@@ -1,13 +1,19 @@
 defmodule ForgeWeb.TicketLive do
   @moduledoc """
-  One ticket, as a work screen (`docs/design/ui.md` § The work screen): Decide, Timeline,
-  Changes, Docs and Activity, with its facts as the rail — or the details sheet below `lg`.
+  One ticket in the frame (`docs/design/ui.md` § The ticket): **Steps · Changes · Docs ·
+  Activity**, and Talk while it has a live or step conversation; the details drop from its title,
+  the decision row is pinned under it, and a document's questions sit in the pane above the
+  strip.
 
-  **Decide** is the ticket's *Waiting on you*, drawn with the queue's own components, and it is
-  the tab a ticket opens on while anything waits; otherwise it opens on the **Timeline**, whose
-  spine is ordered by **time, not topology** — a step is a visit to a state, so a revisit is
-  another step further down with the same name. Stuck is drawn on the step it happened in, never
-  as a step of its own, because there is no such state.
+  **The view it opens on is the one holding what waits**: Changes for a changeset approval, Docs
+  for a document approval, Steps for everything else. A named view is the one shown, and a view
+  the ticket no longer has — `?tab=decide`, from before the Decide tab went — lands on that
+  default too. Chosen when the page is opened or navigated, and not on the reloads a change
+  brings: an approval arriving, or one decided elsewhere, does not move a reader off their view.
+
+  **There is no Decide view.** What it held is where the thing is: the approval in the decision
+  row, questions in the question pane, the ways forward, a human state's editors and the merge
+  queue on the current step, assumptions under Steps (`ForgeWeb.TicketViews`).
 
   **Activity is live while the ticket's job runs.** Someone reading a ticket whose job is running
   is deciding whether to wait, answer or steer (`ui.md` § Motion and structure), so the page is
@@ -17,34 +23,37 @@ defmodule ForgeWeb.TicketLive do
 
   use ForgeWeb, :live_view
 
-  import ForgeWeb.Indicators
-  import ForgeWeb.Operator.Components
-  import ForgeWeb.Operator.QuestionForm, only: [question_form: 1]
-
-  alias Forge.{Artifacts, Conversations, Engine, Events, Git, Jobs, Projects, Proposals, Queue}
-  alias Forge.{Merge, Spend, Tickets}
+  alias Forge.{Artifacts, Conversations, Engine, Events, Git, Jobs, Projects, Proposals}
+  alias Forge.{ReleaseTickets, Spend, Tickets}
+  alias Forge.Tickets.Views
   alias ForgeCore.Workflow
-  alias ForgeWeb.{Diff, FileType, Format, Indicators, JobStream, WorkScreen}
-  alias ForgeWeb.Operator.Actions
-  alias ForgeWeb.Operator.Board
-  alias ForgeWeb.Operator.Drafts
-  alias ForgeWeb.Operator.QuestionForm
+  alias ForgeWeb.{Changes, Diff, Format, JobStream, TicketViews, WorkScreen}
+  alias ForgeWeb.Operator.{Actions, Decision, Drafts, QuestionForm}
 
-  @tabs ~w(decide timeline changes docs activity)
+  @views ~w(steps changes docs activity)
 
-  # How much of a failed command's log the timeline shows: the end, where a build says why it
-  # stopped. The whole log is one tap away on the command's page.
+  # How much of a failed command's log Steps shows: the end, where a build says why it stopped.
+  # The whole log is one tap away on the command's page.
   @tail_bytes 4096
+
+  # How often the spend countdown is drawn again: the minute it is drawn to.
+  @spend_tick :timer.minutes(1)
 
   @impl true
   def mount(%{"project" => name, "number" => number}, _session, socket) do
     {ticket, project} = Tickets.fetch!(name, number)
     ForgeWeb.Access.project_scope!(socket.assigns.current_scope, project)
 
-    if connected?(socket) do
-      Events.subscribe()
-      Events.subscribe_chats()
-    end
+    # A look is recorded once the reader is known to be a member, and only on the connected
+    # mount: the dead render and the live one are one visit, and recording both would make the
+    # second's previous look the first's (`Forge.Tickets.Views`). A rejoin is one visit too.
+    last_looked =
+      if connected?(socket) do
+        Events.subscribe()
+        Events.subscribe_chats()
+        Process.send_after(self(), :spend_tick, @spend_tick)
+        look(socket, ticket)
+      end
 
     {:ok,
      socket
@@ -53,28 +62,75 @@ defmodule ForgeWeb.TicketLive do
        ticket_id: ticket.id,
        tab: nil,
        following: nil,
+       # The person's previous look at this ticket, which marks what is new since (`ui.md`
+       # § Steps, § Activity): recorded above, nil on a first look and on the dead render.
+       since: last_looked,
+       looked: connected?(socket),
+       default_view: nil,
+       forward: nil,
        forms: QuestionForm.init(),
-       drafts: Drafts.init()
+       drafts: Drafts.init(),
+       refusal: nil
      )
-     |> ForgeWeb.Operator.StepAccept.init()
+     |> Decision.init()
+     |> Changes.init()
      |> JobStream.init()
      |> ForgeWeb.Capacity.project(project)
      |> load()}
   end
 
-  # A named tab is the one shown; with none named, Decide while anything waits and the Timeline
-  # otherwise — decided again on each load, so a ticket answered in place moves on to its
-  # timeline rather than holding an empty Decide open.
+  # **A rejoin of the page records no look** (`docs/design/ui.md` § The end of the pass, and
+  # *All*). The page carries the look it was opened with in `#ticket-look`, which only a connected
+  # render draws, and the socket sends it back when it joins (`assets/js/app.js`): a mount that
+  # receives it for this ticket is the same visit rejoining, and draws from it rather than
+  # recording another. A dead render, a page of another ticket and a fresh visit send none, and
+  # record.
+  # What is sent is the person's own look at a ticket they are a member of; sending a false one
+  # moves only their own marks.
+  defp look(socket, ticket) do
+    case get_connect_params(socket) do
+      %{"look" => %{"ticket" => id} = look} when id == ticket.id -> parse_look(look["since"])
+      _fresh -> Views.touch(socket.assigns.current_scope.user, ticket)
+    end
+  end
+
+  defp parse_look(since) when is_binary(since) do
+    case DateTime.from_iso8601(since) do
+      {:ok, at, _offset} -> at
+      _first_look -> nil
+    end
+  end
+
+  defp parse_look(_none), do: nil
+
+  # A view the ticket has is the one shown; anything else — none, or one it no longer has — is
+  # nil, and the default is the one holding what waits, chosen here, as the page is opened or
+  # navigated, and not again on a reload (`docs/design/ui.md` § The ticket).
   @impl true
   def handle_params(params, _uri, socket) do
-    tab = if params["tab"] in @tabs, do: params["tab"], else: nil
-    {:noreply, assign(socket, tab: tab)}
+    tab = if params["tab"] in @views, do: params["tab"], else: nil
+
+    {:noreply,
+     socket
+     |> assign(
+       tab: tab,
+       default_view: default_view(socket.assigns),
+       changes_params: Changes.params(params)
+     )
+     |> Changes.choose_again()
+     |> load_changes()}
   end
+
+  # What Changes shows is read only while it is the view on screen (`ForgeWeb.Changes`).
+  defp load_changes(%{assigns: %{workflow: nil}} = socket), do: socket
+
+  defp load_changes(socket),
+    do: if(view(socket.assigns) == "changes", do: Changes.load(socket), else: socket)
 
   # **A pin is read as it was admitted** (`docs/design/workflow-grammar-v1.md` § Pinning), so this
   # is not where the validator's newer rules are asked again: that is what gave every ticket
   # admitted before 0.16.0 a 500. A pin the grammar can no longer build has no steps to draw and
-  # no topology, so it gets a page of its own that says so rather than a half-drawn work screen.
+  # no topology, so Steps says so rather than drawing half a ticket.
   defp load(%{assigns: %{ticket_id: id}} = socket) do
     ticket = Tickets.get!(id)
 
@@ -101,11 +157,10 @@ defmodule ForgeWeb.TicketLive do
       ticket: ticket,
       workflow: nil,
       errors: errors,
-      docs: docs(project, ticket, artifacts),
+      docs: docs(project, ticket, artifacts, [], %{}),
       events: ticket.id |> Events.for_ticket() |> Enum.reverse() |> Enum.take(10),
       drift: Tickets.drift(ticket, project),
       paused: false,
-      until_midnight: nil,
       now: DateTime.utc_now()
     )
   end
@@ -115,14 +170,11 @@ defmodule ForgeWeb.TicketLive do
     current = List.last(jobs)
 
     # Commands are the ticket's work too, and sit in the step their state is in: an agent's beneath
-    # it, a command state's as that state's (`docs/design/ui.md` § Decide and Timeline).
-    # A chat step's conversations sit in the step they are, beside the jobs of other states
-    # (`docs/design/ui.md` § The Accept area).
-    step_chats = Jobs.step_chats_for_ticket(ticket.id)
-
+    # it, a command state's as that state's (`docs/design/ui.md` § Steps). A chat step's
+    # conversations sit in the step they are, beside the jobs of other states.
     work =
       Enum.sort_by(
-        jobs ++ Jobs.commands_for_ticket(ticket.id) ++ step_chats,
+        jobs ++ Jobs.commands_for_ticket(ticket.id) ++ Jobs.step_chats_for_ticket(ticket.id),
         & &1.inserted_at,
         DateTime
       )
@@ -145,6 +197,7 @@ defmodule ForgeWeb.TicketLive do
       end
 
     diff = ticket_diff(project, ticket)
+    step = step_view(ticket)
 
     # Subscribed before the stream is read, so an event written between the two is heard rather
     # than missing until the next reload; one read and heard both is skipped as seen.
@@ -158,25 +211,23 @@ defmodule ForgeWeb.TicketLive do
       # Blocking questions wait on a person; the rest were assumed and worked past, and are
       # answered here without anything waiting on the answer (`ui.md` § Not waiting on you).
       questions: Artifacts.open_questions(ticket.id) |> Enum.split_with(& &1.blocking),
-      decisions: ticket |> Queue.for_ticket() |> Enum.count(&Queue.waiting?/1),
       jobs: jobs,
       current: current,
-      step: step_view(ticket),
+      step: step,
       accepted: accepted_steps(ticket),
       steps: steps(work, artifacts, ticket, workflow),
       waits: waits(work),
       # Why the last batch sent the ticket where it is, under the commands that failed in it.
       tails: Forge.Jobs.Commands.failure_tails(ticket.id, @tail_bytes),
       artifacts: artifacts,
-      docs: docs(project, ticket, artifacts),
       diff: diff,
       commits: commits(project, ticket),
-      events: ticket.id |> Events.for_ticket() |> Enum.reverse() |> Enum.take(4),
+      events: ticket_events(ticket),
       queue_events: queue_events(ticket),
       activity: if(current, do: Events.for_job(current.id), else: []),
       transitions: Engine.offered_transitions(ticket, workflow),
       retry: Engine.retryable?(ticket),
-      # Where the ticket stands in its project's merge queue, or nil (`ui.md` § Decide and Timeline).
+      # Where the ticket stands in its project's merge queue, or nil (`ui.md` § Steps).
       queue: Forge.MergeQueue.places(project.id)[ticket.id],
       stuck_reason: Engine.why_stuck(ticket),
       drift: Tickets.drift(ticket, project),
@@ -186,16 +237,54 @@ defmodule ForgeWeb.TicketLive do
           Workflow.State.human?(Workflow.state(workflow, ticket.state)),
       writable: writable(ticket, workflow),
       proposals: Proposals.open_for_ticket(ticket.id),
-      reviewable: reviewable?(ticket, workflow),
-      approve: approve_pins(project, ticket, artifacts),
-      commit_message: Merge.commit_message(ticket),
       changeset: Artifacts.latest(ticket.id, Workflow.changeset_artifact()),
-      paused: ticket.status == :active and Spend.paused?(),
-      until_midnight: until_midnight(),
+      release: release(ticket),
+      paused: paused?(ticket, jobs),
       now: DateTime.utc_now()
     )
+    |> assign_decision()
+    |> assign_docs(artifacts, jobs)
     |> load_chats()
+    |> load_changes()
   end
+
+  # The one decision row the ticket has (`docs/design/ui.md` § The decision row): its pending
+  # approval, or else its chat step's Accept, whose *Answer first* goes to the conversation.
+  defp assign_decision(%{assigns: assigns} = socket) do
+    decision =
+      Decision.approval(assigns.project, assigns.ticket, assigns.diff) ||
+        Decision.step(assigns.step, step_questions(assigns.step), step_href(assigns.step))
+
+    Decision.put(socket, decision)
+  end
+
+  # Docs is grouped by what each document asks of you (`ui.md` § Docs), so which ones the decision
+  # on screen waits on is the decision's to say: the versions an approval pins, or the documents a
+  # chat step's Accept would approve.
+  defp assign_docs(%{assigns: %{project: project, ticket: ticket} = assigns} = socket, art, jobs) do
+    jobs = Map.new(jobs ++ Jobs.step_chats_for_ticket(ticket.id), &{&1.id, &1})
+    assign(socket, docs: docs(project, ticket, art, waiting(assigns.decision), jobs))
+  end
+
+  defp waiting(%{kind: :approval, pins: pins}), do: for(p <- pins, not p.changeset, do: p.name)
+
+  defp waiting(%{kind: :step, step: step}),
+    do: for(d <- step.documents, d.version != nil, do: d.name)
+
+  defp waiting(_none), do: []
+
+  # What the conversation's last reply asked and nobody has answered: they stay unanswered if the
+  # step is accepted now, and Accept's panel says so. Read only when there is a row to say it in.
+  defp step_questions(step) do
+    if ForgeWeb.Components.StepAccept.row?(step) do
+      step.chat.id |> Conversations.messages() |> List.last() |> Conversations.questions()
+    else
+      []
+    end
+  end
+
+  defp step_href(nil), do: nil
+  defp step_href(step), do: ~p"/chats/#{step.chat.id}"
 
   # Apart from `load/3` because something said in a conversation is far more frequent than
   # anything else on this page, and the rest of it is several reads and some git.
@@ -215,6 +304,16 @@ defmodule ForgeWeb.TicketLive do
 
   defp queue_event?(%{type: type}), do: String.starts_with?(type, "merge_queue.")
 
+  # The ticket's own events that say something its jobs do not — a decision and its note, a
+  # transition, why it stuck — newest first, for Activity (`ui.md` § Activity).
+  defp ticket_events(ticket) do
+    ticket.id
+    |> Events.for_ticket()
+    |> Enum.filter(&(&1.type in TicketViews.said_types()))
+    |> Enum.reverse()
+    |> Enum.take(12)
+  end
+
   # The Accept area's model while the ticket rests in a chat step that has a conversation.
   defp step_view(%Forge.Tickets.Ticket{status: status} = ticket)
        when status in [:active, :stuck] do
@@ -228,8 +327,8 @@ defmodule ForgeWeb.TicketLive do
 
   defp step_view(_ticket), do: nil
 
-  # What each step's conversation was accepted with, by conversation id: the timeline's entry for
-  # the outcome, as a job's row has one. Who pressed it is the event's actor.
+  # What each step's conversation was accepted with, by conversation id: Steps' entry for the
+  # outcome, as a job's row has one. Who pressed it is the event's actor.
   defp accepted_steps(ticket) do
     ticket.id
     |> Events.for_ticket()
@@ -237,9 +336,18 @@ defmodule ForgeWeb.TicketLive do
     |> Map.new(&{&1.job_id, &1.payload})
   end
 
+  # A release ticket's band and the head of its Steps (`ui.md` § Steps, `21e`): who started it,
+  # the workflow it runs, and what has merged since the previous release.
+  defp release(ticket) do
+    if ReleaseTickets.release?(ticket) do
+      admitted = Events.latest_for_ticket(ticket.id, "ticket.admitted")
+      %{by: admitted && admitted.actor, since: ReleaseTickets.since(ticket)}
+    end
+  end
+
   # The documents the state the ticket rests in declares, for a person to write: a human state's
-  # `produces`, with the latest version of each when there is one (`docs/design/ui.md` § Decide
-  # and Timeline). A job state's are the job's to write, so it offers none.
+  # `produces`, with the latest version of each when there is one (`docs/design/ui.md` § Steps).
+  # A job state's are the job's to write, so it offers none.
   defp writable(ticket, workflow) do
     # Nothing is written into a ticket that is done or cancelled: it rests where no one decides.
     state = if ticket.status in Forge.Tickets.Ticket.open_statuses(), do: ticket.state
@@ -268,13 +376,33 @@ defmodule ForgeWeb.TicketLive do
   end
 
   # What the branch holds against its base: the ticket's own work, whether or not it has been
-  # recorded as a changeset yet.
+  # recorded as a changeset yet — and, while an approval of the changeset waits, the commit that
+  # approval pins and no other, which is what Approve is pressed on (`ui.md` § Changes).
   defp ticket_diff(project, ticket) do
     repo = Projects.repo_path(project)
 
-    case Git.resolve(repo, "refs/heads/" <> ticket.branch) do
+    case pinned_head(ticket) || Git.resolve(repo, "refs/heads/" <> ticket.branch) do
       {:ok, head} -> Diff.build(repo, ticket.base_commit, head)
+      # A pinned version that names no commit is said, never replaced by the branch's diff: that
+      # would be a change shown for approval that the approval does not pin.
+      {:not_a_commit, uri} -> %{error: {:not_a_commit, uri}}
       _gone -> nil
+    end
+  end
+
+  defp pinned_head(%{pending_transition: nil}), do: nil
+
+  defp pinned_head(ticket) do
+    changeset = Workflow.changeset_artifact()
+
+    with true <- changeset in Engine.awaiting_approval(ticket),
+         %{} = version <- Artifacts.latest(ticket.id, changeset) do
+      case Artifacts.commit(version) do
+        nil -> {:not_a_commit, version.blob_uri}
+        head -> {:ok, head}
+      end
+    else
+      _none -> nil
     end
   end
 
@@ -287,32 +415,36 @@ defmodule ForgeWeb.TicketLive do
       )
 
   # Every artifact the ticket has, a row each — a document's rendered when opened — its latest
-  # version first and the earlier ones linked. The changeset is not one: it is the Changes tab.
-  defp docs(project, ticket, artifacts) do
-    for %{artifact: artifact, latest: latest} = entry <- artifacts,
-        latest != nil,
-        artifact.name != Workflow.changeset_artifact() do
+  # version first and the earlier ones linked, grouped by what it asks of the person. The
+  # changeset is not one: it is Changes.
+  defp docs(project, ticket, artifacts, waiting, jobs) do
+    for %{artifact: artifact, latest: latest} = entry <- artifacts, TicketViews.doc?(entry) do
       href = fn version ->
         ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/#{artifact.name}/#{version}"
       end
 
-      WorkScreen.doc(
-        artifact,
-        Artifacts.versions(ticket.id, artifact.name),
-        href,
-        entry.approvable,
-        Forge.References.ticket_scope(project.name, ticket)
-      )
+      doc =
+        WorkScreen.doc(
+          artifact,
+          Artifacts.versions(ticket.id, artifact.name),
+          href,
+          entry.approvable,
+          Forge.References.ticket_scope(project.name, ticket)
+        )
+
+      doc
+      |> Map.put(:group, group(doc, latest, waiting))
+      |> Map.put(:by, TicketViews.written_by(latest.author, jobs))
     end
   end
 
-  # The rail names what this ticket's jobs proposed and sends the decision to the project page,
-  # where every proposal on the project is in one place. Deciding here too would put the same
-  # affordance in two places, and one of them would be the one you did not open.
-  defp proposal_title(version) do
-    case ForgeCore.Proposal.parse(version.content || "") do
-      {:ok, proposal} -> proposal.title
-      {:error, _errors} -> "(could not be read)"
+  # Waiting: what the decision on screen waits on. Built from: what a person approved or wrote.
+  # Produced: the rest, what the ticket's jobs wrote.
+  defp group(doc, latest, waiting) do
+    cond do
+      doc.name in waiting -> :waiting
+      doc.approved or match?(%{"kind" => "user"}, latest.author) -> :built_from
+      true -> :produced
     end
   end
 
@@ -337,7 +469,7 @@ defmodule ForgeWeb.TicketLive do
     else
       visits ++ [%{name: ticket.state, jobs: [], artifacts: [], cost: 0}]
     end
-    |> Enum.map(&Map.put(&1, :topology, Board.topology(workflow, &1.name)))
+    |> Enum.map(&Map.put(&1, :topology, ForgeWeb.Topology.of(workflow, &1.name)))
   end
 
   # Why each pending job has not gone out, in the scheduler's own sentence — only a pending job
@@ -362,9 +494,9 @@ defmodule ForgeWeb.TicketLive do
   end
 
   # The current job's stream is added to the log the page holds as it arrives
-  # (`ForgeWeb.JobStream`), and so is the rail's list of the latest events; after a call's result
-  # the branch is read again shortly. Anything else on the job's topic — a wait, the run ending —
-  # reloads, and so does every change announced for this ticket.
+  # (`ForgeWeb.JobStream`); after a call's result the branch is read again shortly. Anything else
+  # on the job's topic — a wait, the run ending — reloads, and so does every change announced for
+  # this ticket.
   #
   # Adding rather than reloading is a saving here and not a behaviour: this page holds nothing a
   # reload takes away, and a reload reads the same log and the branch a moment sooner. So the
@@ -379,11 +511,7 @@ defmodule ForgeWeb.TicketLive do
           {:noreply, socket}
 
         {:ok, activity} ->
-          {:noreply,
-           socket
-           |> assign(activity: activity)
-           |> update(:events, &Enum.take([event | &1], 4))
-           |> JobStream.catch_up(event)}
+          {:noreply, socket |> assign(activity: activity) |> JobStream.catch_up(event)}
       end
     else
       {:noreply, load(socket)}
@@ -404,13 +532,30 @@ defmodule ForgeWeb.TicketLive do
   def handle_info({:chat_changed, _id, _project, _other}, socket), do: {:noreply, socket}
 
   # What the branch holds, read again after a call that may have committed to it.
+  # The spend countdown moves on the minute, as the usage lines do (`ForgeWeb.Frame`), and whether
+  # the cap still holds is read again with it: it can lift before midnight, when a running job's
+  # budget is released.
+  def handle_info(:spend_tick, socket) do
+    Process.send_after(self(), :spend_tick, @spend_tick)
+
+    case socket.assigns do
+      %{workflow: nil} ->
+        {:noreply, assign(socket, now: DateTime.utc_now())}
+
+      %{ticket: ticket, jobs: jobs} ->
+        {:noreply, assign(socket, now: DateTime.utc_now(), paused: paused?(ticket, jobs))}
+    end
+  end
+
   def handle_info(:catch_up, %{assigns: %{project: project, ticket: ticket}} = socket) do
     {:noreply,
-     assign(socket,
+     socket
+     |> assign(
        diff: ticket_diff(project, ticket),
        commits: commits(project, ticket),
        catching_up: false
-     )}
+     )
+     |> load_changes()}
   end
 
   @impl true
@@ -420,9 +565,9 @@ defmodule ForgeWeb.TicketLive do
   def handle_event(event, _params, %{assigns: %{workflow: nil}} = socket)
       when event not in ["cancel-ticket", "restore-ticket", "repin"] do
     {:noreply,
-     put_flash(
+     Actions.refuse(
        socket,
-       :error,
+       "unavailable",
        "That is not available while this ticket's workflow cannot be read."
      )}
   end
@@ -449,8 +594,52 @@ defmodule ForgeWeb.TicketLive do
   def handle_event("notices", params, socket),
     do: JobStream.handle_event("notices", params, socket)
 
-  def handle_event("step:" <> _ = event, params, socket),
-    do: ForgeWeb.Operator.StepAccept.handle_event(event, params, socket, &load/1)
+  # The person's own decision moves the ticket on, and the page with it: the default view is chosen
+  # again when their press changed what waits (`docs/design/ui.md` § The ticket). A refused press
+  # changes nothing, and neither does someone else's decision. A view the address names would
+  # outrank the new default (`view/1`) — every strip tab and the queue's link name one — so the
+  # address loses its `tab`, and `handle_params/3` chooses the default from what waits now.
+  def handle_event("decision:" <> _ = event, params, socket) do
+    before = socket.assigns.decision_key
+    {:noreply, socket} = Decision.handle_event(event, params, socket, &load/1)
+
+    cond do
+      socket.assigns.decision_key == before or socket.assigns.decision_error != nil ->
+        {:noreply, socket}
+
+      socket.assigns.tab != nil ->
+        %{project: project, ticket: ticket} = socket.assigns
+        {:noreply, push_patch(socket, to: ~p"/tickets/#{project.name}/#{ticket.number}")}
+
+      true ->
+        {:noreply,
+         socket
+         |> assign(default_view: default_view(socket.assigns))
+         # Changes' sub-view is chosen again with the view. Dropping this is an equivalent mutant
+         # as far as a test can tell: a decision that leaves Changes the default leaves what
+         # waits in review, which keeps the sub-view chosen before it.
+         |> Changes.choose_again()
+         |> load_changes()}
+    end
+  end
+
+  # The wide screen's pane beside the presentation: which file it shows. Reads, writes nothing.
+  def handle_event("changes:follow", params, socket),
+    do: {:noreply, Changes.follow(socket, params)}
+
+  # The way forward picked, held so the dock button names it and a rejoin gives it back
+  # (`docs/design/ui.md` § A reconnect is not a reload). Picking commits nothing.
+  def handle_event("forward:pick", params, socket),
+    do: {:noreply, assign(socket, forward: params["way"])}
+
+  # The dock button: the way picked, taken by the operation that takes it anywhere — a transition
+  # or running the state again, each guarded in `Forge.Operator`.
+  def handle_event("forward", params, socket) do
+    case forward(params["way"], socket.assigns.ticket) do
+      {event, params} -> handle_event(event, params, assign(socket, forward: nil))
+      nil -> {:noreply, socket}
+    end
+  end
 
   def handle_event(event, params, socket) do
     case Actions.handle(event, params, socket) do
@@ -460,940 +649,185 @@ defmodule ForgeWeb.TicketLive do
     end
   end
 
-  defp tab(%{tab: nil, decisions: n}) when n > 0, do: "decide"
-  defp tab(%{tab: nil, queue: %{}}), do: "decide"
-  defp tab(%{tab: nil, step: %{current: true}}), do: "decide"
-  defp tab(%{tab: nil}), do: "timeline"
-  defp tab(%{tab: tab}), do: tab
+  defp forward("again", ticket), do: {"retry", %{"ticket" => ticket.id}}
+  defp forward("to:" <> to, ticket), do: {"transition", %{"ticket" => ticket.id, "to" => to}}
+  defp forward(_nothing, _ticket), do: nil
 
-  defp tabs(assigns) do
-    [
-      {"decide", "Decide", assigns.decisions},
-      {"timeline", "Timeline", nil},
-      {"changes", "Changes", Diff.file_count(assigns.diff)},
-      {"docs", "Docs", length(assigns.docs)},
-      {"activity", "Activity", WorkScreen.activity_count(assigns.activity)}
-    ]
+  # The view shown: the one named, else the one that held what waited when the page was opened.
+  defp view(%{tab: tab}) when tab != nil, do: tab
+  defp view(%{default_view: view}) when view != nil, do: view
+  defp view(assigns), do: default_view(assigns)
+
+  defp default_view(%{decision: %{kind: :approval} = decision}), do: approval_view(decision)
+  defp default_view(_assigns), do: "steps"
+
+  # A changeset approval is read on Changes, and so is any approval that merges; a document's on
+  # Docs.
+  defp approval_view(%{merges: true}), do: "changes"
+
+  defp approval_view(%{pins: pins}),
+    do: if(Enum.any?(pins, & &1.changeset), do: "changes", else: "docs")
+
+  defp views(assigns) do
+    TicketViews.strip(
+      assigns.project,
+      assigns.ticket,
+      %{
+        changes: Diff.file_count(assigns.diff),
+        docs: length(assigns.docs),
+        activity: WorkScreen.activity_count(assigns.activity)
+      },
+      TicketViews.talk(assigns.step, assigns.chats),
+      :patch
+    )
   end
 
-  # What Decide draws: the queue's own cards for this ticket, whatever is waiting.
-  defp deciding?(assigns),
-    do:
-      assigns.queue != nil or assigns.ticket.pending_transition != nil or
-        blocking(assigns) != [] or stuck_or_human?(assigns) or assigns.retry or
-        assigns.writable != [] or assigns.step != nil
+  defp subline(assigns) do
+    topology =
+      if assigns.workflow, do: ForgeWeb.Topology.of(assigns.workflow, assigns.ticket.state)
 
-  # The changeset approval, at the foot of the diff it approves — only when that approval is what
-  # the ticket waits on.
-  defp approving_changeset?(%{ticket: %{pending_transition: pending}} = assigns)
-       when is_map(pending),
-       do: Workflow.changeset_artifact() in Engine.awaiting_approval(assigns.ticket)
+    [
+      "##{assigns.ticket.number} · #{ForgeWeb.Topology.mark(topology)} #{assigns.ticket.state}",
+      assigns.ticket.status != :active && to_string(assigns.ticket.status),
+      # No "waiting on you": the decision row says it, in amber, and on a phone it was the part
+      # the ellipsis cut (`ui.md` § The ticket).
+      assigns.paused && spend_paused(assigns.now)
+    ]
+    |> Enum.filter(& &1)
+    |> Enum.join(" · ")
+  end
 
-  defp approving_changeset?(_assigns), do: false
+  # The daily cap holds back a job that has not started (`ui.md` § The projects page says it the
+  # same way): a ticket with nothing pending is not paused by it, whatever the cap says.
+  defp paused?(%{status: :active}, jobs),
+    do: Enum.any?(jobs, &(&1.status == :pending)) and Spend.paused?()
+
+  defp paused?(_ticket, _jobs), do: false
+
+  # The daily cap lifts at midnight UTC, so beside it is a countdown, not an age
+  # (`docs/design/capacity.md` § Four exhaustions, three treatments): the one thing a person
+  # waiting on it can be told, as every countdown is (`Format.until/2`). Under a minute there is
+  # none to give, and the line is the ticket list's bare one.
+  @doc false
+  @spec spend_paused(DateTime.t()) :: String.t()
+  def spend_paused(now) do
+    {:ok, midnight} = DateTime.new(Date.add(DateTime.to_date(now), 1), ~T[00:00:00], "Etc/UTC")
+
+    case Format.until(midnight, now) do
+      "now" -> "paused · spend"
+      left -> "paused · spend " <> left
+    end
+  end
 
   @impl true
   def render(%{workflow: nil} = assigns) do
-    ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} capacity={@capacity} measure="46rem">
-      <.link
-        navigate={~p"/projects/#{@project.name}"}
-        class="flex min-h-[46px] items-center font-mono text-[12.5px] opacity-60 hover:opacity-100 sm:min-h-0"
-      >
-        ‹ {@project.name}
-      </.link>
-      <h1 class="text-xl font-semibold break-words -tracking-[.03em] sm:text-2xl">
-        {@ticket.title}
-      </h1>
-      <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span :if={@ticket.ticket_type} id="ticket-type" class="font-mono text-[12.5px] opacity-60">
-          {@ticket.ticket_type}
-        </span>
-        <span id="ticket-state" class="font-mono text-[12.5px]">{@ticket.state}</span>
-        <.status_flag status={@ticket.status} age={Format.ago(@ticket.updated_at, @now)} />
-      </div>
-
-      <%!-- Said once, in plain words, with the way on: neither Re-pin nor Cancel reads the pin
-            that cannot be built (`workflow-grammar-v1.md` § Pinning). --%>
-      <section id="unreadable-pin" class="mt-6">
-        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase text-accent">
-          Cannot be read
-        </h2>
-        <p class="mt-2 text-sm/[1.55]">
-          The workflow this ticket was pinned to can no longer be read, so its steps cannot be
-          shown and it cannot move on. Its documents and history are below.
-        </p>
-        <details class="mt-2 text-[12.5px]">
-          <summary class="flex min-h-[46px] cursor-pointer items-center opacity-70">
-            What stopped it
-          </summary>
-          <pre class="overflow-x-auto font-mono whitespace-pre-wrap opacity-70">{ForgeCore.Error.format(@errors)}</pre>
-        </details>
-        <div :if={@drift && @ticket.status in Forge.Tickets.Ticket.open_statuses()} id="pin-drift">
-          <p class="text-sm/[1.55] opacity-70">
-            {@project.default_branch} has a workflow it can be pinned to instead.
-          </p>
-          <button
-            type="button"
-            id="repin-ticket"
-            phx-click="repin"
-            phx-value-ticket={@ticket.id}
-            data-confirm={"Re-pin at #{String.slice(@drift.head, 0, 12)}? Every job from now on reads the workflow, its prompts and its command scripts from there."}
-            class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
-          >
-            Re-pin at {String.slice(@drift.head, 0, 12)}
-          </button>
-        </div>
-        <button
-          :if={@ticket.status in Forge.Tickets.Ticket.open_statuses()}
-          type="button"
-          id="cancel-ticket"
-          phx-click="cancel-ticket"
-          phx-value-ticket={@ticket.id}
-          data-confirm="Cancel this ticket? Its jobs stop and it is hidden everywhere but this page, where Restore brings it back."
-          class="flex min-h-[46px] items-center text-sm text-error hover:underline"
-        >
-          Cancel ticket
-        </button>
-        <button
-          :if={@ticket.status == :cancelled}
-          type="button"
-          id="restore-ticket"
-          phx-click="restore-ticket"
-          phx-value-ticket={@ticket.id}
-          class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
-        >
-          Restore
-        </button>
-      </section>
-
-      <section id="docs" class="mt-6">
-        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Documents</h2>
-        <WorkScreen.docs docs={@docs} empty="No job wrote a document on this ticket." />
-      </section>
-
-      <section id="timeline" class="mt-6">
-        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">History</h2>
-        <ol class="mt-3 flex flex-col gap-1 font-mono text-[12.5px]">
-          <li :for={event <- @events} class="flex gap-2">
-            <span class="shrink-0 opacity-50">
-              {Calendar.strftime(event.inserted_at, "%m-%d %H:%M")}
-            </span>
-            <span class="block min-w-0 truncate">{event.type}</span>
-          </li>
-        </ol>
-      </section>
-    </Layouts.app>
-    """
-  end
-
-  def render(assigns) do
-    assigns = assign(assigns, shown_tab: tab(assigns))
+    assigns = assign(assigns, subline: subline(assigns))
 
     ~H"""
     <Layouts.app
       flash={@flash}
       current_scope={@current_scope}
+      frame={@frame}
       capacity={@capacity}
-      measure="74rem"
-      frame={:work}
+      title={@ticket.title}
+      subline={@subline}
+      context={{@project.name, ~p"/projects/#{@project.name}"}}
+      views={
+        WorkScreen.views([{"steps", "Steps", nil}], ~p"/tickets/#{@project.name}/#{@ticket.number}")
+      }
+      view="steps"
+      measure="46rem"
     >
-      <WorkScreen.frame
-        tabs={tabs(assigns)}
-        tab={@shown_tab}
-        path={~p"/tickets/#{@project.name}/#{@ticket.number}"}
-        capacity={@capacity}
-      >
-        <:header>
-          <.link
-            navigate={~p"/projects/#{@project.name}"}
-            class="flex min-h-[46px] items-center font-mono text-[12.5px] opacity-60 hover:opacity-100 sm:min-h-0"
-          >
-            ‹ {@project.name}
-          </.link>
-          <h1 class="truncate text-xl font-semibold -tracking-[.03em] sm:text-2xl">
-            {@ticket.title}
-          </h1>
-          <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-            <span
-              :if={@ticket.ticket_type}
-              id="ticket-type"
-              class="font-mono text-[12.5px] opacity-60"
-            >
-              {@ticket.ticket_type}
-            </span>
-            <.state name={@ticket.state} topology={Board.topology(@workflow, @ticket.state)} />
-            <.status_flag status={@ticket.status} age={Format.ago(@ticket.updated_at, @now)} />
-            <.paused :if={@paused} reason="spend" until={@until_midnight} />
-            <span :if={waiting_clause(assigns)} class="text-sm opacity-70">
-              {waiting_clause(assigns)}
-            </span>
-          </div>
-        </:header>
-
-        <:strip>
-          <span>{@ticket.branch}</span>
-          <Diff.stat diff={@diff} />
-          <span>{turns(@jobs)} turns</span>
-          <span>{Format.windows(@ticket.usage) || "—"}</span>
-        </:strip>
-
-        <WorkScreen.body :if={@shown_tab == "decide"} id="decide">
-          <.decide {assigns} />
-        </WorkScreen.body>
-
-        <WorkScreen.body :if={@shown_tab == "timeline"} id="timeline">
-          <.timeline {assigns} />
-        </WorkScreen.body>
-
-        <WorkScreen.body :if={@shown_tab == "changes"} id="changes">
-          <.changes {assigns} />
-        </WorkScreen.body>
-
-        <WorkScreen.body :if={@shown_tab == "docs"} id="docs">
-          <WorkScreen.docs docs={@docs} empty="The first job writes the first document." />
-        </WorkScreen.body>
-
-        <WorkScreen.body :if={@shown_tab == "activity"} id="activity">
-          <.activity {assigns} />
-        </WorkScreen.body>
-
-        <:rail>
-          <.rail {assigns} />
-        </:rail>
-      </WorkScreen.frame>
+      <%!-- Not a work screen: no view of it needs a scroller of its own. --%>
+      <div id="steps">
+        <TicketViews.unreadable {assigns} />
+      </div>
+      <.look_carried :if={@looked} ticket_id={@ticket_id} since={@since} />
     </Layouts.app>
     """
   end
 
-  # The queue's components exactly, answering in place and never navigating.
-  defp decide(assigns) do
-    ~H"""
-    <section :if={deciding?(assigns)} id="hoisted-decision">
-      <h2 class="font-mono text-[11px] tracking-[.14em] uppercase text-accent">Waiting on you</h2>
-      <div class="mt-3">
-        <%!-- A chat step: this step is a conversation, and Accept is how it ends. --%>
-        <div :if={@step} id="step-card" class="mb-4 flex flex-col gap-3">
-          <p class="min-w-0 break-words text-sm">
-            This step is a conversation.
-            <.link
-              navigate={~p"/chats/#{@step.chat.id}"}
-              class="underline"
-            >
-              {if @step.dormant, do: "Open it to reopen it", else: "Talk to the agent"} ›
-            </.link>
-          </p>
-          <p
-            :if={@waits[@step.chat.id]}
-            id="step-waiting-reason"
-            class="min-w-0 text-sm opacity-60 [overflow-wrap:anywhere]"
-          >
-            {@waits[@step.chat.id]}
-          </p>
-          <ForgeWeb.Components.StepAccept.accept_area
-            step={@step}
-            pick={@step_pick}
-            confirming={@step_confirming}
-            error={@step_error}
-          />
-        </div>
-
-        <.approval_card
-          :if={@ticket.pending_transition}
-          ticket={@ticket}
-          pending={@ticket.pending_transition}
-          approve={@approve}
-          drafts={@drafts}
-          commit_message={@commit_message}
-        />
-
-        <%!-- Where the approval card stood: approving a queueing edge puts the ticket in line, and
-              the card says so instead of offering to approve what is approved. --%>
-        <.merge_queue_card :if={@queue} ticket={@ticket} place={@queue} />
-
-        <.link
-          :if={@reviewable}
-          navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/review"}
-          class="mt-2 flex min-h-[46px] items-center text-sm text-primary hover:underline"
-        >
-          Read the change first ›
-        </.link>
-        <div :if={!@ticket.pending_transition and blocking(assigns) != []} class="flex flex-col gap-6">
-          <.question_form
-            :for={{version_id, questions} <- forms(assigns, :waiting)}
-            id={version_id}
-            questions={questions}
-            forms={@forms}
-            submit="questions:send"
-            hidden={[{"ticket", @ticket.id}, {"version", version_id}]}
-          />
-        </div>
-        <div
-          :if={!@ticket.pending_transition and @writable != []}
-          class="mb-6 flex flex-col gap-6"
-        >
-          <.document_editor
-            :for={{name, latest} <- @writable}
-            ticket={@ticket}
-            name={name}
-            latest={latest}
-            drafts={@drafts}
-          />
-        </div>
-        <.transition_card
-          :if={
-            !@ticket.pending_transition and blocking(assigns) == [] and stuck_or_human?(assigns) and
-              @queue == nil and not step_live?(@step)
-          }
-          ticket={@ticket}
-          transitions={@transitions}
-        />
-        <div :if={@retry} class="mt-2">
-          <.retry_row ticket={@ticket} />
-        </div>
-      </div>
-    </section>
-
-    <p :if={not deciding?(assigns)} id="nothing-to-decide" class="text-sm/[1.55] opacity-70">
-      Nothing here is waiting on you. A job that stops to ask a question, a transition that needs
-      approving, or the ticket coming to rest where only a person can move it would put it here.
-    </p>
-
-    <%!-- What an agent assumed and carried on from: answerable here, where the queue's digest
-          sends it, and drawn without accent because nothing waits on the answer. --%>
-    <section
-      :if={forms(assigns, :assumed) != []}
-      id="assumed"
-      class="mt-8 border-t border-base-300 pt-5"
-    >
-      <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
-        Assumed, and carried on
-      </h2>
-      <div class="mt-3 flex flex-col gap-6">
-        <.question_form
-          :for={{version_id, questions} <- forms(assigns, :assumed)}
-          id={version_id}
-          questions={questions}
-          forms={@forms}
-          submit="questions:send"
-          hidden={[{"ticket", @ticket.id}, {"version", version_id}]}
-        />
-      </div>
-    </section>
-    """
-  end
-
-  defp blocking(%{questions: {blocking, _assumed}}), do: blocking
-
-  # No by-hand transition is offered while a step's conversation is live: Accept is the way out
-  # (`docs/design/conversations.md` § A conversation that is a step).
-  defp step_live?(%{current: true, dormant: false}), do: true
-  defp step_live?(_step), do: false
-
-  # One form per document version (`docs/design/ui.md` § Answering questions). A version holding a
-  # blocking question is waiting, and its assumptions join its form, optional; a version with only
-  # assumptions is answered beneath, where nothing waits on it. Oldest version first.
-  defp forms(%{questions: {blocking, assumed}}, which) do
-    {joined, alone} = QuestionForm.join_assumed(blocking, assumed)
-    questions = if which == :waiting, do: blocking ++ joined, else: alone
-
-    questions
-    |> Enum.group_by(& &1.artifact_version_id)
-    |> Enum.sort_by(fn {_version, [first | _]} -> first.inserted_at end, DateTime)
-  end
-
-  defp timeline(assigns) do
-    ~H"""
-    <p :if={@ticket.body != ""} class="mb-6 text-sm/[1.55] whitespace-pre-line break-words opacity-80">
-      {@ticket.body}
-    </p>
-
-    <ol>
-      <li :for={step <- @steps} class="grid grid-cols-[26px_1fr] pb-5 lg:pb-[26px]">
-        <div class="flex flex-col items-center">
-          <span class={[
-            "mt-1.5 size-[11px] rounded-full",
-            if(step.name == @ticket.state,
-              do: "bg-accent ring-4 ring-accent/20",
-              else: "bg-base-300"
-            )
-          ]} />
-          <span class="mt-1 w-px flex-1 bg-base-300" />
-        </div>
-
-        <div class="min-w-0 pb-2">
-          <div class="flex flex-wrap items-baseline justify-between gap-2">
-            <.state name={step.name} topology={step.topology} />
-            <span :if={step.jobs != []} class="font-mono text-[12.5px] opacity-50">
-              {length(step.jobs)} {if length(step.jobs) == 1, do: "job", else: "jobs"} · {Format.windows(
-                step.cost
-              ) || "—"}
-            </span>
-          </div>
-
-          <%!-- The whole row is the target, at the full 46px: hunting for a 20px `#3` is the
-                failure docs/design/ui.md § The affordance rule names. Nothing inside a job row
-                commits anything, so the row may be a link. --%>
-          <%!-- One list in the order the work was made, so an agent's commands follow the row
-                of the agent that invoked them rather than all sitting above it. --%>
-          <ol :if={step.jobs != []} class="mt-2 flex flex-col">
-            <li :for={job <- step.jobs}>
-              <.command_row
-                :if={job.kind == :command}
-                job={job}
-                project={@project}
-                ticket={@ticket}
-                wait={@waits[job.id]}
-              />
-              <%!-- `job.kind == :command` is an equivalent mutant: a batch's `commands.started`
-                    names only its command jobs, which is all `failure_tails/2` keys by. --%>
-              <pre
-                :if={job.kind == :command and @tails[job.id]}
-                id={"command-#{job.id}-tail"}
-                class="max-h-72 overflow-auto border-l-2 border-error/60 bg-base-200/60 px-3 py-2 font-mono text-[12px]/[1.5] whitespace-pre-wrap break-words"
-              >{@tails[job.id]}</pre>
-              <.link
-                :if={job.kind == :chat}
-                id={"step-chat-#{job.id}"}
-                navigate={~p"/chats/#{job.id}"}
-                class="flex min-h-[46px] items-center gap-3 border-b border-base-300/60 py-1.5 text-[12.5px] hover:bg-base-200"
-              >
-                <span class="w-8 shrink-0 font-mono">#{job.attempt}</span>
-                <span class="min-w-0 flex-1 text-sm">
-                  <span class="block truncate">Conversation</span>
-                  <span
-                    id={"job-#{job.id}-harness"}
-                    class="block font-mono text-[11.5px] opacity-60 [overflow-wrap:anywhere]"
-                  >
-                    {Forge.Jobs.harness_line(job, @project)}
-                  </span>
-                  <%!-- The outcome drawn with the component a job's row uses (`.outcome`), cut to
-                        the line: the outcome is the workflow author's word. --%>
-                  <span
-                    :if={@accepted[job.id]}
-                    id={"step-accepted-#{job.id}"}
-                    class="block truncate"
-                  >
-                    <.outcome value={@accepted[job.id]["outcome"]} />
-                    <span class="opacity-70">→ {@accepted[job.id]["to"]}</span>
-                  </span>
-                  <.job_status :if={!@accepted[job.id]} status={job.status} />
-                  <span
-                    :if={@waits[job.id]}
-                    id={"job-#{job.id}-waiting"}
-                    class="block text-sm/[1.4] opacity-60 [overflow-wrap:anywhere]"
-                  >
-                    {@waits[job.id]}
-                  </span>
-                </span>
-                <span class="shrink-0 font-mono opacity-60">{job.turns} turns</span>
-                <span class="w-20 shrink-0 text-right font-mono opacity-60">
-                  {Format.windows(job.usage) || "—"}
-                </span>
-                <span class="shrink-0 font-mono opacity-40" aria-hidden="true">›</span>
-              </.link>
-              <.link
-                :if={job.kind == :workflow}
-                navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/jobs/#{job.id}"}
-                class="flex min-h-[46px] items-center gap-3 border-b border-base-300/60 py-1.5 text-[12.5px] hover:bg-base-200"
-              >
-                <span class="w-8 shrink-0 font-mono">#{job.attempt}</span>
-                <span class="min-w-0 flex-1">
-                  <.outcome
-                    :if={job.declared_outcome || job.outcome}
-                    value={job.declared_outcome || to_string(job.outcome)}
-                    bucket={job.declared_outcome && Indicators.bucket(job.outcome)}
-                  />
-                  <.job_status :if={is_nil(job.outcome)} status={job.status} />
-                  <.ceiling job={job} />
-                  <span
-                    id={"job-#{job.id}-harness"}
-                    class="block font-mono text-[11.5px] opacity-60 [overflow-wrap:anywhere]"
-                  >
-                    {Forge.Jobs.harness_line(job, @project)}
-                  </span>
-                  <%!-- Language, not an identifier: sans at body size, and never accent — a
-                        machine is being waited on, not the operator. --%>
-                  <span
-                    :if={@waits[job.id]}
-                    id={"job-#{job.id}-waiting"}
-                    class="block text-sm/[1.4] opacity-60"
-                  >
-                    {@waits[job.id]}
-                  </span>
-                </span>
-                <span class="shrink-0 font-mono opacity-60">{job.turns} turns</span>
-                <span class="w-20 shrink-0 text-right font-mono opacity-60">
-                  {Format.windows(job.usage) || "—"}
-                </span>
-                <span class="shrink-0 font-mono opacity-40" aria-hidden="true">›</span>
-              </.link>
-            </li>
-          </ol>
-
-          <div :if={step.artifacts != []} class="mt-2 flex flex-wrap gap-2">
-            <.artifact_chip
-              :for={entry <- step.artifacts}
-              entry={entry}
-              project={@project.name}
-              number={@ticket.number}
-            />
-          </div>
-        </div>
-      </li>
-    </ol>
-
-    <%!-- The merge queue's part of the ticket's story: queued, back in line after an integration,
-          taken out, merged, left — in the words the rail uses (`ui.md` § Decide and Timeline). --%>
-    <section :if={@queue_events != []} id="queue-history" class="mt-2 mb-6">
-      <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Merge queue</h2>
-      <ol class="mt-3 flex flex-col gap-1.5 text-sm/[1.45]">
-        <li :for={event <- @queue_events} class="flex gap-3">
-          <span class="shrink-0 font-mono text-[12.5px] opacity-50">
-            {Calendar.strftime(event.inserted_at, "%m-%d %H:%M")}
-          </span>
-          <span class="min-w-0 break-words">
-            {Forge.Events.summary(event)}<span
-              :if={Format.author(event.actor)}
-              class="opacity-60"
-            > · {Format.author(event.actor)}</span>
-          </span>
-        </li>
-      </ol>
-    </section>
-
-    <%!-- A conversation started from a ticket was findable from the project page and not from
-          the ticket it is about. Its order and sections are the component's. --%>
-    <section id="ticket-chats" class="mt-4 border-t border-base-300 pt-5">
-      <div class="flex items-center justify-between gap-3">
-        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Conversations</h2>
-        <.link
-          navigate={~p"/chats/new?project=#{@project.name}&ticket=#{@ticket.number}"}
-          class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
-        >
-          New chat ›
-        </.link>
-      </div>
-      <ForgeWeb.Conversations.list
-        summaries={@chats}
-        now={@now}
-        project={false}
-        heading="h3"
-        empty="No conversation about this ticket yet."
-      />
-    </section>
-    """
-  end
-
-  # `docs/design/ui.md` § Decide and Timeline: `$` where an attempt goes, the command and its
-  # arguments, the exit status where an outcome goes, the duration where turns and cost go. One an
-  # agent invoked is indented beneath it.
-  attr :job, :map, required: true
-  attr :project, :map, required: true
-  attr :ticket, :map, required: true
-  attr :wait, :string, default: nil
-
-  defp command_row(assigns) do
-    command = Jobs.spec(assigns.job).command
-    assigns = assign(assigns, name: command["name"], args: command["args"] || [])
+  def render(assigns) do
+    assigns =
+      assign(assigns,
+        view: view(assigns),
+        subline: subline(assigns),
+        ways: TicketViews.ways(assigns)
+      )
 
     ~H"""
-    <.link
-      navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/jobs/#{@job.id}"}
-      id={"command-#{@job.id}"}
-      class={[
-        "flex min-h-[46px] items-center gap-3 border-b border-base-300/60 py-1.5 text-[12.5px] hover:bg-base-200",
-        @job.parent_job_id && "pl-8"
-      ]}
-    >
-      <span class="w-8 shrink-0 font-mono opacity-60" aria-hidden="true">$</span>
-      <span class="min-w-0 flex-1">
-        <span class="font-mono">
-          {@name}<span :if={@args != []} class="opacity-60">{ForgeCore.Workflow.Command.argv(@args)}</span>
-        </span>
-        <.exit_status job={@job} />
-        <span :if={@wait} id={"job-#{@job.id}-waiting"} class="block text-sm/[1.4] opacity-60">
-          {@wait}
-        </span>
-      </span>
-      <span class="shrink-0 font-mono opacity-60">{Format.duration(@job)}</span>
-      <span class="shrink-0 font-mono opacity-40" aria-hidden="true">›</span>
-    </.link>
-    """
-  end
-
-  defp changes(assigns) do
-    ~H"""
-    <section>
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
-          What the branch holds
-        </h2>
-        <.link
-          :if={@changeset}
-          navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/review"}
-          class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
-        >
-          Review page ›
-        </.link>
-      </div>
-      <div class="mt-3">
-        <Diff.file_table :if={@diff} diff={@diff} ask="ask" />
-        <p :if={!@diff} class="text-sm/[1.55] opacity-70">Its branch is not in the repository.</p>
-      </div>
-    </section>
-
-    <WorkScreen.commits commits={@commits} now={@now} />
-
-    <%!-- Reading a change and approving it are adjacent; they are still two gestures. The same
-          card Decide draws, from the same component and the same pending transition. --%>
-    <section
-      :if={approving_changeset?(assigns)}
-      id="changes-approval"
-      class="mt-8 border-t border-accent pt-5"
-    >
-      <h2 class="font-mono text-[11px] tracking-[.14em] uppercase text-accent">Waiting on you</h2>
-      <div class="mt-3">
-        <.approval_card
-          ticket={@ticket}
-          pending={@ticket.pending_transition}
-          approve={@approve}
-          drafts={@drafts}
-          commit_message={@commit_message}
-        />
-      </div>
-    </section>
-    """
-  end
-
-  defp activity(assigns) do
-    ~H"""
-    <p :if={is_nil(@current)} class="text-sm opacity-60">No job has run on this ticket.</p>
-
-    <div :if={@current}>
-      <.link
-        navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/jobs/#{@current.id}"}
-        class="mb-3 flex min-h-[46px] items-center font-mono text-[12.5px] hover:underline"
-      >
-        {@current.state} #{@current.attempt} ›
-      </.link>
-      <WorkScreen.activity
-        events={@activity}
-        shown={@shown}
-        notices={@notices}
-        heading={WorkScreen.stream_heading(@current, @activity)}
-      />
-
-      <section :if={length(@jobs) > 1} class="mt-8">
-        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Earlier jobs</h2>
-        <ul class="mt-3 flex flex-col">
-          <li :for={job <- @jobs |> Enum.drop(-1) |> Enum.reverse()}>
-            <.link
-              navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/jobs/#{job.id}"}
-              class="flex min-h-[46px] items-center gap-3 border-b border-base-300/60 font-mono text-[12.5px] hover:bg-base-200"
-            >
-              <span class="min-w-0 flex-1 truncate">{job.state} #{job.attempt}</span>
-              <%!-- Through `Indicators`, like every other row: `ui.md` § The three axes says
-                    nothing else may draw a job outcome, and this row drew it as plain demoted
-                    text — which left the ceiling beside it at exactly the same weight. --%>
-              <span class="shrink-0">
-                <.outcome :if={job.outcome} value={to_string(job.outcome)} />
-                <.job_status :if={is_nil(job.outcome)} status={job.status} />
-              </span>
-              <.ceiling job={job} />
-              <span class="shrink-0 opacity-40" aria-hidden="true">›</span>
-            </.link>
-          </li>
-        </ul>
-      </section>
-    </div>
-    """
-  end
-
-  defp rail(assigns) do
-    ~H"""
-    <%!-- The strip's gauge written out, where a phone reaches it: below `lg` this is the
-          details sheet, and the top bar that carries the gauge's title is not drawn. --%>
-    <Layouts.capacity_written
-      :if={@capacity not in [nil, %{}]}
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      frame={@frame}
       capacity={@capacity}
-      prefix="details-capacity"
-      class="mb-6 border-b border-base-300 pb-3 lg:hidden"
-    />
-    <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Usage</h2>
-    <div class="mt-3">
-      <div id="ticket-usage" class="font-mono text-[17px]" title={Format.exact(@ticket.usage)}>
-        {Format.windows(@ticket.usage) || "—"}
-      </div>
-      <div class="mt-2 h-[5px] w-full bg-base-300">
-        <div class="h-full bg-accent" style={"width: #{usage_pct(@ticket, @workflow)}%"} />
-      </div>
-      <div class="mt-1 font-mono text-[11px] opacity-50">
-        allowance {Format.windows(@workflow.limits.ticket_tokens) || "—"}
-      </div>
-      <div
-        :if={@ticket.usage_converted}
-        id="ticket-usage-converted"
-        class="mt-1 font-mono text-[11px] opacity-50"
-      >
-        includes figures converted from dollars
-      </div>
-    </div>
-
-    <h2 class="mt-6 font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Facts</h2>
-    <dl class="mt-3 flex flex-col gap-2 text-[12.5px]">
-      <.fact label="branch">{@ticket.branch}</.fact>
-      <.fact label="base">{String.slice(@ticket.base_commit || "", 0, 12)}</.fact>
-      <.fact :if={@queue} label="merge queue">
-        {merge_queue_place(@queue)}
-      </.fact>
-      <.fact label="workflow">{String.slice(@ticket.workflow_commit || "", 0, 12)}</.fact>
-      <.fact label="admitted">{Format.ago(@ticket.inserted_at, @now)} ago</.fact>
-    </dl>
-    <%!-- A ticket reads its workflow, prompts and command scripts at its pin for its whole life,
-          so a fix that lands on the default branch does not reach it until a person says so
-          (`workflow-grammar-v1.md` § Pinning). Said where the pin is, with the way to take it. --%>
-    <div :if={@drift} id="pin-drift" class="mt-3 text-[12.5px]">
-      <p class="opacity-70">
-        {@project.default_branch} has changed what this ticket runs since it was pinned:
-      </p>
-      <ul class="mt-1 flex flex-col gap-0.5 font-mono break-all opacity-70">
-        <li :for={path <- @drift.paths}>{path}</li>
-      </ul>
-      <button
-        :if={@ticket.status in Forge.Tickets.Ticket.open_statuses()}
-        type="button"
-        id="repin-ticket"
-        phx-click="repin"
-        phx-value-ticket={@ticket.id}
-        data-confirm={"Re-pin at #{String.slice(@drift.head, 0, 12)}? Every job from now on reads the workflow, its prompts and its command scripts from there."}
-        class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
-      >
-        Re-pin at {String.slice(@drift.head, 0, 12)}
-      </button>
-    </div>
-    <%!-- A merge moved the default branch into conflict with this ticket's changeset: said before
-          anybody approves it, with the way down the conflict route — and nothing started until
-          it is pressed (`docs/design/ui.md` § Decide and Timeline). --%>
-    <div :if={@conflict} id="merge-conflict" class="mt-3 text-[12.5px]">
-      <p class="opacity-70">
-        {@project.default_branch} no longer merges with this ticket's changeset{since(@conflict.cause)}:
-      </p>
-      <ul class="mt-1 flex flex-col gap-0.5 font-mono break-all opacity-70">
-        <li :for={path <- @conflict.paths}>{path}</li>
-      </ul>
-      <button
-        :if={@conflict.send_to}
-        type="button"
-        id="integrate-ticket"
-        phx-click="integrate"
-        phx-value-ticket={@ticket.id}
-        data-confirm={send_confirm(@conflict.send_to, @workflow, @project.default_branch)}
-        class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
-      >
-        Send to {@conflict.send_to}
-      </button>
-    </div>
-
-    <h2
-      :if={@proposals != []}
-      class="mt-6 font-mono text-[11px] tracking-[.14em] uppercase opacity-60"
+      title={@ticket.title}
+      subline={@subline}
+      context={{@project.name, ~p"/projects/#{@project.name}"}}
+      views={views(assigns)}
+      view={@view}
+      measure={if @view == "changes", do: nil, else: "46rem"}
+      fill
     >
-      Proposed here
-    </h2>
-    <ul :if={@proposals != []} class="mt-3 flex flex-col gap-2 text-[12.5px]">
-      <li :for={p <- @proposals} class="opacity-70">{proposal_title(p.version)}</li>
-    </ul>
-    <p :if={@proposals != []} class="mt-2 text-[12.5px] opacity-50">
-      Waiting on you, on <.link navigate={~p"/projects/#{@project.name}"} class="hover:underline">
-        the project page
-      </.link>.
-    </p>
+      <:decision :if={@decision || @release || @decision_error}>
+        <TicketViews.release_band :if={@release} ticket={@ticket} release={@release} />
+        <Decision.gone :if={is_nil(@decision) && @decision_error} error={@decision_error} />
+        <Decision.row
+          :if={@decision}
+          decision={@decision}
+          open={@decision_open}
+          note={@decision_note}
+          pick={@decision_pick}
+          error={@decision_error}
+        />
+      </:decision>
+      <:details>
+        <TicketViews.details {assigns} />
+      </:details>
+      <:composer :if={TicketViews.dock?(assigns)}>
+        <TicketViews.dock {assigns} />
+      </:composer>
+      <:aside :if={TicketViews.aside?(assigns)}>
+        <TicketViews.aside {assigns} />
+      </:aside>
 
-    <h2 class="mt-6 font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Artifacts</h2>
-    <div class="mt-3 flex flex-wrap gap-2">
-      <.artifact_chip
-        :for={entry <- @artifacts}
-        entry={entry}
-        project={@project.name}
-        number={@ticket.number}
-      />
-      <p :if={@artifacts == []} class="text-sm opacity-50">
-        The first job writes the first document.
-      </p>
-    </div>
+      <WorkScreen.body :if={@view == "steps"} id="steps">
+        <TicketViews.steps {assigns} />
+      </WorkScreen.body>
 
-    <h2 class="mt-6 font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
-      Last four events
-    </h2>
-    <ol class="mt-3 flex flex-col gap-1 font-mono text-[12.5px]">
-      <li :for={event <- @events} class="flex gap-2">
-        <span class="shrink-0 opacity-50">
-          {Calendar.strftime(event.inserted_at, "%m-%d %H:%M")}
-        </span>
-        <span class="min-w-0">
-          <span class="block truncate">{event.type}</span>
-          <span :if={Format.author(event.actor)} class="block truncate text-[11.5px] opacity-60">
-            {Format.author(event.actor)}
-          </span>
-          <span :if={said(event)} class="block break-words font-sans text-sm/[1.4] opacity-70">
-            {said(event)}
-          </span>
-        </span>
-      </li>
-    </ol>
-    <%!-- Cancelling is rare and undoable, so it sits at the foot of the rail rather than beside
-          the decisions: `workflow-grammar-v1.md` § Cancelling a ticket. --%>
-    <div :if={@ticket.status in Forge.Tickets.Ticket.open_statuses()} class="mt-6">
-      <button
-        type="button"
-        id="cancel-ticket"
-        phx-click="cancel-ticket"
-        phx-value-ticket={@ticket.id}
-        data-confirm="Cancel this ticket? Its jobs stop and it is hidden everywhere but this page, where Restore brings it back."
-        class="flex min-h-[46px] items-center text-sm text-error hover:underline"
-      >
-        Cancel ticket
-      </button>
-    </div>
-    <div :if={@ticket.status == :cancelled} class="mt-6">
-      <p class="text-[12.5px] opacity-60">
-        Cancelled: hidden everywhere but here. Restoring leaves it stuck in {@ticket.state}.
-      </p>
-      <button
-        type="button"
-        id="restore-ticket"
-        phx-click="restore-ticket"
-        phx-value-ticket={@ticket.id}
-        class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
-      >
-        Restore
-      </button>
-    </div>
+      <WorkScreen.body :if={@view == "changes"} id="changes">
+        <Changes.view {assigns} />
+      </WorkScreen.body>
+
+      <WorkScreen.body :if={@view == "docs"} id="docs">
+        <WorkScreen.docs
+          docs={@docs}
+          now={@now}
+          empty="A document an agent writes appears here when its job declares it."
+        />
+      </WorkScreen.body>
+
+      <WorkScreen.body :if={@view == "activity"} id="activity">
+        <TicketViews.activity {assigns} />
+      </WorkScreen.body>
+      <.look_carried :if={@looked} ticket_id={@ticket_id} since={@since} />
+    </Layouts.app>
     """
   end
 
-  # There is no chip without a version: approval attaches to an exact version, and a human edit
-  # creating v3 does not carry v2's approval. A presentation has no approval slot at all, and
-  # neither has an artifact the pinned workflow never approves — see docs/design/ui.md.
-  #
-  # The chip is a link to the exact version's bytes, which is also why it is bordered: a border
-  # means you can tap it. A changeset is a commit rather than a file and the controller sends it
-  # to the review page, where a diff is rendered.
-  attr :entry, :map, required: true
-  attr :project, :string, required: true
-  attr :number, :integer, required: true
+  attr :ticket_id, :string, required: true
+  attr :since, :any, required: true
 
-  defp artifact_chip(assigns) do
+  # The look this visit was opened with, for the socket to send back when it rejoins (`look/2`).
+  # Drawn only by a connected render, so a dead render's DOM carries none.
+  defp look_carried(assigns) do
     ~H"""
-    <.link
-      :if={@entry.latest}
-      href={
-        ~p"/tickets/#{@project}/#{@number}/artifacts/#{@entry.artifact.name}/#{@entry.latest.version}"
-      }
-      class={[
-        "inline-flex min-h-[46px] items-center gap-1.5 rounded-field px-2 py-1 font-mono text-[12.5px] hover:bg-base-200",
-        if(@entry.artifact.kind == :presentation,
-          do: "border border-dashed border-base-300",
-          else: "border border-base-300"
-        )
-      ]}
-    >
-      <FileType.file_icon artifact={@entry.artifact} size={:chip} />
-      {@entry.artifact.name}
-      <span class="opacity-60">v{@entry.latest.version}</span>
-      <span :if={@entry.artifact.kind == :presentation} class="tracking-[.14em] uppercase opacity-50">
-        view only
-      </span>
-      <span :if={@entry.approvable and @entry.approved} class="text-success">✓ approved</span>
-      <span :if={@entry.approvable and not @entry.approved} class="text-warning">◇ unapproved</span>
-    </.link>
+    <div
+      id="ticket-look"
+      hidden
+      data-ticket={@ticket_id}
+      data-since={@since && DateTime.to_iso8601(@since)}
+    />
     """
-  end
-
-  # The events whose type alone does not say what happened: which outcome a batch decided, why the
-  # ticket stuck, where it went, why a conversation's request to move it moved nothing. Every
-  # other type is its own sentence here.
-  @said ~w(commands.decided ticket.stuck transition.taken ticket.merge_conflicted
-           chat.transition_refused merge_queue.entered merge_queue.returned merge_queue.taken_out
-           merge_queue.left ticket.merged ticket.renamed)
-
-  defp said(%{type: type} = event) when type in @said, do: Forge.Events.summary(event)
-  defp said(_event), do: nil
-
-  defp turns(jobs), do: jobs |> Enum.map(& &1.turns) |> Enum.sum()
-
-  # Which merge put the ticket in conflict, when it was one: one that conflicted already names none.
-  defp since(%{"ticket" => number}), do: " since ##{number} merged"
-  defp since(%{"chat" => _id}), do: " since a conversation merged"
-  defp since(_none), do: ""
-
-  # The confirm says what pressing it spends: a job, when the state it sends to runs one.
-  defp send_confirm(target, workflow, branch) do
-    case Workflow.state(workflow, target) do
-      %Workflow.State{chat: true} ->
-        "Send this ticket to #{target}? A conversation opens there, waiting for a person."
-
-      %Workflow.State{prompt: prompt} when is_binary(prompt) ->
-        "Send this ticket to #{target}? A job starts there to merge #{branch} into its branch, " <>
-          "and spends a credential."
-
-      _human ->
-        "Send this ticket to #{target}? It waits there for a person."
-    end
-  end
-
-  defp stuck_or_human?(assigns),
-    do: (assigns.ticket.status == :stuck or assigns.human_state) and assigns.transitions != []
-
-  defp waiting_clause(%{ticket: %{status: :stuck}, stuck_reason: reason}) when is_binary(reason),
-    do: "Stuck: #{reason}. Waiting for you to choose."
-
-  defp waiting_clause(%{ticket: %{status: :stuck}}), do: "Stuck, and waiting for you to choose."
-
-  defp waiting_clause(%{queue: %{}}), do: "In the merge queue."
-
-  defp waiting_clause(%{ticket: %{pending_transition: p}}) when is_map(p),
-    do: "Waiting for approval."
-
-  defp waiting_clause(%{questions: {[_ | _], _assumed}}),
-    do: "A job stopped to ask you something."
-
-  defp waiting_clause(_assigns), do: nil
-
-  # A merge decision has a page of its own — whether it is waiting as a pending approval or as the
-  # transition out of the state the ticket rests in, and whatever it pins: what makes it one is
-  # that the state it enters merges (`Forge.Engine.merge_decision?/2`).
-  defp reviewable?(ticket, workflow), do: Engine.merge_decision?(ticket, workflow)
-
-  defp approve_pins(project, ticket, artifacts) do
-    for name <- Engine.awaiting_approval(ticket),
-        entry = Enum.find(artifacts, &(&1.artifact.name == name)),
-        entry && entry.latest,
-        do: pinned(project.name, ticket, name, entry.latest)
-  end
-
-  # The daily cap is resolved by the clock, so the figure beside it is a countdown, not an age.
-  defp until_midnight do
-    now = DateTime.utc_now()
-    {:ok, midnight} = DateTime.new(Date.add(DateTime.to_date(now), 1), ~T[00:00:00], "Etc/UTC")
-
-    case DateTime.diff(midnight, now, :second) do
-      s when s < 3600 -> "#{div(s, 60)}m"
-      s -> "#{div(s, 3600)}h #{div(rem(s, 3600), 60)}m"
-    end
-  end
-
-  defp usage_pct(ticket, workflow) do
-    cap = workflow.limits.ticket_tokens
-
-    if is_number(cap) and cap > 0 do
-      ticket.usage
-      |> Kernel./(cap)
-      |> Kernel.*(100)
-      |> min(100)
-      |> round()
-    else
-      0
-    end
   end
 end

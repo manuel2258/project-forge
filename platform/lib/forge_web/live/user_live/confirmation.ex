@@ -1,4 +1,15 @@
 defmodule ForgeWeb.UserLive.Confirmation do
+  @moduledoc """
+  An emailed link, opened (`21g`, `docs/design/ui.md` § Signing in). It asks the question it
+  means — is this your own device? — with the common answer filled. The first sign-in confirms
+  the address and later ones only sign in; both get the same two answers, which decide whether
+  the session is remembered (`remember_me`). A link that no longer works goes back to the link's
+  own screen with the line under its field.
+
+  It wears the same head as every sign-in screen, and **focuses no button**: a button that opens
+  with the focus ring reads as already chosen (UX pass, A29).
+  """
+
   use ForgeWeb, :live_view
 
   alias Forge.Accounts
@@ -6,69 +17,51 @@ defmodule ForgeWeb.UserLive.Confirmation do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope}>
-      <div class="mx-auto max-w-sm">
-        <div class="text-center">
-          <.header>Welcome {@user.email}</.header>
-        </div>
+    <Layouts.sign_in flash={@flash}>
+      <div id="sign-in-link" class="signin signin-sent">
+        <ForgeWeb.UserLive.Login.brand />
+        <h1 class="signin-sent-title">Welcome, {@user.email}</h1>
+        <p :if={!@current_scope} class="signin-sent-text">Is this your own device?</p>
 
         <.form
-          :if={!@user.confirmed_at}
           for={@form}
-          id="confirmation_form"
-          phx-mounted={JS.focus_first()}
+          id={if @user.confirmed_at, do: "login_form", else: "confirmation_form"}
           phx-submit="submit"
-          action={~p"/users/log-in?_action=confirmed"}
+          action={
+            if @user.confirmed_at,
+              do: ~p"/users/log-in",
+              else: ~p"/users/log-in?_action=confirmed"
+          }
           phx-trigger-action={@trigger_submit}
-        >
-          <input type="hidden" name={@form[:token].name} value={@form[:token].value} />
-          <.button
-            name={@form[:remember_me].name}
-            value="true"
-            phx-disable-with="Confirming..."
-            class="btn btn-primary w-full"
-          >
-            Confirm and stay logged in
-          </.button>
-          <.button phx-disable-with="Confirming..." class="btn btn-primary btn-soft w-full mt-2">
-            Confirm and log in only this time
-          </.button>
-        </.form>
-
-        <.form
-          :if={@user.confirmed_at}
-          for={@form}
-          id="login_form"
-          phx-submit="submit"
-          phx-mounted={JS.focus_first()}
-          action={~p"/users/log-in"}
-          phx-trigger-action={@trigger_submit}
+          class="signin-answers"
         >
           <input type="hidden" name={@form[:token].name} value={@form[:token].value} />
           <%= if @current_scope do %>
-            <.button phx-disable-with="Logging in..." class="btn btn-primary w-full">
-              Log in
+            <.button phx-disable-with="Signing in…" variant="primary" size="xl" class="w-full">
+              Sign in
             </.button>
           <% else %>
             <.button
               name={@form[:remember_me].name}
               value="true"
-              phx-disable-with="Logging in..."
-              class="btn btn-primary w-full"
+              phx-disable-with="Signing in…"
+              variant="primary"
+              size="xl"
+              class="w-full"
             >
-              Keep me logged in on this device
+              Yes, keep me signed in
             </.button>
-            <.button phx-disable-with="Logging in..." class="btn btn-primary btn-soft w-full mt-2">
-              Log me in only this time
+            <.button phx-disable-with="Signing in…" variant="outline" size="xl" class="w-full">
+              No, just this once
             </.button>
           <% end %>
         </.form>
 
-        <p :if={!@user.confirmed_at} class="alert alert-outline mt-8">
-          Tip: If you prefer passwords, you can enable them in the user settings.
+        <p :if={!@user.confirmed_at} class="signin-note">
+          If you prefer passwords, you can turn them on in your settings.
         </p>
       </div>
-    </Layouts.app>
+    </Layouts.sign_in>
     """
   end
 
@@ -82,8 +75,8 @@ defmodule ForgeWeb.UserLive.Confirmation do
     else
       {:ok,
        socket
-       |> put_flash(:error, "Magic link is invalid or it has expired.")
-       |> push_navigate(to: ~p"/users/log-in")}
+       |> put_flash(:sign_in_error, "Magic link is invalid or it has expired.")
+       |> push_navigate(to: ~p"/users/log-in?way=link")}
     end
   end
 

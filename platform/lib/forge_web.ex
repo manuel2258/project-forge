@@ -84,8 +84,13 @@ defmodule ForgeWeb do
 
       # HTML escaping functionality
       import Phoenix.HTML
-      # Core UI components
+      # Core UI components, and the design's primitives (docs/design/ui.md § Components)
       import ForgeWeb.CoreComponents
+      import ForgeWeb.UI.Navigation
+      import ForgeWeb.UI.Decisions
+      import ForgeWeb.UI.Forms
+      import ForgeWeb.UI.Data
+      import ForgeWeb.UI.Feedback
 
       # Common modules used in templates
       alias ForgeWeb.Layouts

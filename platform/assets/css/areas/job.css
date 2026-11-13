@@ -1,0 +1,188 @@
+/* The job area's styles (docs/design/ui.md). Edited only by the slice that builds that area. */
+
+/* The job page (docs/design/ui.md § The job page, `6e`, `21a`, `21b`): one markup, three places
+   for where it stands — after the stream on a phone, a band under the title on a portrait screen,
+   a column on the right of a wide one. */
+@layer components {
+  .job-page {
+    display: grid;
+    grid-template-areas: "head" "work" "stand";
+    grid-template-columns: minmax(0, 1fr);
+    gap: 18px;
+  }
+  .job-head { grid-area: head; display: flex; min-width: 0; flex-direction: column; gap: 6px; }
+  .job-work { grid-area: work; display: flex; min-width: 0; flex-direction: column; gap: 10px; }
+  .job-stand { grid-area: stand; display: flex; min-width: 0; flex-direction: column; gap: 28px; }
+
+  /* The drill-in's back row (`6c`): back, which job, where it ran. */
+  .job-back-row {
+    display: flex;
+    min-height: 40px;
+    align-items: center;
+    gap: 12px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border-soft);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .job-back { color: var(--link); font-family: var(--font-sans); font-size: 14px; }
+  .job-name { min-width: 0; flex: 1 1 0%; overflow-wrap: anywhere; }
+
+  .job-headline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding-top: 6px; }
+  .job-outcome { font-size: 24px; line-height: 1.2; }
+  .job-figures { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-2); }
+  .job-caption { font-size: 13px; color: var(--ink-3); }
+  .job-memory { font-family: var(--font-mono); font-size: 12.5px; color: var(--warning); }
+
+  .job-dim { color: var(--ink-3); }
+  .job-none { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-3); }
+
+  /* -- what it did -------------------------------------------------------------------------- */
+
+  .job-stream-head { display: flex; min-height: 40px; flex-wrap: wrap; align-items: center; gap: 4px 14px; font-family: var(--font-mono); font-size: 12px; }
+  .job-stream-head > .job-dim { margin-right: auto; }
+  .job-first-error { display: flex; min-height: 40px; align-items: center; color: var(--danger); }
+  .job-first-error:hover { text-decoration: underline; }
+  .job-raw-toggle { min-height: 40px; padding: 0; color: var(--ink-3); font-family: var(--font-mono); font-size: 12px; cursor: pointer; }
+  .job-raw-toggle:hover { color: var(--ink); }
+  .job-raw-toggle[aria-pressed="true"] { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+
+  /* Bounded, so the page does not grow with the run (ui.md § Motion and structure). */
+  .job-pane { max-height: 70dvh; }
+  .job-earlier {
+    min-height: 40px;
+    padding: 0;
+    color: var(--info);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .job-entries { display: flex; flex-direction: column; }
+  /* Each row's time on the baseline of its first line, whatever the line is drawn as. */
+  .job-entry {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding: 4px 0;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .job-entry-time { flex-shrink: 0; width: 4.5rem; color: var(--ink-3); font-size: 11px; }
+  /* On a phone the time is said once a minute, as a divider over the row that opens it, and the
+     rows take the width a time on each took (UX pass, B5). */
+  @media (max-width: 767.98px) {
+    .job-entry { flex-wrap: wrap; }
+    .job-entry-time { display: none; }
+    .job-entry[data-minute]::before {
+      flex-basis: 100%;
+      padding: 6px 0 2px;
+      color: var(--ink-3);
+      content: attr(data-minute);
+      font-size: 11px;
+    }
+  }
+  .job-entry-main { display: flex; min-width: 0; flex: 1 1 0%; flex-direction: column; gap: 2px; }
+  .job-entry-type { color: var(--ink-2); }
+  .job-entry-detail { min-width: 0; overflow-wrap: anywhere; color: var(--ink-2); }
+  /* The agent's words, boxed as the transcript boxes them. */
+  .job-said {
+    /* Prose stops at a reading measure, as a chat's bubbles do (UX pass, B5). */
+    max-width: 68ch;
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    background: var(--surface-1);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+  }
+  .job-stream-end { padding: 10px 0 4px; border-top: 1px solid var(--border-soft); color: var(--ink-3); font-family: var(--font-mono); font-size: 12px; }
+  .job-stream-foot { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 8px; max-width: 32rem; }
+  /* The page's main control: as wide as the stream it switches, not 320px under 712 (UX
+     re-check #14). A filter (a project's All · Waiting · Running) stays wrapped. */
+  .job-work > .ui-seg { max-width: none; }
+  .job-stream-foot:empty { display: none; }
+
+  .job-prompt {
+    overflow-x: auto;
+    padding: 12px;
+    border-radius: var(--radius);
+    background: var(--surface-1);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .job-manifest { display: flex; flex-direction: column; gap: 10px; }
+  .job-prompt-fold { padding-bottom: 6px; border-bottom: 1px solid var(--border-soft); }
+  .job-prompt-fold > summary { list-style: none; }
+  .job-prompt-fold > summary::-webkit-details-marker { display: none; }
+  .job-prompt-summary { display: flex; min-height: 44px; align-items: center; gap: 8px; cursor: pointer; font-size: 14px; }
+  .job-prompt-summary::after { color: var(--ink-3); content: "▸"; font-size: 11px; }
+  .job-prompt-fold[open] > .job-prompt-summary::after { content: "▾"; }
+  .job-list { display: flex; flex-direction: column; gap: 4px; font-family: var(--font-mono); font-size: 12.5px; }
+  .job-list-row { display: flex; min-width: 0; justify-content: space-between; gap: 12px; }
+  .job-declared { overflow-wrap: anywhere; }
+  .job-refusal { margin-top: 4px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-2); }
+
+  .job-wrote { display: flex; flex-direction: column; }
+  .job-file {
+    display: flex;
+    min-height: 46px;
+    align-items: center;
+    gap: 10px;
+    border-bottom: 1px solid var(--border-soft);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .job-file:hover { background: var(--surface-2); }
+  .job-file-name { min-width: 0; flex: 1 1 0%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* -- where it stands ---------------------------------------------------------------------- */
+
+  .job-stand-plan,
+  .job-stand-facts { display: flex; min-width: 0; flex-direction: column; gap: 8px; }
+  .job-plan { font-size: 13px; }
+  .job-attempts { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; }
+  .job-attempt { display: flex; min-height: 32px; align-items: center; gap: 10px; font-family: var(--font-mono); font-size: 12.5px; }
+  .job-attempt-open { margin-left: auto; color: var(--link); font-family: var(--font-sans); font-size: 13px; }
+  .job-attempt-open.job-dim { color: var(--ink-3); }
+  .job-run { display: flex; min-width: 0; flex-direction: column; gap: 2px; padding: 6px 0; font-family: var(--font-mono); font-size: 12.5px; }
+  .job-run-head { display: flex; justify-content: space-between; gap: 12px; }
+  .job-run-kinds { color: var(--ink-3); overflow-wrap: anywhere; }
+  .job-secrets { display: block; text-align: right; }
+
+  /* Portrait: where it stands is a band under the title, plan beside facts, and the stream takes
+     the rest. The title row already leads back to the ticket. */
+  @media (min-width: 768px) {
+    .job-page { grid-template-areas: "head" "stand" "work"; gap: 24px; }
+    .job-stand {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 0 48px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--border);
+    }
+    .job-back { display: none; }
+    .job-pane { max-height: calc(100dvh - 260px); min-height: 18rem; }
+  }
+
+  /* Wide: what it did on the left, where it stands on the right. */
+  @media (min-width: 1440px) {
+    .job-page {
+      grid-template-areas: "head stand" "work stand";
+      grid-template-columns: minmax(0, 1fr) 360px;
+      grid-template-rows: auto 1fr;
+      gap: 20px 40px;
+    }
+    .job-stand {
+      display: flex;
+      align-self: start;
+      gap: 28px;
+      padding: 0 0 0 30px;
+      border-bottom: 0;
+      border-left: 1px solid var(--border);
+    }
+  }
+}

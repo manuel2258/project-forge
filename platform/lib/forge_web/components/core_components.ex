@@ -3,23 +3,19 @@ defmodule ForgeWeb.CoreComponents do
   Provides core UI components.
 
   At first glance, this module may seem daunting, but its goal is to provide
-  core building blocks for your application, such as tables, forms, and
+  core building blocks for your application, such as buttons, forms and
   inputs. The components consist mostly of markup and are well-documented
   with doc strings and declarative assigns. You may customize and style
   them in any way you want, based on your application growth and needs.
 
-  The foundation for styling is Tailwind CSS, a utility-first CSS framework,
-  augmented with daisyUI, a Tailwind CSS plugin that provides UI components
-  and themes. Here are useful references:
-
-    * [daisyUI](https://daisyui.com/docs/intro/) - a good place to get
-      started and see the available components.
+  The foundation for styling is Tailwind CSS, with the design's tokens as its theme
+  (`assets/css/tokens.css`, `docs/design/ui.md` § Tokens): `bg-surface-2`, `text-ink-3`,
+  `border-border`, `text-danger`. There is no component library and no icon set; a state is a
+  Unicode mark (`docs/design/ui.md` § Marks). Here are useful references:
 
     * [Tailwind CSS](https://tailwindcss.com) - the foundational framework
       we build on. You will use it for layout, sizing, flexbox, grid, and
       spacing.
-
-    * [Heroicons](https://heroicons.com) - see `icon/1` for usage.
 
     * [Phoenix.Component](https://phoenix-live-view.hexdocs.pm/Phoenix.Component.html) -
       the component system used by Phoenix. Some components, such as `<.link>`
@@ -32,136 +28,102 @@ defmodule ForgeWeb.CoreComponents do
   alias Phoenix.LiveView.JS
 
   @doc """
-  Renders flash notices.
+  The one button (`actions/Button`, `docs/design/ui.md` § The affordance rule): `primary` filled
+  ink is the next step, `decision` amber waits on you and leads with ◆, `outline` navigates,
+  `danger` destroys. A `navigate`, `patch` or `href` draws it as a link.
+
+  **`chevron` is drawn on a link only.** `›` says the button goes somewhere (`docs/design/ui.md`
+  § Marks); on a Send, a submit or a click that commits in place it promised a page that never
+  came, on exactly the buttons where certainty matters (UX pass, A7).
+
+  **Disabled keeps its size and place** — the same element at 45 % — and is never hidden.
 
   ## Examples
 
-      <.flash kind={:info} flash={@flash} />
-      <.flash
-        id="welcome-back"
-        kind={:info}
-        phx-mounted={show("#welcome-back") |> JS.remove_attribute("hidden")}
-        hidden
-      >
-        Welcome Back!
-      </.flash>
+      <.button variant="primary" fill>Send 1 answer</.button>
+      <.button variant="decision" size="md">Approve</.button>
+      <.button variant="outline" chevron navigate={~p"/"}>Review the changeset</.button>
   """
-  attr :id, :string, doc: "the optional id of flash container"
-  attr :flash, :map, default: %{}, doc: "the map of flash messages to display"
-  attr :title, :string, default: nil
-  attr :kind, :atom, values: [:info, :error], doc: "used for styling and flash lookup"
-  attr :rest, :global, doc: "the arbitrary HTML attributes to add to the flash container"
+  attr :rest, :global,
+    include: ~w(href navigate patch method download name value disabled type form replace)
 
-  slot :inner_block, doc: "the optional inner block that renders the flash message"
+  attr :class, :any,
+    default: nil,
+    doc: "added to the button's own classes, for its width or place"
 
-  def flash(assigns) do
-    assigns = assign_new(assigns, :id, fn -> "flash-#{assigns.kind}" end)
+  # The contract's default is `primary`. Here it is `secondary`, because every call site written
+  # before the primitives passed no variant and meant a bordered button; defaulting them to
+  # filled ink would put two filled buttons side by side on a dozen pages.
+  attr :variant, :string,
+    default: "secondary",
+    values: ~w(primary decision decision-open outline secondary neutral danger quiet link)
 
-    ~H"""
-    <div
-      :if={msg = render_slot(@inner_block) || Phoenix.Flash.get(@flash, @kind)}
-      id={@id}
-      phx-click={JS.push("lv:clear-flash", value: %{key: @kind}) |> hide("##{@id}")}
-      role="alert"
-      class="toast toast-top toast-end z-50"
-      {@rest}
-    >
-      <div class={[
-        "alert w-80 sm:w-96 max-w-80 sm:max-w-96 text-wrap",
-        @kind == :info && "alert-info",
-        @kind == :error && "alert-error"
-      ]}>
-        <.icon :if={@kind == :info} name="hero-information-circle" class="size-5 shrink-0" />
-        <.icon :if={@kind == :error} name="hero-exclamation-circle" class="size-5 shrink-0" />
-        <div>
-          <p :if={@title} class="font-semibold">{@title}</p>
-          <p>{msg}</p>
-        </div>
-        <div class="flex-1" />
-        <button type="button" class="group self-start cursor-pointer" aria-label={gettext("close")}>
-          <.icon name="hero-x-mark" class="size-5 opacity-40 group-hover:opacity-70" />
-        </button>
-      </div>
-    </div>
-    """
-  end
+  # The contract's default is `xl` (52); here `lg` (48), the height every existing call site was
+  # drawn at, until each area's slice picks its sizes.
+  attr :size, :string, default: "lg", values: ~w(xl lg md sm desk)
+  attr :fill, :boolean, default: false, doc: "grow to fill the row: the one primary in a dock"
+  attr :chevron, :boolean, default: false, doc: "a trailing › for an action that goes somewhere"
 
-  @doc """
-  Renders a button with navigation support.
+  attr :diamond, :boolean,
+    default: nil,
+    doc: "a leading ◆; on by default for the decision variants"
 
-  ## Examples
-
-      <.button>Send!</.button>
-      <.button phx-click="go" variant="primary">Send!</.button>
-      <.button navigate={~p"/"}>Home</.button>
-  """
-  attr :rest, :global, include: ~w(href navigate patch method download name value disabled)
-  attr :class, :any
-  attr :variant, :string, values: ~w(primary)
   slot :inner_block, required: true
 
   def button(%{rest: rest} = assigns) do
-    variants = %{"primary" => "btn-primary", nil => "btn-primary btn-soft"}
+    link? = (rest[:href] || rest[:navigate] || rest[:patch]) != nil
+    chevron = assigns.chevron and link?
 
     assigns =
-      assign_new(assigns, :class, fn ->
-        ["btn", Map.fetch!(variants, assigns[:variant])]
-      end)
+      assigns
+      |> assign(:diamond, diamond?(assigns.diamond, assigns.variant))
+      |> assign(:chevron, chevron)
+      |> assign(:class, [
+        "ui-btn",
+        "ui-btn--#{assigns.variant}",
+        "ui-btn--#{assigns.size}",
+        assigns.fill && "ui-btn--fill",
+        chevron && "ui-btn--chevron",
+        assigns.class
+      ])
 
-    if rest[:href] || rest[:navigate] || rest[:patch] do
+    if link? do
       ~H"""
       <.link class={@class} {@rest}>
-        {render_slot(@inner_block)}
+        <span :if={@diamond} class="ui-btn-diamond" aria-hidden="true">◆</span>
+        <span>{render_slot(@inner_block)}</span>
+        <span :if={@chevron} aria-hidden="true">›</span>
       </.link>
       """
     else
       ~H"""
       <button class={@class} {@rest}>
-        {render_slot(@inner_block)}
+        <span :if={@diamond} class="ui-btn-diamond" aria-hidden="true">◆</span>
+        <span>{render_slot(@inner_block)}</span>
       </button>
       """
     end
   end
 
+  defp diamond?(nil, variant), do: variant in ~w(decision decision-open)
+  defp diamond?(diamond, _variant), do: diamond
+
   @doc """
-  Renders an input with label and error messages.
+  A field (`forms/Field`): the label above, the hint or the errors below, each error under the
+  input it belongs to and in the server's words, the input marked `aria-invalid` and pointing at
+  them (`docs/design/ui.md` § Errors stay where you acted).
 
-  A `Phoenix.HTML.FormField` may be passed as argument,
-  which is used to retrieve the input name, id, and values.
-  Otherwise all attributes may be passed explicitly.
+  A `Phoenix.HTML.FormField` may be passed as `field`, which gives the name, id, value and errors;
+  otherwise all of them may be passed explicitly. `multiline` (or `type="textarea"`) draws a
+  textarea, `mono` sets the value in mono (a name, a URL, a key), `desk` draws the desktop size.
 
-  ## Types
-
-  This function accepts all HTML input types, considering that:
-
-    * You may also set `type="select"` to render a `<select>` tag
-
-    * `type="checkbox"` is used exclusively to render boolean values
-
-    * For live file uploads, see `Phoenix.Component.live_file_input/1`
-
-  See https://developer.mozilla.org/en-US/docs/Web/HTML/Element/input
-  for more information. Unsupported types, such as radio, are best
-  written directly in your templates.
+  `type="select"` takes `options` (and `prompt`); `type="checkbox"` is a boolean field. A choice
+  between a few visible options is a `ForgeWeb.UI.Forms.choice_row/1` rather than either.
 
   ## Examples
 
-  ```heex
-  <.input field={@form[:email]} type="email" />
-  <.input name="my-input" errors={["oh no!"]} />
-  ```
-
-  ## Select type
-
-  When using `type="select"`, you must pass the `options` and optionally
-  a `value` to mark which option should be preselected.
-
-  ```heex
-  <.input field={@form[:user_type]} type="select" options={["Admin": "admin", "User": "user"]} />
-  ```
-
-  For more information on what kind of data can be passed to `options` see
-  [`options_for_select`](https://phoenix-html.hexdocs.pm/Phoenix.HTML.Form.html#options_for_select/2).
+      <.input field={@form[:name]} label="Name" mono hint="Lowercase, digits and hyphens." />
+      <.input name="note" multiline errors={["can't be blank"]} />
   """
   attr :id, :any, default: nil
   attr :name, :any
@@ -177,12 +139,15 @@ defmodule ForgeWeb.CoreComponents do
     doc: "a form field struct retrieved from the form, for example: @form[:email]"
 
   attr :errors, :list, default: []
+  attr :hint, :string, default: nil, doc: "said under the field while it has no error"
+  attr :mono, :boolean, default: false
+  attr :multiline, :boolean, default: false, doc: "a textarea, as `type=\"textarea\"`"
+  attr :desk, :boolean, default: false, doc: "the desktop size: 34px, 13px"
   attr :checked, :boolean, doc: "the checked flag for checkbox inputs"
   attr :prompt, :string, default: nil, doc: "the prompt for select inputs"
   attr :options, :list, doc: "the options to pass to Phoenix.HTML.Form.options_for_select/2"
   attr :multiple, :boolean, default: false, doc: "the multiple flag for select inputs"
-  attr :class, :any, default: nil, doc: "the input class to use over defaults"
-  attr :error_class, :any, default: nil, doc: "the input error class to use over defaults"
+  attr :class, :any, default: nil, doc: "added to the input's own classes"
 
   attr :rest, :global,
     include: ~w(accept autocomplete capture cols disabled form list max maxlength min minlength
@@ -199,6 +164,9 @@ defmodule ForgeWeb.CoreComponents do
     |> input()
   end
 
+  def input(%{multiline: true, type: "text"} = assigns),
+    do: input(%{assigns | multiline: false, type: "textarea"})
+
   def input(%{type: "hidden"} = assigns) do
     ~H"""
     <input type="hidden" id={@id} name={@name} value={@value} {@rest} />
@@ -212,7 +180,7 @@ defmodule ForgeWeb.CoreComponents do
       end)
 
     ~H"""
-    <div class="fieldset mb-2">
+    <div class="ui-field">
       <label for={@id}>
         <input
           type="hidden"
@@ -221,60 +189,59 @@ defmodule ForgeWeb.CoreComponents do
           disabled={@rest[:disabled]}
           form={@rest[:form]}
         />
-        <span class="label">
+        <span class="flex min-h-11 items-center gap-2.5 text-ui text-ink-2">
           <input
             type="checkbox"
             id={@id}
             name={@name}
             value="true"
             checked={@checked}
-            class={@class || "checkbox checkbox-sm"}
+            class={@class || "size-4"}
+            aria-invalid={@errors != [] && "true"}
+            aria-describedby={@errors != [] && error_id(@id)}
             {@rest}
           />{@label}
         </span>
       </label>
-      <.error :for={msg <- @errors}>{msg}</.error>
+      <.field_errors id={@id} errors={@errors} />
     </div>
     """
   end
 
   def input(%{type: "select"} = assigns) do
     ~H"""
-    <div class="fieldset mb-2">
-      <label for={@id}>
-        <span :if={@label} class="label mb-1">{@label}</span>
-        <select
-          id={@id}
-          name={@name}
-          class={[@class || "w-full select", @errors != [] && (@error_class || "select-error")]}
-          multiple={@multiple}
-          {@rest}
-        >
-          <option :if={@prompt} value="">{@prompt}</option>
-          {Phoenix.HTML.Form.options_for_select(@options, @value)}
-        </select>
-      </label>
-      <.error :for={msg <- @errors}>{msg}</.error>
+    <div class={field_class(assigns)}>
+      <label :if={@label} for={@id} class="ui-field-label">{@label}</label>
+      <select
+        id={@id}
+        name={@name}
+        class={["ui-field-input", @class]}
+        multiple={@multiple}
+        aria-invalid={@errors != [] && "true"}
+        aria-describedby={described_by(@id, @errors, @hint)}
+        {@rest}
+      >
+        <option :if={@prompt} value="">{@prompt}</option>
+        {Phoenix.HTML.Form.options_for_select(@options, @value)}
+      </select>
+      <.field_errors id={@id} errors={@errors} hint={@hint} />
     </div>
     """
   end
 
   def input(%{type: "textarea"} = assigns) do
     ~H"""
-    <div class="fieldset mb-2">
-      <label for={@id}>
-        <span :if={@label} class="label mb-1">{@label}</span>
-        <textarea
-          id={@id}
-          name={@name}
-          class={[
-            @class || "w-full textarea",
-            @errors != [] && (@error_class || "textarea-error")
-          ]}
-          {@rest}
-        >{Phoenix.HTML.Form.normalize_value("textarea", @value)}</textarea>
-      </label>
-      <.error :for={msg <- @errors}>{msg}</.error>
+    <div class={field_class(assigns)}>
+      <label :if={@label} for={@id} class="ui-field-label">{@label}</label>
+      <textarea
+        id={@id}
+        name={@name}
+        class={["ui-field-input", @class]}
+        aria-invalid={@errors != [] && "true"}
+        aria-describedby={described_by(@id, @errors, @hint)}
+        {@rest}
+      >{Phoenix.HTML.Form.normalize_value("textarea", @value)}</textarea>
+      <.field_errors id={@id} errors={@errors} hint={@hint} />
     </div>
     """
   end
@@ -282,173 +249,50 @@ defmodule ForgeWeb.CoreComponents do
   # All other inputs text, datetime-local, url, password, etc. are handled here...
   def input(assigns) do
     ~H"""
-    <div class="fieldset mb-2">
-      <label for={@id}>
-        <span :if={@label} class="label mb-1">{@label}</span>
-        <input
-          type={@type}
-          name={@name}
-          id={@id}
-          value={Phoenix.HTML.Form.normalize_value(@type, @value)}
-          class={[
-            @class || "w-full input",
-            @errors != [] && (@error_class || "input-error")
-          ]}
-          {@rest}
-        />
-      </label>
-      <.error :for={msg <- @errors}>{msg}</.error>
+    <div class={field_class(assigns)}>
+      <label :if={@label} for={@id} class="ui-field-label">{@label}</label>
+      <input
+        type={@type}
+        name={@name}
+        id={@id}
+        value={Phoenix.HTML.Form.normalize_value(@type, @value)}
+        class={["ui-field-input", @class]}
+        aria-invalid={@errors != [] && "true"}
+        aria-describedby={described_by(@id, @errors, @hint)}
+        {@rest}
+      />
+      <.field_errors id={@id} errors={@errors} hint={@hint} />
     </div>
     """
   end
 
-  # Helper used by inputs to generate form errors
-  defp error(assigns) do
+  defp field_class(assigns),
+    do: ["ui-field", assigns.mono && "ui-field--mono", assigns.desk && "ui-field--desk"]
+
+  defp described_by(id, errors, hint) do
+    cond do
+      errors != [] -> error_id(id)
+      hint -> hint_id(id)
+      true -> nil
+    end
+  end
+
+  defp error_id(nil), do: nil
+  defp error_id(id), do: "#{id}-error"
+  defp hint_id(nil), do: nil
+  defp hint_id(id), do: "#{id}-hint"
+
+  attr :id, :any, required: true
+  attr :errors, :list, required: true
+  attr :hint, :string, default: nil
+
+  # The errors under their own field; the hint only while there are none (`forms/Field`).
+  defp field_errors(assigns) do
     ~H"""
-    <p class="mt-1.5 flex gap-2 items-center text-sm text-error">
-      <.icon name="hero-exclamation-circle" class="size-5" />
-      {render_slot(@inner_block)}
-    </p>
-    """
-  end
-
-  @doc """
-  Renders a header with title.
-  """
-  slot :inner_block, required: true
-  slot :subtitle
-  slot :actions
-
-  def header(assigns) do
-    ~H"""
-    <header class={[@actions != [] && "flex items-center justify-between gap-6", "pb-4"]}>
-      <div>
-        <h1 class="text-lg font-semibold leading-8">
-          {render_slot(@inner_block)}
-        </h1>
-        <p :if={@subtitle != []} class="text-sm text-base-content/70">
-          {render_slot(@subtitle)}
-        </p>
-      </div>
-      <div class="flex-none">{render_slot(@actions)}</div>
-    </header>
-    """
-  end
-
-  @doc """
-  Renders a table with generic styling.
-
-  ## Examples
-
-      <.table id="users" rows={@users}>
-        <:col :let={user} label="id">{user.id}</:col>
-        <:col :let={user} label="username">{user.username}</:col>
-      </.table>
-  """
-  attr :id, :string, required: true
-  attr :rows, :list, required: true
-  attr :row_id, :any, default: nil, doc: "the function for generating the row id"
-  attr :row_click, :any, default: nil, doc: "the function for handling phx-click on each row"
-
-  attr :row_item, :any,
-    default: &Function.identity/1,
-    doc: "the function for mapping each row before calling the :col and :action slots"
-
-  slot :col, required: true do
-    attr :label, :string
-  end
-
-  slot :action, doc: "the slot for showing user actions in the last table column"
-
-  def table(assigns) do
-    assigns =
-      with %{rows: %Phoenix.LiveView.LiveStream{}} <- assigns do
-        assign(assigns, row_id: assigns.row_id || fn {id, _item} -> id end)
-      end
-
-    ~H"""
-    <table class="table table-zebra">
-      <thead>
-        <tr>
-          <th :for={col <- @col}>{col[:label]}</th>
-          <th :if={@action != []}>
-            <span class="sr-only">{gettext("Actions")}</span>
-          </th>
-        </tr>
-      </thead>
-      <tbody id={@id} phx-update={is_struct(@rows, Phoenix.LiveView.LiveStream) && "stream"}>
-        <tr :for={row <- @rows} id={@row_id && @row_id.(row)}>
-          <td
-            :for={col <- @col}
-            phx-click={@row_click && @row_click.(row)}
-            class={@row_click && "hover:cursor-pointer"}
-          >
-            {render_slot(col, @row_item.(row))}
-          </td>
-          <td :if={@action != []} class="w-0 font-semibold">
-            <div class="flex gap-4">
-              <%= for action <- @action do %>
-                {render_slot(action, @row_item.(row))}
-              <% end %>
-            </div>
-          </td>
-        </tr>
-      </tbody>
-    </table>
-    """
-  end
-
-  @doc """
-  Renders a data list.
-
-  ## Examples
-
-      <.list>
-        <:item title="Title">{@post.title}</:item>
-        <:item title="Views">{@post.views}</:item>
-      </.list>
-  """
-  slot :item, required: true do
-    attr :title, :string, required: true
-  end
-
-  def list(assigns) do
-    ~H"""
-    <ul class="list">
-      <li :for={item <- @item} class="list-row">
-        <div class="list-col-grow">
-          <div class="font-bold">{item.title}</div>
-          <div>{render_slot(item)}</div>
-        </div>
-      </li>
-    </ul>
-    """
-  end
-
-  @doc """
-  Renders a [Heroicon](https://heroicons.com).
-
-  Heroicons come in three styles – outline, solid, and mini.
-  By default, the outline style is used, but solid and mini may
-  be applied by using the `-solid` and `-mini` suffix.
-
-  You can customize the size and colors of the icons by setting
-  width, height, and background color classes.
-
-  Icons are extracted from the `deps/heroicons` directory and bundled within
-  your compiled app.css by the plugin in `assets/vendor/heroicons.js`.
-
-  ## Examples
-
-      <.icon name="hero-x-mark" />
-      <.icon name="hero-arrow-path" class="ml-1 size-3 motion-safe:animate-spin" />
-  """
-  attr :name, :string, required: true
-  attr :class, :any, default: "size-4"
-
-  def icon(%{name: "hero-" <> _} = assigns) do
-    ~H"""
-    <span class={[@name, @class]} />
+    <div :if={@errors != []} id={error_id(@id)} class="flex flex-col gap-1">
+      <p :for={msg <- @errors} class="ui-field-error">{msg}</p>
+    </div>
+    <p :if={@errors == [] and @hint} id={hint_id(@id)} class="ui-field-hint">{@hint}</p>
     """
   end
 
@@ -494,12 +338,5 @@ defmodule ForgeWeb.CoreComponents do
     else
       Gettext.dgettext(ForgeWeb.Gettext, "errors", msg, opts)
     end
-  end
-
-  @doc """
-  Translates the errors for a field from a keyword list of errors.
-  """
-  def translate_errors(errors, field) when is_list(errors) do
-    for {^field, {msg, opts}} <- errors, do: translate_error({msg, opts})
   end
 end

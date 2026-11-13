@@ -2,7 +2,7 @@ defmodule ForgeWeb.UserSessionController do
   use ForgeWeb, :controller
 
   alias Forge.Accounts
-  alias ForgeWeb.UserAuth
+  alias ForgeWeb.{SignIn, Toast, UserAuth}
 
   def create(conn, %{"_action" => "confirmed"} = params) do
     create(conn, params, "User confirmed successfully.")
@@ -19,13 +19,15 @@ defmodule ForgeWeb.UserSessionController do
         UserAuth.disconnect_sessions(tokens_to_disconnect)
 
         conn
-        |> put_flash(:info, info)
+        |> Toast.put(info)
+        |> SignIn.remember(:magic)
         |> UserAuth.log_in_user(user, user_params)
 
+      # Back to the link's own screen, where the line sits under the address it went to.
       _ ->
         conn
-        |> put_flash(:error, "The link is invalid or it has expired.")
-        |> redirect(to: ~p"/users/log-in")
+        |> put_flash(:sign_in_error, "The link is invalid or it has expired.")
+        |> redirect(to: ~p"/users/log-in?way=link")
     end
   end
 
@@ -35,14 +37,15 @@ defmodule ForgeWeb.UserSessionController do
 
     if user = Accounts.get_user_by_email_and_password(email, password) do
       conn
-      |> put_flash(:info, info)
+      |> Toast.put(info)
+      |> SignIn.remember(:password)
       |> UserAuth.log_in_user(user, user_params)
     else
       # In order to prevent user enumeration attacks, don't disclose whether the email is registered.
       conn
-      |> put_flash(:error, "Invalid email or password")
+      |> put_flash(:sign_in_error, "That email and password don't match an account here.")
       |> put_flash(:email, String.slice(email, 0, 160))
-      |> redirect(to: ~p"/users/log-in")
+      |> redirect(to: ~p"/users/log-in?way=password")
     end
   end
 
@@ -61,7 +64,7 @@ defmodule ForgeWeb.UserSessionController do
 
   def delete(conn, _params) do
     conn
-    |> put_flash(:info, "Logged out successfully.")
+    |> Toast.put("Logged out successfully.")
     |> UserAuth.log_out_user()
   end
 end

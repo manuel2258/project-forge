@@ -1,25 +1,46 @@
 defmodule ForgeWeb.ProjectSettingsLive do
   @moduledoc """
-  A project's credentials: issued here, listed here, revoked here.
+  A project's settings (`docs/design/ui.md` § Project settings): an index of sections, each with a
+  one-line state, by `?section=` — tokens, people, the model and effort, secrets, and the branch
+  and mirrors.
 
   This page exists because the product's own instructions were unfollowable without a terminal.
-  The project page hands out a clone URL and says to push a `.forge/workflow.yml`, and until now
-  `mix forge.git.token` was the only way to get the credential for either.
+  The project page hands out a clone URL and says to push a `.forge/workflow.yml`, and until it
+  existed `mix forge.git.token` was the only way to get the credential for either.
 
   **A token is shown once.** Only its hash is kept — the same as the worker token and the
   operator's API tokens — so afterwards a row can say what a token may do and when it was last
-  used, and never what it is. See `docs/design/ui.md` § Project settings.
+  used, and never what it is.
+
+  **One page, three arrangements, drawn by CSS from one render.** On a phone the index is the
+  page, a section replaces it, and a section's form (`&add=1`) replaces the section. From 768px
+  the index is a column on the left; a section's form sits under it on a portrait screen and in
+  the right-hand column on a wide one, so there it is always drawn. A bare `/settings` draws the
+  first section beside the index from 768px, since a desktop has room for both and nothing to
+  choose between.
   """
 
   use ForgeWeb, :live_view
 
-  import ForgeWeb.Operator.Components
+  import ForgeWeb.Operator.Components,
+    only: [breakable: 1, copyable: 1, effort_field: 1, model_field: 1, shown_once: 1]
 
   alias Forge.Git.{Tokens, Url}
   alias Forge.{Operator, Projects, Secrets, Tickets, Workers}
-  alias ForgeWeb.Format
+  alias ForgeWeb.{Format, Toast}
 
   require Logger
+
+  # A token this close to its end is something to look at: the index row says so in warning.
+  @lapsing_days 3
+
+  @admin_sections ~w(tokens people agent secrets repository)
+  @member_sections ~w(secrets repository)
+
+  # The sections whose form is a screen of its own on a phone (`&add=1`).
+  @adding ~w(tokens secrets repository)
+
+  @member_blank %{"email" => "", "role" => "member"}
 
   @impl true
   def mount(%{"name" => name}, _session, socket) do
@@ -35,21 +56,55 @@ defmodule ForgeWeb.ProjectSettingsLive do
        issued: nil,
        show_spent: false,
        error: nil,
+       revoke_error: nil,
        member_error: nil,
+       # What was typed into Add someone, drawn back after a refusal so it can be corrected
+       # rather than typed again; emptied once someone is added.
+       member_draft: @member_blank,
+       people_error: nil,
+       mirror_error: nil,
+       mirrors_error: nil,
+       defaults_error: nil,
        # The secret form's errors and the name it was sent with — never its value, which this
        # process is not given to keep. The nonce renews the form after a save, so the browser
        # drops the value it was holding rather than leaving it on screen.
        secret_error: nil,
        secret_name: "",
+       secret_locked: false,
        secret_nonce: 0,
-       # Whether this page may change who is in the project. The section is hidden without it,
-       # and `Forge.Projects` refuses without it, which is the half that matters.
+       # Whether this page may change anything here. The sections are hidden without it, and the
+       # operations refuse without it, which is the half that matters.
        manage: Forge.Access.can?(scope, :manage)
      )
      |> assign(form: token_form(), nonce: nonce())
      |> ForgeWeb.Capacity.project(project)
-     |> load()}
+     |> load()
+     |> reset_defaults()}
   end
+
+  @impl true
+  def handle_params(params, _uri, socket) do
+    sections = if socket.assigns.manage, do: @admin_sections, else: @member_sections
+    section = if params["section"] in sections, do: params["section"]
+
+    {:noreply,
+     assign(socket,
+       section: section,
+       # What the middle draws: the section asked for, or on a desktop the first one.
+       shown: section || hd(sections),
+       adding: section in @adding and params["add"] == "1"
+     )
+     |> replacing(section, params["secret"])}
+  end
+
+  # Replace value: the secret form with the name filled and locked. Leaving it lets go of the name.
+  defp replacing(socket, "secrets", name) when is_binary(name) and name != "",
+    do: assign(socket, secret_name: name, secret_locked: true)
+
+  defp replacing(%{assigns: %{secret_locked: true}} = socket, _section, _name),
+    do: assign(socket, secret_name: "", secret_locked: false)
+
+  defp replacing(socket, _section, _name), do: socket
 
   # Nothing that writes is preselected: git reads, the API is off, and the lifetime is short.
   defp token_form,
@@ -63,29 +118,31 @@ defmodule ForgeWeb.ProjectSettingsLive do
   # a double click cannot make two tokens.
   defp nonce, do: 12 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
 
-  defp load(%{assigns: %{project: project}} = socket) do
+  defp load(%{assigns: %{project: project, manage: manage}} = socket) do
     now = DateTime.utc_now()
     tokens = Tokens.list(project)
     secrets = Secrets.list(project)
+    received_by = Secrets.received_by(project)
+    tickets = Tickets.list(project)
 
     assign(socket,
-      model_form: to_form(%{"model" => project.model || ""}, as: :project),
-      effort_form: to_form(%{"effort" => project.effort || ""}, as: :project),
-      harness_form: to_form(%{"harness" => project.harness}, as: :project),
-      codex_form:
-        to_form(%{"model" => project.codex_model || "", "effort" => project.codex_effort || ""},
-          as: :codex
-        ),
       offered: Workers.offered(project.id),
-      tokens: Enum.map(tokens, &decorate(&1, now)),
-      live_count: Enum.count(tokens, &Tokens.live?(&1, now)),
-      tickets: Tickets.list(project),
-      members: Projects.members(project),
-      mirrors: Projects.list_mirrors(project),
+      observed: Projects.observed_model(project),
+      tickets: tickets,
+      tokens: Enum.map(tokens, &decorate(&1, now, project, tickets)),
+      members: project |> Projects.members() |> sort_people(socket.assigns.current_scope.user),
+      # Mirrors are the admin's: a member's page neither lists nor counts them.
+      # Failing first: the one a person came here about (UX pass, D17).
+      mirrors:
+        if(manage,
+          do: project |> Projects.list_mirrors() |> Enum.sort_by(&(&1.last_status != "failed")),
+          else: []
+        ),
       secrets: secrets,
       # Each row says who receives it — the access list read backwards — the last run that held
       # it, and the live conversations holding it (`docs/design/secrets.md` § Surfaces).
-      received_by: Secrets.received_by(project),
+      received_by: received_by,
+      unreceived: Enum.count(secrets, &unreceived?(received_by, &1.name)),
       last_held: Secrets.last_held(project, secrets),
       held_by_chats: Secrets.held_by_conversations(project),
       clone_url: Url.for(project),
@@ -93,21 +150,74 @@ defmodule ForgeWeb.ProjectSettingsLive do
     )
   end
 
-  defp decorate(token, now) do
+  # The model and effort form, drawn from what is stored: on mount, after a save, on Discard.
+  defp reset_defaults(%{assigns: %{project: project}} = socket) do
+    assign(socket,
+      defaults_form:
+        to_form(
+          %{
+            "harness" => project.harness || ForgeCore.Harness.default(),
+            "model" => project.model || "",
+            "effort" => project.effort || "",
+            "codex_model" => project.codex_model || "",
+            "codex_effort" => project.codex_effort || ""
+          },
+          as: :project
+        ),
+      defaults_error: nil
+    )
+  end
+
+  # You first, then the admins, then everyone else, each by address: an order that does not move
+  # between two loads of the same page (UX pass, D23).
+  defp sort_people(members, me),
+    do: Enum.sort_by(members, &{&1.user_id != me.id, &1.role != :admin, &1.user.email})
+
+  defp decorate(token, now, project, tickets) do
+    live = Tokens.live?(token, now)
+    held_by_job = is_binary(token.job_id)
+
     %{
       token: token,
-      live: Tokens.live?(token, now),
-      held_by_job: is_binary(token.job_id),
-      capability: capability(token)
+      live: live,
+      held_by_job: held_by_job,
+      # A job's token lives for hours and the engine revokes it: its end is not news.
+      lapsing:
+        live and not held_by_job and
+          DateTime.diff(token.expires_at, now, :second) < @lapsing_days * 86_400,
+      capability: capability(token, project, tickets)
     }
   end
 
-  # What it may do, in a sentence, which is the only thing about a token worth reading.
-  defp capability(token), do: "Git: #{git_words(token)} · API: #{api_words(token.api_access)}"
+  # What it may do, in a sentence, which is the only thing about a token worth reading — in the
+  # same words the form offered it with (`git_words/3`), on the list and on the band that shows it
+  # once (UX pass, D13: the band said `admin`, the list another phrase, the form "push those").
+  defp capability(token, project, tickets),
+    do: "Git: #{git_words(token, project, tickets)} · API: #{api_words(token.api_access)}"
 
-  defp git_words(%{git_access: :branch, ref: ref}), do: "writes #{ref}"
-  defp git_words(%{git_access: :reader}), do: "read"
-  defp git_words(%{git_access: access}), do: to_string(access)
+  @doc """
+  What a token may do in git, in the one set of words the form, the list and the issued band
+  share: *read every branch*, *write #1's branch*, *push any open ticket's branch*, *push any open
+  ticket's branch and main*.
+  """
+  @spec git_words(map(), map(), [map()]) :: String.t()
+  def git_words(%{git_access: :none}, _project, _tickets), do: "none"
+  def git_words(%{git_access: :reader}, _project, _tickets), do: "read every branch"
+
+  def git_words(%{git_access: :branch} = token, _project, tickets) do
+    case Enum.find(tickets, &(&1.id == token.ticket_id)) do
+      %{number: number} -> "write ##{number}'s branch"
+      nil -> "write #{String.replace_prefix(token.ref || "a branch", "refs/heads/", "")}"
+    end
+  end
+
+  def git_words(%{git_access: :developer}, _project, _tickets),
+    do: "push any open ticket's branch"
+
+  def git_words(%{git_access: :admin}, project, _tickets),
+    do: "push any open ticket's branch and #{project.default_branch}"
+
+  def git_words(%{git_access: access}, _project, _tickets), do: to_string(access)
 
   defp api_words(:none), do: "none"
   defp api_words(access), do: to_string(access)
@@ -149,7 +259,8 @@ defmodule ForgeWeb.ProjectSettingsLive do
          nonce: nonce(),
          error: nil
        )
-       |> load()}
+       |> load()
+       |> push_patch(to: section_path(socket.assigns.project, "tokens"))}
     else
       # The form is hidden from a member; this is what refuses the event sent by hand.
       {:error, :forbidden} ->
@@ -160,55 +271,62 @@ defmodule ForgeWeb.ProjectSettingsLive do
     end
   end
 
-  def handle_event("model", %{"project" => %{"model" => model}}, socket) do
-    case Operator.set_model(socket.assigns.project, socket.assigns.current_scope.user, model) do
+  # What was typed into the model and effort form, held so that a rejoin draws it back
+  # (`docs/design/ui.md` § A reconnect is not a reload).
+  def handle_event("defaults-change", %{"project" => params}, socket) when is_map(params),
+    do: {:noreply, assign(socket, defaults_form: to_form(params, as: :project))}
+
+  def handle_event("defaults-change", _params, socket), do: {:noreply, socket}
+
+  def handle_event("defaults-discard", _params, socket), do: {:noreply, reset_defaults(socket)}
+
+  # One Save for every dial — the harness, Claude Code's model and effort, Codex's model and
+  # effort: `Operator.set_defaults/3` writes them all or none. Only the keys the form sent are
+  # written, so a hand-sent event naming one leaves the others alone.
+  def handle_event("defaults", %{"project" => params}, socket) when is_map(params) do
+    %{project: project, current_scope: scope} = socket.assigns
+
+    attrs =
+      for {key, field} <- [
+            {"harness", :harness},
+            {"model", :model},
+            {"effort", :effort},
+            {"codex_model", :codex_model},
+            {"codex_effort", :codex_effort}
+          ],
+          Map.has_key?(params, key),
+          into: %{},
+          do: {field, params[key]}
+
+    case Operator.set_defaults(project, scope.user, attrs) do
       {:ok, project} ->
-        {:noreply, socket |> assign(project: project) |> put_flash(:info, "Saved.") |> load()}
+        {:noreply,
+         socket
+         |> assign(project: project)
+         |> reset_defaults()
+         |> Toast.put("Saved the agent's defaults.")
+         |> load()}
 
-      {:error, _changeset} ->
-        {:noreply, put_flash(socket, :error, "Could not save that.")}
+      {:error, :forbidden} ->
+        {:noreply, assign(socket, defaults_error: "Only an administrator can do that.")}
+
+      {:error, _reason} ->
+        {:noreply,
+         assign(socket,
+           defaults_form: to_form(params, as: :project),
+           defaults_error: "That was not saved, and no setting changed."
+         )}
     end
   end
 
-  def handle_event("effort", %{"project" => %{"effort" => effort}}, socket) do
-    case Operator.set_effort(socket.assigns.project, socket.assigns.current_scope.user, effort) do
-      {:ok, project} ->
-        {:noreply, socket |> assign(project: project) |> put_flash(:info, "Saved.") |> load()}
-
-      {:error, _changeset} ->
-        {:noreply, put_flash(socket, :error, "Could not save that.")}
-    end
-  end
-
-  # The project's default harness: what a state naming none, and a conversation opened with the
-  # form's own choice left at its default, runs on. `Operator.set_harness/3` is the guard.
-  def handle_event("harness", %{"project" => %{"harness" => harness}}, socket) do
-    case Operator.set_harness(socket.assigns.project, socket.assigns.current_scope.user, harness) do
-      {:ok, project} ->
-        {:noreply, socket |> assign(project: project) |> put_flash(:info, "Saved.") |> load()}
-
-      {:error, _changeset_or_forbidden} ->
-        {:noreply, put_flash(socket, :error, "Could not save that.")}
-    end
-  end
-
-  # Codex's own model and effort, the project's per-harness dials: the two above are Claude Code's.
-  def handle_event("codex", %{"codex" => %{"model" => model, "effort" => effort}}, socket) do
-    %{project: project, current_scope: %{user: user}} = socket.assigns
-
-    with {:ok, project} <- Operator.set_codex_model(project, user, model),
-         {:ok, project} <- Operator.set_codex_effort(project, user, effort) do
-      {:noreply, socket |> assign(project: project) |> put_flash(:info, "Saved.") |> load()}
-    else
-      {:error, _changeset_or_forbidden} ->
-        {:noreply, put_flash(socket, :error, "Could not save that.")}
-    end
-  end
+  def handle_event("defaults", _params, socket),
+    do: {:noreply, assign(socket, defaults_error: "That was not saved, and no setting changed.")}
 
   def handle_event("dismiss", _params, socket), do: {:noreply, assign(socket, issued: nil)}
 
   def handle_event("add-member", %{"member" => %{"email" => email, "role" => role}}, socket)
-      when role in ["admin", "member"] do
+      when is_binary(email) and role in ["admin", "member"] do
+    socket = assign(socket, member_draft: %{"email" => email, "role" => role})
     %{project: project, current_scope: scope} = socket.assigns
 
     case Forge.Accounts.get_user_by_email(String.trim(email)) do
@@ -219,7 +337,7 @@ defmodule ForgeWeb.ProjectSettingsLive do
         {:noreply, assign(socket, member_error: "No approved account for that address.")}
 
       user ->
-        member(socket, fn ->
+        member(socket, :member_error, fn ->
           Projects.put_member(project, user, String.to_existing_atom(role), scope.user)
         end)
     end
@@ -227,16 +345,40 @@ defmodule ForgeWeb.ProjectSettingsLive do
 
   # A role off the wire that is any other existing atom reached `put_member/4`'s `when` and
   # raised; one that is not an atom at all raised in `to_existing_atom`. Both crash the page.
-  def handle_event("add-member", %{"member" => _params}, socket),
+  def handle_event("add-member", _params, socket),
     do: {:noreply, assign(socket, member_error: "Pick a role.")}
+
+  # A role changed in place, on someone already here: `Projects.put_member/4` is the guard — it
+  # refuses a member, and refuses making the last administrator a member whatever the page drew.
+  # The id is resolved among this project's members, so the event cannot add anyone.
+  def handle_event("set-role", %{"id" => id, "role" => role}, socket)
+      when role in ["admin", "member"] do
+    %{project: project, current_scope: scope} = socket.assigns
+
+    case Enum.find(Projects.members(project), &(&1.user_id == id)) do
+      nil ->
+        {:noreply, assign(socket, people_error: "That account is not in this project.")}
+
+      member ->
+        member(socket, :people_error, fn ->
+          Projects.put_member(project, member.user, String.to_existing_atom(role), scope.user)
+        end)
+    end
+  end
+
+  def handle_event("set-role", _params, socket),
+    do: {:noreply, assign(socket, people_error: "Pick a role.")}
 
   def handle_event("remove-member", %{"id" => id}, socket) do
     %{project: project, current_scope: scope} = socket.assigns
 
     # `get_user!/1` on an id off the wire raises for any well-formed-but-unknown UUID.
     case Forge.Accounts.get_user(id) do
-      nil -> {:noreply, assign(socket, member_error: "No such account.")}
-      user -> member(socket, fn -> Projects.remove_member(project, user, scope.user) end)
+      nil ->
+        {:noreply, assign(socket, people_error: "No such account.")}
+
+      user ->
+        member(socket, :people_error, fn -> Projects.remove_member(project, user, scope.user) end)
     end
   end
 
@@ -250,12 +392,13 @@ defmodule ForgeWeb.ProjectSettingsLive do
     # node given its UUID. `issue` and `model` were routed here and this one was missed.
     case Operator.revoke_token(socket.assigns.project, socket.assigns.current_scope.user, id) do
       {:ok, _token} ->
-        {:noreply, socket |> assign(error: nil) |> load()}
+        {:noreply, socket |> assign(revoke_error: nil) |> load()}
 
       {:error, :held_by_job} ->
         {:noreply,
          assign(socket,
-           error: "that token belongs to a running job; the engine revokes it when the job ends"
+           revoke_error:
+             "That token belongs to a running job; the engine revokes it when the job ends."
          )}
 
       {:error, reason} when reason in [:not_found, :forbidden] ->
@@ -266,7 +409,7 @@ defmodule ForgeWeb.ProjectSettingsLive do
   # The guard is `Projects.put_mirror/5`'s, not this handler's — see its moduledoc and
   # `Forge.ProjectsMirrorTest`. This is what refuses the event when it is driven directly,
   # bypassing the `:if={@manage}` section that hides the form from a member.
-  def handle_event("add-mirror", %{"mirror" => params}, socket) do
+  def handle_event("add-mirror", %{"mirror" => params}, socket) when is_map(params) do
     project = socket.assigns.project
 
     opts = [
@@ -282,15 +425,26 @@ defmodule ForgeWeb.ProjectSettingsLive do
            params["url"],
            opts
          ) do
-      :ok -> {:noreply, socket |> put_flash(:info, "Mirror saved.") |> load()}
-      {:error, reason} -> {:noreply, put_flash(socket, :error, mirror_error(reason))}
+      :ok ->
+        {:noreply,
+         socket
+         |> assign(mirror_error: nil)
+         |> Toast.put("Mirror saved.")
+         |> load()
+         |> push_patch(to: section_path(project, "repository"))}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, mirror_error: mirror_error(reason))}
     end
   end
 
   def handle_event("remove-mirror", %{"name" => name}, socket) do
     case Projects.delete_mirror(socket.assigns.project, socket.assigns.current_scope.user, name) do
-      :ok -> {:noreply, socket |> put_flash(:info, "Mirror removed.") |> load()}
-      {:error, reason} -> {:noreply, put_flash(socket, :error, mirror_error(reason))}
+      :ok ->
+        {:noreply, socket |> assign(mirrors_error: nil) |> Toast.put("Mirror removed.") |> load()}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, mirrors_error: mirror_error(reason))}
     end
   end
 
@@ -305,10 +459,11 @@ defmodule ForgeWeb.ProjectSettingsLive do
       {:ok, secret} ->
         {:noreply,
          socket
-         |> assign(secret_error: nil, secret_name: "")
+         |> assign(secret_error: nil, secret_name: "", secret_locked: false)
          |> update(:secret_nonce, &(&1 + 1))
-         |> put_flash(:info, "Saved #{secret.name}, version #{secret.version}.")
-         |> load()}
+         |> Toast.put("Saved #{secret.name}, version #{secret.version}.")
+         |> load()
+         |> push_patch(to: section_path(project, "secrets"))}
 
       {:error, :forbidden} ->
         {:noreply, assign(socket, secret_error: "Only an administrator can do that.")}
@@ -333,7 +488,7 @@ defmodule ForgeWeb.ProjectSettingsLive do
   def handle_event("delete-secret", %{"id" => id}, socket) do
     case Operator.delete_secret(socket.assigns.project, socket.assigns.current_scope.user, id) do
       {:ok, secret} ->
-        {:noreply, socket |> put_flash(:info, "Deleted #{secret.name}.") |> load()}
+        {:noreply, socket |> Toast.put("Deleted #{secret.name}.") |> load()}
 
       {:error, :forbidden} ->
         {:noreply, assign(socket, secret_error: "Only an administrator can do that.")}
@@ -399,26 +554,58 @@ defmodule ForgeWeb.ProjectSettingsLive do
   defp blank_to_nil(""), do: nil
   defp blank_to_nil(value), do: value
 
-  defp member(socket, fun) do
+  # Who is in the project, changed: the error goes where the person acted — `:member_error` under
+  # the address they typed, `:people_error` over the rows they pressed in.
+  defp member(socket, error_key, fun) do
     case fun.() do
       # The same words as an address with no account at all: a pending account is not a person
       # this project can have yet, and `Projects.put_member/4` is what says so.
       {:error, :not_approved} ->
-        {:noreply, assign(socket, member_error: "No approved account for that address.")}
+        {:noreply, assign(socket, error_key, "No approved account for that address.")}
 
       {:error, :suspended} ->
-        {:noreply, assign(socket, member_error: "That account is suspended.")}
+        {:noreply, assign(socket, error_key, "That account is suspended.")}
 
       {:error, :last_admin} ->
-        {:noreply, assign(socket, member_error: "A project keeps at least one administrator.")}
+        {:noreply, assign(socket, error_key, last_admin())}
+
+      {:error, :forbidden} ->
+        {:noreply, assign(socket, error_key, "Only an administrator can do that.")}
 
       {:error, _reason} ->
-        {:noreply, assign(socket, member_error: "That did not work.")}
+        {:noreply, assign(socket, error_key, "That did not work.")}
 
       _ok ->
-        {:noreply, socket |> assign(member_error: nil) |> load()}
+        {:noreply,
+         socket
+         |> assign(member_error: nil, people_error: nil, member_draft: @member_blank)
+         |> load()}
     end
   end
+
+  # What changing a role asks first, or nil when it is asked nothing: granting admin changes who
+  # can change everything on the project (UX pass, D23), and making yourself a member takes that
+  # from you.
+  defp role_question("admin", member, _me, project),
+    do:
+      "Make #{member.user.email} an admin of #{project.name}? They can change everything here, people included."
+
+  defp role_question("member", %{user_id: id}, %{id: id}, _project),
+    do: "Make yourself a member? You will no longer be able to change these settings."
+
+  defp role_question(_role, _member, _me, _project), do: nil
+
+  # The role changes on a row that are asked first, each with its question.
+  defp asked(%{role: :admin}, true, _me, _project), do: []
+
+  defp asked(member, _sole_admin, me, project) do
+    for role <- ~w(member admin),
+        to_string(member.role) != role,
+        question = role_question(role, member, me, project),
+        do: {role, question}
+  end
+
+  defp last_admin, do: "A project keeps at least one administrator."
 
   # What the form asks for, as `Forge.Git.Tokens.issue/2` takes it. A job-scoped token is the
   # engine's to mint — see docs/design/git-hosting.md § Issuing a token — and no field here can
@@ -488,30 +675,439 @@ defmodule ForgeWeb.ProjectSettingsLive do
   defp message(message) when is_binary(message), do: message
   defp message(_reason), do: "That did not work."
 
+  defp section_path(project, nil), do: ~p"/projects/#{project.name}/settings"
+
+  defp section_path(project, section),
+    do: ~p"/projects/#{project.name}/settings?section=#{section}"
+
+  defp add_path(project, section),
+    do: ~p"/projects/#{project.name}/settings?section=#{section}&add=1"
+
+  defp replace_path(project, name),
+    do: ~p"/projects/#{project.name}/settings?#{[section: "secrets", add: "1", secret: name]}"
+
+  # -- the page -------------------------------------------------------------------------------
+
   @impl true
   def render(assigns) do
+    assigns =
+      assign(assigns,
+        # What a phone draws beside the section: its form instead of it (`form`), or under it
+        # (`foot`, people's Add someone); nothing on the index or a section with no form.
+        aside: aside(assigns),
+        back: back(assigns)
+      )
+
     ~H"""
     <Layouts.app
       flash={@flash}
       current_scope={@current_scope}
+      frame={@frame}
       capacity={@capacity}
-      active={:board}
-      measure="48rem"
+      title="Settings"
+      subline={"#{@project.name} · you are #{if @manage, do: "an admin", else: "a member"}"}
+      context={{@project.name, ~p"/projects/#{@project.name}"}}
+      views={ForgeWeb.ProjectLive.strip(@project, %{}, :navigate)}
+      measure={nil}
     >
-      <.link
-        navigate={~p"/projects/#{@project.name}"}
-        class="flex min-h-[46px] items-center font-mono text-[12.5px] opacity-60 hover:opacity-100"
+      <:list>
+        <.index {assigns} />
+      </:list>
+
+      <div id="settings" class="settings" data-aside={@aside}>
+        <.link :if={@back} patch={elem(@back, 1)} class="settings-back">‹ {elem(@back, 0)}</.link>
+        <div class={["settings-main", is_nil(@section) && "settings-desk"]}>
+          <.tokens :if={@shown == "tokens"} {assigns} />
+          <.people :if={@shown == "people"} {assigns} />
+          <.agent :if={@shown == "agent"} {assigns} />
+          <.secrets :if={@shown == "secrets"} {assigns} />
+          <.repository :if={@shown == "repository"} {assigns} />
+        </div>
+      </div>
+
+      <:aside :if={@manage and @shown in ~w(tokens people secrets repository)}>
+        <div class={["settings-aside", is_nil(@section) && "settings-desk"]}>
+          <.issue_form :if={@shown == "tokens" and is_nil(@issued)} {assigns} />
+          <.issued
+            :if={@shown == "tokens" and @issued}
+            issued={@issued}
+            project={@project}
+            tickets={@tickets}
+          />
+          <.add_member :if={@shown == "people"} {assigns} />
+          <.set_secret :if={@shown == "secrets"} {assigns} />
+          <.add_mirror :if={@shown == "repository"} {assigns} />
+        </div>
+      </:aside>
+    </Layouts.app>
+    """
+  end
+
+  defp aside(%{section: nil}), do: nil
+  defp aside(%{manage: false}), do: nil
+  defp aside(%{section: "tokens", issued: issued}) when issued != nil, do: "form"
+  defp aside(%{section: "people"}), do: "foot"
+  defp aside(%{adding: true}), do: "form"
+  defp aside(_assigns), do: nil
+
+  # The phone's way back within the page: from a form to its section, from a section to the index.
+  defp back(%{section: nil}), do: nil
+
+  defp back(%{section: "tokens", issued: issued}) when issued != nil, do: nil
+
+  defp back(%{adding: true, section: section, project: project}),
+    do: {section_title(section), section_path(project, section)}
+
+  defp back(%{project: project}), do: {"Settings", section_path(project, nil)}
+
+  defp section_title("tokens"), do: "Tokens"
+  defp section_title("people"), do: "People"
+  defp section_title("agent"), do: "Harness, model and effort"
+  defp section_title("secrets"), do: "Secrets"
+  defp section_title("repository"), do: "Branch and mirrors"
+
+  # -- the index ------------------------------------------------------------------------------
+
+  defp index(assigns) do
+    ~H"""
+    <nav id="settings-sections" class="settings-index" data-open={@section && "true"}>
+      <%= if @manage do %>
+        <div class="settings-group">
+          <.eyebrow>Access</.eyebrow>
+        </div>
+        <.section_row key="tokens" {assigns} />
+        <.section_row key="people" {assigns} />
+        <div class="settings-group">
+          <.eyebrow>Agent</.eyebrow>
+        </div>
+        <.section_row key="agent" {assigns} />
+        <.section_row key="secrets" {assigns} />
+        <div class="settings-group">
+          <.eyebrow>Repository</.eyebrow>
+        </div>
+        <.section_row key="repository" {assigns} />
+      <% else %>
+        <div class="settings-group">
+          <.eyebrow>Agent</.eyebrow>
+        </div>
+        <.section_row key="secrets" {assigns} />
+        <div class="settings-group">
+          <.eyebrow>Repository</.eyebrow>
+        </div>
+        <.section_row key="repository" {assigns} />
+      <% end %>
+
+      <div class="settings-clone">
+        <.copyable id="clone-url" value={@clone_url} label="Clone URL" />
+        <p class="settings-note">The username is ignored; a token is the password.</p>
+      </div>
+    </nav>
+    """
+  end
+
+  defp section_row(assigns) do
+    {state, tone} = state(assigns.key, assigns)
+    assigns = assign(assigns, state: state, tone: tone)
+
+    ~H"""
+    <.list_row
+      id={"section-#{@key}"}
+      title={if @key == "repository" and not @manage, do: "Branch", else: section_title(@key)}
+      latest={@state}
+      latest_tone={@tone}
+      selected={@shown == @key}
+      patch={section_path(@project, @key)}
+    />
+    """
+  end
+
+  # Each section's one line, and whether it is something to look at.
+  defp state("tokens", %{tokens: tokens}) do
+    live = Enum.count(tokens, & &1.live)
+
+    case Enum.count(tokens, & &1.lapsing) do
+      0 -> {"#{live} live", nil}
+      1 -> {"#{live} live · 1 expires within #{@lapsing_days} days", "warning"}
+      n -> {"#{live} live · #{n} expire within #{@lapsing_days} days", "warning"}
+    end
+  end
+
+  defp state("people", %{members: members}) do
+    admins = Enum.count(members, &(&1.role == :admin))
+    {"#{count(length(members), "person", "people")} · #{count(admins, "admin", "admins")}", nil}
+  end
+
+  # The harness the project runs on, then that harness's own model and effort.
+  defp state("agent", %{project: project}) do
+    {model, effort, fallback} =
+      case project.harness do
+        "codex" -> {project.codex_model, project.codex_effort, "Codex's"}
+        _claude -> {project.model, project.effort, "the machine's"}
+      end
+
+    {"#{Forge.Harness.label(project.harness || ForgeCore.Harness.default())} · model: " <>
+       "#{model || fallback} · effort: #{effort || fallback}", nil}
+  end
+
+  defp state("secrets", %{secrets: []}), do: {"none set", nil}
+  defp state("secrets", %{secrets: secrets, unreceived: 0}), do: {"#{length(secrets)} set", nil}
+
+  # A member cannot fix it, so the warning says whom to tell (UX pass, D26).
+  defp state("secrets", %{secrets: secrets, unreceived: n, manage: manage}),
+    do:
+      {"#{length(secrets)} set · #{n} that nothing receives" <>
+         if(manage, do: "", else: " — ask an admin"), "warning"}
+
+  defp state("repository", %{project: project, mirrors: mirrors}) do
+    case Enum.filter(mirrors, &(&1.last_status == "failed")) do
+      [] ->
+        {project.default_branch, nil}
+
+      failing ->
+        names = Enum.map_join(failing, ", ", & &1.name)
+        {"#{project.default_branch} · #{names} #{mirror_word(failing)} failing", "danger"}
+    end
+  end
+
+  defp mirror_word([_one]), do: "mirror"
+  defp mirror_word(_many), do: "mirrors"
+
+  defp count(1, one, _many), do: "1 #{one}"
+  defp count(n, _one, many), do: "#{n} #{many}"
+
+  # -- tokens ---------------------------------------------------------------------------------
+
+  # Credentials are the admin's, both halves. The list is not merely a readout: it names every
+  # token's id, which is the whole input the revoke button needs.
+  defp tokens(assigns) do
+    assigns =
+      assign(assigns,
+        live_count: Enum.count(assigns.tokens, & &1.live),
+        spent_count: Enum.count(assigns.tokens, &(not &1.live))
+      )
+
+    ~H"""
+    <section id="tokens-section" aria-labelledby="tokens-heading">
+      <div class="settings-heading">
+        <h2 id="tokens-heading">Tokens</h2>
+        <span class="settings-count">{@live_count} live</span>
+      </div>
+
+      <p :if={@tokens == []} class="settings-note">
+        A token lets an outside program — a script, a dashboard, <code>curl</code>
+        — read this project's tickets and their documents, push to git, or both. It is shown once
+        when issued; after that a row says what it may do and when it was last used, never what it
+        is.
+      </p>
+
+      <.error_note :if={@revoke_error} class="settings-error">{@revoke_error}</.error_note>
+
+      <table :if={@tokens != []} id="tokens" class="settings-table">
+        <thead>
+          <tr>
+            <th>Token</th>
+            <th>It may</th>
+            <th class="settings-desk">Expires</th>
+            <th>Last used</th>
+            <th><span class="sr-only">Revoke</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            :for={row <- @tokens}
+            :if={@show_spent or row.live}
+            id={"token-#{row.token.id}"}
+            class={[not row.live && "settings-spent"]}
+          >
+            <td>
+              <div class="settings-name-line">
+                <span class="settings-name">{row.token.name || "a job's token"}</span>
+                <span class={["settings-phone", row.lapsing && "settings-warning"]}>
+                  {expiry(row, @now)}
+                </span>
+              </div>
+              <div :if={issuer(row.token)} class="settings-sub">
+                issued by {issuer(row.token)}
+              </div>
+            </td>
+            <td class="settings-capability">{row.capability}</td>
+            <td class={["settings-desk settings-mono", row.lapsing && "settings-warning"]}>
+              {expiry(row, @now)}
+            </td>
+            <td class="settings-sub">
+              {(row.token.last_used_at &&
+                  "used #{ago(row.token.last_used_at, @now)} via #{row.token.last_used_via || "git"}") ||
+                "never used"}
+            </td>
+            <td class="settings-act">
+              <.confirm
+                :if={row.live and not row.held_by_job}
+                id={"revoke-#{row.token.id}"}
+                label="Revoke"
+                act="Revoke it"
+                sentence="Revoke this token? Anything using it stops working."
+                phx-click="revoke"
+                phx-value-id={row.token.id}
+                phx-disable-with="Revoking…"
+              />
+              <span :if={row.live and row.held_by_job} class="settings-sub">
+                held by a job · revoked when it ends
+              </span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <.button
+        :if={@spent_count > 0}
+        type="button"
+        variant="quiet"
+        size="sm"
+        phx-click="toggle-spent"
+        class="settings-toggle"
       >
-        ‹ {@project.name}
-      </.link>
+        {if @show_spent,
+          do: "Hide expired and revoked",
+          else: "Show expired and revoked · #{@spent_count}"}
+      </.button>
 
-      <h1 class="mt-4 text-2xl font-semibold -tracking-[.025em]">Settings</h1>
+      <.button
+        variant="outline"
+        size="lg"
+        patch={add_path(@project, "tokens")}
+        class="settings-phone settings-add"
+      >
+        + Issue a token
+      </.button>
+    </section>
+    """
+  end
 
-      <%!-- Once, and only here: the row below will never be able to show it again. --%>
-      <.shown_once :if={@issued} id="issued" done="dismiss">
+  defp expiry(%{live: true, token: token}, now) do
+    case Format.ago(now, token.expires_at) do
+      "now" -> "in under a minute"
+      left -> "in " <> left
+    end
+  end
+
+  defp expiry(%{token: token}, now), do: spent(token, now)
+
+  defp issue_form(assigns) do
+    ~H"""
+    <section id="issue" aria-labelledby="issue-heading">
+      <h2 id="issue-heading" class="settings-form-title">Issue a token</h2>
+      <p class="settings-note">
+        For <span class="settings-mono">{breakable(@clone_url)}</span>. The username is
+        ignored; the token is the password.
+      </p>
+
+      <.form
+        for={@form}
+        id="token-form"
+        phx-change="validate"
+        phx-submit="issue"
+        class="settings-form"
+      >
+        <input type="hidden" name="token[nonce]" value={@nonce} />
+
+        <.input field={@form[:name]} type="text" label="Name" maxlength="60" mono />
+
+        <fieldset class="settings-fieldset settings-span">
+          <legend class="settings-legend">Git: it may</legend>
+          <.choice_row
+            :for={{value, words, detail} <- git_choices(@project)}
+            id={"token-git-#{value}"}
+            name="token[git]"
+            value={value}
+            label={words}
+            detail={@form[:git].value == value && detail}
+            selected={@form[:git].value == value}
+          />
+        </fieldset>
+
+        <.input
+          :if={@form[:git].value == "branch"}
+          field={@form[:ticket]}
+          type="select"
+          label="Ticket"
+          prompt="choose one"
+          options={Enum.map(@tickets, &{"##{&1.number} #{&1.title}", &1.number})}
+        />
+
+        <p :if={@form[:git].value == "branch" and @tickets == []} class="settings-warning">
+          This project has no tickets yet, so there is no branch to write.
+        </p>
+
+        <fieldset class="settings-fieldset">
+          <legend class="settings-legend">API: it may</legend>
+          <.segmented
+            id="token-api"
+            name="token[api]"
+            value={@form[:api].value}
+            options={[{"none", "none"}, {"read", "read"}, {"read and write", "write"}]}
+          />
+        </fieldset>
+
+        <div class="settings-fieldset">
+          <label for="token-days" class="settings-legend">Days it lasts</label>
+          <.stepper
+            id="token-days"
+            name="token[days]"
+            value={@form[:days].value}
+            min={1}
+            max={Tokens.max_days()}
+          />
+        </div>
+
+        <.error_note :if={@error} id="token-error" class="settings-error settings-span">
+          {@error}
+        </.error_note>
+
+        <.button
+          type="submit"
+          variant="primary"
+          size="xl"
+          fill
+          phx-disable-with="Issuing…"
+          class="settings-span"
+        >
+          Issue it
+        </.button>
+      </.form>
+    </section>
+    """
+  end
+
+  # The five scopes, nothing that writes first. The last is named after the branch it reaches and
+  # carries why it is worth choosing on purpose (`docs/design/git-hosting.md` § One project token).
+  defp git_choices(project) do
+    [
+      {"none", "not use git", nil},
+      {"reader", "read every branch", nil},
+      {"branch", "write one ticket's branch", nil},
+      {"developer", "push any open ticket's branch", nil},
+      {"admin", "push any open ticket's branch and #{project.default_branch}",
+       "The default branch is what every job builds on. It is fast-forward only, like the " <>
+         "platform's own merge, and every credential a job holds is refused it."}
+    ]
+  end
+
+  # Once, and only here: the row will never be able to show it again.
+  attr :issued, :map, required: true
+  attr :project, :map, required: true
+  attr :tickets, :list, required: true
+
+  defp issued(assigns) do
+    ~H"""
+    <section id="issued" aria-labelledby="issued-heading">
+      <.eyebrow>Token issued</.eyebrow>
+      <h2 id="issued-heading" class="settings-form-title">{@issued.token.name}</h2>
+      <.shown_once id="issued-once" done="dismiss">
         <:note>
-          {@issued.token.name}: {capability(@issued.token)}, until {@issued.token.expires_at}. It is
-          not shown again.
+          {capability(@issued.token, @project, @tickets)}, until {Calendar.strftime(
+            @issued.token.expires_at,
+            "%-d %b %Y"
+          )}.
         </:note>
         <.copyable id="issued-secret" value={@issued.secret} label="Token" />
         <.copyable
@@ -527,510 +1123,459 @@ defmodule ForgeWeb.ProjectSettingsLive do
           label="Clone URL, token included"
         />
       </.shown_once>
-
-      <section :if={@manage} class="mt-8">
-        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Issue a token</h2>
-        <p class="mt-2 text-sm/[1.55] opacity-70">
-          For <span class="font-mono text-[12.5px] break-all">{@clone_url}</span>. The username is
-          ignored; the token is the password.
-        </p>
-
-        <.form
-          for={@form}
-          id="token-form"
-          phx-change="validate"
-          phx-submit="issue"
-          class="mt-4 flex flex-col gap-4"
-        >
-          <input type="hidden" name="token[nonce]" value={@nonce} />
-
-          <.input field={@form[:name]} type="text" label="Name" maxlength="60" />
-
-          <.input
-            field={@form[:git]}
-            type="select"
-            label="Git: it may"
-            options={[
-              {"not use git", "none"},
-              {"read every branch", "reader"},
-              {"write one ticket's branch", "branch"},
-              {"push any open ticket's branch", "developer"},
-              {"push those, and #{@project.default_branch}, the default branch", "admin"}
-            ]}
-          />
-
-          <p :if={@form[:git].value == "admin"} class="text-sm/[1.55] opacity-70">
-            The default branch is what every job builds on. It is fast-forward only, like the
-            platform's own merge, and every credential a job holds is refused it.
-          </p>
-
-          <.input
-            :if={@form[:git].value == "branch"}
-            field={@form[:ticket]}
-            type="select"
-            label="Ticket"
-            prompt="choose one"
-            options={Enum.map(@tickets, &{"##{&1.number} #{&1.title}", &1.number})}
-          />
-
-          <p :if={@form[:git].value == "branch" and @tickets == []} class="text-sm text-warning">
-            This project has no tickets yet, so there is no branch to write.
-          </p>
-
-          <.input
-            field={@form[:api]}
-            type="select"
-            label="API: it may"
-            options={[
-              {"not use the API", "none"},
-              {"read tickets and their documents", "read"},
-              {"read, and also change tickets as a member can", "write"}
-            ]}
-          />
-
-          <.input
-            field={@form[:days]}
-            type="number"
-            label="Days it lasts"
-            min="1"
-            max={Tokens.max_days()}
-          />
-
-          <p :if={@error} class="text-sm text-error">{@error}</p>
-
-          <button
-            type="submit"
-            phx-disable-with="Issuing…"
-            class="min-h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
-          >
-            Issue it
-          </button>
-        </.form>
-      </section>
-
-      <%!-- Credentials are the admin's, both halves. The list is not merely a readout: it names
-            every token's id, which is the whole input the revoke button needs. --%>
-      <section :if={@manage} class="mt-10">
-        <div class="flex flex-wrap items-baseline justify-between gap-3">
-          <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
-            Tokens · {@live_count} live
-          </h2>
-          <button
-            type="button"
-            phx-click="toggle-spent"
-            class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
-          >
-            {if @show_spent, do: "Hide spent", else: "Show expired and revoked"}
-          </button>
-        </div>
-
-        <p :if={@tokens == []} class="mt-3 text-sm opacity-60">
-          A token lets an outside program — a script, a dashboard, <code class="font-mono">curl</code>
-          — read this project's tickets and their documents, push to git, or both. Issue one above;
-          it appears here, described but never shown again.
-        </p>
-
-        <table :if={@tokens != []} id="tokens" class="reflow mt-3 w-full text-left text-[12.5px]">
-          <thead class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">
-            <tr class="border-b border-base-300">
-              <th class="py-2 pr-3 font-normal">Token</th>
-              <th class="py-2 pr-3 font-normal">Expires</th>
-              <th class="py-2 pr-3 font-normal">Last used</th>
-              <th class="py-2 font-normal"></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              :for={row <- @tokens}
-              :if={@show_spent or row.live}
-              class={["border-b border-base-300/60 align-top", row.live || "opacity-50"]}
-            >
-              <td class="py-3 pr-3 font-mono">
-                <%!-- A long name is cut to a line and opens whole on a tap: a `title` is a hover, and
-                      a phone has none (`ui.md` § The capacity gauge in the top bar: "a phone has no hover"). --%>
-                <div :if={row.token.name && String.length(row.token.name) <= 22}>
-                  {row.token.name}
-                </div>
-                <details :if={row.token.name && String.length(row.token.name) > 22}>
-                  <summary class="flex min-h-[46px] max-w-[22ch] cursor-pointer items-center truncate">
-                    {row.token.name}
-                  </summary>
-                  <p class="break-words">{row.token.name}</p>
-                </details>
-                <div class="break-all">{row.capability}</div>
-                <div :if={issuer(row.token)} class="text-[11px] opacity-50">
-                  issued by {issuer(row.token)}
-                </div>
-                <div :if={row.held_by_job} class="text-[11px] opacity-50">held by a job</div>
-              </td>
-              <td data-label="Expires" class="py-3 pr-3 font-mono">
-                {if row.live,
-                  do: "in " <> Format.ago(DateTime.utc_now(), row.token.expires_at),
-                  else: spent(row.token, @now)}
-              </td>
-              <td data-label="Last used" class="py-3 pr-3 font-mono opacity-70">
-                {(row.token.last_used_at &&
-                    "#{Format.ago(row.token.last_used_at, @now)} via #{row.token.last_used_via || "git"}") ||
-                  "never"}
-              </td>
-              <td class="py-3 text-right">
-                <button
-                  :if={row.live and not row.held_by_job}
-                  type="button"
-                  phx-click="revoke"
-                  phx-value-id={row.token.id}
-                  phx-disable-with="Revoking…"
-                  data-confirm="Revoke this token? Anything using it stops working."
-                  class="min-h-[46px] text-sm text-primary hover:underline reflow-control"
-                >
-                  Revoke
-                </button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
-
-      <section :if={@manage} class="mt-10">
-        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">People</h2>
-
-        <p class="mt-2 text-sm/[1.55] opacity-60">
-          Everyone here can run the work. Administrators can also change these settings and this
-          list.
-        </p>
-
-        <ul class="mt-3 divide-y divide-base-300 border-y border-base-300">
-          <li :for={member <- @members} class="flex flex-wrap items-center gap-3 py-3">
-            <span class="font-mono text-[13px]">{member.user.email}</span>
-            <span class="font-mono text-[11.5px] opacity-60">{member.role}</span>
-            <button
-              phx-click="remove-member"
-              phx-value-id={member.user.id}
-              class="ml-auto min-h-[46px] rounded-field border border-base-300 px-3 text-sm hover:border-base-content/30"
-            >
-              Remove
-            </button>
-          </li>
-        </ul>
-
-        <.form
-          for={to_form(%{"email" => "", "role" => "member"}, as: :member)}
-          phx-submit="add-member"
-          class="mt-4 flex flex-wrap items-end gap-3"
-        >
-          <.input field={to_form(%{}, as: :member)[:email]} type="email" label="Address" />
-          <.input
-            field={to_form(%{"role" => "member"}, as: :member)[:role]}
-            type="select"
-            label="Role"
-            options={[{"member", "member"}, {"admin", "admin"}]}
-          />
-          <button class="min-h-[46px] rounded-field border border-base-300 px-3 text-sm hover:border-base-content/30">
-            Add
-          </button>
-        </.form>
-
-        <p :if={@member_error} class="mt-2 text-sm text-error">{@member_error}</p>
-      </section>
-
-      <%!-- Behind `@manage` like every other form here: `Operator.set_model/3` refuses a plain
-            member, and a form the context refuses is one that answers "Could not save that." --%>
-      <section :if={@manage} class="mt-10">
-        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
-          Model · Claude Code
-        </h2>
-        <p class="mt-2 text-sm/[1.55] opacity-70">
-          What this project's work runs on when a workflow state does not name one of its own.
-          Left empty, it is the machine's — the platform-wide setting.
-        </p>
-
-        <.form for={@model_form} id="model-form" phx-submit="model" class="mt-4 flex flex-col gap-4">
-          <ForgeWeb.Operator.Components.model_field
-            field={@model_form[:model]}
-            offered={@offered}
-            label="Default model"
-            fallback="the machine's"
-          />
-          <button
-            type="submit"
-            class="min-h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
-          >
-            Save it
-          </button>
-        </.form>
-      </section>
-
-      <%!-- The second dial, and behind `@manage` for the same reason: `Operator.set_effort/3`
-            refuses a plain member. A dropdown of the levels the connected workers offer, and a box
-            while none does, as the model field beside it is. --%>
-      <section :if={@manage} class="mt-10">
-        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
-          Effort · Claude Code
-        </h2>
-        <p class="mt-2 text-sm/[1.55] opacity-70">
-          How hard this project's work thinks when a workflow state does not name an effort of its
-          own. Left empty, it is the machine's — the platform-wide setting.
-        </p>
-
-        <.form
-          for={@effort_form}
-          id="effort-form"
-          phx-submit="effort"
-          class="mt-4 flex flex-col gap-4"
-        >
-          <ForgeWeb.Operator.Components.effort_field
-            field={@effort_form[:effort]}
-            offered={@offered}
-            label="Default effort"
-            fallback="the machine's"
-          />
-          <button
-            type="submit"
-            class="min-h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
-          >
-            Save it
-          </button>
-        </.form>
-      </section>
-
-      <%!-- Which harness runs this project's work, and Codex's own model and effort. Behind
-            `@manage` for the same reason: `Operator.set_harness/3` and the two Codex setters refuse
-            a plain member. The Model and Effort above are Claude Code's. --%>
-      <section :if={@manage} class="mt-10" id="harness">
-        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Harness</h2>
-        <p class="mt-2 text-sm/[1.55] opacity-70">
-          What this project's work runs on when a workflow state does not name a harness, and what
-          a new conversation starts on. The Model and Effort above are Claude Code's; Codex has
-          its own below, left empty for Codex's default.
-        </p>
-
-        <.form
-          for={@harness_form}
-          id="harness-form"
-          phx-submit="harness"
-          class="mt-4 flex flex-col gap-4"
-        >
-          <.input
-            field={@harness_form[:harness]}
-            type="select"
-            label="Default harness"
-            options={for h <- Forge.Harness.names(), do: {Forge.Harness.label(h), h}}
-          />
-          <button
-            type="submit"
-            class="min-h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
-          >
-            Save it
-          </button>
-        </.form>
-
-        <.form for={@codex_form} id="codex-form" phx-submit="codex" class="mt-6 flex flex-col gap-4">
-          <.input
-            field={@codex_form[:model]}
-            type="text"
-            label="Codex model"
-            placeholder="Codex's own default"
-            autocomplete="off"
-          />
-          <ForgeWeb.Operator.Components.effort_field
-            offered={%{@offered | efforts: @offered.codex_efforts}}
-            field={@codex_form[:effort]}
-            label="Codex effort"
-            fallback="Codex's own default"
-          />
-          <button
-            type="submit"
-            class="min-h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
-          >
-            Save Codex's
-          </button>
-        </.form>
-      </section>
-
-      <%!-- `docs/design/secrets.md` § Surfaces: the list for every member, because a workflow's
-            author needs the names; setting and deleting for an admin, refused by
-            `Operator.set_secret/4` and `delete_secret/3` without one. No value is ever drawn,
-            because none is ever loaded. --%>
-      <section class="mt-10" id="secrets">
-        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Secrets</h2>
-        <p class="mt-2 text-sm/[1.55] opacity-70">
-          Values a job is handed when its workflow state or command names them, and a
-          conversation when the person opening it picks them. Once set, a value is never shown
-          again, to anyone. Jobs do not receive them yet.
-        </p>
-
-        <p :if={@secrets == []} class="mt-3 text-sm opacity-60">None yet.</p>
-
-        <table
-          :if={@secrets != []}
-          id="secret-rows"
-          class="reflow mt-3 w-full text-left text-[12.5px]"
-        >
-          <thead class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">
-            <tr class="border-b border-base-300">
-              <th class="py-2 pr-3 font-normal">Name</th>
-              <th class="py-2 pr-3 font-normal">Version</th>
-              <th class="py-2 pr-3 font-normal">Set</th>
-              <th class="py-2 pr-3 font-normal">Received by</th>
-              <th class="py-2 font-normal"></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr :for={secret <- @secrets} class="border-b border-base-300/60 align-top">
-              <td class="py-3 pr-3 font-mono break-all">{secret.name}</td>
-              <td data-label="Version" class="py-3 pr-3 font-mono">{secret.version}</td>
-              <td data-label="Set" class="py-3 pr-3 font-mono">
-                <div>{Format.ago(secret.set_at, @now)}</div>
-                <div class="text-[11px] opacity-50">
-                  {(secret.set_by && secret.set_by.email) || "an account since removed"}
-                </div>
-              </td>
-              <td data-label="Received by" class="py-3 pr-3 text-[12.5px]">
-                <div>{received(@received_by, secret.name)}</div>
-                <div :if={@held_by_chats[secret.name]} class="text-[11px] opacity-60">
-                  {chats(@held_by_chats[secret.name])}
-                </div>
-                <div class="text-[11px] opacity-50">
-                  {held(@last_held[secret.id], @now)}
-                </div>
-              </td>
-              <td class="py-3 text-right">
-                <button
-                  :if={@manage}
-                  type="button"
-                  phx-click="delete-secret"
-                  phx-value-id={secret.id}
-                  data-confirm={"Delete #{secret.name}? Its value is destroyed, and a job whose workflow names it stops until it is set again."}
-                  class="min-h-[46px] text-sm text-primary hover:underline reflow-control"
-                >
-                  Delete
-                </button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-
-        <.form
-          :let={f}
-          :if={@manage}
-          for={to_form(%{"name" => @secret_name}, as: :secret)}
-          id={"secret-form-#{@secret_nonce}"}
-          phx-submit="set-secret"
-          class="mt-4 flex flex-col gap-4"
-        >
-          <.input field={f[:name]} type="text" label="Name" placeholder="STRIPE_TEST_KEY" />
-          <%!-- Write-only: rendered empty every time, because nothing keeps a value to render.
-                No `phx-change`, so what is typed reaches the server once, on submit. --%>
-          <.input
-            field={f[:value]}
-            type="textarea"
-            label="Value"
-            rows="3"
-            autocomplete="off"
-            spellcheck="false"
-          />
-          <p class="text-sm/[1.55] opacity-60">
-            Setting a name that exists replaces its value.
-          </p>
-          <p :if={@secret_error} class="text-sm text-error">{@secret_error}</p>
-          <button
-            type="submit"
-            class="min-h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
-          >
-            Set it
-          </button>
-        </.form>
-
-        <p :if={not @manage and @secret_error} class="mt-2 text-sm text-error">{@secret_error}</p>
-      </section>
-
-      <section class="mt-10">
-        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Repository</h2>
-        <dl class="mt-3 flex flex-col gap-2 text-[12.5px]">
-          <.fact label="default branch" value={@project.default_branch} />
-        </dl>
-      </section>
-
-      <%!-- `docs/design/git-hosting.md` § What the mirrors say about themselves: this is where
-            they say it. The project page carries only whether one is failing; this is the
-            table, and the only place a mirror is set or removed. --%>
-      <section :if={@manage} class="mt-10">
-        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Mirrors</h2>
-        <p class="mt-2 text-sm/[1.55] opacity-70">
-          Every push to <span class="font-mono text-[12.5px]">{@project.default_branch}</span>
-          is pushed on to each of these too. <code class="font-mono text-[12.5px]">https://</code>
-          carries a token safely; <code class="font-mono text-[12.5px]">http://</code>
-          sends it in clear.
-        </p>
-
-        <p :if={@mirrors == []} class="mt-3 text-sm opacity-60">
-          None yet. One added below appears here, with what the last push said.
-        </p>
-
-        <table :if={@mirrors != []} id="mirrors" class="reflow mt-3 w-full text-left text-[12.5px]">
-          <thead class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">
-            <tr class="border-b border-base-300">
-              <th class="py-2 pr-3 font-normal">Name</th>
-              <th class="py-2 pr-3 font-normal">URL</th>
-              <th class="py-2 pr-3 font-normal">Last push</th>
-              <th class="py-2 font-normal"></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr :for={m <- @mirrors} class="border-b border-base-300/60 align-top">
-              <td class="py-3 pr-3 font-mono">{m.name}</td>
-              <td data-label="URL" class="py-3 pr-3 font-mono break-all">{m.url}</td>
-              <td data-label="Last push" class="py-3 pr-3 font-mono">
-                <div>{m.last_status || "never pushed"}</div>
-                <div :if={m.last_at} class="text-[11px] opacity-50">{m.last_at}</div>
-                <div
-                  :if={m.last_status == "failed" and m.last_error}
-                  class="text-[11px] text-error"
-                >
-                  {m.last_error}
-                </div>
-                <div :if={m.last_ok_at} class="text-[11px] opacity-50">last ok {m.last_ok_at}</div>
-              </td>
-              <td class="py-3 text-right">
-                <button
-                  type="button"
-                  phx-click="remove-mirror"
-                  phx-value-name={m.name}
-                  data-confirm={"Remove the #{m.name} mirror? Nothing further is pushed there."}
-                  class="min-h-[46px] text-sm text-primary hover:underline reflow-control"
-                >
-                  Remove
-                </button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-
-        <.form
-          :let={f}
-          for={to_form(%{}, as: :mirror)}
-          id="add-mirror"
-          phx-submit="add-mirror"
-          class="mt-4 flex flex-col gap-4"
-        >
-          <.input field={f[:name]} type="text" label="Name" placeholder="github" />
-          <.input field={f[:url]} type="text" label="URL" placeholder="https://host/x/y.git" />
-          <.input field={f[:refs]} type="text" label="Refs, a glob (optional)" />
-          <.input field={f[:user]} type="text" label="Username (optional)" />
-          <%!-- Write-only: nothing here is ever populated from a stored mirror, because
-                nothing keeps the token around to populate it with. --%>
-          <.input field={f[:token]} type="password" label="Token (optional)" />
-          <button
-            type="submit"
-            class="min-h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
-          >
-            Add mirror
-          </button>
-        </.form>
-      </section>
-    </Layouts.app>
+    </section>
     """
   end
+
+  # -- people ---------------------------------------------------------------------------------
+
+  defp people(assigns) do
+    admins = Enum.count(assigns.members, &(&1.role == :admin))
+    assigns = assign(assigns, sole_admin: admins == 1)
+
+    ~H"""
+    <section id="people" aria-labelledby="people-heading">
+      <div class="settings-heading">
+        <h2 id="people-heading">People</h2>
+        <span class="settings-count">{length(@members)}</span>
+      </div>
+      <p class="settings-note">
+        Everyone here can run the work. Administrators can also change these settings and this
+        list.
+      </p>
+
+      <.error_note :if={@people_error} id="people-error" class="settings-error">
+        {@people_error}
+      </.error_note>
+
+      <ul id="members" class="settings-people">
+        <li :for={member <- @members} id={"member-#{member.user_id}"} class="settings-person">
+          <span class="settings-person-name">
+            <span class="settings-mono settings-break">{member.user.email}</span>
+            <span :if={member.user_id == @current_scope.user.id} class="settings-sub">· you</span>
+          </span>
+
+          <%!-- One control for a role, the add form's member | admin (UX pass, A14), changed in
+                place. Granting admin, and giving up your own, are asked first in place: one
+                changes who can change everything here, the other locks you out of it (D23). --%>
+          <div id={"role-#{member.user_id}"} class="settings-role">
+            <div role="radiogroup" aria-label="Role" class="ui-seg ui-seg--sm settings-role-seg">
+              <%= for role <- ~w(member admin) do %>
+                <button
+                  :if={to_string(member.role) == role or (@sole_admin and member.role == :admin)}
+                  type="button"
+                  role="radio"
+                  class="ui-seg-opt"
+                  aria-checked={to_string(to_string(member.role) == role)}
+                  phx-value-role={role}
+                  disabled
+                >
+                  {role}
+                </button>
+                <button
+                  :if={
+                    to_string(member.role) != role and not (@sole_admin and member.role == :admin) and
+                      role_question(role, member, @current_scope.user, @project) != nil
+                  }
+                  type="button"
+                  role="radio"
+                  class="ui-seg-opt"
+                  aria-checked="false"
+                  aria-controls={"role-#{member.user_id}-#{role}-confirm"}
+                  phx-click={
+                    JS.show(to: "#role-#{member.user_id}-#{role}-confirm", display: "flex")
+                    |> JS.focus(to: "#role-#{member.user_id}-#{role}-keep")
+                  }
+                >
+                  {role}
+                </button>
+                <button
+                  :if={
+                    to_string(member.role) != role and not (@sole_admin and member.role == :admin) and
+                      is_nil(role_question(role, member, @current_scope.user, @project))
+                  }
+                  type="button"
+                  role="radio"
+                  class="ui-seg-opt"
+                  aria-checked="false"
+                  phx-click="set-role"
+                  phx-value-id={member.user_id}
+                  phx-value-role={role}
+                >
+                  {role}
+                </button>
+              <% end %>
+            </div>
+            <.confirm
+              :for={{role, question} <- asked(member, @sole_admin, @current_scope.user, @project)}
+              id={"role-#{member.user_id}-#{role}"}
+              label={role}
+              act={if role == "admin", do: "Make them admin", else: "Make me a member"}
+              sentence={question}
+              tone="neutral"
+              class="settings-role-confirm"
+              phx-click="set-role"
+              phx-value-id={member.user_id}
+              phx-value-role={role}
+            />
+          </div>
+
+          <%= if @sole_admin and member.role == :admin do %>
+            <.button
+              type="button"
+              variant="quiet"
+              size="sm"
+              disabled
+              class="settings-x"
+              aria-label={"Remove #{member.user.email}"}
+            >
+              ×
+            </.button>
+            <p class="settings-sub settings-person-reason">{last_admin()}</p>
+          <% else %>
+            <.confirm
+              id={"remove-#{member.user_id}"}
+              label="×"
+              aria_label={"Remove #{member.user.email}"}
+              act="Remove them"
+              sentence={"Remove #{member.user.email} from #{@project.name}? They can no longer see it or run its work."}
+              trigger="quiet"
+              class="ui-confirm--inline"
+              phx-click="remove-member"
+              phx-value-id={member.user_id}
+            />
+          <% end %>
+        </li>
+      </ul>
+    </section>
+    """
+  end
+
+  defp add_member(assigns) do
+    ~H"""
+    <section id="add-someone" aria-labelledby="add-someone-heading">
+      <h2 id="add-someone-heading" class="settings-form-title">Add someone</h2>
+      <.form
+        :let={f}
+        for={to_form(@member_draft, as: :member)}
+        id="add-member-form"
+        phx-submit="add-member"
+        class="settings-form"
+      >
+        <.input
+          field={f[:email]}
+          type="email"
+          label="Address"
+          mono
+          hint="There are no invitations: the address needs an approved account."
+        />
+        <%!-- Next to the field it is about (`docs/design/ui.md` § Errors stay where you acted). --%>
+        <.error_note :if={@member_error} id="member-error" class="settings-error">
+          {@member_error}
+        </.error_note>
+        <.segmented
+          id="member-role"
+          name="member[role]"
+          value={@member_draft["role"]}
+          options={[{"member", "member"}, {"admin", "admin"}]}
+        />
+        <.button type="submit" variant="primary" size="xl" fill>Add them</.button>
+      </.form>
+    </section>
+    """
+  end
+
+  # -- model and effort -----------------------------------------------------------------------
+
+  # Behind `@manage` like every other form here: `Operator.set_defaults/3` refuses a member.
+  defp agent(assigns) do
+    levels = assigns.offered.efforts
+    stored = assigns.defaults_form[:effort].value
+    kept = if stored not in [nil, ""] and stored not in levels, do: [{"#{stored} · set", stored}]
+
+    assigns =
+      assign(assigns,
+        free_effort: levels == [],
+        effort_options: [{"the machine's", ""} | Enum.map(levels, &{&1, &1})] ++ (kept || [])
+      )
+
+    ~H"""
+    <section id="agent" aria-labelledby="agent-heading">
+      <div class="settings-heading">
+        <h2 id="agent-heading">Harness, model and effort</h2>
+      </div>
+      <p class="settings-note">
+        What this project's work runs on when a workflow state does not name its own. Left on <em>the machine's</em>, the harness picks.
+      </p>
+
+      <.form
+        for={@defaults_form}
+        id="defaults-form"
+        phx-change="defaults-change"
+        phx-submit="defaults"
+        class="settings-form settings-form--single"
+      >
+        <%!-- Which harness runs the project's work when a workflow state names none, and what a
+              new conversation starts on. Each harness keeps its own model and effort below. --%>
+        <fieldset id="project-harness" class="settings-fieldset">
+          <legend class="settings-legend">Harness</legend>
+          <.segmented
+            id="project_harness"
+            name="project[harness]"
+            value={@defaults_form[:harness].value}
+            options={for h <- Forge.Harness.names(), do: {Forge.Harness.label(h), h}}
+          />
+        </fieldset>
+
+        <.eyebrow>Claude Code</.eyebrow>
+        <div>
+          <.model_field
+            field={@defaults_form[:model]}
+            offered={@offered}
+            label="Model"
+            fallback="the machine's"
+          />
+          <p :if={@observed} id="model-observed" class="settings-sub">
+            the machine's · last observed {@observed.model}, {ago(@observed.at, @now)}
+          </p>
+        </div>
+
+        <.input
+          :if={@free_effort}
+          field={@defaults_form[:effort]}
+          type="text"
+          label="Effort"
+          autocomplete="off"
+          hint="How hard it thinks. No connected worker offers a level; type one, or leave it for the machine's."
+        />
+
+        <fieldset :if={not @free_effort} class="settings-fieldset">
+          <legend class="settings-legend">Effort</legend>
+          <.segmented
+            :if={length(@effort_options) <= 4}
+            id="project_effort"
+            name="project[effort]"
+            value={@defaults_form[:effort].value}
+            options={@effort_options}
+          />
+          <div :if={length(@effort_options) > 4} id="project_effort">
+            <.choice_row
+              :for={{{words, value}, i} <- Enum.with_index(@effort_options)}
+              id={"project_effort_#{i}"}
+              name="project[effort]"
+              value={value}
+              label={words}
+              selected={to_string(@defaults_form[:effort].value) == value}
+            />
+          </div>
+        </fieldset>
+
+        <%!-- Codex's own dials: nothing lists Codex's models, so the model is typed, and empty
+              is Codex's own default; its levels are the connected machines' (a box while none
+              offers one). --%>
+        <.eyebrow>Codex</.eyebrow>
+        <.input
+          field={@defaults_form[:codex_model]}
+          type="text"
+          label="Model"
+          placeholder="Codex's own default"
+          autocomplete="off"
+        />
+        <.effort_field
+          offered={%{@offered | efforts: @offered.codex_efforts}}
+          field={@defaults_form[:codex_effort]}
+          label="Effort"
+          fallback="Codex's own default"
+        />
+
+        <p class="settings-note">
+          A workflow state that names its own harness, model or effort keeps it. Saved changes
+          apply to jobs that start after them.
+        </p>
+
+        <.error_note :if={@defaults_error} id="defaults-error" class="settings-error">
+          {@defaults_error}
+        </.error_note>
+
+        <div class="settings-dock">
+          <.button type="button" size="xl" phx-click="defaults-discard">Discard</.button>
+          <.button type="submit" variant="primary" size="xl" fill>Save</.button>
+        </div>
+      </.form>
+    </section>
+    """
+  end
+
+  # -- secrets --------------------------------------------------------------------------------
+
+  # `docs/design/secrets.md` § Surfaces: the list for every member, because a workflow's author
+  # needs the names; setting and deleting for an admin, refused by `Operator.set_secret/4` and
+  # `delete_secret/3` without one. No value is ever drawn, because none is ever loaded.
+  defp secrets(assigns) do
+    ~H"""
+    <section id="secrets" aria-labelledby="secrets-heading">
+      <div class="settings-heading">
+        <h2 id="secrets-heading">Secrets</h2>
+        <span class="settings-count">{length(@secrets)}</span>
+      </div>
+      <p class="settings-note">
+        Handed to a job when its state or command names them, and to a chat when the person
+        opening it picks them, in its environment. Once set, a value is never shown again, to
+        anyone.
+      </p>
+
+      <p :if={@secrets == []} class="settings-note">None yet.</p>
+
+      <.error_note :if={not @manage and @secret_error} class="settings-error">
+        {@secret_error}
+      </.error_note>
+
+      <table :if={@secrets != []} id="secret-rows" class="settings-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Received by</th>
+            <th>Set by</th>
+            <th :if={@manage}><span class="sr-only">Delete</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr :for={secret <- @secrets} id={"secret-#{secret.id}"}>
+            <td>
+              <div class="settings-name settings-break">{secret.name}</div>
+              <div class="settings-sub">v{secret.version} · set {ago(secret.set_at, @now)}</div>
+            </td>
+            <td>
+              <div class={[unreceived?(@received_by, secret.name) && "settings-warning"]}>
+                {ticked(received(@received_by, secret.name))}
+              </div>
+              <div :if={@held_by_chats[secret.name]} class="settings-sub">
+                {chats(@held_by_chats[secret.name])}
+              </div>
+              <div class="settings-sub">{held(@last_held[secret.id], @now)}</div>
+            </td>
+            <td class="settings-sub">
+              set by {(secret.set_by && secret.set_by.email) || "an account since removed"}
+            </td>
+            <td :if={@manage} class="settings-act">
+              <%!-- Rotating a value is setting it again under the same name: the form, with the
+                    name filled and locked (UX pass, D18). Side by side in the row's one slot for
+                    acts, the destructive one last (UX re-check #13). --%>
+              <div class="ui-row-acts">
+                <.button
+                  id={"replace-secret-#{secret.id}"}
+                  variant="link"
+                  size="sm"
+                  patch={replace_path(@project, secret.name)}
+                >
+                  Replace value
+                </.button>
+                <.confirm
+                  id={"delete-secret-#{secret.id}"}
+                  label="Delete"
+                  act="Delete it"
+                  sentence={"Delete #{secret.name}? Its value is destroyed, and a job whose workflow names it stops until it is set again."}
+                  class="ui-confirm--inline"
+                  phx-click="delete-secret"
+                  phx-value-id={secret.id}
+                />
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <.button
+        :if={@manage}
+        variant="outline"
+        size="lg"
+        patch={add_path(@project, "secrets")}
+        class="settings-phone settings-add"
+      >
+        + Set a secret
+      </.button>
+    </section>
+    """
+  end
+
+  defp set_secret(assigns) do
+    ~H"""
+    <section id="set-secret" aria-labelledby="set-secret-heading">
+      <h2 id="set-secret-heading" class="settings-form-title">
+        {if @secret_locked, do: "Replace a value", else: "Set a secret"}
+      </h2>
+      <.form
+        :let={f}
+        for={to_form(%{"name" => @secret_name}, as: :secret)}
+        id={"secret-form-#{@secret_nonce}"}
+        phx-submit="set-secret"
+        class="settings-form settings-form--single"
+      >
+        <.input
+          field={f[:name]}
+          type="text"
+          label="Name"
+          placeholder="e.g. SENTRY_DSN"
+          readonly={@secret_locked}
+          mono
+        />
+        <%!-- Write-only: rendered empty every time, because nothing keeps a value to render.
+              No `phx-change`, so what is typed reaches the server once, on submit. Drawn as dots
+              until shown, for a phone over someone's shoulder, and a textarea still, for a value
+              of several lines (UX pass, D19). --%>
+        <.input
+          field={f[:value]}
+          id={"secret-value-#{@secret_nonce}"}
+          type="textarea"
+          label="Value"
+          rows="3"
+          autocomplete="off"
+          spellcheck="false"
+          class="settings-masked"
+          mono
+          hint="Setting a name that exists replaces its value."
+        />
+        <.button
+          type="button"
+          variant="quiet"
+          size="sm"
+          class="settings-reveal"
+          aria-controls={"secret-value-#{@secret_nonce}"}
+          phx-click={JS.toggle_class("settings-masked", to: "#secret-value-#{@secret_nonce}")}
+        >
+          Show or hide the value
+        </.button>
+        <.error_note :if={@secret_error} id="secret-error" class="settings-error">
+          {@secret_error}
+        </.error_note>
+        <.button type="submit" variant="primary" size="xl" fill>Set it</.button>
+      </.form>
+    </section>
+    """
+  end
+
+  @doc """
+  A sentence whose names are quoted in backticks, as `Forge.Secrets.received_by/1` writes them
+  (state `review`): each name drawn in mono, no backtick drawn at all, and **nothing between the
+  parts** — a template's line breaks between them read `implementing , state` (UX pass, D18).
+  """
+  @spec ticked(String.t()) :: Phoenix.HTML.safe()
+  def ticked(text) do
+    text
+    |> String.split("`")
+    |> Enum.with_index()
+    |> Enum.map(fn
+      {part, i} when rem(i, 2) == 1 ->
+        ["<code class=\"settings-code\">", escape(part), "</code>"]
+
+      {part, _i} ->
+        escape(part)
+    end)
+    |> IO.iodata_to_binary()
+    |> Phoenix.HTML.raw()
+  end
+
+  defp escape(text), do: text |> Phoenix.HTML.html_escape() |> Phoenix.HTML.safe_to_string()
 
   # The access list read backwards. A name no state or command names is said to be one, because a
   # secret set and listed nowhere is a secret nothing receives — which may be what someone meant,
@@ -1047,6 +1592,12 @@ defmodule ForgeWeb.ProjectSettingsLive do
     end <> unread(invalid)
   end
 
+  # In warning, because it may be a misspelling: nothing reads a name a workflow does not name.
+  # A workflow that cannot be read says nothing either way, so it is not counted.
+  defp unreceived?(:none, _name), do: true
+  defp unreceived?(%{names: names, invalid: [nil]}, _name) when names == %{}, do: false
+  defp unreceived?(%{names: names}, name), do: Map.get(names, name, []) == []
+
   # A type whose workflow is refused names nothing that can be read, so the list above may be
   # short by what it would have said.
   defp unread([]), do: ""
@@ -1059,8 +1610,142 @@ defmodule ForgeWeb.ProjectSettingsLive do
   defp chats(count), do: "held by #{count} live conversations"
 
   defp held(nil, _now), do: "no run has held it"
-  defp held(at, now), do: "last held " <> Format.ago(at, now)
+  defp held(at, now), do: "last held " <> ago(at, now)
 
-  defp spent(%{revoked_at: at}, now) when not is_nil(at), do: "revoked " <> Format.ago(at, now)
-  defp spent(%{expires_at: at}, now), do: "expired " <> Format.ago(at, now)
+  defp spent(%{revoked_at: at}, now) when not is_nil(at), do: "revoked " <> ago(at, now)
+  defp spent(%{expires_at: at}, now), do: "expired " <> ago(at, now)
+
+  defp ago(at, now), do: Format.ago_phrase(at, now)
+
+  # -- branch and mirrors ---------------------------------------------------------------------
+
+  # `docs/design/git-hosting.md` § What the mirrors say about themselves: this is where they say
+  # it. The project page carries only whether one is failing; this is the list, and the only
+  # place a mirror is set or removed.
+  defp repository(assigns) do
+    ~H"""
+    <section id="repository" aria-labelledby="repository-heading">
+      <div class="settings-heading">
+        <h2 id="repository-heading">{if @manage, do: "Branch and mirrors", else: "Branch"}</h2>
+      </div>
+      <.fact_list>
+        <:fact label="default branch">{@project.default_branch}</:fact>
+      </.fact_list>
+
+      <div :if={@manage} id="mirrors-section">
+        <div class="settings-heading settings-heading--sub">
+          <h3>Mirrors</h3>
+          <span class="settings-count">{length(@mirrors)}</span>
+        </div>
+        <p class="settings-note">
+          Every push to <span class="settings-mono">{@project.default_branch}</span>
+          is pushed on to each of these. <code>https://</code>
+          carries a token safely; <code>http://</code>
+          sends it in clear.
+        </p>
+
+        <.error_note :if={@mirrors_error} class="settings-error">{@mirrors_error}</.error_note>
+
+        <p :if={@mirrors == []} class="settings-note">
+          None yet. One added appears here, with what the last push said.
+        </p>
+
+        <table :if={@mirrors != []} id="mirrors" class="settings-table">
+          <thead>
+            <tr>
+              <th>Mirror</th>
+              <th>Last push</th>
+              <th><span class="sr-only">Remove</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr :for={m <- @mirrors} id={"mirror-#{m.name}"}>
+              <td>
+                <div class="settings-name-line">
+                  <span class="settings-name">{m.name}</span>
+                  <span class={["settings-mono", mirror_tone(m)]}>{mirror_status(m)}</span>
+                </div>
+                <div class="settings-sub">{breakable(m.url)}</div>
+              </td>
+              <td>
+                <div :if={m.last_at} class="settings-sub">{when_pushed(m.last_at, @now)}</div>
+                <div :if={m.last_status == "failed" and m.last_error} class="settings-danger">
+                  {m.last_error}
+                </div>
+                <div :if={m.last_ok_at} class="settings-sub">
+                  last ok {when_pushed(m.last_ok_at, @now)}
+                </div>
+              </td>
+              <td class="settings-act">
+                <.confirm
+                  id={"remove-mirror-#{m.name}"}
+                  label="Remove"
+                  act="Remove it"
+                  sentence={"Remove the #{m.name} mirror? Nothing further is pushed there."}
+                  phx-click="remove-mirror"
+                  phx-value-name={m.name}
+                />
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <.button
+          variant="outline"
+          size="lg"
+          patch={add_path(@project, "repository")}
+          class="settings-phone settings-add"
+        >
+          + Add a mirror
+        </.button>
+      </div>
+    </section>
+    """
+  end
+
+  # The hook writes an ISO 8601 time; anything else it said is drawn as it said it.
+  defp when_pushed(at, now) do
+    case DateTime.from_iso8601(at) do
+      {:ok, at, _offset} -> ago(at, now)
+      _other -> at
+    end
+  end
+
+  defp mirror_status(%{last_status: "failed"}), do: "✗ failed"
+  defp mirror_status(%{last_status: "ok"}), do: "✓ ok"
+  defp mirror_status(%{last_status: nil}), do: "never pushed"
+  defp mirror_status(%{last_status: status}), do: status
+
+  defp mirror_tone(%{last_status: "failed"}), do: "settings-danger"
+  defp mirror_tone(%{last_status: "ok"}), do: "settings-success"
+  defp mirror_tone(_mirror), do: "settings-sub"
+
+  defp add_mirror(assigns) do
+    ~H"""
+    <section id="add-a-mirror" aria-labelledby="add-mirror-heading">
+      <h2 id="add-mirror-heading" class="settings-form-title">Add a mirror</h2>
+      <.form
+        :let={f}
+        for={to_form(%{}, as: :mirror)}
+        id="add-mirror"
+        phx-submit="add-mirror"
+        class="settings-form"
+      >
+        <.input field={f[:name]} type="text" label="Name" placeholder="github" mono />
+        <.input field={f[:url]} type="text" label="URL" placeholder="https://host/x/y.git" mono />
+        <.input field={f[:refs]} type="text" label="Refs, a glob (optional)" mono />
+        <.input field={f[:user]} type="text" label="Username (optional)" mono />
+        <%!-- Write-only: nothing here is ever populated from a stored mirror, because
+              nothing keeps the token around to populate it with. --%>
+        <.input field={f[:token]} type="password" label="Token (optional)" mono />
+        <.error_note :if={@mirror_error} id="mirror-error" class="settings-error settings-span">
+          {@mirror_error}
+        </.error_note>
+        <.button type="submit" variant="primary" size="xl" fill class="settings-span">
+          Add it
+        </.button>
+      </.form>
+    </section>
+    """
+  end
 end

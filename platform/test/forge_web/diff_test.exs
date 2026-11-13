@@ -92,7 +92,7 @@ defmodule ForgeWeb.DiffTest do
     # The map of the change survives; only the patch gives way.
     assert [%{path: "latin1.ex", lines: nil}] = Diff.files(diff)
 
-    drawn = render_component(&Diff.section/1, diff: diff)
+    drawn = render_component(&Diff.file_table/1, diff: diff)
     assert String.valid?(drawn)
     assert drawn =~ "not valid UTF-8"
     assert drawn =~ "latin1.ex"
@@ -104,7 +104,7 @@ defmodule ForgeWeb.DiffTest do
   # withheld, because a change whose file list is missing is not a map of anything.
   # A patch naming such a file is never text, since the name is in it — so this is the one case
   # where both guards fire, and the path's is what keeps the file list readable.
-  test "a path that is not valid UTF-8 is drawn escaped, on both drawings" do
+  test "a path that is not valid UTF-8 is drawn escaped, in the file table" do
     {repo, base, head} = change(%{("caf" <> <<0xE9>> <> ".ex") => "def ok, do: :ok\n"})
 
     diff = Diff.build(repo, base, head)
@@ -118,13 +118,9 @@ defmodule ForgeWeb.DiffTest do
     refute diff.text
     assert [%{path: ^escaped, lines: nil}] = Diff.files(diff)
 
-    for drawn <- [
-          render_component(&Diff.section/1, diff: diff),
-          render_component(&Diff.file_table/1, diff: diff)
-        ] do
-      assert String.valid?(drawn)
-      assert drawn =~ ~s(caf\\351.ex)
-    end
+    drawn = render_component(&Diff.file_table/1, diff: diff)
+    assert String.valid?(drawn)
+    assert drawn =~ ~s(caf\\351.ex)
   end
 
   # A name git has to quote even with `core.quotePath=false`, in a patch that is otherwise
@@ -209,6 +205,61 @@ defmodule ForgeWeb.DiffTest do
 
     assert %{lines: nil, hunks: []} = rows["logo.png"]
     assert {:line, "+a"} in rows["a.ex"].lines
+  end
+
+  # Each row of a patch is drawn with its number and tinted by what it is; the number is the new
+  # side's for a line kept or added and the old side's for one taken out, as `18b` numbers them.
+  test "a patch's rows are numbered on their own side and kinded" do
+    lines = [
+      {:line, "diff --git a/s.ex b/s.ex"},
+      {:line, "--- a/s.ex"},
+      {:line, "+++ b/s.ex"},
+      {:hunk, "@@ -14,3 +14,4 @@", 14},
+      {:line, " defstruct a: 1,"},
+      {:line, "-  b: 2"},
+      {:line, "+  b: 2,"},
+      {:line, "+  c: 3"},
+      {:line, " end"},
+      {:line, "\\ No newline at end of file"}
+    ]
+
+    assert Diff.numbered(lines) == [
+             {:hunk, "@@ -14,3 +14,4 @@", 14},
+             {:ctx, 14, "defstruct a: 1,"},
+             {:del, 15, "  b: 2"},
+             {:add, 15, "  b: 2,"},
+             {:add, 16, "  c: 3"},
+             {:ctx, 17, "end"},
+             {:meta, nil, "\\ No newline at end of file"}
+           ]
+  end
+
+  # What an excerpt of the head commit tints: the new side's numbers of the lines added, per file,
+  # and nothing for a file with no patch drawn.
+  test "the lines a change adds are its new side's, per file" do
+    {repo, base, head} = change(%{"a.ex" => "one\ntwo\n", "logo.png" => <<0, 1, 2, 0, 255>>})
+    first = Diff.build(repo, base, head)
+    assert Diff.added_lines(first)["a.ex"] == MapSet.new([1, 2])
+    refute Map.has_key?(Diff.added_lines(first), "logo.png")
+
+    commit!(repo, %{"a.ex" => "one\nnew\ntwo\n"})
+    {:ok, next} = Git.run(repo, ["rev-parse", "HEAD"])
+
+    assert Diff.added_lines(Diff.build(repo, head, String.trim(next))) == %{
+             "a.ex" => MapSet.new([2])
+           }
+  end
+
+  # The file table draws those rows tinted, the sign apart from the text, and wrapping rather
+  # than scrolling sideways (`docs/design/ui.md` § Changes).
+  test "the file table tints added and removed rows" do
+    {repo, base, head} = change(%{"README.md" => "# Changed\n"})
+    doc = render_component(&Diff.file_table/1, diff: Diff.build(repo, base, head))
+    html = Floki.parse_fragment!(doc)
+
+    assert html |> Floki.find(".diff-line--del .diff-text") |> Floki.text() == "# Base"
+    assert html |> Floki.find(".diff-line--add .diff-text") |> Floki.text() == "# Changed"
+    assert html |> Floki.find(".diff-line--add .diff-sign") |> Floki.text() == "+"
   end
 
   test "a quoted path is read back to the name it quotes" do

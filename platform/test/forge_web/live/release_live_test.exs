@@ -89,7 +89,19 @@ defmodule ForgeWeb.ReleaseLiveTest do
 
       assert html =~ "Release"
       assert has_element?(view, "#release-form textarea[name=note]")
-      assert has_element?(view, ~S{#release-form button[type=submit]:not([disabled])}, "Release")
+
+      assert has_element?(
+               view,
+               ~S{#release-form button[type=submit]:not([disabled])},
+               "Start the release"
+             )
+
+      # The block is headed by what it is, says its verb once, and does not tell an admin that
+      # it is for admins.
+      assert has_element?(view, "#release .release-title", "Release")
+      refute has_element?(view, "#release .release-title", "Start")
+      refute has_element?(view, "#release", "admins only")
+
       # No title, no body, no version: one optional note and nothing else.
       refute has_element?(view, "#release-form input[type=text]")
       # Working while it is created, and unusable a second time.
@@ -177,8 +189,8 @@ defmodule ForgeWeb.ReleaseLiveTest do
       assert has_element?(view, "#release-form button[type=submit][disabled]")
 
       # The other type is unaffected.
-      {:ok, _view, form_html} = live(conn, ~p"/tickets/new?project=#{project.name}")
-      assert form_html =~ "starts in implementing"
+      {:ok, form_view, _html} = live(conn, ~p"/tickets/new?project=#{project.name}")
+      assert has_element?(form_view, "#first-step .ui-state", "implementing")
     end
 
     test "while one is open it links there and offers no second", %{
@@ -335,7 +347,7 @@ defmodule ForgeWeb.ReleaseLiveTest do
   end
 
   describe "the placeholder is a title everywhere" do
-    test "on the board, the queue and the ticket page", %{
+    test "on the project page and the ticket page", %{
       conn: conn,
       project: project,
       user: user
@@ -343,7 +355,6 @@ defmodule ForgeWeb.ReleaseLiveTest do
       {:ok, ticket} = Operator.start_release(project, user, "")
 
       for path <- [
-            ~p"/board",
             ~p"/projects/#{project.name}",
             ~p"/tickets/#{project.name}/#{ticket.number}"
           ] do
@@ -364,7 +375,7 @@ defmodule ForgeWeb.ReleaseLiveTest do
       assert html =~ "Release in progress"
     end
 
-    test "and a rename is said in the ticket's timeline", %{
+    test "and a rename is said in the ticket's Activity", %{
       conn: conn,
       project: project,
       user: user
@@ -379,8 +390,8 @@ defmodule ForgeWeb.ReleaseLiveTest do
         payload: %{"from" => "Release in progress", "to" => "0.17.0", "document" => "notes.md"}
       })
 
-      {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=timeline")
-      assert html =~ "renamed to 0.17.0, from notes.md"
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=activity")
+      assert has_element?(view, "#ticket-events", "renamed to 0.17.0, from notes.md")
     end
 
     test "and a rename shows wherever the title does", %{conn: conn, project: project, user: user} do
@@ -390,9 +401,61 @@ defmodule ForgeWeb.ReleaseLiveTest do
       |> Ecto.Changeset.change(title: "0.17.0")
       |> Forge.Repo.update!()
 
-      {:ok, _view, html} = live(conn, ~p"/board")
+      {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}")
       assert html =~ "0.17.0"
       refute html =~ "Release in progress"
+    end
+  end
+
+  # `21e`: a release ticket uses the ticket's frame unchanged, with a band that is not a decision
+  # row, and its note and what merged since the last release leading Steps.
+  describe "a release ticket's page" do
+    test "carries the band, and leads Steps with its note and what merged since", %{
+      conn: conn,
+      project: project,
+      user: user
+    } do
+      {:ok, first} = Operator.start_release(project, user, "")
+      {:ok, _} = Operator.cancel(first, user)
+      {:ok, ticket} = Operator.start_release(project, user, "Everything since the last one.")
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+
+      assert has_element?(view, ".frame-decision #release-band", "Release · started by")
+      refute has_element?(view, "#release-band button")
+      assert has_element?(view, "#steps #release-lead", "Everything since the last one.")
+      # No earlier release done: nothing to say it is since.
+      refute has_element?(view, "#release-since")
+
+      first
+      |> Ecto.Changeset.change(status: :done, title: "0.17.0")
+      |> Forge.Repo.update!()
+
+      merged = ticket_fixture(%{project: project, title: "Sound toggle", branch: "ticket/x"})
+
+      Forge.Repo.insert!(%Forge.Events.Event{
+        type: "ticket.merged",
+        actor: %{"kind" => "system", "id" => nil},
+        ticket_id: merged.id,
+        project_id: project.id,
+        payload: %{},
+        inserted_at: DateTime.add(DateTime.utc_now(:second), 60, :second)
+      })
+
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+      assert has_element?(view, "#release-since", "Since 0.17.0")
+
+      assert has_element?(
+               view,
+               ~s(#release-since a[href="/tickets/#{project.name}/#{merged.number}"]),
+               "Sound toggle"
+             )
+    end
+
+    test "an ordinary ticket carries no band", %{conn: conn, project: project} do
+      ticket = ticket_fixture(%{project: project})
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+      refute has_element?(view, "#release-band")
+      refute has_element?(view, "#release-lead")
     end
   end
 

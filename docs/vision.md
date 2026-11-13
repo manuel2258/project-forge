@@ -285,8 +285,9 @@ list, answerable in sequence without navigating back. Push notification for bloc
 questions; everything else digested.
 
 **Ticket view** is a vertical timeline of states with outcome, cost and artifacts per step.
-**Job view** shows the pinned manifest — the transparency promise made concrete. **Board
-view** gives the familiar swimlane-per-state overview. **Merge approval** shows the diff
+**Job view** shows the pinned manifest — the transparency promise made concrete. **A project's
+Tickets** list every open ticket with where it is in its workflow, which is what a swimlane board
+was for. **Merge approval** shows the diff
 alongside what the platform uniquely knows: the verification report, the chain of documents
 the change was built from, the questions answered along the way, and total cost.
 

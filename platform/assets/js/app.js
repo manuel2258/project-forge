@@ -25,18 +25,48 @@ import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/forge"
 import topbar from "../vendor/topbar"
 import {PushSubscribe, registerServiceWorker} from "./push"
+import {Connection, listen, reconnectAfterMs, rejoinAfterMs} from "./connection"
+import {guard} from "./moved_guard"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
+// The look a connected render of a ticket's page drew (`ForgeWeb.TicketLive`); none elsewhere.
+const ticketLook = () => {
+  const el = document.getElementById("ticket-look")
+  return el ? {look: {ticket: el.dataset.ticket, since: el.dataset.since || ""}} : {}
+}
+
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
-  params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, PushSubscribe},
+  // Asked again at every join. A rejoin of a ticket's page sends back the look the page was
+  // opened with, so the rejoin records none (`docs/design/ui.md` § The end of the pass, and
+  // *All*).
+  params: () => ({_csrf_token: csrfToken, ...ticketLook()}),
+  hooks: {...colocatedHooks, PushSubscribe, Connection},
+  // Given rather than Phoenix's own, so the top bar can count down to the next try.
+  reconnectAfterMs,
+  rejoinAfterMs,
 })
+listen(liveSocket.socket)
+
+// A button that moved in the last half second ignores a tap.
+guard()
 
 // Show progress bar on live navigation and form submits
 topbar.config({barColors: {0: "#29d"}, shadowColor: "rgba(0, 0, 0, .3)"})
-window.addEventListener("phx:page-loading-start", _info => topbar.show(300))
+// Not for a lost connection: the top bar says that itself, and nothing else moves
+// (docs/design/ui.md § Connection state).
+window.addEventListener("phx:page-loading-start", info => {
+  if (info.detail?.kind !== "error") topbar.show(300)
+})
 window.addEventListener("phx:page-loading-stop", _info => topbar.hide())
+
+// The stepper's − and + (ForgeWeb.UI.Forms.stepper/1): step the number in the browser, within
+// its min and max, and fire `input` so the form's phx-change runs as if it had been typed.
+window.addEventListener("forge:step", event => {
+  const input = event.target
+  if (event.detail.by > 0) input.stepUp(); else input.stepDown()
+  input.dispatchEvent(new Event("input", {bubbles: true}))
+})
 
 // connect if there are any LiveViews on the page
 liveSocket.connect()

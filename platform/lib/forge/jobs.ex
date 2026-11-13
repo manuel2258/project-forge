@@ -1811,7 +1811,7 @@ defmodule Forge.Jobs do
          }) do
       {:ok, event} ->
         Events.notify_job(job_id, event)
-        if said?(event), do: Events.notify_chat(job)
+        if said?(event), do: Events.notify_chat(job, queue: first_words?(job, event))
         :ok
 
       {:error, changeset} ->
@@ -1834,6 +1834,27 @@ defmodule Forge.Jobs do
     do: is_nil(payload["parent_tool_use_id"])
 
   defp said?(%Event{}), do: false
+
+  # Whether this is the block that makes a conversation wait on its person: words, where nothing
+  # the agent said since the person last spoke had any. That is the change `Forge.Queue`'s chat
+  # item reads — its last message being the agent's — and the queue hears of no other block
+  # (`Events.notify_chat/2`). A conversation's own process only, never a workflow job's.
+  defp first_words?(%{kind: :chat, id: job_id}, %Event{seq: seq, payload: payload}) do
+    String.trim(to_string(payload["text"])) != "" and
+      Repo.one(
+        from e in Event,
+          where: e.job_id == ^job_id and e.seq < ^seq,
+          where:
+            e.type == "chat.message" or
+              (e.type == "job.harness.text" and is_nil(e.payload["parent_tool_use_id"]) and
+                 fragment("btrim(?->>'text') <> ''", e.payload)),
+          order_by: [desc: e.seq],
+          limit: 1,
+          select: e.type
+      ) in [nil, "chat.message"]
+  end
+
+  defp first_words?(_job, _event), do: false
 
   defp json_safe(term), do: term |> Jason.encode!() |> Jason.decode!()
 

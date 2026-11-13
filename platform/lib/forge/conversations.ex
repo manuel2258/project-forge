@@ -847,6 +847,9 @@ defmodule Forge.Conversations do
 
   defp humanise(:nothing_pending), do: "no transition is waiting for a decision"
 
+  defp humanise(:note_required),
+    do: "a rejection needs a comment saying why; the next job reads it"
+
   defp humanise(:no_such_transition),
     do: "the workflow declares no such transition out of this state"
 
@@ -2015,6 +2018,7 @@ defmodule Forge.Conversations do
           live: boolean(),
           waiting: boolean(),
           said: {:user | :agent, String.t()} | nil,
+          first: String.t() | nil,
           at: DateTime.t()
         }
 
@@ -2046,6 +2050,25 @@ defmodule Forge.Conversations do
 
   defp node_wide, do: from(j in Job, where: j.kind == :chat, order_by: [desc: j.inserted_at])
 
+  @doc """
+  How many conversations a user can see, and how many of them are live: the title menu's line for
+  Chats (`docs/design/ui.md` § The title menu). Scoped as `summaries(for: user)` is, and counted
+  in the database rather than by building that list.
+  """
+  @spec counts(User.t()) :: %{live: non_neg_integer(), total: non_neg_integer()}
+  def counts(%User{} = user) do
+    project_ids = Enum.map(Forge.Projects.list(user), & &1.id)
+
+    Repo.one(
+      from j in Job,
+        where: j.kind == :chat and j.project_id in ^project_ids,
+        select: %{
+          live: filter(count(j.id), j.status in ^@live_statuses),
+          total: count(j.id)
+        }
+    )
+  end
+
   # A row carries the project's name and the last thing the agent said, so an unscoped list is a
   # transcript leak and not only a name one. See `docs/design/identity.md` § Read scoping.
   defp for_user(%User{} = user) do
@@ -2061,6 +2084,7 @@ defmodule Forge.Conversations do
     projects = by_id(Projects.Project, Enum.map(chats, & &1.project_id))
     tickets = by_id(Tickets.Ticket, Enum.reject(Enum.map(chats, & &1.ticket_id), &is_nil/1))
     said = last_said(Enum.map(chats, & &1.id))
+    first = first_said(Enum.map(chats, & &1.id))
 
     chats
     |> Enum.map(fn chat ->
@@ -2074,6 +2098,9 @@ defmodule Forge.Conversations do
         # Waiting on a person is the agent having spoken last, which is what the queue reads too.
         waiting: live?(chat) and match?({:agent, _text}, last),
         said: last,
+        # What the person opened it with: a conversation has no title, and this is what a list
+        # names it by (`title/3`).
+        first: first[chat.id],
         at: at
       }
     end)
@@ -2114,6 +2141,77 @@ defmodule Forge.Conversations do
     )
     |> Map.new(fn {id, type, payload, at} -> {id, {{role(type), payload["text"] || ""}, at}} end)
   end
+
+  # The first thing a person said in each conversation, in one query: the same DISTINCT ON as
+  # `last_said/1`, ascending.
+  defp first_said(job_ids) do
+    Repo.all(
+      from e in Event,
+        where: e.job_id in ^job_ids and e.type == "chat.message",
+        distinct: e.job_id,
+        order_by: [asc: e.job_id, asc: e.seq],
+        select: {e.job_id, e.payload}
+    )
+    |> Map.new(fn {id, payload} -> {id, payload["text"]} end)
+  end
+
+  @doc """
+  What a conversation is called where it is listed or open (`docs/design/ui.md` § A chat): a
+  workflow step's chat is its ticket's, since the step is the ticket's work; any other is the
+  first line of what the person opened it with; one with nothing said yet is *Chat*. A
+  conversation has no stored title, and this is not one — it is read from what is there.
+  """
+  @spec title(Job.t(), Tickets.Ticket.t() | nil, String.t() | nil) :: String.t()
+  def title(%Job{state: state}, %Tickets.Ticket{title: title}, _first) when state != nil,
+    do: title
+
+  def title(_chat, _ticket, first) when is_binary(first) do
+    case first |> String.split("\n", trim: true) |> Enum.map(&String.trim/1) do
+      [line | _] when line != "" -> String.slice(line, 0, 120)
+      _blank -> "Chat"
+    end
+  end
+
+  def title(_chat, _ticket, _first), do: "Chat"
+
+  @doc """
+  The machine a conversation holds, for its details (`docs/design/ui.md` § A chat): its provider,
+  memory and cores, its id at the provider, and whose it is. Nil when it holds none — waiting for
+  one, or stopped, which releases it: `worker_id` outlives the run, so it is read only while the
+  conversation is running on it.
+
+  Every member of the project may see this shape. **Whose machine it is decides only whether a
+  page links to it**, because the machines' pages are their owner's (`docs/design/identity.md`
+  § Workers); `owner_id` is here so the page can ask that, never to name the owner.
+  """
+  @spec machine(Job.t()) ::
+          %{
+            id: String.t(),
+            provider: String.t() | nil,
+            provider_id: String.t() | nil,
+            memory: non_neg_integer() | nil,
+            cores: non_neg_integer() | nil,
+            owner_id: String.t() | nil
+          }
+          | nil
+  def machine(%Job{status: :running, worker_id: worker_id}) when is_binary(worker_id) do
+    case Workers.get(worker_id) do
+      nil ->
+        nil
+
+      worker ->
+        %{
+          id: worker.id,
+          provider: worker.provider,
+          provider_id: worker.provider_id,
+          memory: worker.memory_budget,
+          cores: worker.cores,
+          owner_id: worker.user_id
+        }
+    end
+  end
+
+  def machine(_chat), do: nil
 
   defp role("chat.message"), do: :user
   defp role(_harness_text), do: :agent

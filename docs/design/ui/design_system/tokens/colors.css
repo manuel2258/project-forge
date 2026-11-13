@@ -1,0 +1,103 @@
+/* forge colour tokens. Dark is the default; light via [data-theme="light"]. Colour carries meaning, never decoration. */
+:root {
+  /* neutrals */
+  --bg: oklch(15.5% 0.008 300);
+  --surface-1: oklch(17.5% 0.008 300);
+  --surface-2: oklch(19.5% 0.009 300);
+  --surface-3: oklch(22% 0.010 300);
+  --border: oklch(24.5% 0.008 300);
+  --border-soft: oklch(24.5% 0.008 300 / .6);
+  --border-strong: oklch(40% 0.010 300);
+  --chip: oklch(30% 0.012 300);
+  --ink: oklch(94% 0.004 300);
+  --ink-2: oklch(94% 0.004 300 / .75);
+  --ink-3: oklch(94% 0.004 300 / .55);
+  --ink-4: oklch(94% 0.004 300 / .40);
+  --track: oklch(94% 0.004 300 / .10);
+
+  /* meaning */
+  --accent: oklch(76% 0.130 62);          /* waits on you */
+  --on-accent: oklch(18% 0.040 62);
+  --accent-text: oklch(76% 0.130 62);
+  --accent-wash: oklch(76% 0.130 62 / .08);
+  --accent-line: oklch(76% 0.130 62 / .5);
+  --accent-highlight: oklch(24% 0.035 62);
+  --info: oklch(72% 0.100 240);           /* running, agent actions */
+  --success: oklch(72% 0.120 150);        /* passed, added, connected */
+  --warning: oklch(82% 0.110 62);         /* outdated, expiring, near a limit */
+  --danger: oklch(72% 0.170 22);          /* failed, removed, destructive */
+  --danger-line: oklch(72% 0.170 22 / .5);
+  --danger-wash: oklch(72% 0.170 22 / .06);
+  --link: oklch(72% 0.130 290);           /* links, selected options */
+  --doc: oklch(74% 0.100 210);            /* document icons */
+
+  /* diff */
+  --diff-add: oklch(72% 0.120 150 / .10);
+  --diff-del: oklch(72% 0.170 22 / .10);
+
+  /* overlays */
+  --overlay: oklch(8% 0.005 300 / .7);
+  --overlay-soft: oklch(8% 0.005 300 / .6);
+  --toast-bg: oklch(26% 0.012 300);
+  --toast-ink: oklch(96% 0.004 300);
+
+  /* syntax (chroma <= .08 so code never reads as status) */
+  --syntax-keyword: oklch(76% 0.08 320);
+  --syntax-module: oklch(84% 0.05 200);
+  --syntax-function: oklch(88% 0.04 260);
+  --syntax-string: oklch(82% 0.06 110);
+  --syntax-atom: oklch(80% 0.06 175);
+  --syntax-number: oklch(78% 0.07 345);
+  --syntax-comment: oklch(94% 0.004 300 / .45);
+
+  /* semantic aliases */
+  --surface-page: var(--bg);
+  --surface-card: var(--surface-1);
+  --surface-selected: var(--surface-2);
+  --surface-strip: var(--surface-2);
+  --text-body: var(--ink);
+  --text-muted: var(--ink-3);
+  --rule: var(--border);
+}
+[data-theme="light"] {
+  --bg: oklch(99.2% 0.004 240);
+  --surface-1: oklch(97.5% 0.005 245);
+  --surface-2: oklch(95% 0.007 245);
+  --surface-3: oklch(92% 0.009 248);
+  --border: oklch(89% 0.012 250);
+  --border-soft: oklch(89% 0.012 250 / .8);
+  --border-strong: oklch(75% 0.012 250);
+  --chip: oklch(90% 0.010 250);
+  --ink: oklch(22% 0.025 255);
+  --ink-2: oklch(22% 0.025 255 / .75);
+  --ink-3: oklch(22% 0.025 255 / .58);
+  --ink-4: oklch(22% 0.025 255 / .42);
+  --track: oklch(22% 0.025 255 / .10);
+  --accent: oklch(80% 0.155 72);
+  --on-accent: oklch(24% 0.060 60);
+  --accent-text: oklch(56% 0.160 52);
+  --accent-wash: oklch(80% 0.155 72 / .14);
+  --accent-line: oklch(70% 0.155 62 / .6);
+  --accent-highlight: oklch(93% 0.060 80);
+  --info: oklch(52% 0.150 248);
+  --success: oklch(52% 0.140 162);
+  --warning: oklch(56% 0.160 52);
+  --danger: oklch(55% 0.200 25);
+  --danger-line: oklch(55% 0.200 25 / .45);
+  --danger-wash: oklch(55% 0.200 25 / .06);
+  --link: oklch(50% 0.190 278);
+  --doc: oklch(50% 0.100 215);
+  --diff-add: oklch(60% 0.130 162 / .12);
+  --diff-del: oklch(60% 0.190 25 / .10);
+  --overlay: oklch(30% 0.020 255 / .35);
+  --overlay-soft: oklch(30% 0.020 255 / .25);
+  --toast-bg: oklch(23% 0.020 255);
+  --toast-ink: oklch(97% 0.004 250);
+  --syntax-keyword: oklch(45% 0.10 320);
+  --syntax-module: oklch(45% 0.07 200);
+  --syntax-function: oklch(40% 0.06 260);
+  --syntax-string: oklch(45% 0.09 110);
+  --syntax-atom: oklch(45% 0.08 175);
+  --syntax-number: oklch(45% 0.10 345);
+  --syntax-comment: oklch(22% 0.025 255 / .45);
+}

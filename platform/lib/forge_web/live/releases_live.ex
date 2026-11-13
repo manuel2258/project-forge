@@ -79,54 +79,49 @@ defmodule ForgeWeb.ReleasesLive do
     <Layouts.app
       flash={@flash}
       current_scope={@current_scope}
+      frame={@frame}
       capacity={@capacity}
-      active={:board}
-      measure="74rem"
+      title="Releases"
+      subline={subline(@project, @count)}
+      context={{@project.name, ~p"/projects/#{@project.name}"}}
+      back={{@project.name, ~p"/projects/#{@project.name}"}}
+      views={ForgeWeb.ProjectLive.strip(@project, %{}, :navigate)}
+      measure="44rem"
     >
-      <.link
-        navigate={~p"/projects/#{@project.name}"}
-        class="flex min-h-[46px] items-center font-mono text-[12.5px] opacity-60 hover:opacity-100"
-      >
-        ‹ {@project.name}
-      </.link>
+      <div id="releases-page" class="releases">
+        <p :if={@open} id="release-in-progress" class="releases-line">
+          A release is in progress:
+          <.link navigate={~p"/tickets/#{@project.name}/#{@open.number}"} class="release-target">
+            #{@open.number} ›
+          </.link>
+        </p>
 
-      <h1 class="mt-4 text-2xl font-semibold -tracking-[.025em]">Releases</h1>
+        <p :if={@records == [] and @has_workflow} id="releases-empty" class="releases-line">
+          A release appears here once one ends done.
+        </p>
+        <p :if={@records == [] and not @has_workflow} id="releases-no-workflow" class="releases-line">
+          No workflow in this project sets <code>release: true</code>, which is what would fill this
+          page.
+        </p>
 
-      <p :if={@open} id="release-in-progress" class="mt-3 min-w-0 text-sm break-words">
-        A release is in progress:
+        <div id="releases">
+          <ReleaseComponents.entry :for={record <- @records} record={record} project={@project} />
+        </div>
+
         <.link
-          navigate={~p"/tickets/#{@project.name}/#{@open.number}"}
-          class="inline-flex min-h-[46px] items-center text-primary hover:underline"
+          :if={@count > length(@records)}
+          id="show-more"
+          patch={~p"/projects/#{@project.name}/releases?shown=#{@next}"}
+          class="release-more"
         >
-          #{@open.number} ›
+          Show more › ({@count - length(@records)} older)
         </.link>
-      </p>
-
-      <p :if={@records == [] and @has_workflow} id="releases-empty" class="mt-6 text-sm opacity-70">
-        A release appears here once one ends done.
-      </p>
-      <p
-        :if={@records == [] and not @has_workflow}
-        id="releases-no-workflow"
-        class="mt-6 text-sm opacity-70"
-      >
-        No workflow in this project sets <code class="font-mono">release: true</code>, which is what
-        would fill this page.
-      </p>
-
-      <div id="releases" class="mt-4">
-        <ReleaseComponents.entry :for={record <- @records} record={record} project={@project} />
       </div>
-
-      <.link
-        :if={@count > length(@records)}
-        id="show-more"
-        patch={~p"/projects/#{@project.name}/releases?shown=#{@next}"}
-        class="flex min-h-[46px] items-center justify-center border-t border-base-300 text-sm text-primary hover:underline"
-      >
-        Show more › ({@count - length(@records)} older)
-      </.link>
     </Layouts.app>
     """
   end
+
+  defp subline(project, 0), do: project.name
+  defp subline(project, 1), do: "#{project.name} · 1 release"
+  defp subline(project, count), do: "#{project.name} · #{count} releases"
 end

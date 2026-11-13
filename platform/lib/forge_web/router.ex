@@ -29,12 +29,12 @@ defmodule ForgeWeb.Router do
   scope "/", ForgeWeb do
     pipe_through [:browser, :require_authenticated_user, :require_approved_user]
 
-    # `ForgeWeb.Capacity` draws the top bar's window gauge over the viewer's own credentials; a
-    # page about one project switches it to that project's pool once it has allowed the viewer.
+    # `ForgeWeb.Frame` reads what the frame draws on every page — the queue count, the usage
+    # lines over the viewer's own credentials — and keeps it current; a page about one project
+    # switches the lines to that project's pool once it has allowed the viewer.
     live_session :operator,
-      on_mount: [{ForgeWeb.UserAuth, :require_approved}, {ForgeWeb.Capacity, :own}] do
+      on_mount: [{ForgeWeb.UserAuth, :require_approved}, {ForgeWeb.Frame, :signed_in}] do
       live "/", QueueLive
-      live "/board", BoardLive
       live "/workers", WorkersLive
       live "/workers/:id", WorkerLive
       live "/templates", TemplatesLive
@@ -52,11 +52,11 @@ defmodule ForgeWeb.Router do
       live "/projects/:name/releases/:id", ReleaseLive
       live "/tickets/new", TicketNewLive
       live "/tickets/:project/:number", TicketLive
-      live "/tickets/:project/:number/review", ReviewLive
       live "/tickets/:project/:number/jobs/:job_id", JobLive
       live "/chats", ChatsLive
       live "/chats/new", ChatNewLive
       live "/chats/:id", ChatLive
+      live "/usage", UsageLive
     end
 
     # Not a LiveView: this serves bytes, and every artifact name in the product links to it.
@@ -72,7 +72,7 @@ defmodule ForgeWeb.Router do
     pipe_through [:browser, :require_authenticated_user, :require_approved_user]
 
     live_session :node_admin,
-      on_mount: [{ForgeWeb.UserAuth, :require_node_admin}, {ForgeWeb.Capacity, :own}] do
+      on_mount: [{ForgeWeb.UserAuth, :require_node_admin}, {ForgeWeb.Frame, :signed_in}] do
       live "/accounts", AccountsLive
     end
   end
@@ -169,7 +169,7 @@ defmodule ForgeWeb.Router do
     pipe_through [:browser, :require_authenticated_user, :require_approved_user]
 
     live_session :require_authenticated_user,
-      on_mount: [{ForgeWeb.UserAuth, :require_approved}, {ForgeWeb.Capacity, :own}] do
+      on_mount: [{ForgeWeb.UserAuth, :require_approved}, {ForgeWeb.Frame, :signed_in}] do
       live "/users/settings", UserLive.Settings, :edit
       live "/users/settings/confirm-email/:token", UserLive.Settings, :confirm_email
     end
@@ -180,8 +180,11 @@ defmodule ForgeWeb.Router do
   scope "/", ForgeWeb do
     pipe_through [:browser]
 
+    # The session carries how this device last signed in (`ForgeWeb.SignIn`), checked, so the
+    # login page opens on that way in.
     live_session :current_user,
-      on_mount: [{ForgeWeb.UserAuth, :mount_current_scope}] do
+      on_mount: [{ForgeWeb.UserAuth, :mount_current_scope}],
+      session: {ForgeWeb.SignIn, :session, []} do
       live "/users/log-in", UserLive.Login, :new
       live "/users/log-in/:token", UserLive.Confirmation, :new
     end

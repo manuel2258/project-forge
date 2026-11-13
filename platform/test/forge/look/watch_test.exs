@@ -41,6 +41,19 @@ defmodule Forge.Look.WatchTest do
     assert mount =~ "nope"
   end
 
+  # The not-found page is what a miss renders (`ui.md` § Not found): a LiveView that cannot see a
+  # row raises with a 404 status, which is the platform answering and no crash.
+  test "a miss raised in a live view is an answer, not a failure" do
+    for reason <- [%Ecto.NoResultsError{message: "none"}, %ForgeWeb.NotAllowed{}] do
+      :telemetry.execute([:phoenix, :live_view, :mount, :exception], %{duration: 1}, %{
+        kind: :error,
+        reason: reason
+      })
+    end
+
+    assert Watch.drain() == []
+  end
+
   test "an error-level log is recorded and a warning is not" do
     capture_log(fn ->
       require Logger

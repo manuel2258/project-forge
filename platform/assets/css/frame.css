@@ -1,0 +1,306 @@
+/* The frame: top bar, usage lines, decision row, strip, the three layouts (docs/design/ui.md
+   § The frame). `Layouts.app/1` draws it; the primitives inside it are components.css's. */
+
+@layer components {
+  /* The viewport exactly: fixed bands and one scroller, so the composer is never below the fold
+     and the strip never scrolls away. The `.ViewportFrame` hook resizes it where the browser
+     ignores `interactive-widget`. */
+  .frame {
+    position: fixed;
+    top: 0;
+    right: 0;
+    left: 0;
+    display: flex;
+    height: 100dvh;
+    flex-direction: column;
+  }
+
+  .frame-top { position: relative; z-index: var(--z-panel); flex-shrink: 0; background: var(--bg); }
+  .frame-top .ui-top { z-index: auto; }
+  .frame-header,
+  .frame-title-row { display: none; }
+
+  .frame-decision { position: relative; z-index: var(--z-row); flex-shrink: 0; }
+  /* A decision's panel can hold a commit message and a note: it scrolls inside itself, and the
+     row it drops from stays where it is. */
+  .frame-decision .ui-drop { max-height: calc(100dvh - 160px); overflow-y: auto; animation: frame-drop var(--dur-panel) var(--ease-out); }
+
+  /* The page's only scroller. When the frame is shorter than everything fixed in it, this is what
+     gives way. */
+  .frame-content {
+    display: flex;
+    min-height: 0;
+    flex: 1 1 0%;
+    flex-direction: column;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .frame-columns { display: flex; width: 100%; flex: 1 0 auto; flex-direction: column; }
+  /* The middle column: the content, and under it the composer — sticky at the scroller's foot, so
+     it never scrolls away and the content's end is still reachable above it. Both are capped at
+     the page's measure (`--frame-measure`, 90rem when the page says nil) and centred alike. */
+  .frame-main { display: flex; min-width: 0; flex: 1 0 auto; flex-direction: column; }
+  .frame-body {
+    width: 100%;
+    max-width: var(--frame-measure, 90rem);
+    box-sizing: border-box;
+    flex: 1 0 auto;
+    margin: 0 auto;
+    padding: 16px var(--gutter-phone) 32px;
+  }
+  .frame-list,
+  .frame-aside { padding: 16px var(--gutter-phone); }
+
+  /* A page with a scroller of its own (a transcript, a tab body): the content is bounded and the
+     page's scroller takes its height. */
+  /* A page that asked for all of the width still stops at 90rem, centred: past that a row's
+     figures sit a screen away from its name (UX pass, A26, D9). */
+  /* Through the fallback, not `:not([style])`: HEEx draws `style={nil}` as `style=""`, so a rule on
+     the attribute's absence never matched and those pages ran the whole width. */
+  .frame--fill .frame-columns { min-height: 0; flex: 1 1 0%; }
+  .frame--fill .frame-main { min-height: 0; flex: 1 1 0%; }
+  .frame--fill .frame-body { display: flex; min-height: 0; flex: 1 1 0%; flex-direction: column; padding-bottom: 0; }
+
+  .frame-composer {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    width: 100%;
+    max-width: var(--frame-measure, 90rem);
+    box-sizing: border-box;
+    flex-shrink: 0;
+    margin: 0 auto;
+    padding: 0 var(--gutter-phone);
+    background: var(--bg);
+  }
+  .frame-strip { flex-shrink: 0; padding-bottom: env(safe-area-inset-bottom); background: var(--surface-strip); }
+
+  /* Drop panels hang from the bottom edge of what dropped them; nothing below them moves. */
+  .frame-drop { position: absolute; top: 100%; right: 0; left: 0; height: 0; }
+  .frame-drop[hidden] { display: none; }
+  .frame-drop .ui-drop { max-height: calc(100dvh - 80px); overflow-y: auto; animation: frame-drop var(--dur-panel) var(--ease-out); }
+  @keyframes frame-drop { from { opacity: 0; transform: translateY(-8px); } }
+
+  .frame-handle { display: flex; height: 22px; align-items: flex-end; justify-content: center; margin: -4px 0 -10px; border: 0; background: none; cursor: pointer; }
+  .frame-handle > span { width: 36px; height: 4px; border-radius: var(--radius-pill); background: var(--border-strong); }
+
+  /* The title menu (19b): a place per row with its state, then the account at its foot. */
+  .frame-menu { display: flex; flex-direction: column; }
+  .frame-menu-row {
+    display: flex;
+    min-height: 46px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border: 0;
+    border-bottom: 1px solid var(--border-soft);
+    background: none;
+    color: var(--ink);
+    font-size: 14px;
+    text-align: left;
+  }
+  .frame-menu-place { width: 100%; padding: 0 0 0 10px; margin-left: -10px; box-sizing: content-box; cursor: pointer; }
+  .frame-menu-label { font-size: 15px; font-weight: 500; }
+  /* The place on screen carries the selection edge (ui.md § Space), not a weight alone. */
+  .frame-menu-place[aria-current] { box-shadow: inset 2px 0 0 var(--ink); }
+  .frame-menu-place[aria-current] .frame-menu-label { font-weight: 600; }
+  .frame-menu-waiting { color: var(--accent-text); }
+  .frame-menu-state:has(.frame-menu-waiting) { opacity: 1; }
+  .frame-menu-state { margin-left: auto; font-family: var(--font-mono); font-size: 12px; opacity: .65; }
+  .frame-menu-chevron { opacity: .4; }
+  .frame-menu-foot { display: flex; flex-direction: column; margin-top: 4px; }
+  .frame-menu-account { overflow: hidden; font-family: var(--font-mono); font-size: 12.5px; text-overflow: ellipsis; }
+  .frame-menu-version { padding-top: 10px; font-family: var(--font-mono); font-size: 12px; opacity: .55; }
+
+  /* The usage panel (22e, basic). */
+  .frame-usage { display: flex; flex-direction: column; gap: 16px; }
+  .frame-usage-window { display: flex; flex-direction: column; gap: 6px; }
+  .frame-usage-head { display: flex; align-items: baseline; justify-content: space-between; }
+  .frame-usage-label { font-size: 14px; font-weight: 500; }
+  .frame-usage-figure { font-family: var(--font-mono); font-size: 20px; font-weight: 500; }
+  .frame-usage-meta { font-family: var(--font-mono); font-size: 11.5px; opacity: .65; }
+  .frame-usage .ui-usage { height: 4px; }
+
+  /* Desktop, portrait and wide: the header and the title row, and the strip's views as tabs. */
+  @media (min-width: 768px) {
+    .frame-top #top-bar,
+    .frame-strip { display: none; }
+
+    .frame-header {
+      display: flex;
+      height: var(--bar-header-desk);
+      box-sizing: border-box;
+      align-items: center;
+      gap: 24px;
+      padding: 0 var(--gutter-desk);
+      font-size: 14px;
+    }
+    .frame-brand { display: flex; align-items: baseline; gap: 8px; }
+    .frame-wordmark { font-weight: 600; letter-spacing: -.02em; }
+    .frame-version { font-family: var(--font-mono); font-size: 12px; opacity: .55; }
+    .frame-switch {
+      display: flex;
+      height: 34px;
+      align-items: center;
+      gap: 6px;
+      padding: 0 8px;
+      border: 0;
+      border-radius: var(--radius-sm);
+      background: none;
+      color: var(--ink);
+      cursor: pointer;
+      font-weight: 500;
+    }
+    .frame-switch > span { font-size: 11px; opacity: .6; }
+    .frame-queue { display: flex; height: 34px; align-items: center; gap: 8px; padding: 0 8px; border-radius: var(--radius-sm); }
+    .frame-header-gap { flex: 1 1 0%; }
+    .frame-digits { border: 0; background: none; color: var(--ink-3); cursor: pointer; font-family: var(--font-mono); font-size: 12px; }
+    .frame-digit--warning { color: var(--warning); }
+    .frame-digit--danger { color: var(--danger); }
+    .frame-account {
+      overflow: hidden;
+      max-width: 260px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      opacity: .7;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .frame-switch:hover,
+    .frame-queue:hover { background: var(--surface-2); }
+    .frame-account:hover { opacity: 1; }
+
+    .frame-title-row {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 14px var(--gutter-desk) 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    /* A page with no column either side: the title row's edges are the body's, so the title
+       starts where the content does (`--frame-measure` is the page's, 90rem when it has none). */
+    .frame-title-row--measured { padding-inline: max(var(--gutter-desk), calc((100% - var(--frame-measure, 90rem)) / 2 + var(--gutter-desk))); }
+    .frame-heading { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+    .frame-back { font-family: var(--font-mono); font-size: 12px; opacity: .6; }
+    .frame-back:hover { opacity: 1; }
+    .frame-heading-line { display: flex; min-width: 0; align-items: baseline; gap: 14px; }
+    .frame-h1 { overflow: hidden; font-size: 21px; font-weight: 600; letter-spacing: -.02em; text-overflow: ellipsis; white-space: nowrap; }
+    .frame-h1 > button { border: 0; background: none; color: inherit; cursor: pointer; font: inherit; letter-spacing: inherit; }
+    .frame-h1-menu { margin-left: 8px; font-size: 12px; font-weight: 400; opacity: .6; }
+    .frame-subline { font-family: var(--font-mono); font-size: 12px; opacity: .65; white-space: nowrap; }
+    .frame-context {
+      display: flex;
+      height: 34px;
+      align-items: center;
+      padding: 0 12px;
+      border: 1px solid var(--border-control);
+      border-radius: var(--radius);
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+    }
+    .frame-context:hover { background: var(--surface-2); }
+
+    .frame-body { padding: 24px var(--gutter-desk) 64px; }
+    .frame-list,
+    .frame-aside { padding: 24px var(--gutter-desk); }
+    .frame-composer { padding: 0 var(--gutter-desk); }
+
+    /* On a desktop a panel is anchored to its trigger rather than spanning the window: the menu
+       under the switch and the usage panel under the digits, both from the header's foot; the
+       details under the title row. */
+    .frame-drop--menu,
+    .frame-drop--usage { top: calc(var(--usage-5h) + var(--bar-header-desk) + var(--usage-week)); }
+    .frame-drop--menu .ui-drop,
+    .frame-drop--usage .ui-drop,
+    .frame-drop--details .ui-drop { border: 1px solid var(--border); border-radius: var(--radius-panel); }
+    .frame-drop--menu .ui-drop { right: auto; left: calc(var(--gutter-desk) + 60px); width: 380px; }
+    .frame-drop--usage .ui-drop { right: var(--gutter-desk); left: auto; width: 440px; }
+    .frame-drop--details .ui-drop { right: auto; left: var(--gutter-desk); width: min(480px, calc(100vw - 2 * var(--gutter-desk))); }
+
+    /* The decision row lines up with the title row, and its panel is anchored under its button. */
+    .frame-decision .ui-decision-bar { height: var(--bar-decision-desk); padding: 0 var(--gutter-desk); }
+    .frame-decision .ui-decision-bar > .ui-btn { --ui-btn-h: var(--control-desk); padding: 0 12px; border-radius: var(--radius-sm); font-size: 13px; }
+    .frame-decision .ui-drop { right: var(--gutter-desk); left: auto; width: min(480px, calc(100vw - 2 * var(--gutter-desk))); border: 1px solid var(--border); border-radius: var(--radius-panel); }
+  }
+
+  /* Wide: the list column on the left and the context column on the right, the content between at
+     its measure. Nothing moves above anything else. */
+  @media (min-width: 1440px) {
+    .frame-columns { flex-direction: row; align-items: stretch; }
+    .frame-main { flex: 1 1 0%; }
+    .frame-list { width: var(--column-list); min-width: 320px; flex-shrink: 0; border-right: 1px solid var(--border); }
+    .frame-aside { width: var(--column-context); min-width: 360px; flex-shrink: 0; border-left: 1px solid var(--border); }
+  }
+
+  /* The sign-in screens: no frame, no usage, no version. */
+  .sign-in { display: flex; min-height: 100dvh; justify-content: center; padding: 48px var(--gutter-phone); }
+  .sign-in-body { width: 100%; max-width: 24rem; }
+  .sign-in-wordmark { margin-bottom: 32px; font-size: 18px; font-weight: 600; letter-spacing: -.02em; }
+
+  /* Not found (ui.md § Not found, 20c): in the frame, what was asked for, why, and the two places
+     worth going — the first outlined in ink, the way on. Centred in what the frame leaves. */
+  .not-found {
+    display: flex;
+    min-height: 60dvh;
+    flex-direction: column;
+    justify-content: center;
+    gap: 14px;
+    padding: 24px 0;
+  }
+  .not-found-code {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: var(--tracking-eyebrow);
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .not-found-headline { font-size: 21px; font-weight: 600; letter-spacing: var(--tracking-title); line-height: 1.3; overflow-wrap: anywhere; }
+  .not-found-reasons { font-size: var(--text-body); line-height: 1.55; color: var(--ink-2); }
+  .not-found-places { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+  .not-found-place {
+    display: flex;
+    min-height: 52px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius-md);
+    font-size: 14px;
+  }
+  .not-found-place:first-child { border-color: var(--ink); font-weight: 500; }
+  .not-found-place span { color: var(--ink-3); }
+  .not-found-place:first-child span { color: var(--ink); }
+  @media (hover: hover) { .not-found-place:hover { background: var(--surface-2); } }
+
+  /* Connection state (ui.md § Connection state). `data-connection` on <html> is the `Connection`
+     hook's: `lost` turns the bar red-hatched under a 2px red rule — drawn inside the bar, so its
+     52px and everything under it stay put — and `back` shows it green for a moment. */
+  .frame-offline { display: none; }
+  [data-connection="lost"] .frame-top .ui-top-bar,
+  [data-connection="lost"] .frame-header {
+    background: repeating-linear-gradient(135deg, var(--danger-wash) 0 8px, transparent 8px 16px), var(--bg);
+    box-shadow: inset 0 2px 0 var(--danger);
+  }
+  [data-connection="back"] .frame-top .ui-top-bar,
+  [data-connection="back"] .frame-header {
+    background: color-mix(in oklch, var(--success) 8%, var(--bg));
+    box-shadow: inset 0 2px 0 var(--success);
+  }
+  [data-connection="lost"] .frame-top .ui-top-title > :not(.ui-top-offline) { display: none; }
+  [data-connection="lost"] .frame-top .ui-top-offline { display: contents; color: var(--danger); }
+  [data-connection="lost"] .frame-offline {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 6px;
+    color: var(--danger);
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  .frame-offline-title { font-weight: 500; }
+  .frame-offline-line { overflow: hidden; font-family: var(--font-mono); font-size: 11.5px; text-overflow: ellipsis; }
+
+  /* What would send something greys out where it is, at its own size. */
+  [data-offline] { cursor: not-allowed; opacity: .45; pointer-events: none; }
+}

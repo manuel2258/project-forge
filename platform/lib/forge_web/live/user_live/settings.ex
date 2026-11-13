@@ -3,71 +3,131 @@ defmodule ForgeWeb.UserLive.Settings do
 
   on_mount {ForgeWeb.UserAuth, :require_sudo_mode}
 
+  import ForgeWeb.ProjectAssign, only: [project_assign: 1]
+
   alias Forge.{Accounts, Credentials, Harness, Projects}
-  alias ForgeWeb.Format
+  alias ForgeWeb.{Capacity, Format, PushEvents, SignIn, Toast}
 
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} capacity={@capacity}>
-      <div class="text-center">
-        <.header>
-          Account Settings
-          <:subtitle>Manage your account email address and password settings</:subtitle>
-        </.header>
-      </div>
+    <Layouts.app
+      section="You"
+      flash={@flash}
+      current_scope={@current_scope}
+      frame={@frame}
+      capacity={@capacity}
+      title="You"
+      subline={subline(@current_scope.user)}
+      measure="34rem"
+    >
+      <section id="you-browser" class="you-section">
+        <.eyebrow>This browser</.eyebrow>
 
-      <.form for={@email_form} id="email_form" phx-submit="update_email" phx-change="validate_email">
-        <.input
-          field={@email_form[:email]}
-          type="email"
-          label="Email"
-          autocomplete="username"
-          spellcheck="false"
-          required
-        />
-        <.button variant="primary" phx-disable-with="Changing...">Change Email</.button>
-      </.form>
+        <%!-- The switch is this browser's own subscription, which only the browser knows: the
+              hook reads it and sets `aria-checked`, and `phx-update="ignore"` keeps a re-render
+              from setting it back. --%>
+        <button
+          :if={@push_key}
+          id="push-switch"
+          type="button"
+          role="switch"
+          aria-checked="false"
+          phx-hook="PushSubscribe"
+          phx-update="ignore"
+          data-vapid-key={@push_key}
+          class="you-row you-row--switch"
+        >
+          <span class="you-row-text">
+            <span>Notify me of blocking questions</span>
+            <span class="you-row-detail">Push notifications, this browser only</span>
+          </span>
+          <span class="you-switch" aria-hidden="true"></span>
+        </button>
+        <.error_note :if={@push_error} id="push-error">{@push_error}</.error_note>
 
-      <div class="divider" />
+        <div id="you-theme" class="you-row you-row--stack">
+          <span id="you-theme-label">Theme</span>
+          <%!-- Drawn like `segmented/1`, but the selected look follows `data-theme` on <html>,
+                which the browser sets: the server does not know this browser's theme. --%>
+          <div class="ui-seg you-theme" role="group" aria-labelledby="you-theme-label">
+            <button
+              :for={theme <- ~w(system dark light)}
+              type="button"
+              class="ui-seg-opt"
+              phx-click={JS.dispatch("phx:set-theme")}
+              data-phx-theme={theme}
+            >
+              {theme}
+            </button>
+          </div>
+        </div>
+      </section>
 
-      <.form
-        for={@password_form}
-        id="password_form"
-        action={~p"/users/update-password"}
-        method="post"
-        phx-change="validate_password"
-        phx-submit="update_password"
-        phx-trigger-action={@trigger_submit}
-      >
-        <input
-          name={@password_form[:email].name}
-          type="hidden"
-          id="hidden_user_email"
-          spellcheck="false"
-          value={@current_email}
-        />
-        <.input
-          field={@password_form[:password]}
-          type="password"
-          label="New password"
-          autocomplete="new-password"
-          spellcheck="false"
-          required
-        />
-        <.input
-          field={@password_form[:password_confirmation]}
-          type="password"
-          label="Confirm new password"
-          autocomplete="new-password"
-          spellcheck="false"
-        />
-        <.button variant="primary" phx-disable-with="Saving...">
-          Save Password
-        </.button>
-      </.form>
+      <section id="you-account" class="you-section">
+        <.eyebrow>Account</.eyebrow>
 
-      <div class="divider" />
+        <div id="you-signed-in" class="you-row">
+          <span class="you-row-quiet">Signed in with</span>
+          <span class="you-row-ways">
+            <span :for={way <- @ways} class="you-row-value">{way}</span>
+          </span>
+        </div>
+
+        <.form
+          for={@email_form}
+          id="email_form"
+          phx-submit="update_email"
+          phx-change="validate_email"
+          class="you-form"
+        >
+          <.input
+            field={@email_form[:email]}
+            type="email"
+            label="Email"
+            autocomplete="username"
+            spellcheck="false"
+            required
+          />
+          <.error_note :if={@email_error} id="email-error">{@email_error}</.error_note>
+          <.button phx-disable-with="Sending…">Change email</.button>
+        </.form>
+
+        <.form
+          for={@password_form}
+          id="password_form"
+          action={~p"/users/update-password"}
+          method="post"
+          phx-change="validate_password"
+          phx-submit="update_password"
+          phx-trigger-action={@trigger_submit}
+          class="you-form"
+        >
+          <input
+            name={@password_form[:email].name}
+            type="hidden"
+            id="hidden_user_email"
+            spellcheck="false"
+            value={@current_email}
+          />
+          <.input
+            field={@password_form[:password]}
+            type="password"
+            label="New password"
+            autocomplete="new-password"
+            spellcheck="false"
+            required
+          />
+          <.input
+            field={@password_form[:password_confirmation]}
+            type="password"
+            label="Confirm new password"
+            autocomplete="new-password"
+            spellcheck="false"
+          />
+          <.button phx-disable-with="Saving…">Save password</.button>
+        </.form>
+      </section>
 
       <.credentials
         credentials={@credentials}
@@ -81,25 +141,51 @@ defmodule ForgeWeb.UserLive.Settings do
         seq={@credential_seq}
         error={@credential_error}
       />
+
+      <%!-- Where to go from here, after what is yours to set (UX pass, D20): they sat between
+            "Signed in with" and the email field, which they have nothing to do with. --%>
+      <section id="you-elsewhere" class="you-section">
+        <.link :if={@waiting} id="you-accounts" navigate={~p"/accounts"} class="you-row">
+          <span>Accounts</span>
+          <span class={["you-row-value", @waiting > 0 && "you-row-value--waiting"]}>
+            {@waiting} waiting ›
+          </span>
+        </.link>
+
+        <.link id="you-usage" navigate={~p"/usage"} class="you-row">
+          <span>Usage</span>
+          <span class="you-row-value you-row-quiet">
+            5h {Capacity.shown(@capacity["five_hour"])} · week {Capacity.shown(@capacity["seven_day"])} ›
+          </span>
+        </.link>
+      </section>
+
+      <.link id="you-sign-out" href={~p"/users/log-out"} method="delete" class="you-sign-out">
+        Sign out
+      </.link>
     </Layouts.app>
     """
   end
 
+  defp subline(user), do: if(user.node_admin, do: user.email <> " · admin", else: user.email)
+
   @impl true
   def mount(%{"token" => token}, _session, socket) do
-    socket =
-      case Accounts.update_user_email(socket.assigns.current_scope.user, token) do
-        {:ok, _user} ->
-          put_flash(socket, :info, "Email changed successfully.")
+    case Accounts.update_user_email(socket.assigns.current_scope.user, token) do
+      {:ok, _user} ->
+        {:ok,
+         socket
+         |> Toast.put("Email changed successfully.")
+         |> push_navigate(to: ~p"/users/settings")}
 
-        {:error, _} ->
-          put_flash(socket, :error, "Email change link is invalid or it has expired.")
-      end
-
-    {:ok, push_navigate(socket, to: ~p"/users/settings")}
+      # Said under the email field, where a new link is asked for: the address carries it,
+      # because the page it lands on is a new one.
+      {:error, _} ->
+        {:ok, push_navigate(socket, to: ~p"/users/settings?email=expired")}
+    end
   end
 
-  def mount(_params, _session, socket) do
+  def mount(params, _session, socket) do
     user = socket.assigns.current_scope.user
     email_changeset = Accounts.change_user_email(user, %{}, validate_unique: false)
     password_changeset = Accounts.change_user_password(user, %{}, hash_password: false)
@@ -107,14 +193,26 @@ defmodule ForgeWeb.UserLive.Settings do
     socket =
       socket
       |> assign(:current_email, user.email)
+      |> PushEvents.init()
+      |> assign(:ways, ways(user))
+      |> assign(:waiting, user.node_admin && Forge.Queue.waiting_accounts(user))
       |> assign(:email_form, to_form(email_changeset))
       |> assign(:password_form, to_form(password_changeset))
       |> assign(:trigger_submit, false)
+      |> assign(:email_error, email_error(params))
       |> load_credentials()
       |> reset_credential_form()
 
     {:ok, socket}
   end
+
+  defp email_error(%{"email" => "expired"}),
+    do: "Email change link is invalid or it has expired. Ask for another below."
+
+  defp email_error(_params), do: nil
+
+  # How this account signs in, as the accounts page says it (`SignIn.ways/2`).
+  defp ways(user), do: SignIn.ways(user, Accounts.identities_by_user([user])[user.id] || [])
 
   # -- inference credentials --------------------------------------------------------------------
   #
@@ -185,7 +283,7 @@ defmodule ForgeWeb.UserLive.Settings do
         )
 
         info = "A link to confirm your email change has been sent to the new address."
-        {:noreply, socket |> put_flash(:info, info)}
+        {:noreply, socket |> Toast.put(info)}
 
       changeset ->
         {:noreply, assign(socket, :email_form, to_form(changeset, action: :insert))}
@@ -203,6 +301,12 @@ defmodule ForgeWeb.UserLive.Settings do
 
     {:noreply, assign(socket, password_form: password_form)}
   end
+
+  # This browser's push subscription: one head each, so the inventory can read them
+  # (`authorization_inventory_test.exs`), all handled by `ForgeWeb.PushEvents`.
+  def handle_event("push:subscribe" = event, params, socket), do: push(event, params, socket)
+  def handle_event("push:unsubscribe" = event, params, socket), do: push(event, params, socket)
+  def handle_event("push:error" = event, params, socket), do: push(event, params, socket)
 
   # Changing the harness changes the kinds it offers. What arrives is every field of the form,
   # the secret included, and all of it but the secret is kept.
@@ -377,9 +481,9 @@ defmodule ForgeWeb.UserLive.Settings do
 
   defp credentials(assigns) do
     ~H"""
-    <section id="credentials">
-      <h2 class="text-lg font-semibold">Inference credentials</h2>
-      <p class="mt-1 text-sm/[1.55] opacity-60">
+    <section id="credentials" class="you-section">
+      <.eyebrow>Inference credentials</.eyebrow>
+      <p class="you-lede">
         The tokens your agents authenticate with. Yours and nobody else's: a job spends one only
         when you have assigned it to that job's project, and a project with several picks between
         them per job. Each is tried against the provider when you add it — a Codex credential only
@@ -388,86 +492,85 @@ defmodule ForgeWeb.UserLive.Settings do
 
       <%!-- Rows separated by a rule, not boxed: a row is not something to tap, and § The
             affordance rule reserves the border for what is. --%>
-      <ul class="mt-4 flex flex-col">
+      <ul class="you-credentials">
         <li
           :for={credential <- @credentials}
           id={"credential-#{credential.id}"}
-          class={[
-            "flex min-h-[52px] flex-wrap items-center gap-x-4 gap-y-1 border-b border-base-300 py-2",
-            Credentials.revoked?(credential) && "opacity-50"
-          ]}
+          class={["you-credential", Credentials.revoked?(credential) && "you-credential--revoked"]}
         >
-          <%!-- Cut to the row, whole in its title, as names are everywhere else (`ui.md`): the name
-                is the owner's and as long as they typed. --%>
-          <span class="max-w-full truncate text-sm font-medium" title={credential.name}>
-            {credential.name}
-          </span>
-          <span class="font-mono text-[12.5px] opacity-60">
-            {Harness.label(credential.harness)} · {Harness.kind_label(
-              credential.harness,
-              credential.kind
-            )}
-          </span>
-          <span class="font-mono text-[12.5px] opacity-60">{status(credential)}</span>
-          <span
+          <div class="you-credential-head">
+            <%!-- Cut to the row, whole in its title, as names are everywhere else (`ui.md`): the
+                  name is the owner's and as long as they typed. --%>
+            <span class="you-credential-name" title={credential.name}>{credential.name}</span>
+            <span class="you-credential-fact">
+              {Harness.label(credential.harness)} · {Harness.kind_label(
+                credential.harness,
+                credential.kind
+              )}
+            </span>
+          </div>
+          <p class="you-credential-fact">{status(credential)}</p>
+          <p
             :if={detail(credential, @in_use)}
-            class={[
-              "font-mono text-[12.5px]",
-              if(expiring?(credential), do: "text-warning", else: "opacity-60")
-            ]}
+            class={["you-credential-fact", expiring?(credential) && "text-warning"]}
           >
             {detail(credential, @in_use)}
-          </span>
-          <span class="font-mono text-[12.5px] opacity-60">
+          </p>
+          <p class="you-credential-fact" title={Format.exact(Map.get(@spent, credential.id))}>
             {spend(Map.get(@spent, credential.id), credential.daily_limit)}
-          </span>
-          <span
+          </p>
+          <p
             :if={kinds_line(Map.get(@detail, credential.id))}
             id={"credential-#{credential.id}-tokens"}
-            class="font-mono text-[12.5px] opacity-60"
+            class="you-credential-fact"
           >
             {kinds_line(Map.get(@detail, credential.id))}
-          </span>
-          <%!-- Claude Code's own dollar figure, for the one kind billed in dollars; read by no cap. --%>
-          <span
+          </p>
+          <%!-- Claude Code's own dollar figure, for the one kind billed in dollars; read by no
+                cap. --%>
+          <p
             :if={dollars_line(credential, Map.get(@detail, credential.id))}
             id={"credential-#{credential.id}-dollars"}
-            class="font-mono text-[12.5px] opacity-60"
+            class="you-credential-fact"
           >
             {dollars_line(credential, Map.get(@detail, credential.id))}
-          </span>
+          </p>
           <%!-- One line per window the provider has reported, drawn by capacity.md's rules: a
                 figure only when one was given, the reset always, warning colour only while it
-                blocks. --%>
-          <span
+                blocks — when the line is also drawn full, because a limited credential counts as
+                full. --%>
+          <div
             :for={{type, window} <- ordered(Map.get(@windows, credential.id, %{}))}
             id={"credential-#{credential.id}-#{type}"}
-            class={[
-              "font-mono text-[12.5px]",
-              if(window.limited, do: "text-warning", else: "opacity-60")
-            ]}
+            class={["you-window", window.limited && "text-warning"]}
           >
-            {window_line(type, window)}{if window.limited, do: " · rate-limited"}
-          </span>
-          <div :if={not Credentials.revoked?(credential)} class="ml-auto flex items-center gap-4">
-            <button
+            <.usage_line
+              :if={line(type)}
+              window={line(type)}
+              percent={line_percent(window)}
+            />
+            <span class="you-window-text">
+              {window_line(type, window)}{if window.limited, do: " · rate-limited"}
+            </span>
+          </div>
+          <div :if={not Credentials.revoked?(credential)} class="you-credential-actions">
+            <.button
               :if={not checked_by_shape?(credential)}
-              type="button"
+              size="sm"
               phx-click="check-credential"
               phx-value-id={credential.id}
-              class="min-h-[46px] text-sm text-primary hover:underline"
             >
               Check again
-            </button>
-            <button
-              type="button"
+            </.button>
+            <.confirm
+              id={"revoke-credential-#{credential.id}"}
+              label="Revoke"
+              act="Revoke it"
+              sentence={"Revoke #{credential.name}? No job will start on it again, and the token is deleted."}
+              class="ui-confirm--inline"
               phx-click="revoke-credential"
               phx-value-id={credential.id}
-              data-confirm={"Revoke #{credential.name}? No job will start on it again, and the token is deleted."}
-              class="min-h-[46px] text-sm text-error hover:underline"
-            >
-              Revoke
-            </button>
+            />
           </div>
           <.funds
             :if={not Credentials.revoked?(credential)}
@@ -476,20 +579,21 @@ defmodule ForgeWeb.UserLive.Settings do
             projects={@projects}
           />
         </li>
-        <li :if={@credentials == []} class="text-sm opacity-60">
+        <li :if={@credentials == []} class="you-lede">
           None yet, so none of your projects can run a job on your account.
         </li>
       </ul>
 
-      <p :if={@error} class="mt-4 text-sm text-error">{@error}</p>
+      <.error_note :if={@error} class="you-error">{@error}</.error_note>
 
       <.form
         for={@form}
         id="credential-form"
         phx-change="credential-change"
         phx-submit="add-credential"
-        class="mt-4 flex flex-col gap-2"
+        class="you-form"
       >
+        <h2 class="you-form-title">Add a credential</h2>
         <.input field={@form[:name]} type="text" label="Name" autocomplete="off" />
         <.input
           field={@form[:harness]}
@@ -506,10 +610,10 @@ defmodule ForgeWeb.UserLive.Settings do
         <p
           :if={@form.params["kind"] == "chatgpt_login"}
           id="login-howto"
-          class="text-sm/[1.55] opacity-70"
+          class="you-howto"
         >
-          Make one for forge alone: <code class="font-mono">CODEX_HOME=$(mktemp -d) codex login --device-auth</code>,
-          then paste that folder's <code class="font-mono">auth.json</code>. It must be a login made
+          Make one for forge alone: <code>CODEX_HOME=$(mktemp -d) codex login --device-auth</code>,
+          then paste that folder's <code>auth.json</code>. It must be a login made
           for forge alone: Codex renews a login by itself, and a copy that something else renewed
           first stops working. A job that takes it can keep using the account until you sign that
           login out at OpenAI; revoking it here only stops forge using it.
@@ -517,7 +621,7 @@ defmodule ForgeWeb.UserLive.Settings do
         <p
           :if={@form.params["kind"] == "access_token"}
           id="token-howto"
-          class="text-sm/[1.55] opacity-70"
+          class="you-howto"
         >
           Created in your workspace's settings by an admin of the workspace: a fixed token with an
           expiry its creator chose.
@@ -528,32 +632,30 @@ defmodule ForgeWeb.UserLive.Settings do
               the id**: an ignored element is never patched, so the box for another kind has to be
               another element. --%>
         <div
-          class="fieldset mb-2"
+          class="ui-field"
           id={"credential-secret-#{@seq}-#{@form.params["kind"]}"}
           phx-update="ignore"
         >
-          <label for={"credential-secret-input-#{@seq}"}>
-            <span class="label mb-1">
-              {if @form.params["kind"] == "chatgpt_login", do: "Login (auth.json)", else: "Token"}
-            </span>
-            <textarea
-              :if={@form.params["kind"] == "chatgpt_login"}
-              name="credential[secret]"
-              id={"credential-secret-input-#{@seq}"}
-              rows="6"
-              autocomplete="off"
-              spellcheck="false"
-              class="w-full textarea font-mono text-xs"
-            ></textarea>
-            <input
-              :if={@form.params["kind"] != "chatgpt_login"}
-              type="password"
-              name="credential[secret]"
-              id={"credential-secret-input-#{@seq}"}
-              autocomplete="off"
-              class="w-full input"
-            />
+          <label for={"credential-secret-input-#{@seq}"} class="ui-field-label">
+            {if @form.params["kind"] == "chatgpt_login", do: "Login (auth.json)", else: "Token"}
           </label>
+          <textarea
+            :if={@form.params["kind"] == "chatgpt_login"}
+            name="credential[secret]"
+            id={"credential-secret-input-#{@seq}"}
+            rows="6"
+            autocomplete="off"
+            spellcheck="false"
+            class="ui-field-input you-login-box"
+          ></textarea>
+          <input
+            :if={@form.params["kind"] != "chatgpt_login"}
+            type="password"
+            name="credential[secret]"
+            id={"credential-secret-input-#{@seq}"}
+            autocomplete="off"
+            class="ui-field-input"
+          />
         </div>
         <.input
           :if={@form.params["kind"] == "access_token"}
@@ -568,11 +670,21 @@ defmodule ForgeWeb.UserLive.Settings do
           placeholder="4M"
           autocomplete="off"
         />
-        <.button variant="primary" phx-disable-with="Checking...">Add credential</.button>
+        <.button variant="primary" size="xl" phx-disable-with="Checking…">Add it</.button>
       </.form>
     </section>
     """
   end
+
+  # The two windows the frame draws get its line; any other the provider names is text alone.
+  defp line("five_hour"), do: "5h"
+  defp line("seven_day"), do: "week"
+  defp line(_type), do: nil
+
+  # A limited window is full, whatever it last reported; otherwise the reported figure, or none.
+  defp line_percent(%{limited: true}), do: 100
+  defp line_percent(%{utilization: u}) when is_number(u), do: round(u * 100)
+  defp line_percent(_window), do: nil
 
   attr :credential, :map, required: true
   attr :assigned, :list, required: true
@@ -582,43 +694,17 @@ defmodule ForgeWeb.UserLive.Settings do
   # (`docs/design/credentials.md` § How a job picks), so a credential funding nothing says so.
   defp funds(assigns) do
     ~H"""
-    <div class="flex w-full flex-wrap items-center gap-2 text-sm">
-      <span class="opacity-60">Funds</span>
-      <span
-        :for={project <- @assigned}
-        class="flex items-center gap-1 rounded-field border border-base-300 pl-2 font-mono text-[12.5px]"
-      >
-        {project.name}
-        <button
-          type="button"
-          phx-click="unassign-credential"
-          phx-value-credential={@credential.id}
-          phx-value-project={project.id}
-          class="min-h-[46px] min-w-[46px] opacity-60 hover:opacity-100"
-          aria-label={"Stop funding #{project.name}"}
-        >
-          ×
-        </button>
-      </span>
-      <span :if={@assigned == []} class="opacity-60">no project yet</span>
-      <form
-        :if={@projects != []}
-        phx-submit="assign-credential"
-        class="ml-auto flex items-center gap-2"
-      >
-        <input type="hidden" name="credential" value={@credential.id} />
-        <select
-          name="project"
-          aria-label="Project"
-          class="h-[46px] rounded-field border border-base-300 bg-base-100 px-2 text-sm"
-        >
-          <option :for={project <- @projects} value={project.id}>{project.name}</option>
-        </select>
-        <button type="submit" class="min-h-[46px] text-sm text-primary hover:underline">
-          Assign
-        </button>
-      </form>
-    </div>
+    <.project_assign
+      id={"funds-#{@credential.id}"}
+      assigned={@assigned}
+      projects={@projects}
+      assign="assign-credential"
+      unassign="unassign-credential"
+      values={[{"credential", @credential.id}]}
+      remove="Stop funding"
+      label="Funds"
+      none="no project yet"
+    />
     """
   end
 
@@ -627,7 +713,9 @@ defmodule ForgeWeb.UserLive.Settings do
       Credentials.revoked?(credential) -> "revoked"
       credential.check_error -> "not checked: #{credential.check_error}"
       checked_by_shape?(credential) -> "not checked with OpenAI: the first job is the check"
-      true -> "#{length(credential.models || [])} models"
+      # No list is not no models: the provider did not say (UX pass, D20).
+      (credential.models || []) == [] -> "models not listed"
+      true -> Format.counted(length(credential.models), "model")
     end
   end
 
@@ -665,4 +753,6 @@ defmodule ForgeWeb.UserLive.Settings do
     do: Date.diff(on, Date.utc_today()) <= 7
 
   defp expiring?(_credential), do: false
+
+  defp push(event, params, socket), do: {:noreply, PushEvents.handle(event, params, socket)}
 end

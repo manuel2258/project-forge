@@ -158,8 +158,8 @@ defmodule ForgeWeb.ReleasesLiveTest do
       refute has_element?(view, "#show-more")
 
       {:ok, home, _html} = live(ctx.conn, ~p"/projects/#{ctx.project.name}")
-      assert has_element?(home, "#latest-release", "1.0.0")
-      refute has_element?(home, "#latest-release", "8.0.")
+      assert has_element?(home, "#rail-facts-latest-release", "1.0.0")
+      refute has_element?(home, "#rail-facts-latest-release", "8.0.")
     end
 
     test "is newest first, each entry linking to its own page", ctx do
@@ -394,12 +394,56 @@ defmodule ForgeWeb.ReleasesLiveTest do
           ]
         })
 
-      # Each long value is in an element that wraps, inside ones that may shrink.
+      # Each long value is in an element that wraps (`areas/releases.css`: the heading, the tag
+      # line and a link wrap anywhere, a file's name breaks anywhere), inside ones that may shrink.
       {:ok, view, _html} = live(ctx.conn, ~p"/projects/#{ctx.project.name}/releases/#{record.id}")
-      assert has_element?(view, "article.min-w-0 h2.break-words")
-      assert has_element?(view, "article section a.min-w-0 span.break-all")
-      assert has_element?(view, "article section ul li.min-w-0 a.break-words.min-w-0")
-      assert has_element?(view, "article p.break-words")
+      assert has_element?(view, "article.release-entry h2.release-heading", long)
+      assert has_element?(view, "article a.release-file span.release-file-name", long)
+      assert has_element?(view, "article a.release-link", long)
+      assert has_element?(view, "article p.release-tag")
+    end
+  end
+
+  # `ui.md` § A project's releases, the phone: every download, link and *Show more* is a full-size
+  # target. The size is `--target-min` in `areas/releases.css`, on `.release-target` and
+  # `.release-more`; what is pinned here is that each control carries one of them.
+  describe "on a phone" do
+    test "every download, link and show-more is a full-size target", ctx do
+      for n <- 1..21 do
+        record!(ctx.project, %{
+          version: "1.0.#{n}",
+          concluded_at: DateTime.add(~U[2026-01-01 00:00:00.000000Z], n, :minute),
+          files: [%{"name" => "dist/app.zip", "version" => 1, "size" => 5}],
+          links: [
+            %{
+              "label" => "Image",
+              "url" => "https://ok.example/i",
+              "document" => "n",
+              "version" => 1
+            }
+          ]
+        })
+      end
+
+      {:ok, view, _html} = live(ctx.conn, ~p"/projects/#{ctx.project.name}/releases")
+      html = render(view) |> LazyHTML.from_fragment()
+
+      for selector <- [
+            "article h2 a",
+            "article a[href*=artifacts]",
+            ~s|article a[target="_blank"]|,
+            "article dd a"
+          ] do
+        targets = LazyHTML.query(html, selector)
+        refute Enum.empty?(targets), "#{selector} is not on the page"
+
+        for target <- targets,
+            do:
+              assert(target |> LazyHTML.attribute("class") |> hd() =~ "release-target", selector)
+      end
+
+      assert html |> LazyHTML.query("article a[href*=artifacts]") |> Enum.count() == 20
+      assert has_element?(view, "#show-more.release-more")
     end
   end
 
@@ -486,11 +530,11 @@ defmodule ForgeWeb.ReleasesLiveTest do
 
       assert has_element?(
                view,
-               ~s|header a[href="/projects/#{ctx.project.name}/releases"]|,
+               ~s|#rail-facts a[href="/projects/#{ctx.project.name}/releases"]|,
                "Releases"
              )
 
-      refute has_element?(view, "#latest-release")
+      refute has_element?(view, "#rail-facts-latest-release")
     end
 
     test "shows the latest release in one line: version, date, tag, linking to its page", ctx do
@@ -509,13 +553,13 @@ defmodule ForgeWeb.ReleasesLiveTest do
 
       assert has_element?(
                view,
-               ~s|#latest-release a[href="/projects/#{ctx.project.name}/releases/#{latest.id}"]|,
+               ~s|#rail-facts-latest-release a[href="/projects/#{ctx.project.name}/releases/#{latest.id}"]|,
                "1.1.0"
              )
 
       line =
         view
-        |> element("#latest-release")
+        |> element("#rail-facts-latest-release")
         |> render()
         |> LazyHTML.from_fragment()
         |> LazyHTML.text()
@@ -527,12 +571,12 @@ defmodule ForgeWeb.ReleasesLiveTest do
 
     test "a release that concludes appears without a reload", ctx do
       {:ok, view, _html} = live(ctx.conn, ~p"/projects/#{ctx.project.name}")
-      refute has_element?(view, "#latest-release")
+      refute has_element?(view, "#rail-facts-latest-release")
 
       record = record!(ctx.project, %{version: "4.0.0"})
       Events.notify(record.ticket_id)
 
-      assert has_element?(view, "#latest-release", "4.0.0")
+      assert has_element?(view, "#rail-facts-latest-release", "4.0.0")
     end
   end
 end

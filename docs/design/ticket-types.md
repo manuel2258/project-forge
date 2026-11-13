@@ -11,7 +11,8 @@ ticket is admitted. Code follows it; a change of mind updates it first.
 **It is built** — all but a listing of libraries, which § Imports says is not: the grammar half — `description`, `import` and `extends`, resolved by
 `ForgeCore.Workflow.Imports` through `Parser.load/2` — and the directory of types
 (`Forge.TicketTypes`), admission, re-pinning and drift by type, proposals suggesting a type, what a
-job is told, the project page, the board's lanes and the ticket page. What it leaves out on purpose
+job is told, the project page, the board's lanes (which go with the board — § The tickets list) and
+the ticket page. What it leaves out on purpose
 is § Deliberately not here. **Releases** (§ Releases) are built too, and `.forge/workflows/release.yml` sets the flag. What is unobserved is a real project with types: everything here is
 tested against repositories a test made.
 
@@ -50,8 +51,8 @@ per type for free — a spike capped at a dollar and a feature at twenty-five is
 so.
 
 **The single file stays valid and means one type.** A project with only `.forge/workflow.yml`
-has one unnamed type, and nothing in the product mentions types: no select on the form, no lanes
-on the board. Most projects start there and many will stay, and a directory holding one file is
+has one unnamed type, and nothing in the product mentions types: no select on the form, no type
+switch on the project page. Most projects start there and many will stay, and a directory holding one file is
 ceremony. **Both at once — the single file and a type in the directory — is an error**, at
 admission and on the project page, naming both paths: there is no rule for which wins, and
 inventing one is how a ticket runs a workflow nobody chose.
@@ -172,7 +173,7 @@ the commit, the same shape as the `prompt_exists` and `file_exists` callbacks `P
 takes — and returns a plain v1 map with no `import` and no `extends` in it. That map is what is
 validated and what admission stores in `tickets.workflow`. This is not a convenience; it is
 required. `Tickets.parsed_workflow/1` builds the stored map with `Parser.from_pinned/1` (the
-grammar's reading, and not the validator's) and no repository, on every read of a ticket's workflow — the board, the queue, the engine — so a stored
+grammar's reading, and not the validator's) and no repository, on every read of a ticket's workflow — the project's tickets, the queue, the engine — so a stored
 map that still said `import` could not be read anywhere. It also keeps pinning honest: a ticket
 holds exactly the definition it runs, a later edit to a library reaches it only through a re-pin,
 and `workflow_commit` with the ticket's type reproduces it.
@@ -270,28 +271,24 @@ The job's own manifest names its ticket's type beside its number and title. It i
 not a switch: a prompt shared by two types that behaves differently by type is a branch hidden
 from the workflow file, and the right form of that is two states.
 
-## The board
+## The tickets list
 
-**One lane per type, each with its own columns** (`ForgeWeb.Operator.Board.lanes/2`). The columns
-are the workflow's topology (`ui.md`), and they came from one ticket's pinned workflow — the
-lowest-numbered visible ticket's (`Board.workflow/1`) — which with types draws a bug's states in a
-feature's columns. Within a project each type is a lane headed by its name, and the lane's columns
-come from the lowest-numbered ticket of that type, by the same rule. A column is addressed by
-project, type and state, not project and state, so `implementing` in two types is two columns; a
-column of the single file's lane keeps the address it always had. Both boards draw lanes with one
-component, `Board.board/1`.
+**The board goes, and its lanes with it** (`ui.md` § The project page). With it went the lane per
+type (`ForgeWeb.Operator.Board.lanes/2`), which drew each type's tickets in its own workflow's
+columns, addressed by project, type and state, because a bug's states are not a feature's.
 
-A type's lane is always headed by its name: with several types and tickets of only one of them on
-the board, the columns would otherwise not say whose they are. A type with no tickets has no lane,
-since empty columns are its workflow and the project page shows those. A project with the single
-file draws no heading and is unchanged. Tickets left with a nil type in a project that has since
-moved to `workflows/` are a lane of their own, headed `workflow.yml`. Below `sm` the board already
-stacks a state per section; the type heading goes above its states.
+What replaces it reads the same distinction a different way. **A project's Tickets is one list**
+— what waits on you first, then by last change — and each row carries **its own ticket's pinned
+workflow** as a compact track, so a bug's row draws a bug's steps and a feature's a feature's, with
+no column shared between them to get wrong. The type is named on the row on a project that has
+types. **The Workflow view switches between types** (§ The project page), each with its map, whose
+dots are that type's open tickets. A project with the single file draws no type anywhere, as
+before.
 
 ## The project page
 
-The "workflow the next ticket will pin" table (`ui.md` § The project page) becomes one per type,
-under the type's name and description, with a broken type shown as its error. The ticket page
+The "workflow the next ticket will pin" (`ui.md` § Workflow) is one per type, a segmented switch
+between them, each under the type's name and description, with a broken type shown as its error. The ticket page
 names its type beside its state.
 
 ## What this changed elsewhere
@@ -308,7 +305,8 @@ Each of these was updated with the part it describes:
 - `job-prompt.md` and the preamble: "do not edit `.forge/workflow.yml`, `.forge/agents/` or
   `.forge/commands/`" becomes "do not edit anything under `.forge/`". Libraries and type files can
   sit anywhere there, and pinning, not the list, is what enforces it (`commands.md`).
-- `ui.md`: § Creating things (the type select), § The project page, the board, § The phone.
+- `ui.md`: § Creating things (the type select), § The project page, the board, § The phone — and,
+  in the redesign, § The tickets list here.
 - `api-and-ui.md`: `ticket_type` on admission and on accepting a proposal.
 - `core/priv/chat-preamble.md`: a conversation bootstrapping a project writes the single file
   unless asked for types.
@@ -459,8 +457,8 @@ belonged to it.
 
 ## Open
 
-- Whether `/board`, every project at once, stays readable with lanes. It is decided by looking at
-  a real one, not here.
+- Whether `/board`, every project at once, stays readable with lanes. *Settled by removing it*: the
+  redesign has no board (§ The tickets list).
 - Whether drift should read the type's imports at the pin to stop counting libraries it does not
   use. It costs one git read per ticket page and is worth it only if false drift turns out to be
   common.

@@ -225,12 +225,32 @@ defmodule ForgeCore.Document do
 
   # Walks the body line by line, tracking fenced code blocks so a ```question inside another
   # code block is not mistaken for a real one. Line numbers are file lines, hence `offset`.
-  defp questions(body, offset, opts) do
+  defp questions(body, offset, opts), do: body |> scan(offset) |> finish_scan(opts)
+
+  defp scan(body, offset) do
     body
     |> String.split(~r/\r?\n/)
     |> Enum.with_index(offset + 1)
     |> Enum.reduce({:outside, [], []}, &scan_line/2)
-    |> finish_scan(opts)
+  end
+
+  @doc """
+  The lines each ```question block in `text` spans, from its opening fence to its closing one, as
+  lines of `text` numbered from 1 — found by the same scan `parse/2` finds the questions with, so
+  each question's `line` is the first line of exactly one span, and a fence inside another code
+  block, or one the parser would not read as a question, is in none. A block never closed spans
+  nothing (`parse/2` refuses it).
+
+  For a surface that draws a question where its block stood: the text is cut where the parser cut
+  it, not where a second reading of the same text would.
+  """
+  @spec question_spans(String.t()) :: [{pos_integer(), pos_integer()}]
+  def question_spans(text) when is_binary(text) do
+    {_front_matter, body, offset, _errors} =
+      text |> String.replace_prefix("\uFEFF", "") |> split_front_matter()
+
+    {_state, blocks, _errors} = scan(body, offset)
+    blocks |> Enum.reverse() |> Enum.map(fn {first, last, _yaml} -> {first, last} end)
   end
 
   defp scan_line({line, number}, {:outside, blocks, errors}) do
@@ -251,10 +271,10 @@ defmodule ForgeCore.Document do
       else: {{:code, width}, blocks, errors}
   end
 
-  defp scan_line({line, _number}, {{:question, width, start, acc}, blocks, errors}) do
+  defp scan_line({line, number}, {{:question, width, start, acc}, blocks, errors}) do
     if closing_fence?(line, width) do
       yaml = acc |> Enum.reverse() |> Enum.join("\n")
-      {:outside, [{start, yaml} | blocks], errors}
+      {:outside, [{start, number, yaml} | blocks], errors}
     else
       {{:question, width, start, [line | acc]}, blocks, errors}
     end
@@ -283,7 +303,7 @@ defmodule ForgeCore.Document do
       blocks
       |> Enum.reverse()
       |> Enum.with_index()
-      |> Enum.map(fn {{line, yaml}, index} ->
+      |> Enum.map(fn {{line, _last, yaml}, index} ->
         Question.build(yaml, line, "question[#{index}]", opts)
       end)
       |> Enum.reduce({[], []}, fn

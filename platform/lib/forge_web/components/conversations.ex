@@ -2,16 +2,17 @@ defmodule ForgeWeb.Conversations do
   @moduledoc """
   How a conversation is drawn in a list.
 
-  Three surfaces show one — `/chats`, a project's page and a ticket's page — so there is one of
-  this rather than three. What differs between them is which conversations, not what a row looks
-  like, nor the order and the sections they come in (`docs/design/ui.md` § Chats is a destination
-  on both).
+  `/chats` and a ticket's page draw a list of conversations through `list/1`; a project's Chats
+  (`7c`) draws its own rows. All three read the conversations, their order and which are live
+  from `Forge.Conversations.summaries/1`, so what differs between them is which conversations,
+  not the order they come in (`docs/design/ui.md` § Chats).
   """
 
   use Phoenix.Component
   use ForgeWeb, :verified_routes
 
   import ForgeWeb.Indicators
+  import ForgeWeb.UI.Decisions, only: [confirm: 1]
 
   alias ForgeWeb.Format
 
@@ -54,19 +55,19 @@ defmodule ForgeWeb.Conversations do
           id={@id}
           name={@name}
           rows={@rows}
-          phx-hook=".Composer"
+          phx-hook="ForgeWeb.UI.Forms.Composer"
           phx-debounce="200"
-          data-newline-on={if @enter == :newline, do: "all", else: "(pointer: coarse)"}
+          data-newline-on={ForgeWeb.UI.Forms.newline_on(@enter)}
           data-max-lines="6"
           placeholder={@placeholder}
-          class="min-h-[46px] w-full min-w-0 resize-none rounded-box border border-base-300 bg-base-100 px-3 py-[11px] text-sm/[1.6]"
+          class="min-h-[46px] w-full min-w-0 resize-none rounded-card border border-border bg-bg px-3 py-[11px] text-sm/[1.6]"
           {@rest}
         >{@value}</textarea>
         <button
           :if={@send}
           type="submit"
           aria-label="Send"
-          class="flex size-[46px] shrink-0 items-center justify-center rounded-field bg-base-content text-base-100"
+          class="flex size-[46px] shrink-0 items-center justify-center rounded-md bg-ink text-bg"
         >
           <span aria-hidden="true" class="text-lg leading-none">↑</span>
         </button>
@@ -79,50 +80,6 @@ defmodule ForgeWeb.Conversations do
         Enter sends · shift-enter for a new line
       </p>
     </div>
-
-    <script :type={Phoenix.LiveView.ColocatedHook} name=".Composer">
-      export default {
-        mounted() {
-          this.coarse = window.matchMedia(this.el.dataset.newlineOn)
-
-          this.el.addEventListener("keydown", (event) => {
-            if (event.key !== "Enter" || event.shiftKey) return
-
-            // An input method editor uses Enter to commit the character being composed. Sending
-            // then would send half a word, so composition always wins.
-            if (event.isComposing || event.keyCode === 229) return
-
-            // A phone, or a box that is one field of a larger form (`all`): Enter is how a line
-            // is ended, and Send is how a message is sent. No ExUnit test can press a key, so
-            // deleting this line fails nothing there; what the tests pin is the query it reads,
-            // `data-newline-on`.
-            if (this.coarse.matches) return
-
-            event.preventDefault()
-            this.el.form?.requestSubmit()
-          })
-
-          this.el.addEventListener("input", () => this.fit())
-          this.fit()
-        },
-
-        updated() { this.fit() },
-
-        // From one line to six, then it scrolls inside itself.
-        fit() {
-          const style = getComputedStyle(this.el)
-          const edges = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom) +
-            parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth)
-          const most = parseFloat(style.lineHeight) * Number(this.el.dataset.maxLines) + edges
-
-          this.el.style.height = "auto"
-          const wanted = this.el.scrollHeight + parseFloat(style.borderTopWidth) +
-            parseFloat(style.borderBottomWidth)
-          this.el.style.height = `${Math.min(wanted, most)}px`
-          this.el.style.overflowY = wanted > most ? "auto" : "hidden"
-        }
-      }
-    </script>
     """
   end
 
@@ -213,45 +170,41 @@ defmodule ForgeWeb.Conversations do
 
   defp rows(assigns) do
     ~H"""
-    <ol class="mt-3 flex flex-col">
-      <li
-        :for={summary <- @summaries}
-        id={"conversation-#{summary.chat.id}"}
-        class="flex items-start gap-4 border-t border-base-300"
-      >
+    <ol class="chat-rows">
+      <li :for={summary <- @summaries} id={"conversation-#{summary.chat.id}"} class="chat-row">
         <%!-- The row goes to one place, and the control that ends the conversation is beside it
               rather than inside it: `ui.md` § The affordance rule — a navigation target never
               encloses something that commits, or reading and ending become one gesture. --%>
-        <.link
-          navigate={~p"/chats/#{summary.chat.id}"}
-          class="flex min-w-0 flex-1 flex-col gap-[6px] py-[15px] hover:opacity-100"
-        >
-          <div class="flex items-start justify-between gap-4">
-            <div class="flex flex-wrap items-center gap-2 font-mono text-[11px] tracking-[.14em] uppercase opacity-70">
-              <span :if={@project}>{summary.project.name}</span>
-              <span :if={@project and summary.ticket} aria-hidden="true">·</span>
-              <span :if={summary.ticket}>#{summary.ticket.number}</span>
-              <span :if={summary.waiting} class="text-accent">· waiting on you</span>
-              <.job_status :if={not summary.live} status={summary.chat.status} />
-            </div>
-            <%!-- When it was last used, which is what the list is ordered by. --%>
-            <span class="shrink-0 font-mono text-[12.5px] opacity-50">
-              {Format.ago(summary.at, @now)}
+        <.link navigate={~p"/chats/#{summary.chat.id}"} class="chat-row-link">
+          <span class="chat-row-head">
+            <span class="chat-row-title">{title(summary)}</span>
+            <%!-- When it was last used, which is what the list is ordered by; a live one's in the
+                  colour of running. --%>
+            <span class={["chat-row-at", summary.live && "chat-row-at--live"]}>
+              <span :if={summary.live} aria-hidden="true">▸</span> {Format.ago(summary.at, @now)}
             </span>
-          </div>
+          </span>
 
-          <%!-- The last thing said, which is what tells one conversation from another — a chat
-                has no title, and the first message is often not what it became about. --%>
-          <p class="text-sm/[1.5] opacity-80">
-            <span class="opacity-50">{speaker(summary.said)}</span>
+          <span class="chat-row-where">
+            <span :if={@project}>{summary.project.name}</span>
+            <span :if={@project and summary.ticket} aria-hidden="true">·</span>
+            <span :if={summary.ticket}>#{summary.ticket.number}{step(summary)}</span>
+            <span :if={summary.waiting} class="text-accent">· waiting on you</span>
+            <.job_status :if={not summary.live} status={summary.chat.status} />
+          </span>
+
+          <%!-- The last thing said, which is what tells one conversation from another at a glance
+                once the title has said what it started as. --%>
+          <span class="chat-row-said">
+            <span class="text-ink-3">{speaker(summary.said)}</span>
             {said(summary.said)}
-          </p>
+          </span>
 
-          <div class="font-mono text-[11px] opacity-50">
+          <span class="chat-row-figures">
             {summary.chat.turns} {noun(summary.chat.turns, "turn")} · {Format.windows(
               summary.chat.usage
             ) || "—"}
-          </div>
+          </span>
         </.link>
 
         <%!-- Only a live one, and worded as the conversation's own page words it: a
@@ -260,20 +213,31 @@ defmodule ForgeWeb.Conversations do
               also deletes its branch, and the confirm says so. The confirm names this row's
               conversation, from the same summary as `phx-value-id`, so the two cannot name
               different ones. HEEx escapes the attribute, so a message cannot close it. --%>
-        <button
+        <%!-- A quiet word in danger ink at the row's top right, beside the time: a full button
+              on a line of its own made every live row 56px taller (UX pass, B17). --%>
+        <.confirm
           :if={@ending && summary.live}
-          type="button"
+          id={"chat-end-#{summary.chat.id}"}
+          label="End"
+          act="End it"
+          sentence={ending_confirm(name(summary, @project))}
+          trigger="quiet"
+          class="chat-row-end"
           phx-click={@ending}
           phx-value-id={summary.chat.id}
-          data-confirm={ending_confirm(name(summary, @project))}
-          class="mt-[15px] min-h-[46px] shrink-0 text-sm text-primary hover:underline"
-        >
-          End
-        </button>
+        />
       </li>
     </ol>
     """
   end
+
+  # What a row is called: `Forge.Conversations.title/3`, from what the summary already holds.
+  defp title(summary),
+    do: Forge.Conversations.title(summary.chat, summary.ticket, Map.get(summary, :first))
+
+  # A step's conversation names its step after the ticket's number.
+  defp step(%{chat: %{state: state}}) when is_binary(state), do: " " <> state
+  defp step(_summary), do: ""
 
   # Project where the list names it, the ticket's number, and the start of the last thing said.
   defp name(summary, project?) do

@@ -1,12 +1,14 @@
 defmodule ForgeWeb.RepoCommitLive do
   @moduledoc """
-  One commit of a project's repository: what it changed, against its own parent.
+  One commit of a project's repository: what it changed, against its own parent (`10e`).
 
-  The same `ForgeWeb.Diff.section/1` the review page draws, so a binary file already reads
-  *binary* with no attempted content and an oversized change already says where to read it. A
-  root commit is shown against the empty tree, so the first commit in a repository opens like
-  any other — named rather than written, so nothing on this page touches the repository at all.
-  See `docs/design/ui.md` § The project's repository.
+  The header is the commit's subject, short sha, author and age, the size of the change and the
+  parent it is read against; the change is the same file list a ticket's Changes draws
+  (`ForgeWeb.Diff.file_table/1`), each row opening its own patch in place, so a binary file
+  already reads *binary* with no attempted content and an oversized change already says where
+  to read it. A root commit is shown against the empty tree, so the first commit in a repository
+  opens like any other — named rather than written, so nothing on this page touches the
+  repository at all. See `docs/design/ui.md` § The project's repository.
   """
 
   use ForgeWeb, :live_view
@@ -20,13 +22,15 @@ defmodule ForgeWeb.RepoCommitLive do
     {project, _scope} = ForgeWeb.Access.project_by_name!(socket.assigns.current_scope, name)
     repo = Projects.repo_path(project)
     commit = commit!(repo, sha)
+    {parent, base} = base(repo, commit.sha)
 
     {:ok,
      socket
      |> assign(
        project: project,
        commit: commit,
-       diff: Diff.build(repo, base(repo, commit.sha), commit.sha),
+       parent: parent,
+       diff: Diff.build(repo, base, commit.sha),
        page_title: "#{project.name} #{Diff.short(commit.sha)}",
        now: DateTime.utc_now()
      )
@@ -59,11 +63,12 @@ defmodule ForgeWeb.RepoCommitLive do
     end
   end
 
-  # Against the first parent, which is what a merge commit's own change is.
+  # Against the first parent, which is what a merge commit's own change is: `{parent, base}`,
+  # the parent drawn in the header (nil for a root commit) and what the change is read against.
   defp base(repo, sha) do
     case Git.parent(repo, sha) do
       {:ok, parent} ->
-        parent
+        {parent, parent}
 
       # A root commit's change is against the empty tree, which `Diff` then reads as any other
       # base rather than being given a special case of its own. Named and not written: git
@@ -71,49 +76,95 @@ defmodule ForgeWeb.RepoCommitLive do
       # other read here — leaves the repository exactly as it found it.
       {:error, :no_parent} ->
         {:ok, tree} = Git.empty_tree(repo)
-        tree
+        {nil, tree}
     end
   end
 
   @impl true
   def handle_params(params, _uri, socket) do
-    {:noreply, assign(socket, back: back(socket.assigns.project, params))}
+    {:noreply,
+     assign(socket,
+       back: back(socket.assigns.project, params),
+       branch: if(is_binary(params["branch"]), do: params["branch"])
+     )}
   end
 
   # Where the reader came from, off this page's own query string: the branch they were looking
-  # at and how far back they had paged.
+  # at, the view (Commits unless it said Files), how far back they had paged, the file whose
+  # history it was, and the file open beside the list on a wide screen.
   defp back(project, params) do
+    tab = if params["tab"] == "files", do: "files", else: "commits"
+
     query =
-      [branch: params["branch"], tab: "commits", page: params["page"]]
-      |> Enum.reject(fn {_key, value} -> value in [nil, "", "1"] end)
+      [
+        branch: params["branch"],
+        tab: tab,
+        page: params["page"],
+        path: params["path"],
+        file: params["file"]
+      ]
+      |> Enum.reject(fn {_key, value} -> not is_binary(value) or value in ["", "1"] end)
 
     ~p"/projects/#{project.name}/repo?#{query}"
+  end
+
+  # The parent opens the same page, carrying the same origin, so its back row still returns to
+  # where the reader started.
+  defp parent_path(project, parent, back) do
+    %URI{query: query} = URI.parse(back)
+    ~p"/projects/#{project.name}/repo/commits/#{parent}" <> if(query, do: "?" <> query, else: "")
   end
 
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} capacity={@capacity} measure="74rem">
-      <.link
-        navigate={@back}
-        class="flex min-h-[46px] items-center font-mono text-[12.5px] opacity-60 hover:opacity-100"
-      >
-        ‹ {@project.name} repository
-      </.link>
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      frame={@frame}
+      capacity={@capacity}
+      title="Repository"
+      subline={if @branch, do: "#{@project.name} · #{@branch}", else: @project.name}
+      context={{@project.name, ~p"/projects/#{@project.name}"}}
+      back={{"#{@project.name} repository", @back}}
+      views={ForgeWeb.ProjectLive.strip(@project, %{}, :navigate)}
+      measure="56rem"
+    >
+      <div id="repo-commit" class="repo-commit-page">
+        <.link id="commit-back" navigate={@back} class="repo-back">‹ Commits</.link>
 
-      <header class="mt-4 flex flex-col gap-2">
-        <div class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">The commit</div>
-        <h1 class="text-[23px] font-semibold -tracking-[.03em] sm:text-2xl">{@commit.subject}</h1>
-        <div class="flex flex-wrap items-center gap-3 font-mono text-[12.5px] opacity-60">
-          <span class="break-all">{Diff.short(@commit.sha)}</span>
-          <span>{Format.ago(@commit.at, @now)}</span>
-        </div>
-      </header>
+        <header class="repo-commit-head">
+          <.eyebrow>The commit</.eyebrow>
+          <h2 id="commit-subject" class="repo-commit-subject">{@commit.subject}</h2>
+          <div id="commit-meta" class="repo-commit-meta">
+            <span class="repo-commit-sha">{Diff.short(@commit.sha)}</span>
+            <span id="commit-author">{@commit.author}</span>
+            <span>{Format.ago(@commit.at, @now)}</span>
+            <.link
+              :if={@parent}
+              id="commit-parent"
+              navigate={parent_path(@project, @parent, @back)}
+              class="repo-link"
+            >
+              parent {Diff.short(@parent)}
+            </.link>
+            <span :if={!@parent} id="commit-parent">root commit</span>
+          </div>
+          <div :if={@diff[:files]} id="commit-size" class="repo-commit-size">
+            <.diff_stat added={@diff.added} removed={@diff.removed} />
+            <span>{files(length(@diff.files))}</span>
+          </div>
+        </header>
 
-      <div class="mt-8">
-        <Diff.section diff={@diff} id="commit-diff" title="What it changed" />
+        <section id="commit-diff" class="repo-commit-diff" aria-label="What it changed">
+          <.eyebrow>What it changed</.eyebrow>
+          <Diff.file_table diff={@diff} id="commit-files" />
+        </section>
       </div>
     </Layouts.app>
     """
   end
+
+  defp files(1), do: "1 file"
+  defp files(n), do: "#{n} files"
 end

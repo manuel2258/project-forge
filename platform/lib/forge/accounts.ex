@@ -381,15 +381,18 @@ defmodule Forge.Accounts do
     do: Repo.all(from i in Identity, where: i.user_id == ^id, order_by: i.inserted_at)
 
   @doc """
-  The issuers each of those accounts logs in from, keyed by user id, in one query.
+  The identities each of those accounts logs in with, as `{issuer, subject}` pairs oldest first,
+  keyed by user id, in one query.
 
   `ForgeWeb.AccountsLive` asked `list_identities/1` once per row, on mount and again after every
   approve, suspend and promote — a node with fifty accounts ran fifty queries to draw one column,
   four times over in a session. An account with no identity is present with an empty list, so the
-  caller can tell "made on this host" from "not loaded".
+  caller can tell "made on this host" from "not loaded". The pair is what an identity *is*
+  (`docs/design/identity.md` § Identity is `(issuer, subject)`, never email), so it is what a row
+  says about how somebody signs in.
   """
-  @spec issuers_by_user([User.t()]) :: %{Ecto.UUID.t() => [String.t()]}
-  def issuers_by_user(users) do
+  @spec identities_by_user([User.t()]) :: %{Ecto.UUID.t() => [{String.t(), String.t()}]}
+  def identities_by_user(users) do
     ids = Enum.map(users, & &1.id)
 
     # **`where` is a bound on what is fetched, not on what is returned — an equivalent mutant.**
@@ -402,12 +405,12 @@ defmodule Forge.Accounts do
         from i in Identity,
           where: i.user_id in ^ids,
           order_by: i.inserted_at,
-          select: {i.user_id, i.issuer}
+          select: {i.user_id, {i.issuer, i.subject}}
       )
 
     found = Enum.group_by(rows, &elem(&1, 0), &elem(&1, 1))
 
-    Map.new(ids, fn id -> {id, found |> Map.get(id, []) |> Enum.uniq()} end)
+    Map.new(ids, fn id -> {id, Map.get(found, id, [])} end)
   end
 
   ## Account governance
@@ -443,13 +446,14 @@ defmodule Forge.Accounts do
 
   @doc "Accounts waiting on a node admin, oldest first."
   @spec list_pending_users() :: [User.t()]
-  def list_pending_users do
-    Repo.all(
-      from u in User,
-        where: is_nil(u.approved_at) and is_nil(u.suspended_at),
-        order_by: u.inserted_at
-    )
-  end
+  def list_pending_users, do: Repo.all(from u in pending(), order_by: u.inserted_at)
+
+  @doc "How many accounts wait on a node admin: `list_pending_users/0`'s length, counted in the database."
+  @spec count_pending_users() :: non_neg_integer()
+  def count_pending_users, do: Repo.aggregate(pending(), :count)
+
+  # Never approved and not refused: the one definition both of the above read.
+  defp pending, do: from(u in User, where: is_nil(u.approved_at) and is_nil(u.suspended_at))
 
   @doc """
   Approves a pending account. Approval is the perimeter: everything behind it is permissive,
@@ -457,38 +461,70 @@ defmodule Forge.Accounts do
   """
   @spec approve_user(User.t(), User.t() | :host) :: {:ok, User.t()} | {:error, term()}
   def approve_user(%User{} = user, by),
-    do: govern(user, by, "user.approved", approved_at: DateTime.utc_now(:second))
+    do: user |> govern(by, "user.approved", approved_at: DateTime.utc_now(:second)) |> governed()
 
   @doc """
-  Suspends an account. Sessions and API tokens are refused from the next request.
+  Suspends an account, and signs it out: its sessions are deleted in the same transaction and
+  every page they hold open is told to disconnect once it commits. API tokens are refused from
+  the next request, by `User.active?/1`, and kept, so reinstating gives them back.
 
   `approved_at` is deliberately left alone: reinstating is then one field rather than a second
   decision, and `User.active?/1` is what refuses the account meanwhile.
+
+  **Nobody suspends themselves** (`:self`), and so **the last node admin who can act is never
+  suspended**: either would sign out the one person who could reinstate anyone and leave a node
+  nobody can govern. The second needs no rule of its own. The actor is read again at the act and
+  must be an admin who can act (`acting_admins/2`, the model `set_node_admin/3`'s last-admin rule
+  counts with), and it is not the account suspended, so one who can act is always left. Two
+  admins suspending each other at once take the same lock, and the second finds itself suspended
+  (review fixes 7, M1 and L4).
   """
   @spec suspend_user(User.t(), User.t()) :: {:ok, User.t()} | {:error, term()}
-  def suspend_user(%User{} = user, %User{} = by),
-    do: govern(user, by, "user.suspended", suspended_at: DateTime.utc_now(:second))
+  def suspend_user(%User{id: id}, %User{id: id}), do: {:error, :self}
+
+  def suspend_user(%User{} = user, %User{} = by) do
+    with {:ok, %{user: suspended, sessions: sessions}} <-
+           govern(user, by, "user.suspended", [suspended_at: DateTime.utc_now(:second)],
+             also: &drop_sessions(&1, user)
+           ) do
+      # After the commit, so a page that reconnects at once finds its session already gone.
+      ForgeWeb.UserAuth.disconnect_sessions(sessions)
+      {:ok, suspended}
+    end
+  end
+
+  defp drop_sessions(multi, %User{id: id}) do
+    sessions = from(t in UserToken, where: t.user_id == ^id and t.context == "session")
+
+    Multi.run(multi, :sessions, fn repo, _changes ->
+      tokens = repo.all(sessions)
+      repo.delete_all(sessions)
+      {:ok, tokens}
+    end)
+  end
 
   @doc "Lifts a suspension."
   @spec reinstate_user(User.t(), User.t()) :: {:ok, User.t()} | {:error, term()}
   def reinstate_user(%User{} = user, %User{} = by),
-    do: govern(user, by, "user.reinstated", suspended_at: nil)
+    do: user |> govern(by, "user.reinstated", suspended_at: nil) |> governed()
 
   @doc """
   Grants or revokes the node admin flag.
 
-  Revoking the last node admin is refused. It is the only account that can approve anyone, so a
-  node with none is a node nobody can ever join again, and the fix would be a shell and a SQL
-  statement.
+  Revoking it from the last node admin who can act is refused — the rule `suspend_user/2` holds.
+  That account is the only one that can approve anyone, so a node with none is a node nobody can
+  ever join again, and the fix would be a shell and a SQL statement. A suspended admin is not
+  one who can act: it reinstates nobody, so the only active admin dropping their own flag beside
+  one locked the node out as surely (review fixes 7, M1).
   """
   @spec set_node_admin(User.t(), User.t(), boolean()) :: {:ok, User.t()} | {:error, term()}
   def set_node_admin(%User{} = user, %User{} = by, true),
-    do: govern(user, by, "user.node_admin_granted", node_admin: true)
+    do: user |> govern(by, "user.node_admin_granted", node_admin: true) |> governed()
 
   def set_node_admin(%User{} = user, %User{} = by, false) do
-    if last_node_admin?(user),
-      do: {:error, :last_node_admin},
-      else: govern(user, by, "user.node_admin_revoked", node_admin: false)
+    user
+    |> govern(by, "user.node_admin_revoked", [node_admin: false], leaves_an_admin: true)
+    |> governed()
   end
 
   @doc """
@@ -516,12 +552,11 @@ defmodule Forge.Accounts do
   """
   @spec delete_unapproved_user(User.t(), User.t()) ::
           {:ok, User.t()} | {:error, :forbidden | :approved | :has_history}
-  def delete_unapproved_user(%User{}, %User{node_admin: false}), do: {:error, :forbidden}
-
   def delete_unapproved_user(%User{approved_at: %DateTime{}}, %User{}), do: {:error, :approved}
 
   def delete_unapproved_user(%User{approved_at: nil} = user, %User{} = by) do
     Multi.new()
+    |> Multi.run(:actor, fn repo, _changes -> acting_admins(repo, by) end)
     |> Multi.delete(:user, user)
     |> Events.log(:event, "user.deleted", {:user, by.id}, fn _changes ->
       %{payload: %{"user_id" => user.id, "email" => user.email}}
@@ -529,6 +564,7 @@ defmodule Forge.Accounts do
     |> Repo.transaction()
     |> case do
       {:ok, _changes} -> {:ok, user}
+      {:error, :actor, reason, _changes} -> {:error, reason}
       {:error, _step, _reason, _changes} -> {:error, :has_history}
     end
   rescue
@@ -542,35 +578,68 @@ defmodule Forge.Accounts do
     _error in Ecto.ConstraintError -> {:error, :has_history}
   end
 
-  defp last_node_admin?(%User{id: id}) do
-    not Repo.exists?(from u in User, where: u.node_admin == true and u.id != ^id)
-  end
-
-  # The actor is checked here and not only at the router. `/accounts` sits behind
-  # `on_mount(:require_node_admin)`, but a page is not a guard — the identical shape was found
-  # open in `Forge.Projects.put_member/4`, where the page was the only thing refusing.
-  defp govern(%User{}, %User{node_admin: false}, _type, _changes), do: {:error, :forbidden}
-
+  # **The actor is read again at the act, with every node admin's row locked**, and must be one
+  # who can act: the flag, and `User.active?/1`. Checked here and not only at the router —
+  # `/accounts` sits behind `on_mount(:require_node_admin)`, but a page is not a guard, and the
+  # `%User{}` a page holds is the one it mounted with. An admin suspended or demoted while the
+  # page was open went on approving, and reinstated themselves (review fixes 7, H1).
+  #
+  # The same read is the last-admin rule's (`leaves_an_admin: true`): those who can act, less the
+  # account the change takes the power from, must not be nobody. Locked because two admins
+  # suspending or demoting each other at once each saw the other still there when this was a read
+  # before the write, and both writes committed (review fixes 7, L4). The lock is an equivalent mutant under
+  # the test sandbox, which runs a test on one connection in one transaction, as
+  # `Forge.Projects.last_admin?/2` says of its own.
+  #
   # `:host` is the command line, which is past every gate there is and is the only way the first
   # node admin's account can be approved — nobody exists yet who could approve it.
-  defp govern(%User{} = user, :host, type, changes),
-    do: apply_governance(user, :system, type, changes)
+  defp govern(user, by, type, changes, opts \\ [])
 
-  defp govern(%User{} = user, %User{} = by, type, changes),
-    do: apply_governance(user, {:user, by.id}, type, changes)
+  defp govern(%User{} = user, :host, type, changes, _opts),
+    do: govern_as(user, :system, type, changes, & &1)
 
-  defp apply_governance(%User{} = user, actor, type, changes) do
+  defp govern(%User{} = user, %User{} = by, type, changes, opts) do
+    leaves_an_admin = Keyword.get(opts, :leaves_an_admin, false)
+    also = Keyword.get(opts, :also, & &1)
+
+    govern_as(user, {:user, by.id}, type, changes, fn multi ->
+      multi
+      |> Multi.run(:actor, fn repo, _changes -> acting_admins(repo, by) end)
+      |> Multi.run(:last_node_admin, fn _repo, %{actor: acting} ->
+        leaves_an_admin(leaves_an_admin, acting, user)
+      end)
+      |> also.()
+    end)
+  end
+
+  defp leaves_an_admin(true, acting, %User{id: id}),
+    do: if(acting -- [id] == [], do: {:error, :last_node_admin}, else: {:ok, nil})
+
+  defp leaves_an_admin(false, _acting, _user), do: {:ok, nil}
+
+  defp acting_admins(repo, %User{id: actor}) do
+    admins = repo.all(from u in User, where: u.node_admin == true, lock: "FOR UPDATE")
+    acting = for admin <- admins, User.active?(admin), do: admin.id
+
+    if actor in acting, do: {:ok, acting}, else: {:error, :forbidden}
+  end
+
+  defp govern_as(%User{} = user, actor, type, changes, guard) do
     Multi.new()
+    |> guard.()
     |> Multi.update(:user, Ecto.Changeset.change(user, changes))
     |> Events.log(:event, type, actor, fn %{user: user} ->
       %{payload: %{"user_id" => user.id, "email" => user.email}}
     end)
     |> Repo.transaction()
     |> case do
-      {:ok, %{user: user}} -> {:ok, user}
+      {:ok, changes} -> {:ok, changes}
       {:error, _step, reason, _changes} -> {:error, reason}
     end
   end
+
+  defp governed({:ok, %{user: user}}), do: {:ok, user}
+  defp governed(error), do: error
 
   ## Session
 

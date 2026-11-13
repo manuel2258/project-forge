@@ -1,0 +1,27 @@
+<!-- @dsCard group="Components" viewport="700x330" name="Navigation" -->
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../../styles.css">
+<style>body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font-sans);-webkit-font-smoothing:antialiased}button{font:inherit}</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../components/_preview.js"></script>
+</head><body><div id="root"></div>
+<script type="text/babel">
+(async () => {
+const NS = await loadForge('../../');
+const { TopBar, BottomStrip, QueueButton } = NS;
+const App = () => <div style={{ padding:16, display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
+  <div style={{ display:'flex', flexDirection:'column', gap:12, border:'1px solid var(--border)', borderRadius:10, overflow:'hidden' }}>
+    <TopBar title="Persist the high score table" context="game" subline={<><span style={{opacity:.6}}>#41 · </span><span style={{color:'var(--info)'}}>▸</span> implementing</>} />
+    <div style={{ height:50 }} />
+    <BottomStrip active="Changes" tabs={[{label:'Steps'},{label:'Changes',count:3},{label:'Docs',count:2},{label:'Activity',count:31}]} />
+  </div>
+  <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
+    <div style={{ border:'1px solid var(--border)', borderRadius:10, overflow:'hidden' }}><TopBar title="Queue" menu left={null} subline={<span style={{color:'var(--accent-text)'}}>1 of 4 · 5 decisions</span>} usage={{fiveH:91,week:63}} /></div>
+    <div style={{ border:'1px solid var(--border)', borderRadius:10, overflow:'hidden' }}><TopBar title="x" context="game" disconnected="retrying in 4s · last update 12s ago" /></div>
+    <div style={{ display:'flex', gap:8 }}><QueueButton count={4} /><QueueButton count={0} /></div>
+  </div>
+</div>;
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+})();
+</script></body></html>

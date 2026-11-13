@@ -40,6 +40,60 @@ defmodule ForgeWeb.TranscriptTest do
       render_component(&Transcript.transcript/1, messages: messages, live: live, now: @at)
       |> Floki.parse_fragment!()
 
+  describe "a question the agent asked" do
+    @asked """
+    Two ways to keep it.
+
+    ```question
+    key: store
+    text: Where should scores live?
+    options: [{label: disk, detail: A file}, {label: db, detail: Postgres}]
+    ```
+
+    Say which.
+    """
+
+    test "is drawn as what it asks, not as the block's YAML" do
+      doc = draw([agent([{:text, @asked}], 1)])
+      text = Floki.text(doc)
+
+      assert text =~ "Where should scores live?"
+      assert text =~ "disk · db"
+      assert text =~ "Two ways to keep it."
+      assert text =~ "Say which."
+      refute text =~ "key: store"
+      assert Floki.find(doc, "[data-said=agent] blockquote") != []
+    end
+
+    test "is left as written when a fence is not one of the document's questions" do
+      nested = "````markdown\n```question\nkey: k\ntext: Not asked\n```\n````\n"
+      assert Transcript.asked(nested) == nested
+      assert Transcript.asked("Nothing asked.") == "Nothing asked."
+    end
+
+    # The review's case: an example fence inside another block, which the parser does not read,
+    # and a real question its parser does read but a column-0 regex would not ("``` question",
+    # indented). One miss each way gave equal counts, and the real question's words were written
+    # into the example's code block while the real one stayed raw YAML.
+    test "replaces the block the parser read, not the one a second reading finds" do
+      example = "````markdown\n```question\nkey: k\ntext: EXAMPLE\n```\n````\n"
+      real = "  ``` question\n  key: real\n  text: REAL\n  ```\n"
+      text = example <> "\n" <> real
+
+      asked = Transcript.asked(text)
+
+      assert asked =~ example
+      assert asked =~ "> **Asked:** REAL"
+      refute asked =~ "key: real"
+      refute asked =~ "> **Asked:** EXAMPLE"
+    end
+
+    test "reads a block written with CRLF line ends" do
+      asked = Transcript.asked("Say.\r\n```question\r\nkey: k\r\ntext: Which?\r\n```\r\nDone.")
+      assert asked == "Say.\n> **Asked:** Which?\nDone."
+    end
+  end
+
   describe "a turn's calls" do
     test "are every line while the turn is open in a live conversation" do
       doc = draw([agent([call("t1", "Bash", %{"command" => "mix test"})])])

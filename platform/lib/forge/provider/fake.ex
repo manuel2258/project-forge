@@ -89,11 +89,18 @@ defmodule Forge.Provider.Fake do
     notify({:provider_shapes, credential})
 
     {:ok,
-     [
+     :persistent_term.get({__MODULE__, :shapes}, [
        %{size: "small", memory: 2 * 1024 * 1024 * 1024, cores: 2, price_hourly: nil},
        %{size: "large", memory: 8 * 1024 * 1024 * 1024, cores: 8, price_hourly: nil}
-     ]}
+     ])}
   end
+
+  @doc """
+  What `shapes/1` will sell until `allow/0`, so a page test can offer priced shapes in a currency
+  of its choosing.
+  """
+  @spec offering([Forge.Provider.shape()]) :: :ok
+  def offering(shapes), do: :persistent_term.put({__MODULE__, :shapes}, shapes)
 
   @impl Forge.Provider
   def credential_fields, do: [%{key: "token", label: "API token"}]
@@ -273,6 +280,7 @@ defmodule Forge.Provider.Fake do
     :persistent_term.erase({__MODULE__, :requires})
     :persistent_term.erase({__MODULE__, :billed_increment_ms})
     :persistent_term.erase({__MODULE__, :images})
+    :persistent_term.erase({__MODULE__, :shapes})
     :persistent_term.erase({__MODULE__, :during_create})
     :persistent_term.erase({__MODULE__, :refuse_build})
     :persistent_term.erase({__MODULE__, :refuse_snapshot})

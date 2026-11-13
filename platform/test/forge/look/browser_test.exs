@@ -43,7 +43,7 @@ defmodule Forge.Look.BrowserTest do
     dir: dir
   } do
     page = Path.join(dir, "ticket-phone.png")
-    part = Path.join(dir, "title-phone.png")
+    part = Path.join(dir, "top-bar-phone.png")
 
     output =
       capture_io(fn ->
@@ -52,12 +52,12 @@ defmodule Forge.Look.BrowserTest do
                    """
                    width phone
                    visit :ticket
-                   text h1
+                   text ".ui-top-name"
                    click text "Docs"
                    wait text "refinement.md"
-                   wait text "Docs 1"
+                   wait "#tab-docs[aria-current=page]"
                    shot page #{page}
-                   shot h1 #{part}
+                   shot "#top-bar" #{part}
                    """,
                    opts
                  )
@@ -254,5 +254,290 @@ defmodule Forge.Look.BrowserTest do
 
     assert output =~ "FAILED while logging in"
     refute output =~ opts[:login_token]
+  end
+
+  # -- the frame's transient states (`docs/design/ui.md` § Transient states) --------------------
+  #
+  # What only a browser can show: the socket dropped, a button moved, a toast's life. Each runs
+  # inside the look's own steps as a `{:call, fun}` between them, so the page is the one a look
+  # logs in to and checks after every step.
+
+  defp run_with(source, calls, opts) do
+    {:ok, steps} = Steps.parse(source)
+    n = length(steps)
+
+    calls =
+      calls
+      |> Enum.with_index(n + 1)
+      |> Enum.map(fn {fun, i} -> %{n: i, text: "call #{i}", op: {:call, fun}} end)
+
+    Look.run(steps ++ calls, opts)
+  end
+
+  defp until(session, script, what, left \\ 5_000) do
+    cond do
+      Look.script(session, script) -> :ok
+      left <= 0 -> flunk("never became true: " <> what)
+      true -> Process.sleep(50) && until(session, script, what, left - 50)
+    end
+  end
+
+  @sender "#top-bar button.ui-top-title"
+  @look "const l = document.querySelector('#ticket-look'); return l && (l.dataset.since || '')"
+
+  defp rect(session, css) do
+    Look.script(
+      session,
+      "const r = document.querySelector('#{css}').getBoundingClientRect(); " <>
+        "return [r.x, r.y, r.width, r.height]"
+    )
+  end
+
+  test "a lost connection turns the bar red and greys what sends, in place; it comes back", %{
+    opts: opts
+  } do
+    output =
+      capture_io(fn ->
+        assert :ok ==
+                 run_with(
+                   "width phone\nvisit :ticket\nwait \"#{@sender}\"",
+                   [
+                     fn session ->
+                       before = rect(session, @sender)
+
+                       assert Look.script(
+                                session,
+                                "return document.querySelector('#{@sender}').disabled"
+                              ) == false
+
+                       # A submit button outside its form, naming it, as the docks draw one.
+                       Look.script(
+                         session,
+                         "const b = document.createElement('button'); b.id = 'probe-sender'; " <>
+                           "b.type = 'submit'; b.setAttribute('form', 'probe-form'); " <>
+                           "document.querySelector('#top-bar').after(b); return true"
+                       )
+
+                       # The look the page was opened with, which the rejoin must not replace.
+                       looked = Look.script(session, @look)
+                       assert is_binary(looked)
+
+                       Look.script(session, "liveSocket.disconnect(); return true")
+
+                       until(
+                         session,
+                         "return document.documentElement.dataset.connection === 'lost'",
+                         "the bar to say it is not connected"
+                       )
+
+                       assert Look.script(
+                                session,
+                                "return document.querySelector('#probe-sender').disabled"
+                              )
+
+                       # What the person reads, not just the attribute: the bar's own title.
+                       assert Look.script(
+                                session,
+                                "return document.querySelector('#top-bar .ui-top-title').innerText"
+                              ) =~ "Not connected"
+
+                       assert Look.script(
+                                session,
+                                "return document.querySelector('#top-bar [data-connection-line]').innerText"
+                              ) =~ "last heard"
+
+                       # Greyed out where it stood: the same element, the same place and size.
+                       assert Look.script(
+                                session,
+                                "return document.querySelector('#{@sender}').disabled"
+                              )
+
+                       assert rect(session, @sender) == before
+
+                       Look.script(session, "liveSocket.connect(); return true")
+
+                       until(
+                         session,
+                         "return document.documentElement.dataset.connection !== 'lost' && " <>
+                           "!document.querySelector('#{@sender}').disabled",
+                         "the bar to come back and the sender to work again"
+                       )
+
+                       refute Look.script(
+                                session,
+                                "return document.querySelector('#top-bar .ui-top-title').innerText"
+                              ) =~ "Not connected"
+
+                       # The rejoin was the same visit: it drew from the look it was opened
+                       # with, and recorded none (`ui.md` § The end of the pass, and *All*).
+                       until(
+                         session,
+                         "return !!document.querySelector('#ticket-look')",
+                         "the rejoined page to carry its look"
+                       )
+
+                       assert Look.script(session, @look) == looked
+                     end
+                   ],
+                   opts
+                 )
+      end)
+
+    assert output =~ "ok: 4 steps"
+  end
+
+  # On a desktop the header is the disconnected bar (`docs/design/ui.md`): its words are drawn
+  # only while the connection is lost.
+  test "a lost connection says so in the desktop header, and stops saying it when back", %{
+    opts: opts
+  } do
+    # What is drawn: an element that is not rendered answers `innerText` with its text anyway.
+    offline =
+      "const el = document.querySelector('#desktop-header .frame-offline'); " <>
+        "return el.checkVisibility() ? el.innerText : ''"
+
+    output =
+      capture_io(fn ->
+        assert :ok ==
+                 run_with(
+                   "width desktop\nvisit :ticket\nwait \"#desktop-header\"",
+                   [
+                     fn session ->
+                       refute Look.script(session, offline) =~ "Not connected"
+
+                       Look.script(session, "liveSocket.disconnect(); return true")
+
+                       until(
+                         session,
+                         "return document.documentElement.dataset.connection === 'lost'",
+                         "the header to say it is not connected"
+                       )
+
+                       assert Look.script(session, offline) =~ "Not connected"
+                       assert Look.script(session, offline) =~ "last heard"
+
+                       Look.script(session, "liveSocket.connect(); return true")
+
+                       until(
+                         session,
+                         "return document.documentElement.dataset.connection !== 'lost'",
+                         "the header to come back"
+                       )
+
+                       refute Look.script(session, offline) =~ "Not connected"
+                     end
+                   ],
+                   opts
+                 )
+      end)
+
+    assert output =~ "ok: 4 steps"
+  end
+
+  test "a button that just moved ignores a click, and takes one once it has stayed put", %{
+    opts: opts
+  } do
+    # The app's own script and styles, on a page of nothing else: the guard is the client's.
+    path =
+      page!("moved.html", """
+      <!doctype html><html><head><meta name="csrf-token" content="look">
+      <link rel="stylesheet" href="/assets/css/app.css">
+      <script defer src="/assets/js/app.js"></script></head>
+      <body style="height:3000px"><div style="height:300px"></div><div id="spacer"></div>
+      <button id="target" style="width:200px;height:60px"
+        onclick="window.clicks = (window.clicks || 0) + 1">Target</button></body></html>
+      """)
+
+    click = fn session -> Wallaby.Browser.click(session, Wallaby.Query.css("#target")) end
+    clicks = fn session -> Look.script(session, "return window.clicks || 0") end
+
+    capture_io(fn ->
+      assert :ok ==
+               run_with(
+                 "visit #{path}\nwait #target",
+                 [
+                   fn session ->
+                     # Let the guard see where the button is before anything happens.
+                     Process.sleep(200)
+
+                     # Scrolling is the person's own doing and moves nothing on the page: a
+                     # change elsewhere makes the guard look again, and the button is where the
+                     # layout had it.
+                     Look.script(
+                       session,
+                       "window.scrollBy(0, 50); document.body.dataset.x = '1'; return true"
+                     )
+
+                     click.(session)
+                     assert clicks.(session) == 1
+
+                     move = fn px ->
+                       Look.script(
+                         session,
+                         "document.getElementById('spacer').style.height = '#{px}px'; return true"
+                       )
+                     end
+
+                     # The keyboard aims by focus, not by where a thing was drawn.
+                     move.(40)
+                     Wallaby.Browser.send_keys(session, Wallaby.Query.css("#target"), [:enter])
+                     assert clicks.(session) == 2
+
+                     move.(80)
+                     click.(session)
+                     assert clicks.(session) == 2
+
+                     Process.sleep(600)
+                     click.(session)
+                     assert clicks.(session) == 3
+                   end
+                 ],
+                 opts
+               )
+    end)
+  end
+
+  test "a toast clears itself: gone 4.5 s after logging out put it there", %{opts: opts} do
+    log_out = """
+    const form = document.createElement("form")
+    form.method = "post"
+    form.action = "/users/log-out"
+    for (const [name, value] of [["_method", "delete"],
+         ["_csrf_token", document.querySelector("meta[name='csrf-token']").content]]) {
+      const input = document.createElement("input")
+      input.type = "hidden"; input.name = name; input.value = value
+      form.appendChild(input)
+    }
+    document.body.appendChild(form)
+    form.submit()
+    return true
+    """
+
+    capture_io(fn ->
+      assert :ok ==
+               run_with(
+                 "width phone\nvisit :queue",
+                 [
+                   fn session ->
+                     Look.script(session, log_out)
+
+                     until(
+                       session,
+                       "const t = document.querySelector('#toast'); " <>
+                         "return !!t && t.innerText.includes('Logged out')",
+                       "the toast to show"
+                     )
+
+                     Process.sleep(4_500)
+
+                     assert Look.script(
+                              session,
+                              "return document.querySelector('#toast') === null"
+                            )
+                   end
+                 ],
+                 opts
+               )
+    end)
   end
 end

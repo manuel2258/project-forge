@@ -295,15 +295,17 @@ defmodule ForgeWeb.ChatsLiveTest do
     {:ok, first} = Conversations.open(parser, "about the lexer")
     {:ok, second} = Conversations.open(project("engine", user), "about the scheduler")
 
-    {:ok, view, _html} = live(conn, ~p"/chats")
+    {:ok, view, html} = live(conn, ~p"/chats")
+    # No paragraph of design rationale above the list (UX pass, B17).
+    refute html =~ "This is for finding one again"
 
+    # The sentence is in the row's own confirm, which carries the act: in place, and naming it.
     confirm = fn chat ->
       view
-      |> element(~s(ol li button[phx-value-id="#{chat.id}"]))
+      |> element("#chat-end-#{chat.id}-confirm .ui-confirm-sentence")
       |> render()
-      |> Floki.parse_fragment!()
-      |> Floki.attribute("data-confirm")
-      |> hd()
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.text()
     end
 
     assert confirm.(first) =~ ~s(End #{parser.name} "about the lexer"?)
@@ -311,7 +313,16 @@ defmodule ForgeWeb.ChatsLiveTest do
     assert confirm.(second) =~ ~s("about the scheduler")
     refute confirm.(second) =~ "lexer"
 
-    view |> element(~s(ol li button[phx-value-id="#{first.id}"])) |> render_click()
+    # The trigger is a quiet word in the row's first line, not a button on a line of its own
+    # (UX pass, B17).
+    assert has_element?(
+             view,
+             ~s(#conversation-#{first.id} > .chat-row-end #chat-end-#{first.id}-ask.ui-confirm-quiet),
+             "End"
+           )
+
+    assert has_element?(view, ~s(#chat-end-#{first.id}[phx-value-id="#{first.id}"]), "End it")
+    view |> element("#chat-end-#{first.id}") |> render_click()
     assert Jobs.get(first.id).status == :finished
     assert Jobs.get(second.id).status == :pending
   end
@@ -323,7 +334,7 @@ defmodule ForgeWeb.ChatsLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/chats")
 
-    assert view |> element("ol li button", "End") |> render() =~
+    assert view |> element("ol li .ui-confirm-sentence") |> render() =~
              "#{project.name} ##{ticket.number}"
   end
 
@@ -346,7 +357,7 @@ defmodule ForgeWeb.ChatsLiveTest do
     refute row =~ "second line"
     refute has_element?(view, "ol li b")
 
-    confirm = view |> element("ol li button", "End") |> render()
+    confirm = view |> element("ol li .ui-confirm-sentence") |> render()
     assert confirm =~ "&lt;b&gt;x&lt;/b&gt;"
     refute confirm =~ "<b>x"
     refute confirm =~ "second line"
@@ -369,7 +380,100 @@ defmodule ForgeWeb.ChatsLiveTest do
   test "a conversation can be started from here", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/chats")
 
-    assert has_element?(view, ~s(header a[href="/chats/new"]))
+    # The frame's context: `+ New` at the top bar's right end, and in the title row on a desktop.
+    assert has_element?(view, ~s(#top-bar a.ui-top-context[href="/chats/new"]))
+    assert has_element?(view, ~s(#title-row a.frame-context[href="/chats/new"]))
+  end
+
+  # The dock's composer starts one in place (`12c`), with a picker of the viewer's projects
+  # beside it: this is the one surface with no project to carry.
+  describe "the composer" do
+    test "starts a chat in the picked project and opens it", %{conn: conn, user: user} do
+      _first = project("first", user)
+      second = project("second", user)
+      {:ok, view, _html} = live(conn, ~p"/chats")
+
+      assert has_element?(view, ~s(form#chat-start[phx-change="start:change"]))
+      assert has_element?(view, ~s(#chat-start-project option[value="#{second.name}"]))
+
+      assert {:error, {:live_redirect, %{to: "/chats/" <> id}}} =
+               view
+               |> form("#chat-start", %{"project" => second.name, "text" => "why is CI slow?"})
+               |> render_submit()
+
+      chat = Jobs.get(id)
+      assert chat.project_id == second.id
+      assert [%{text: "why is CI slow?"}] = Conversations.messages(id)
+    end
+
+    # The picker offers the viewer's projects only, and the event takes a name off the wire: one
+    # of a project they are not in is refused by the lookup, as a missing one is, and nothing is
+    # started there.
+    test "refuses a project the viewer is not in", %{conn: conn, user: user} do
+      _mine = project("mine", user)
+      theirs = project("theirs", Forge.AccountsFixtures.user_fixture())
+      {:ok, view, _html} = live(conn, ~p"/chats")
+
+      refute has_element?(view, ~s(#chat-start-project option[value="#{theirs.name}"]))
+
+      html = render_submit(view, "chat:start", %{"project" => theirs.name, "text" => "let me in"})
+
+      assert html =~ "Choose one of your projects."
+      assert Conversations.summaries(project_id: theirs.id) == []
+    end
+
+    test "says so instead of starting a chat with nothing said", %{conn: conn, user: user} do
+      mine = project("mine", user)
+      {:ok, view, _html} = live(conn, ~p"/chats")
+
+      html =
+        view |> form("#chat-start", %{"project" => mine.name, "text" => "   "}) |> render_submit()
+
+      assert html =~ "Say what the chat is about first."
+      assert Conversations.summaries(project_id: mine.id) == []
+    end
+
+    # What was typed is the page's, so a rejoin's replay of the form gives it back.
+    test "keeps what was typed", %{conn: conn, user: user} do
+      mine = project("mine", user)
+      {:ok, view, _html} = live(conn, ~p"/chats")
+
+      view
+      |> form("#chat-start", %{"project" => mine.name, "text" => "half a thought"})
+      |> render_change()
+
+      assert view |> element("#chat-start-text") |> render() =~ "half a thought"
+    end
+
+    test "is not drawn for someone in no project", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/chats")
+      refute has_element?(view, "#chat-start")
+    end
+  end
+
+  # A row is called what the person opened it with, or its ticket for a step's conversation
+  # (`Forge.Conversations.title/3`), and says how many are live in the subline.
+  test "a row is titled by the first thing said, and the subline counts the live", %{
+    conn: conn,
+    user: user
+  } do
+    p = project("titled", user)
+    {:ok, chat} = Conversations.open(p, "Why is the build slow?\nIt went from 4 to 11 minutes.")
+    agent_said(chat, "The asset step.")
+    {:ok, done} = Conversations.open(p, "An older one")
+    {:ok, _done} = Conversations.ended(done, nil, "idle")
+
+    {:ok, view, _html} = live(conn, ~p"/chats")
+
+    assert has_element?(
+             view,
+             "#conversation-#{chat.id} .chat-row-title",
+             "Why is the build slow?"
+           )
+
+    refute has_element?(view, "#conversation-#{chat.id} .chat-row-title", "4 to 11")
+    assert has_element?(view, "#conversation-#{chat.id} .chat-row-said", "The asset step.")
+    assert has_element?(view, "#top-bar .ui-top-title > .ui-top-sub", "1 live · 2 in all")
   end
 
   # A live row is a machine running, and until this existed the only way to stop one was to open
@@ -384,9 +488,8 @@ defmodule ForgeWeb.ChatsLiveTest do
 
     # Ending deletes the branch unless it would not merge cleanly, and the confirm says so —
     # the conversation's own page's sentence, not a quieter one of the list's.
-    button = view |> element(~s(ol li button[phx-value-id="#{chat.id}"]))
-    assert render(button) =~ "its branch is deleted"
-    button |> render_click()
+    assert view |> element("#chat-end-#{chat.id}-confirm") |> render() =~ "its branch is deleted"
+    view |> element("#chat-end-#{chat.id}") |> render_click()
 
     assert Jobs.get(chat.id).status == :finished
   end

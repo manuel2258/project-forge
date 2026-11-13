@@ -2,8 +2,11 @@
 
 Scope: how consumption is modelled, recorded and drawn. Consumption is **consumed capacity, not
 money**: one unit is one percent of a five-hour window, and quantities are stated in **windows** to
-two significant figures (`1.4 windows`). This survives work that spans four windows and a week,
-which a percentage cannot, and it replaces `$0.15562769999999998` on every operator surface.
+two significant figures and never more than two decimals (`1.4 windows`, `0.08 windows`), with
+anything under a hundredth of a window written `<0.01 windows`. This survives work that spans four
+windows and a week, which a percentage cannot, and it replaces `$0.15562769999999998` on every
+operator surface. `0.0020 windows` beside `0.080 windows` was precision nobody can use, and on a
+phone it was the figure that pushed a row onto a fourth line (UX pass, A11, B9).
 
 **What a run used is weighted tokens, for every harness** (§ Usage in weighted tokens). It stays on
 jobs and tickets as `usage`, the PoC's definition of usable asks for a total per ticket, and a
@@ -101,31 +104,36 @@ Drawn as a figure plus a 5px meter filled accent, against the ticket allowance. 
 would mean something different on Monday than on Friday.
 
 **Capacity** is a live shared pool that refills, and it comes from `rate_limit_event` rather than
-from anything forge computes. The current five-hour window carries a mono reset countdown derived
-from `resetsAt`, shown whenever a window is known. The twenty-tick gauge (one tick per five
-percent, compressing to ten ticks in the top bar) is drawn **only when the provider has supplied a
-`utilization` figure** — that is, once the warning threshold is crossed. Below it the countdown
-stands alone. Inventing the first ninety percent of a gauge's range would be exactly the failure
-the design warns about for the countdown, and a quiet page should stay quiet until capacity binds.
+from anything forge computes. Each window — five-hour and weekly — is drawn as **a line**: the
+five-hour window a 3px line directly above the top bar, the week a 2px line that is the top bar's
+bottom border (`ui.md` § Usage). A line fills left to right over a track of ink at 10 %; **below
+80 % it is quiet ink, from 80 % warning, from 95 % danger.** It is drawn **only from a
+`utilization` figure the provider supplied** — in practice once the warning threshold is crossed.
+A window with no figure draws no fill and no track: inventing the first ninety percent of a
+meter's range is exactly the failure a quiet page avoids, and a quiet page should stay quiet until
+capacity binds. Its reset is said where the window is written out — the usage panel, the usage
+page, the desktop digits' title — as a mono time, whenever a reset is known.
 
-The week becomes the headline only when it binds. It is drawn like the five-hour window, from the
-newest report that names it — in `unifiedWindows`, or as a report's own type — until its reset
-passes; with no such report there is nothing truthful to draw, so it is not drawn.
+The week is drawn like the five-hour window, from the newest report that names it — in
+`unifiedWindows`, or as a report's own type — until its reset passes; with no such report there is
+nothing truthful to draw, so it is not drawn.
 
-**The top bar draws a set of credentials, not one.** With a pool there is no single window, so the
-top bar's gauge is, per window — five-hour and weekly — the mean utilization of the credentials
-the page is about that have reported one, a limited credential counting as full, beside a
-countdown to the soonest reset among them; its title says how many of them it averages. Which
-credentials is the page's: a project's pool on a page about that project, the viewer's own
-everywhere else (`docs/design/credentials.md` § Showing the windows). The rules above hold for it
-unchanged — no figure, no gauge; neutral, never accent.
+**The lines draw a set of credentials, not one.** With a pool there is no single window, so each
+line is, per window, the mean utilization of the credentials the page is about that have reported
+one, a limited credential counting as full; where it is written out it says how many of them it
+averages and the soonest reset among them. Which credentials is the page's: a project's pool on a
+page about that project, the viewer's own everywhere else (`docs/design/credentials.md` § Showing
+the windows). The rules above hold for it unchanged — no figure, no fill; neutral, never accent. A
+set in which nothing reported draws nothing.
 
-**The window gauge is neutral, not accent.** The handoff lists it among the accent uses, which
-contradicts the rule accent exists to serve: accent means a human is being waited on, and window
-capacity is resolved by time rather than by a person. Drawing it in accent would put a loud mark on
-the one exhaustion the operator can do nothing about. Usage against a ticket allowance stays accent
-— that ceiling does need a human. This is a deliberate departure from the handoff, recorded here so
-it reads as a decision rather than a mistake.
+**The window lines are neutral, never accent.** The first handoff listed the window gauge among the
+accent uses, which contradicts the rule accent exists to serve: accent means a human is being
+waited on, and window capacity is resolved by time rather than by a person. Drawing it in accent
+would put a loud mark on the one exhaustion the operator can do nothing about. The redesign's
+handoff agrees (*never amber*), and goes further in the same direction: the lines turn warning and
+danger as a window fills, which are the colours for *near a limit* and say nothing about who must
+act. Usage against a ticket allowance stays accent — that ceiling does need a human.
+
 
 ## Four exhaustions, three treatments
 
@@ -135,8 +143,8 @@ Only one of them is the operator's.
 |---|---|---|
 | A job's own budget | **the workflow** — a retry, or an edge onward to a person | outcome `budget_exhausted` on the job row with `· turns`, `· tokens` or `· wall clock` beside it, nowhere else |
 | Ticket allowance | **a human** — raise it or reroute | sticks the ticket, enters the queue, drawn in accent |
-| Daily spend cap | **time**, or the operator raising it | `PAUSED · SPEND 6h 12m`, neutral, on the ticket; the board and the project page draw `PAUSED · SPEND` without the countdown. **Never in the queue** |
-| Window capacity | **time** | `PAUSED · CAPACITY 1h 12m`, neutral, on the board and the ticket, **never in the queue**. Not built (§ Engine support) |
+| Daily spend cap | **time**, or the operator raising it | `paused · spend 6h 12m` in the ticket's subline, neutral, counting down to midnight UTC; the project's ticket list draws `paused · spend` without the countdown. **Never in the queue** |
+| Window capacity | **time** | `PAUSED · CAPACITY 1h 12m`, neutral, on the ticket and the project's ticket list, **never in the queue**. Not built (§ Engine support) |
 
 **The first row is the workflow's, not the engine's.** What happens to a job that ran out is an
 edge in the definition: a self-retry where one is declared, and otherwise wherever
@@ -163,8 +171,8 @@ limit can pass the second without ever breaching it. Drawn as a ratio the pair t
 numbers do not: `37/30 converged` on a job no cap had stopped, beside `38/60 budget_exhausted` on
 a job that $5.07 of $5.00 had. So the job page draws the turns a job used, the pinned manifest
 draws the ceiling as *per run*, and what actually ended the job is the word above. This departs
-from the handoff's "turns always against budget" (`ui/README.md`), deliberately and for that
-reason.
+from the first handoff's "turns always against budget" (its `docs/design/ui/README.md`, in git
+history at `92ea7c1`), deliberately and for that reason.
 
 **The usage ceiling overshoots, and that is the mechanism working.** Forge counts after each model
 call and stops the run after the call that crosses the line: `810k of 800k` is a cap doing its job,
@@ -177,6 +185,61 @@ operator to open items they cannot act on, which is the exact failure the thesis
 against. The daily cap is the platform's own rather than the provider's — it is what the operator
 sets so a bad night cannot cost a month — but it is resolved the same way, by a clock, so it is
 drawn the same way. The countdown is to the next UTC midnight.
+
+## Usage history
+
+The usage page (`ui.md` § Usage) says what spent a window and how fast it is filling. Both are
+read from records the platform already keeps; no history of utilization is stored.
+
+**Spend over time is the run ledger, bucketed by when a run reported.** `job_runs` (`credentials.md`
+§ Spend) holds what each run of a job used, in weighted tokens (§ Usage in weighted tokens), and on
+which credential; no dollars are read, for either harness. The five-hour card draws the
+spend of the page's credentials in 15-minute buckets from the window's start to its reset; the
+week card in one bucket per day of the window, 24 hours each from its start, so a week is seven
+bars and not eight part-days. A bucket holds its start and not its end. A window no credential has
+reported has no reset, and its buckets run over the length before now instead. **A run lands in one bucket, the one holding the moment its usage was
+last written** — `finished_at` for a run that reported, and for a run still open, the moment a
+conversation's turn last counted it. A workflow job reports its usage only at its end, so a long job
+is one bar at the moment it finished, not spread over the hours it ran; a conversation's run records
+itself every turn with its running total, so its whole usage so far sits at its latest turn. That
+is coarser than the truth and says so; spreading usage over a run's life would be inventing a
+rate nothing reported. `Forge.Jobs.Runs.record/3` writes the usage with `update_all`,
+which stamps nothing on its own, so it sets `updated_at` itself: that is the open run's moment.
+
+**Pace is projected, not remembered.** A window's start is its reset less its length — five hours,
+or seven days — and its average rate is its latest utilization over the time since that start.
+Projected to the reset at that rate, a window that would cross 100 % before it resets is drawn
+*full in ~N*, the time until it would; any other is *on pace*. It needs the latest utilization and
+reset, which `Forge.Credentials.windows/2` already reads, and nothing else. A window with no
+utilization has no pace.
+
+**What spent it is a share of the window's figure**, never dollars: each item's — a job or a
+conversation, the running ones marked — project's or model's share is **the window's measured
+figure split by usage**, its weighted tokens over those of everything the set used since the window
+began, times the figure. The figure is capacity, measured; the weighted tokens only say how it
+divides, so the
+shares add up to the figure over them and never to more. **That includes use outside forge.** The
+figure is the provider's, and counts everything the credential did — its owner's own Claude
+sessions as much as forge's jobs — while the weighted tokens are forge's alone, so whatever the
+credential did elsewhere is split in with forge's lines in proportion to their usage: one 20k-token
+job on a credential its owner has filled to 80 % by hand reads 80 %. The legend says so, in those words —
+*use of these credentials outside forge is split in with them* (review fixes 7, M2). Setting it
+apart as a line of its own, *N % outside forge*, was weighed and not built: it needs forge's part
+of the figure from forge's usage, which is the estimate below — a configured guess at a window's
+size (`window_tokens`), a placeholder, in five-hour windows and so in no unit the week's figure has, and summed
+over credentials whose figure is their mean. A line computed from that would present a guess as
+a measurement, which is what this section exists to stop. With a figure and nothing spent yet,
+every share is 0 %. They were each a share of
+`window_tokens` (once `window_cost_usd`), the unit § Two objects defines, and that is a different object: on a set of two
+credentials at 91 %, shares of *one* configured window read 95 % under it (UX pass, D6). **With no
+figure** — no credential of the set has reported the window — there is nothing measured to split,
+and the share is that estimate, said to be one: *share of one 5h window, estimated from tokens
+used*. A conversation's model is `jobs.model`, a workflow job's the one its spec
+was resolved to, and a job with neither is *the project's default*. **An item in a project the
+viewer is not a member of is counted and never named**: one line, *elsewhere*, because the viewer's
+credential paid for it and a project they are not in is not one they may learn about (`identity.md`
+§ Read scoping) — under every breakdown, the model one included. What is spending now, in the usage
+panel, is the items of that list with a run still open.
 
 ## Spend caps
 
@@ -248,7 +311,7 @@ is blocking, leaving the ticket `active` — not `stuck`, and not in the queue �
 credential is limited waits pending with its ticket active, and a job whose own credential is
 limited moves to a free one (`docs/design/credentials.md` § How a job picks). A job stopped by a
 limit *mid-run* goes back to pending the same way rather than failing (`credentials.md` § A limit
-reached mid-run). The `PAUSED` surface on the board and the ticket is not built. The gate keys on
+reached mid-run). The `PAUSED · CAPACITY` surface on the ticket is not built. The gate keys on
 the status string: anything beginning `allowed` permits, anything else pauses. That is
 forward-compatible with statuses this sample does not contain, and it fails towards not spending an
 invocation rather than towards burning one. A rejecting status has not been observed, so until one
@@ -267,7 +330,7 @@ so a quiet job draws nothing about memory at all.
 reached its ceiling, or it thrashed there (`claude-code-events.md` § Memory). Then, and only then:
 
 - **In the job's header** — the job page's, under the outcome, and a conversation's context strip
-  — one mono line in `warning`, with a `⚠` in front: *2 OOM kills · peak 2.0 GiB of 2 GiB*, or
+  — one mono line in `warning`, with a `△` in front: *2 OOM kills · peak 2.0 GiB of 2 GiB*, or
   *reached its ceiling · peak 2.0 GiB of 2 GiB*, or *thrashing at its ceiling · peak …*. The
   figures are the worst the job's events and its result report, so it is visible without
   scrolling the timeline.
@@ -294,9 +357,7 @@ the worker sent that is not a whole number of bytes is left out of the line rath
   is wrong by until dogfooding sets it. It is a display constant only: nothing schedules, caps or
   refuses on it.
 - **A report whose own type is the week is unobserved.** The week has been seen only in
-  `unifiedWindows`, and is drawn as the five-hour window is. Were it to bind, it would be a thin
-  plain bar beneath the window gauge and become the headline when it is the binding ceiling; that
-  is not built.
+  `unifiedWindows`, and is drawn as the five-hour window is, as its own line.
 - **The rejecting status is unobserved**, so the scheduler gate's trigger is inferred from naming.
 - **A job at a window edge** goes back to pending with its session and resumes — on another
   credential if one is free, on its own after the reset if not (`docs/design/credentials.md`

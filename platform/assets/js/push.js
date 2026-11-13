@@ -1,5 +1,6 @@
-// Web push: registers the service worker and lets the "Notify me" button subscribe this
-// browser. The LiveView stores the subscription; the platform pushes blocking questions.
+// Web push: registers the service worker and lets the "Notify me" button, or You's switch,
+// subscribe this browser. The LiveView stores the subscription; the platform pushes blocking
+// questions.
 
 export function registerServiceWorker() {
   if ("serviceWorker" in navigator) {
@@ -28,11 +29,22 @@ export const PushSubscribe = {
   },
 
   async refresh() {
+    let on = false;
     try {
-      const subscription = await this.current();
-      this.label.textContent = subscription ? "Notifications on" : "Notify me";
+      on = !!(await this.current());
     } catch (_e) {
-      this.label.textContent = "Notify me";
+      on = false;
+    }
+    this.show(on);
+  },
+
+  // The queue's button says it in words; You's row is a switch (role="switch"), whose state is
+  // this browser's own subscription, which only the browser knows. That element is
+  // phx-update="ignore", so a re-render leaves the state set here alone.
+  show(on) {
+    if (this.label) this.label.textContent = on ? "Notifications on" : "Notify me";
+    if (this.el.getAttribute("role") === "switch") {
+      this.el.setAttribute("aria-checked", on ? "true" : "false");
     }
   },
 

@@ -1,0 +1,15 @@
+:root {
+  --shadow-row: 0 8px 14px -10px oklch(6% 0.005 300 / .9);   /* decision row, pinned to the bar */
+  --shadow-panel: 0 16px 30px oklch(6% 0.005 300 / .8);      /* drop panels, sheets */
+  --shadow-toast: 0 10px 30px oklch(6% 0.005 300 / .6);
+  --z-row: 3; --z-panel: 4; --z-toast: 5;
+  --dur-fast: 120ms; --dur: 180ms; --dur-panel: 220ms;
+  --ease-out: cubic-bezier(.2, .7, .2, 1);
+  --toast-life: 4s;
+  --moved-guard: 500ms; /* a button that moved ignores taps this long */
+}
+[data-theme="light"] {
+  --shadow-row: 0 8px 14px -10px oklch(40% 0.02 255 / .25);
+  --shadow-panel: 0 16px 30px oklch(40% 0.02 255 / .18);
+  --shadow-toast: 0 10px 30px oklch(30% 0.02 255 / .35);
+}

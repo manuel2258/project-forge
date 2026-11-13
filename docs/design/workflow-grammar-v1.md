@@ -163,7 +163,7 @@ engine. `initial` names the state a ticket enters at admission. A
 state with no outgoing transitions is terminal.
 
 **A human state may declare `produces`: documents a person writes while the ticket rests there**,
-on the ticket's Decide tab or through `POST …/artifacts/:name`. `human_testing` declaring
+on the ticket's Steps, under its current step, or through `POST …/artifacts/:name`. `human_testing` declaring
 `test-report.md` is the case: the person who tried the build is the one the next job needs to
 hear from, and a document is how every other state hears from the one before it. Nothing requires
 one before a transition out is taken — a tester who approves the changeset has nothing to report —
@@ -182,8 +182,8 @@ the edges out are completion transitions, selected by the outcome.
 `review_ready`, `merged`. Names are the project's to choose and nothing validates this, but
 getting it backwards makes the platform assert something false: a ticket in a job state called
 `implemented` is *not* implemented, and will not be until the job it is running ends. The name is
-read at the moment it is least true — on the board while the work is in flight, and as the
-timeline step heading the job's rows sit under.
+read at the moment it is least true — on the project's tickets while the work is in flight, and as
+the step heading the job's rows sit under.
 
 The tempting objection is that a ticket also rests in a job state *after* its job, while a
 transition waits for approval, so no tense is true throughout. It does not hold: that phase is
@@ -372,7 +372,7 @@ pending, running, waiting, parked or hibernated — is finished with outcome `ca
 running one is told to stop, any pending approval is cleared, and `ticket.cancelled` names the
 jobs it ended. **It is not a deletion.** Events and artifact versions are append-only
 (`data-model.md`), the branch is the work, and a mistaken cancel must be undoable — so a cancelled
-ticket keeps all of it and is **hidden everywhere a ticket is listed**: the board, the project
+ticket keeps all of it and is **hidden everywhere a ticket is listed**: the project
 page, the queue, the projects page's count, the API's ticket list, a project token's ticket
 choice, and the backlog every job reads (`ticket-proposals.md` § Reading the backlog). Its own
 page is still reached by its address, and offers **Restore**, which makes it `stuck` in the state
@@ -712,7 +712,7 @@ it commits to `chat/<id>` and records no `changeset`, so nothing of it reaches h
 ticket's or a conversation's — the project's other open tickets with a changeset are checked, and
 one whose latest changeset no longer merges is told so on its page, once per commit, with which
 merge caused it
-(`docs/design/ui.md` § Decide and Timeline). Nothing starts by itself: a job spends a credential,
+(`docs/design/ui.md` § The details). Nothing starts by itself: a job spends a credential,
 and the ticket may be one its operator is about to cancel. A person can send it down the conflict
 route from there (`Forge.Engine.integrate/2`) when its state has an edge into a merging state with
 `on_conflict` and nothing is live in it: the check is run again, a conflict takes the same route an
@@ -1015,7 +1015,8 @@ every definition stored before it and gave each of those tickets a 500 on its pa
 fail is a pin the grammar can no longer build, because it dropped a key the pin uses. The ticket
 page then says that the workflow it was pinned to can no longer be read, with the errors behind a
 disclosure, and offers Re-pin when `.forge/` has changed on the default branch and Cancel while the
-ticket is open (Restore once cancelled) — neither reads the old pin. The review page sends such a ticket to that page. The
+ticket is open (Restore once cancelled) — neither reads the old pin. An address naming its Changes view draws Steps,
+which is all such a ticket has. The
 engine reads such a pin with `Tickets.workflow/1`, which raises, and the page offers no action that
 reaches it (cancel, restore and re-pin do not read the old pin).
 
@@ -1034,7 +1035,7 @@ nobody on the ticket may edit, failing in a way no change on the branch can mend
 on failing on that ticket after a fix landed on the default branch, for as long as the ticket
 lived; the only way on was to move the ticket past the state by hand. The ticket page says when `.forge/` has changed on the
 default branch since the pin, which paths, and offers the re-pin beside it (`docs/design/ui.md` §
-Decide and Timeline). A ticket that changes a command script still sees the change only after it
+The details). A ticket that changes a command script still sees the change only after it
 merges: re-pinning takes the default branch, never the ticket's own.
 
 ## Validation (rejects the file, never partially runs it)
@@ -1123,7 +1124,7 @@ is never produced; `answers.md` is platform-managed and never declared.
   workflow that is a job state or a human state with a transition out — never a command state,
   and never the merging state itself; a job state it names is the `to` of no transition
   (§ Merging). Every walk of the graph — whether each state is reachable, whether an input or an
-  approval comes before its reader, the order the board draws its columns in — follows it as an
+  approval comes before its reader, the order the project page draws its states in — follows it as an
   edge out of the merging state, because the ticket can reach the target only by it. It is no
   transition: no `when` selects it and no person chooses it.
 - `queue` is `true` or `false`, and `true` only on an edge whose `to` has `on_enter: merge`:

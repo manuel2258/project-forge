@@ -33,10 +33,11 @@ defmodule ForgeWeb.ProjectSettingsSecretsTest do
     %{conn: log_in_user(conn, admin), project: project, admin: admin}
   end
 
-  defp settings(conn, project), do: live(conn, ~p"/projects/#{project.name}/settings")
+  defp settings(conn, project),
+    do: live(conn, ~p"/projects/#{project.name}/settings?section=secrets")
 
   defp set(view, params),
-    do: view |> form("#secrets form", secret: params) |> render_submit()
+    do: view |> form(~s(form[phx-submit="set-secret"]), secret: params) |> render_submit()
 
   # Everything the page's process holds, as text: assigns, flash, the rendered tree.
   defp held(view),
@@ -88,7 +89,7 @@ defmodule ForgeWeb.ProjectSettingsSecretsTest do
     assert html =~ "The value must be at least 8 characters"
 
     assert view
-           |> element(~s(#secrets input[name="secret[name]"][value="API_KEY"]))
+           |> element(~s(#set-secret input[name="secret[name]"][value="API_KEY"]))
            |> has_element?()
 
     refute held(view) =~ ~s("short")
@@ -143,7 +144,10 @@ defmodule ForgeWeb.ProjectSettingsSecretsTest do
     {:ok, secret} = Operator.set_secret(project, admin, "STRIPE_TEST_KEY", @value)
     {:ok, view, _html} = settings(conn, project)
 
-    html = view |> element("#secret-rows button", "Delete") |> render_click()
+    assert view |> element("#secret-rows .ui-confirm-panel") |> render() =~
+             "Its value is destroyed"
+
+    html = view |> element(~s(#secret-rows button[phx-click="delete-secret"])) |> render_click()
 
     assert html =~ "Deleted STRIPE_TEST_KEY."
     refute has_element?(view, "#secret-rows")
@@ -165,7 +169,7 @@ defmodule ForgeWeb.ProjectSettingsSecretsTest do
       {:ok, view, html} = settings(conn, project)
 
       assert view |> element("#secret-rows td", "STRIPE_TEST_KEY") |> has_element?()
-      refute has_element?(view, "#secrets form")
+      refute has_element?(view, ~s(form[phx-submit="set-secret"]))
       refute has_element?(view, "#secret-rows button")
       refute html =~ @value
     end
@@ -192,5 +196,54 @@ defmodule ForgeWeb.ProjectSettingsSecretsTest do
 
       assert [%Secret{version: 1, deleted_at: nil}] = Secrets.list(project)
     end
+  end
+
+  # Rotating a value is setting it again: the row opens the form with the name filled and locked
+  # (UX pass, D18), and the value is dots until shown (D19).
+  test "Replace value opens the form on that name, locked, and the value is masked", %{
+    conn: conn,
+    project: project,
+    admin: admin
+  } do
+    {:ok, secret} = Operator.set_secret(project, admin, "STRIPE_TEST_KEY", @value)
+    {:ok, view, _html} = settings(conn, project)
+
+    assert has_element?(view, "#secret-#{secret.id}", "set by #{admin.email}")
+
+    view |> element("#replace-secret-#{secret.id}") |> render_click()
+
+    assert_patch(
+      view,
+      ~p"/projects/#{project.name}/settings?add=1&secret=STRIPE_TEST_KEY&section=secrets"
+    )
+
+    assert has_element?(view, "#set-secret h2", "Replace a value")
+
+    assert has_element?(
+             view,
+             ~s(#set-secret input[name="secret[name]"][readonly][value="STRIPE_TEST_KEY"])
+           )
+
+    assert has_element?(view, ~s(#set-secret textarea.settings-masked))
+
+    html = set(view, %{name: "STRIPE_TEST_KEY", value: "sk_test_rotated"})
+    assert html =~ "Saved STRIPE_TEST_KEY, version 2."
+    # Done: the form is a fresh one again.
+    refute has_element?(view, ~s(#set-secret input[readonly]))
+  end
+
+  # The names a sentence quotes are drawn in mono, with nothing between them and the text around
+  # them — a template's line breaks read `implementing , state` (UX pass, D18).
+  test "a received-by sentence joins its names without stray spaces" do
+    html =
+      "state `implementing`, state `review`"
+      |> ForgeWeb.ProjectSettingsLive.ticked()
+      |> Phoenix.HTML.safe_to_string()
+
+    assert html ==
+             ~s(state <code class="settings-code">implementing</code>, state <code class="settings-code">review</code>)
+
+    assert "a `<b>`" |> ForgeWeb.ProjectSettingsLive.ticked() |> Phoenix.HTML.safe_to_string() ==
+             ~s(a <code class="settings-code">&lt;b&gt;</code>)
   end
 end

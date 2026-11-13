@@ -4,7 +4,7 @@ defmodule ForgeWeb.ArtifactControllerTest do
 
   `docs/design/ui.md` § Addressable artifact versions. What is tested here is what the links on
   the ticket and job pages depend on: an exact version, never "latest" standing in for one; a
-  changeset going to the review page because a commit is not a file; and a `file://` row — the
+  changeset going to the ticket's Changes because a commit is not a file; and a `file://` row — the
   milestone 1 form, still on old rows — confined to the platform's own data directory.
   """
 
@@ -319,7 +319,7 @@ defmodule ForgeWeb.ArtifactControllerTest do
     end
   end
 
-  test "a changeset is a commit, so it goes to the diff instead", %{
+  test "a changeset is a commit, so it goes to the ticket's Changes instead", %{
     conn: conn,
     project: project,
     user: user
@@ -330,7 +330,7 @@ defmodule ForgeWeb.ArtifactControllerTest do
 
     conn = get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/changeset/1")
 
-    assert redirected_to(conn) == ~p"/tickets/#{project.name}/#{ticket.number}/review"
+    assert redirected_to(conn) == ~p"/tickets/#{project.name}/#{ticket.number}?tab=changes"
   end
 
   test "a milestone 1 file:// row is served from inside the data directory", %{

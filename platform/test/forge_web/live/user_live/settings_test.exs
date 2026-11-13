@@ -12,8 +12,8 @@ defmodule ForgeWeb.UserLive.SettingsTest do
         |> log_in_user(user_fixture())
         |> live(~p"/users/settings")
 
-      assert html =~ "Change Email"
-      assert html =~ "Save Password"
+      assert html =~ "Change email"
+      assert html =~ "Save password"
     end
 
     test "redirects if user is not logged in", %{conn: conn} do
@@ -21,7 +21,7 @@ defmodule ForgeWeb.UserLive.SettingsTest do
 
       assert {:redirect, %{to: path, flash: flash}} = redirect
       assert path == ~p"/users/log-in"
-      assert %{"error" => "You must log in to access this page."} = flash
+      assert %{"sign_in_error" => "You must log in to access this page."} = flash
     end
 
     test "redirects if user is not in sudo mode", %{conn: conn} do
@@ -70,7 +70,7 @@ defmodule ForgeWeb.UserLive.SettingsTest do
           "user" => %{"email" => "with spaces"}
         })
 
-      assert result =~ "Change Email"
+      assert result =~ "Change email"
       assert result =~ "must have the @ sign and no spaces"
     end
 
@@ -84,7 +84,7 @@ defmodule ForgeWeb.UserLive.SettingsTest do
         })
         |> render_submit()
 
-      assert result =~ "Change Email"
+      assert result =~ "Change email"
       assert result =~ "did not change"
     end
   end
@@ -136,7 +136,7 @@ defmodule ForgeWeb.UserLive.SettingsTest do
           }
         })
 
-      assert result =~ "Save Password"
+      assert result =~ "Save password"
       assert result =~ "should be at least 12 character(s)"
       assert result =~ "does not match password"
     end
@@ -154,7 +154,7 @@ defmodule ForgeWeb.UserLive.SettingsTest do
         })
         |> render_submit()
 
-      assert result =~ "Save Password"
+      assert result =~ "Save password"
       assert result =~ "should be at least 12 character(s)"
       assert result =~ "does not match password"
     end
@@ -186,18 +186,25 @@ defmodule ForgeWeb.UserLive.SettingsTest do
       # use confirm token again
       {:error, redirect} = live(conn, ~p"/users/settings/confirm-email/#{token}")
       assert {:live_redirect, %{to: path, flash: flash}} = redirect
-      assert path == ~p"/users/settings"
-      assert %{"error" => message} = flash
-      assert message == "Email change link is invalid or it has expired."
+      assert path == ~p"/users/settings?email=expired"
+      refute Map.has_key?(flash, "error")
     end
 
+    # Said under the field a new link is asked from (`ui.md` § Errors stay where you acted),
+    # never in a toast and never in a line of the frame's.
     test "does not update email with invalid token", %{conn: conn, user: user} do
       {:error, redirect} = live(conn, ~p"/users/settings/confirm-email/oops")
-      assert {:live_redirect, %{to: path, flash: flash}} = redirect
-      assert path == ~p"/users/settings"
-      assert %{"error" => message} = flash
-      assert message == "Email change link is invalid or it has expired."
+      assert {:live_redirect, %{to: path}} = redirect
+      assert path == ~p"/users/settings?email=expired"
       assert Accounts.get_user_by_email(user.email)
+
+      {:ok, view, _html} = live(conn, path)
+
+      assert view |> element("#email_form #email-error[role=alert]") |> render() =~
+               "Email change link is invalid or it has expired."
+
+      {:ok, view, _html} = live(conn, ~p"/users/settings")
+      refute has_element?(view, "#email-error")
     end
 
     test "redirects if user is not logged in", %{token: token} do
@@ -205,7 +212,7 @@ defmodule ForgeWeb.UserLive.SettingsTest do
       {:error, redirect} = live(conn, ~p"/users/settings/confirm-email/#{token}")
       assert {:redirect, %{to: path, flash: flash}} = redirect
       assert path == ~p"/users/log-in"
-      assert %{"error" => message} = flash
+      assert %{"sign_in_error" => message} = flash
       assert message == "You must log in to access this page."
     end
   end

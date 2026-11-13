@@ -9,6 +9,7 @@ defmodule ForgeWeb.WorkersLiveTest do
 
   use ForgeWeb.ConnCase, async: false
 
+  import Ecto.Query, only: [from: 2]
   import Phoenix.LiveViewTest
 
   alias Forge.{Jobs, Workers}
@@ -56,7 +57,8 @@ defmodule ForgeWeb.WorkersLiveTest do
     test "is filled, with a line saying why, while the viewer has no template", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/workers")
 
-      assert view |> element("#templates-button") |> render() =~ "bg-primary"
+      # Filled: the one way forward on a page with nothing to show.
+      assert view |> element("#templates-button") |> render() =~ "ui-btn--primary"
 
       assert has_element?(
                view,
@@ -88,7 +90,8 @@ defmodule ForgeWeb.WorkersLiveTest do
 
       template.(user)
       {:ok, view, _html} = live(conn, ~p"/workers")
-      refute view |> element("#templates-button") |> render() =~ "bg-primary"
+      # The views already lead there; a second way would be a button saying nothing new.
+      refute has_element?(view, "#templates-button")
       refute has_element?(view, "#no-templates")
     end
   end
@@ -97,7 +100,7 @@ defmodule ForgeWeb.WorkersLiveTest do
     {:ok, _view, html} = live(conn, ~p"/workers")
 
     assert html =~ "You have no machines"
-    assert html =~ "minted with New machine"
+    assert html =~ "added with + Add a machine"
   end
 
   # Anybody approved may mint a machine of their own (`docs/design/identity.md` § Minting a
@@ -124,6 +127,11 @@ defmodule ForgeWeb.WorkersLiveTest do
       env = minted_env(view)
       # Where it goes, said beside it: nothing on the page can show it again.
       assert has_element?(view, "#minted", "forge-config")
+      # The same block a freshly issued token is shown in (`Operator.Components.shown_once/1`),
+      # so the two say the same thing about what happens once it is dismissed.
+      assert has_element?(view, "#minted .ui-notice", "Copy it now. It is not shown again.")
+      # A warning, not the amber of a decision: nothing waits on you here (UX re-check #5).
+      assert has_element?(view, "#minted .ui-notice--warning")
       refute has_element?(view, "#mint-form")
       # One more click would throw the environment away, so there is nothing to click.
       refute has_element?(view, "#new-machine")
@@ -133,7 +141,7 @@ defmodule ForgeWeb.WorkersLiveTest do
       assert {:ok, _worker} = Workers.authenticate(worker.id, env["FORGE_WORKER_TOKEN"])
       assert has_element?(view, "#worker-#{worker.id}", "no project, so it takes no work")
 
-      view |> element("#minted button", "Done") |> render_click()
+      view |> element("#minted button", "I have copied it") |> render_click()
 
       refute has_element?(view, "#minted")
       refute render(view) =~ env["FORGE_WORKER_TOKEN"]
@@ -317,6 +325,87 @@ defmodule ForgeWeb.WorkersLiveTest do
     refute view |> element("#worker-#{current.id}") |> render() =~ "takes no agent job"
   end
 
+  # UX pass, D14: a row says nothing that contradicts itself.
+  describe "a row that does not contradict itself" do
+    # Busy or ready and not connected is the state that cost a day: in danger, with the words.
+    test "busy and not connected is said in danger, and idle is not said while busy", %{
+      conn: conn,
+      user: user
+    } do
+      w = worker(user)
+      {:ok, _} = Workers.ready(w, %{"memory_budget" => 8_000_000_000})
+      quiet = worker(user)
+
+      Forge.Repo.update_all(from(x in Forge.Workers.Worker, where: x.id == ^w.id),
+        set: [status: :busy, idle_since: DateTime.utc_now(:second)]
+      )
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      assert has_element?(view, "#worker-#{w.id} .machine-head .machine-dot--danger")
+
+      # The danger is on the word that names the problem; busy stays ink (UX re-check #17).
+      assert has_element?(view, "#worker-#{w.id} .machine-status", "busy")
+      refute has_element?(view, "#worker-#{w.id} .machine-status.text-danger")
+      assert has_element?(view, "#worker-#{w.id} .machine-ids .text-danger", "not connected")
+
+      refute view |> element("#worker-#{w.id}") |> render() =~ "· idle"
+      # A machine still being made is not stranded, only not connected yet.
+      refute has_element?(view, "#worker-#{quiet.id} .machine-dot--danger")
+    end
+
+    test "a machine being made says nothing of its release or what it has free", %{
+      conn: conn,
+      user: user
+    } do
+      w = worker(user)
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      row = view |> element("#worker-#{w.id}") |> render()
+
+      refute row =~ "takes no agent job"
+      refute row =~ "GiB of"
+    end
+
+    test "a destroyed machine says nothing of what it has free", %{conn: conn, user: user} do
+      w = worker(user)
+      {:ok, _} = Workers.ready(w, %{"memory_budget" => 8_000_000_000})
+
+      Forge.Repo.update_all(from(x in Forge.Workers.Worker, where: x.id == ^w.id),
+        set: [status: :destroyed]
+      )
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      view |> element("button[phx-click=toggle-destroyed]") |> render_click()
+      refute view |> element("#worker-#{w.id}") |> render() =~ "GiB of"
+    end
+
+    test "the harness is named as You names it", %{conn: conn, user: user} do
+      w = worker(user)
+      {:ok, _} = Workers.ready(w, %{"harness" => %{"driver" => "claude_code"}})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      row = view |> element("#worker-#{w.id} .machine-facts") |> render()
+      assert row =~ "Claude Code"
+      refute row =~ "claude_code"
+    end
+  end
+
+  # The field is labelled with a size, so it is filled with one (UX pass, D15).
+  test "Set what it offers is filled with the size it has, not a byte count", %{
+    conn: conn,
+    user: user
+  } do
+    w = worker(user, %{managed: false})
+    {:ok, _} = Workers.ready(w, %{"memory_budget" => 8 * 1024 * 1024 * 1024})
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+    view |> element("button[phx-click=edit][phx-value-id=\"#{w.id}\"]") |> render_click()
+
+    field = view |> element("#offer-memory-#{w.id}") |> render()
+    assert field =~ ~s(value="8GiB")
+    assert view |> element("#offer-#{w.id}") |> render() =~ "Memory (e.g. 8GiB)"
+  end
+
   # The machine installs or updates its own Claude Code before it reports `ready`, and a failed
   # attempt is a machine that may be running nothing at all — which the operator has to be able
   # to see here rather than in a journal on the machine (`docs/design/worker-tier.md` § Updating
@@ -347,7 +436,7 @@ defmodule ForgeWeb.WorkersLiveTest do
     assert line =~ "claude update failed"
     assert line =~ "could not resolve host"
     # The one state here that is a fault, and the only one drawn in error (`ui.md` § Colour).
-    assert line =~ "text-error"
+    assert line =~ "text-danger"
   end
 
   # Every harness a machine offers is drawn, not only the first: Codex's version and the outcome
@@ -378,7 +467,7 @@ defmodule ForgeWeb.WorkersLiveTest do
 
     assert text(line) =~ "Codex not installed"
     assert text(line) =~ "update failed: curl: (6) no route"
-    assert line =~ "text-error"
+    assert line =~ "text-danger"
     refute has_element?(view, "#harness-#{w.id}-claude_code")
 
     {:ok, _w} =
@@ -428,10 +517,10 @@ defmodule ForgeWeb.WorkersLiveTest do
     # fails here rather than being read as a success with a colon.
     assert text(line) == "claude update succeeded"
     # Not in accent and not in error: a machine that is fine says so quietly. Asserted on this
-    # line alone, because the block around it carries a Destroy button that is `text-error` by
+    # line alone, because the block around it carries a Destroy button that is in danger by
     # right.
-    assert line =~ "opacity-50"
-    refute line =~ "text-error"
+    assert line =~ "text-ink-3"
+    refute line =~ "text-danger"
   end
 
   # A machine whose image predates the unit reports no `update` key, and the line is not drawn at
@@ -645,6 +734,21 @@ defmodule ForgeWeb.WorkersLiveTest do
     refute html =~ "never made"
   end
 
+  # A refused destroy writes `last_error` too, on a machine that was made and goes on running:
+  # it read "never made" for good.
+  test "a machine the driver would not destroy says that, not that it was never made", %{
+    conn: conn,
+    user: user
+  } do
+    w = worker(user, %{managed: true, provider_id: "fake-9"})
+    {:ok, _} = Workers.update(w, %{last_error: "the provider is down"})
+
+    {:ok, _view, html} = live(conn, ~p"/workers")
+
+    assert html =~ "would not destroy: the provider is down"
+    refute html =~ "never made"
+  end
+
   describe "setting what a permanent machine offers" do
     # The edit the whole "row governs" rule exists to protect. Without a way to make one, the
     # rule defends something nobody can do.
@@ -657,7 +761,7 @@ defmodule ForgeWeb.WorkersLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/workers")
 
-      view |> element("a[phx-click=edit][phx-value-id=\"#{w.id}\"]") |> render_click()
+      view |> element("button[phx-click=edit][phx-value-id=\"#{w.id}\"]") |> render_click()
 
       html =
         view
@@ -697,7 +801,7 @@ defmodule ForgeWeb.WorkersLiveTest do
       {:ok, view, _html} = live(conn, ~p"/workers")
 
       view
-      |> element("a[phx-click=edit][phx-value-id=\"#{permanent.id}\"]")
+      |> element("button[phx-click=edit][phx-value-id=\"#{permanent.id}\"]")
       |> render_click()
 
       html =
@@ -716,7 +820,7 @@ defmodule ForgeWeb.WorkersLiveTest do
       {:ok, _} = Workers.ready(w, %{"memory_budget" => 8_000, "cores" => 4})
 
       {:ok, view, _html} = live(conn, ~p"/workers")
-      view |> element("a[phx-click=edit][phx-value-id=\"#{w.id}\"]") |> render_click()
+      view |> element("button[phx-click=edit][phx-value-id=\"#{w.id}\"]") |> render_click()
 
       # Each blank on its own as well as both: a page that read one of them as zero would store
       # it, zero being an offer, whenever the other was filled in.
@@ -746,7 +850,7 @@ defmodule ForgeWeb.WorkersLiveTest do
       assert Workers.get!(w.id).memory_budget == 0
 
       {:ok, view, _html} = live(conn, ~p"/workers")
-      view |> element("a[phx-click=edit][phx-value-id=\"#{w.id}\"]") |> render_click()
+      view |> element("button[phx-click=edit][phx-value-id=\"#{w.id}\"]") |> render_click()
 
       html =
         view
@@ -802,6 +906,30 @@ defmodule ForgeWeb.WorkersLiveTest do
       assert Workers.projects(w) == []
     end
 
+    # The select offers what is not assigned yet, starting on a blank that assigns nothing, and is
+    # not drawn once there is nothing left to offer (UX pass, D5).
+    test "Assign offers only the projects the machine does not serve yet", %{
+      conn: conn,
+      user: user
+    } do
+      {:ok, served} = Forge.Projects.register(%{name: "served", repo_path: repo_path()}, user)
+      {:ok, other} = Forge.Projects.register(%{name: "other", repo_path: repo_path()}, user)
+      w = worker(user, %{managed: false})
+      {:ok, _} = Workers.assign(user, w.id, served.id)
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      select = view |> element("#worker-#{w.id} form[phx-submit=assign] select") |> render()
+
+      refute select =~ ~s(value="#{served.id}")
+      assert select =~ ~s(value="#{other.id}")
+      assert select =~ ~r/<option value="" disabled="" selected="">add a project…/
+
+      {:ok, _} = Workers.assign(user, w.id, other.id)
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      refute has_element?(view, "#worker-#{w.id} form[phx-submit=assign]")
+      assert has_element?(view, ~s(#worker-#{w.id} button[phx-value-project="#{other.id}"]))
+    end
+
     test "a machine the platform made names the template it serves through", %{
       conn: conn,
       user: user
@@ -817,12 +945,12 @@ defmodule ForgeWeb.WorkersLiveTest do
         })
 
       {:ok, _} = Forge.Provisioning.assign(user, template.id, project.id)
-      worker(user, Forge.Provisioning.Template.worker_attrs(template))
+      w = worker(user, Forge.Provisioning.Template.worker_attrs(template))
 
-      {:ok, _view, html} = live(conn, ~p"/workers")
+      {:ok, view, _html} = live(conn, ~p"/workers")
 
-      assert html =~ "serves through template agents:"
-      assert html =~ "through"
+      # In the head of its row, where a permanent machine says `permanent`.
+      assert text_of(view, "#worker-#{w.id} .machine-where") =~ "agents · through"
     end
 
     # The ids are the client's. Neither another person's machine nor a project the viewer is not
@@ -837,7 +965,7 @@ defmodule ForgeWeb.WorkersLiveTest do
       {:ok, _} = Workers.ready(theirs, %{"memory_budget" => 8_000, "cores" => 4})
 
       {:ok, view, _html} = live(conn, ~p"/workers")
-      view |> element("a[phx-click=edit][phx-value-id=\"#{mine.id}\"]") |> render_click()
+      view |> element("button[phx-click=edit][phx-value-id=\"#{mine.id}\"]") |> render_click()
 
       html =
         view
@@ -1152,6 +1280,9 @@ defmodule ForgeWeb.WorkersLiveTest do
       assert view |> element("#worker-#{w.id}") |> render() =~
                "refused: protocol #{too_new}, this platform accepts " <>
                  "#{ForgeCore.WorkerProtocol.range()} — update it"
+
+      # Not "being made" beside it (UX pass, D14).
+      assert has_element?(view, "#worker-#{w.id} .machine-doing", "turned away at its join")
     end
 
     test "a machine that was taken says nothing of the sort", %{conn: conn, user: user} do
@@ -1231,9 +1362,11 @@ defmodule ForgeWeb.WorkersLiveTest do
       {:ok, view, _html} = live(conn, ~p"/workers")
       button = element(view, "#worker-#{w.id} button[phx-click=destroy]")
 
-      assert render(button) =~ "Destroy machine"
-      # The confirm says what will happen, from the one definition of it.
-      assert render(button) =~ "It is deleted at the provider, and its 1 running job is requeued."
+      assert has_element?(view, "#destroy-#{w.id}-ask", "Destroy machine")
+      assert render(button) =~ "Destroy it"
+      # The confirm says what will happen, from the one definition of it, in place.
+      assert view |> element("#destroy-#{w.id}-confirm") |> render() =~
+               "It is deleted at the provider, and its 1 running job is requeued."
 
       html = render_click(button)
 
@@ -1254,9 +1387,10 @@ defmodule ForgeWeb.WorkersLiveTest do
       {:ok, view, _html} = live(conn, ~p"/workers")
       button = element(view, "#worker-#{w.id} button[phx-click=destroy]")
 
-      assert render(button) =~ "Retire"
-      assert render(button) =~ "the machine itself keeps running"
-      assert render(button) =~ "nothing is running on it to requeue"
+      confirm = view |> element("#destroy-#{w.id}-confirm") |> render()
+      assert render(button) =~ "Retire it"
+      assert confirm =~ "the machine itself keeps running"
+      assert confirm =~ "nothing is running on it to requeue"
 
       render_click(button)
 
@@ -1279,6 +1413,17 @@ defmodule ForgeWeb.WorkersLiveTest do
       assert Workers.get!(w.id).status != :destroyed
       assert view |> element("#worker-#{w.id}") |> render() =~ "the API is down"
       assert html =~ "mix forge.worker.retire #{w.id} --force"
+      # In the row whose button was pressed (`ui.md` § Errors stay where you acted).
+      assert view |> element("#worker-#{w.id} #refused-#{w.id}[role=alert]") |> render() =~
+               "--force"
+
+      # That row and no other: a second machine draws nothing of it.
+      other = worker(user, %{managed: true, provider_id: "fake-8"})
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      view |> element("#worker-#{w.id} button[phx-click=destroy]") |> render_click()
+      assert has_element?(view, "#worker-#{w.id} [role=alert]")
+      refute has_element?(view, "#worker-#{other.id} [role=alert]")
+
       # And no promise of a retry: the sweeps retry only a machine that is unreachable or idle,
       # and one somebody just pressed Destroy on is usually neither.
       assert html =~ "The row stays, so the machine is still counted."
@@ -1308,7 +1453,7 @@ defmodule ForgeWeb.WorkersLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/workers")
 
-      assert view |> element("#worker-#{w.id} button[phx-click=destroy]") |> render() =~
+      assert view |> element("#destroy-#{w.id}-confirm") |> render() =~
                "its 2 running jobs are requeued"
     end
 
@@ -1337,7 +1482,7 @@ defmodule ForgeWeb.WorkersLiveTest do
     assert quiet =~ "fake · srv-12345678"
     refute quiet =~ "srv-123456789"
     assert quiet =~ "no harness reported"
-    assert quiet =~ "running nothing"
+    assert quiet =~ "being made"
     assert quiet =~ "last seen never"
     refute quiet =~ "idle now"
 
@@ -1348,8 +1493,8 @@ defmodule ForgeWeb.WorkersLiveTest do
     busy = text_of(view, "#worker-#{w.id}")
 
     assert busy =~ "#{job.state} ##{job.attempt}"
-    refute busy =~ "running nothing"
-    assert busy =~ "last seen now"
+    refute busy =~ "being made"
+    assert busy =~ "last seen just now"
   end
 
   test "an idle machine says since when", %{conn: conn, user: user} do
@@ -1358,7 +1503,8 @@ defmodule ForgeWeb.WorkersLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/workers")
 
-    assert text_of(view, "#worker-#{w.id}") =~ "last seen now · idle now"
+    # In the sentence's own words under a minute: never "last seen now · idle now" (r3 L3).
+    assert text_of(view, "#worker-#{w.id}") =~ "last seen just now · idle &lt;1m"
   end
 
   # On a provider that bills every started hour, an idle machine outlives its period to the end of
@@ -1384,7 +1530,8 @@ defmodule ForgeWeb.WorkersLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/workers")
 
-    assert text_of(view, "#worker-#{w.id}") =~ "idle now · goes in 34m"
+    assert text_of(view, "#worker-#{w.id}") =~ "idle &lt;1m"
+    assert text_of(view, "#worker-#{w.id} .machine-doing") =~ "goes in 34m unless work arrives"
     # The sweep never takes a machine the platform did not make.
     refute text_of(view, "#worker-#{permanent.id}") =~ "goes"
   end
@@ -1423,22 +1570,203 @@ defmodule ForgeWeb.WorkersLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/workers")
 
-    assert text_of(view, "#worker-#{w.id}") =~ "· goes now"
+    assert text_of(view, "#worker-#{w.id} .machine-doing") =~ "goes now unless work arrives"
     refute text_of(view, "#worker-#{w.id}") =~ "goes in"
   end
 
-  test "the laptop nav carries it and the phone bar does not", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+  # The head of a row says what the machine is doing in words (`12f`), and names the ticket a job
+  # is for — but only in a project the viewer is in. The machine is the owner's; the work it runs
+  # is a project's, and its owner may have left that project since.
+  describe "what a machine is doing" do
+    test "a job names its ticket only in a project the viewer is in", %{conn: conn, user: user} do
+      w = worker(user)
+      {:ok, w} = Workers.ready(w, %{"memory_budget" => 8_000})
 
-    # Placement, not a count: counting one occurrence passes just as well when the link is moved
-    # *into* the phone bar. A machine is never a decision, and the phone is where decisions are
-    # answered — see docs/design/ui.md.
-    assert has_element?(view, ~s(header nav a[href="/workers"]))
-    refute has_element?(view, ~s(nav.sm\\:hidden a[href="/workers"]))
-    assert has_element?(view, ~s(nav.sm\\:hidden a[href="/board"]))
+      mine =
+        Forge.ForgeFixtures.project_fixture(%{name: "mine-#{System.unique_integer([:positive])}"})
+
+      Forge.ForgeFixtures.join!(mine, user)
+
+      theirs =
+        Forge.ForgeFixtures.project_fixture(%{
+          name: "hidden-#{System.unique_integer([:positive])}"
+        })
+
+      seen = Forge.ForgeFixtures.ticket_fixture(%{project: mine, state: "implementing"})
+      unseen = Forge.ForgeFixtures.ticket_fixture(%{project: theirs, state: "reviewing"})
+      Forge.ForgeFixtures.job_fixture(%{ticket: seen, status: :running, worker_id: w.id})
+      Forge.ForgeFixtures.job_fixture(%{ticket: unseen, status: :running, worker_id: w.id})
+
+      {:ok, view, html} = live(conn, ~p"/workers")
+      doing = text_of(view, "#worker-#{w.id} .machine-doing")
+
+      assert doing =~ "implementing #1 · #{mine.name}##{seen.number}"
+      assert doing =~ "reviewing #1"
+      refute html =~ theirs.name
+    end
+
+    test "a chat says it is one", %{conn: conn, user: user} do
+      w = worker(user)
+      project = Forge.ForgeFixtures.project_fixture()
+      Forge.ForgeFixtures.join!(project, user)
+      Forge.ForgeFixtures.chat_fixture(%{project: project, status: :running, worker_id: w.id})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      assert text_of(view, "#worker-#{w.id} .machine-doing") =~ "chat · #{project.name}"
+    end
+
+    test "a machine with nothing to do waits for work, and a destroyed one says when it went", %{
+      conn: conn,
+      user: user
+    } do
+      waiting = worker(user, %{managed: false})
+      {:ok, _} = Workers.ready(waiting, %{"memory_budget" => 8_000})
+      gone = worker(user)
+      {:ok, _} = Workers.status(gone, :destroyed)
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      render_click(view, "toggle-destroyed")
+
+      assert text_of(view, "#worker-#{waiting.id} .machine-doing") =~ "waiting for work"
+      assert text_of(view, "#worker-#{gone.id} .machine-doing") =~ "destroyed just now"
+      assert text_of(view, "#worker-#{gone.id} .machine-status") =~ "gone"
+    end
+  end
+
+  # The subline adds up the fleet, and the slots say how full the viewer's templates are (`12f`).
+  describe "the summary" do
+    defp full_template(user, max) do
+      {:ok, template} =
+        Forge.Provisioning.create_template(user, %{
+          name: "t-#{System.unique_integer([:positive])}",
+          provider: "fake",
+          memory: 8_000,
+          cores: 2,
+          max_workers: max
+        })
+
+      template
+    end
+
+    test "counts busy and idle machines, and the templates at their limit", %{
+      conn: conn,
+      user: user
+    } do
+      full = full_template(user, 1)
+      _room = full_template(user, 3)
+      made = worker(user, Forge.Provisioning.Template.worker_attrs(full))
+      {:ok, made} = Workers.ready(made, %{"memory_budget" => 8_000})
+      {:ok, _} = Workers.status(made, :busy)
+      idle = worker(user, %{managed: false})
+      {:ok, _} = Workers.ready(idle, %{"memory_budget" => 8_000})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      assert text_of(view, "#top-bar .ui-top-title > .ui-top-sub") =~
+               "1 busy · 1 idle · 1 template at its limit"
+
+      # One slot per machine there is, then one per machine the templates may still make.
+      assert length(Regex.scan(~r/machines-slot--busy/, render(view))) == 1
+      assert length(Regex.scan(~r/machines-slot--up/, render(view))) == 1
+      assert length(Regex.scan(~r/machines-slot--free/, render(view))) == 3
+    end
+
+    test "a template with room is not at its limit", %{conn: conn, user: user} do
+      template = full_template(user, 2)
+      worker(user, Forge.Provisioning.Template.worker_attrs(template))
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      assert text_of(view, "#top-bar .ui-top-title > .ui-top-sub") =~ "0 busy"
+      refute render(view) =~ "at its limit"
+    end
+  end
+
+  # Machines · Templates · Credentials, in the strip on a phone and the tabs on a desktop, from one
+  # list (`docs/design/ui.md` § Machines).
+  test "the three views lead to the machines, the templates and the credentials", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/workers")
+
+    assert has_element?(view, ~s(.frame-strip a[href="/workers"]), "Machines")
+    assert has_element?(view, ~s(.frame-strip a[href="/templates"]), "Templates")
+
+    assert has_element?(
+             view,
+             ~s(.frame-strip a[href="/templates?view=credentials"]),
+             "Credentials"
+           )
+  end
+
+  # The wide screen's right column (`12o`): the viewer's own templates, each with its slots, and
+  # credentials, each with how many templates name it — and nobody else's.
+  test "the right column lists the viewer's templates and credentials", %{conn: conn, user: user} do
+    {:ok, credential} =
+      Forge.Provisioning.create_credential(user, %{
+        name: "acct",
+        provider: "fake",
+        secret: %{"token" => "t"}
+      })
+
+    {:ok, template} =
+      Forge.Provisioning.create_template(user, %{
+        name: "mine-cx32",
+        provider: "fake",
+        memory: 8_000,
+        cores: 2,
+        max_workers: 1,
+        provider_credential_id: credential.id
+      })
+
+    worker(user, Forge.Provisioning.Template.worker_attrs(template))
+
+    {:ok, _} =
+      Forge.Provisioning.create_template(Forge.AccountsFixtures.user_fixture(), %{
+        name: "theirs-cx22",
+        provider: "fake",
+        memory: 8_000,
+        cores: 2
+      })
+
+    {:ok, view, html} = live(conn, ~p"/workers")
+
+    assert has_element?(
+             view,
+             ~s(#machines-templates a[href="/templates?template=#{template.id}"] .template-slots--full),
+             "1 of 1"
+           )
+
+    assert text_of(view, "#machines-credentials") =~ "fake · 1 template"
+    refute html =~ "theirs-cx22"
   end
 
   test "it requires a logged-in operator" do
     assert {:error, {:redirect, %{to: "/users/log-in"}}} = live(build_conn(), ~p"/workers")
+  end
+
+  test "a worker's unassign and its select hold the 46px floor", %{conn: conn, user: user} do
+    {:ok, project} =
+      Forge.Projects.register(
+        %{name: "floor", repo_path: Forge.GitFixtures.seeded_repo()},
+        user
+      )
+
+    {:ok, worker, _token} =
+      Workers.create(%{provider: "fake", managed: false, user_id: user.id})
+
+    {:ok, _} = Workers.assign(user, worker.id, project.id)
+    # A second project, so the select has one to offer.
+    {:ok, _} =
+      Forge.Projects.register(
+        %{name: "floor-2", repo_path: Forge.GitFixtures.seeded_repo()},
+        user
+      )
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+
+    unassign = view |> element(~s(button[phx-click="unassign"])) |> render()
+    assert unassign =~ "min-h-[46px]"
+    assert unassign =~ "min-w-[46px]"
+    assert view |> element(~s(form[phx-submit="assign"] select)) |> render() =~ "h-[46px]"
   end
 end

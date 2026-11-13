@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Open the platform in headless Chromium as a fixture user and run steps read from standard input:
 #
-#   bin/look --setup NAME --as USER [--timeout SECONDS] < steps
+#   bin/look --setup NAME [--as USER] [--timeout SECONDS] < steps
 #
 # `docs/design/look.md` has the step grammar, what fails a run, the exit codes (0 every step
 # passed, 1 a step failed, 2 the tool could not run) and what a look costs. Pass the steps on

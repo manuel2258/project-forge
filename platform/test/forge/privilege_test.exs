@@ -29,6 +29,44 @@ defmodule Forge.PrivilegeTest do
     }
   end
 
+  # A page holds the user it mounted with. The role is read again at every act, so a membership
+  # removed while the page was open was already refused; an account suspended meanwhile was not,
+  # because a membership row is all `Forge.Projects.role/2` asked about (review fixes 7, H1).
+  describe "an account suspended while its page was open" do
+    test "does nothing on the project it is still a member of", %{
+      project: project,
+      admin: admin,
+      member: member
+    } do
+      {:ok, _suspended} =
+        Accounts.suspend_user(member, Forge.AccountsFixtures.node_admin_fixture())
+
+      chat = chat_fixture(%{project: project, status: :running})
+
+      assert {:error, :forbidden} = Operator.send_chat(chat, member, "still here?")
+      assert {:error, :forbidden} = Operator.open_chat(project, member, "let me in")
+      assert Conversations.messages(chat.id) == []
+
+      # And as a project admin, not on who is in it either.
+      {:ok, _suspended} =
+        Accounts.suspend_user(admin, Forge.AccountsFixtures.node_admin_fixture())
+
+      assert {:error, :forbidden} = Projects.remove_member(project, member, admin)
+      assert {:error, :forbidden} = Projects.put_member(project, user_fixture(), :member, admin)
+    end
+
+    test "a removed member's page is refused as well", %{
+      project: project,
+      admin: admin,
+      member: member
+    } do
+      :ok = Projects.remove_member(project, member, admin)
+      chat = chat_fixture(%{project: project, status: :running})
+
+      assert {:error, :forbidden} = Operator.send_chat(chat, member, "still here?")
+    end
+  end
+
   describe "conversations" do
     test "an outsider cannot send into a conversation", %{project: project, outsider: outsider} do
       chat = chat_fixture(%{project: project, status: :running})
@@ -162,7 +200,9 @@ defmodule Forge.PrivilegeTest do
       {:ok, suspended} = Accounts.suspend_user(member, node_admin_fixture())
 
       assert {:error, :suspended} = Projects.put_member(project, suspended, :admin, admin)
-      assert Projects.role(project, suspended) == :member
+      # The row, not `Projects.role/2`, which answers nil for an account that may not act.
+      assert Forge.Repo.get_by!(Forge.Projects.Member, project_id: project.id, user_id: member.id).role ==
+               :member
     end
 
     # The caller's check comes first, so the answer says nothing about somebody's account to

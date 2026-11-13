@@ -24,7 +24,7 @@ defmodule Forge.GitTest do
   end
 
   # What a caller asks before it reads: `show/3` captures the whole blob, so a bounded slice of an
-  # unbounded file has to be refusable before the bytes are in memory (`ForgeWeb.ReviewLive`).
+  # unbounded file has to be refusable before the bytes are in memory (`ForgeWeb.Blob.read/3`).
   test "blob_size/3 answers a blob's size without reading it", %{repo: repo} do
     {:ok, sha} = Git.resolve(repo, "main")
     {:ok, content} = Git.show(repo, sha, ".forge/workflow.yml")
@@ -250,6 +250,39 @@ defmodule Forge.GitTest do
 
       assert {:ok, %{commits: [%{subject: "seed"}], more: false}} =
                Git.history(repo, "refs/heads/quiet", 0, 30)
+    end
+
+    test "a commit carries its author's name, and a subject is never read as one", %{repo: repo} do
+      # The author is a field of its own, between the time and the subject; the subject is last
+      # and the split stops before it, so a subject holding the separator is still one subject.
+      # A format that lost `%an` would have every line one field short — read as commits, the
+      # subject would land in the author and the subject would be empty.
+      :ok = Git.create_branch(repo, "authors", "refs/heads/main")
+      commit_to(repo, "authors", %{"a.txt" => "a\n"}, "odd \x1f subject")
+
+      assert {:ok, %{commits: [mine, seed]}} = Git.history(repo, "refs/heads/authors", 0, 30)
+      assert %{author: "t", subject: "odd \x1f subject"} = mine
+      assert %{author: "seed", subject: "seed"} = seed
+
+      {:ok, base} = Git.resolve(repo, "refs/heads/main")
+      assert {:ok, [%{author: "t"}]} = Git.log(repo, base, "refs/heads/authors")
+    end
+
+    test "history/5 is the history of one path", %{repo: repo} do
+      :ok = Git.create_branch(repo, "paths", "refs/heads/main")
+      commit_to(repo, "paths", %{"one.txt" => "1\n"}, "touch one")
+      commit_to(repo, "paths", %{"two.txt" => "2\n"}, "touch two")
+      commit_to(repo, "paths", %{"one.txt" => "1 again\n"}, "touch one again")
+
+      assert {:ok, %{commits: commits, more: false}} =
+               Git.history(repo, "refs/heads/paths", 0, 30, "one.txt")
+
+      assert Enum.map(commits, & &1.subject) == ["touch one again", "touch one"]
+
+      # A path the branch never held has no history, and a path that git would read as an
+      # option is refused before git sees it.
+      assert {:ok, %{commits: []}} = Git.history(repo, "refs/heads/paths", 0, 30, "nope.txt")
+      assert {:error, _} = Git.history(repo, "refs/heads/paths", 0, 30, "--output=x")
     end
 
     test "parent/2 is the first parent, and a root commit has none", %{repo: repo} do

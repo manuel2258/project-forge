@@ -28,6 +28,36 @@ the note a tester leaves when sending a build back is exactly what the next job 
 job of a ticket has none, and the manifest says it is the ticket's first state. Like the rest of
 the spec it is written once, when the job is created, from the transition that created it.
 
+**A rejection's note reaches the next job the same way.** Rejecting an approval needs a note
+(`ui.md` § The decision row), and the note is the reason the work came back: a ticket rejected at
+review and run again, or moved on by hand, is exactly the case `entered` exists for. So the newest
+`approval.rejected` on the ticket since its newest workflow job was created is joined into the
+next job's `entered.comment`, after a comment the transition carries of its own, wherever that
+job's `entered` is built — a transition's follow-up job, and running a state again. No spec key
+changes, so neither the worker nor the manifest does: the manifest already says *They wrote:* and
+quotes it. A first state run again has no arrival to add to, so its job is told it came from that
+state, by a person, with the note (`Forge.Engine.rejection_note/1`).
+
+*A job the note is for* is one the workflow made with an arrival to hand it in: an agent state's
+job, or a chat **step**'s conversation. A command state's commands are made with none — a command
+has no manifest to say it in — so they do not use it up: the note goes on to the agent job the
+ticket comes to after them, by whichever edge (`Forge.Engine.rejection_note/1`). A conversation a
+person opens about the ticket by hand is not one either — it is never handed the note, so it does
+not use it up; opening one to ask why the work was rejected is the obvious thing to do after a
+rejection.
+
+**A job is told the latest rejection's note and no other**, after the comment of the transition
+that brought the ticket into the state. Running a state again starts from what its last attempt
+was told, and that may hold an older note — the one before that attempt, or one copied on through
+attempts that failed. So when a rejection has been made since the last attempt, the arrival's
+comment is rebuilt rather than edited: the transition's own comment, read from its
+`transition.taken` event, which records it without any note, and then the newest note. After
+rejecting with *N1*, running again — even through an attempt that failed and was run again — and
+rejecting the new work with *N2*, the next job reads the transition's comment and *N2*, not *N1*,
+which an earlier attempt has already acted on. When no rejection has been made since, an attempt
+run again is told exactly what the last one was, note included: a job that failed before it did
+anything about the note has not acted on it.
+
 **Out of a command state, `entered` names the batch, and the job is handed what it said.** A
 command state's outcome is a name — `build_failed` — and the reason is in the logs. The job it
 sends the ticket to is the one that has to fix the build, and it was the one job that could not

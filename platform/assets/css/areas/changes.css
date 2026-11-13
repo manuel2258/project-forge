@@ -1,0 +1,370 @@
+/* The changes area's styles (docs/design/ui.md). Edited only by the slice that builds that area. */
+
+/* A ticket's Changes view (docs/design/ui.md § Changes, `19d`–`19g`, `18b`, `18f`): the switch,
+   the presentation and its excerpts, the whole file, the file list with its patches tinted, and
+   what the merge approval needs beside them. Also the diff rows a conversation's Changes draws,
+   from the same component (`ForgeWeb.Diff.file_table/1`). */
+@layer components {
+  /* Below 1440 Changes reads in the same centred column as Steps and Docs, so switching views
+     does not move the text sideways (UX pass, B2); from 1440 the presentation and the file it
+     follows take the width side by side, and that split is the one exception. */
+  .changes { display: flex; width: 100%; min-width: 0; max-width: 46rem; flex-direction: column; gap: 16px; margin-inline: auto; }
+
+  /* -- the switch: `segmented/1`'s look as links (components.css), a sub-view an address ---- */
+
+  .changes-switch { max-width: var(--measure); }
+  .changes-switch-off { cursor: default; opacity: .3; }
+  .changes-switch-count { color: var(--ink-3); font-family: var(--font-mono); font-size: 11px; }
+
+  .changes-empty { color: var(--ink-2); font-size: 13.5px; line-height: 1.55; }
+
+  /* -- the presentation (`19d`): prose at the reading measure ---------------------------- */
+
+  .changes-pres { display: flex; min-width: 0; max-width: var(--measure); flex-direction: column; gap: 16px; }
+  .pres { display: flex; min-width: 0; flex-direction: column; gap: 12px; }
+  .pres-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 10px;
+    color: var(--ink-3);
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+  .pres-name { color: var(--ink-2); overflow-wrap: anywhere; }
+  .pres-kind { font-size: 10.5px; letter-spacing: var(--tracking-eyebrow); text-transform: uppercase; }
+  .pres-para { display: flex; min-width: 0; flex-direction: column; gap: 10px; scroll-margin-top: 16px; }
+  .pres-para:target { margin-left: -12px; padding-left: 10px; border-left: 2px solid var(--link); }
+  .pres-note { color: var(--ink-3); font-size: 12.5px; }
+  .pres-source {
+    display: flex;
+    min-height: var(--target-min);
+    align-items: center;
+    color: var(--link);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+
+  .excerpt {
+    overflow: hidden;
+    border-radius: var(--radius);
+    background: var(--surface-1);
+  }
+  .excerpt-head {
+    display: flex;
+    min-height: 40px;
+    align-items: center;
+    gap: 10px;
+    padding: 0 12px;
+    border-bottom: 1px solid var(--border-soft);
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+  .excerpt-label { min-width: 0; flex: 1; color: var(--ink-2); overflow-wrap: anywhere; }
+  .excerpt-whole {
+    display: flex;
+    min-height: var(--target-min);
+    flex-shrink: 0;
+    align-items: center;
+    color: var(--link);
+    font-family: var(--font-sans);
+    font-size: 12.5px;
+  }
+  .excerpt-follow { display: none; }
+  .excerpt-code { padding: 6px 0; }
+  .excerpt-note { padding: 10px 12px; color: var(--ink-3); font-size: 12.5px; }
+
+  /* A line the change added, a line an excerpt showed: the row tinted, the margin marked. */
+  .code-line--add { background: var(--diff-add); }
+  .code-line--marked { box-shadow: inset 2px 0 0 var(--link); }
+
+  /* The wide pane is not drawn below 1440: the excerpts are the source there. */
+  .changes-follow { display: none; }
+
+  /* -- the whole file (`19e`) ------------------------------------------------------------- */
+
+  .changes-file { display: flex; min-width: 0; flex-direction: column; gap: 10px; }
+  /* Sticky in the view's scroller, so a long file never becomes anonymous code (UX pass, B3). */
+  .changes-file-head {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--bg);
+    display: flex;
+    min-height: 44px;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 14px;
+    border-bottom: 1px solid var(--border-soft);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .changes-file-head .diff-path { flex: 0 1 auto; }
+  .changes-back {
+    display: flex;
+    min-height: var(--target-min);
+    align-items: center;
+    color: var(--link);
+    font-family: var(--font-sans);
+    font-size: 13px;
+  }
+  .changes-file-stat { margin-left: auto; }
+  /* A line scrolled to lands under the sticky head, not behind it. */
+  .changes-file .code-line { scroll-margin-top: 52px; }
+  .changes-file-note {
+    padding: 8px 12px;
+    border-left: 2px solid var(--link);
+    border-radius: var(--radius-xs);
+    background: var(--surface-1);
+    color: var(--ink-2);
+    font-size: 12.5px;
+  }
+  .changes-file-foot {
+    display: flex;
+    min-height: var(--target-min);
+    align-items: center;
+    gap: 12px;
+    border-top: 1px solid var(--border-soft);
+    color: var(--ink-3);
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+  .changes-file-at { flex: 1; text-align: center; }
+  .changes-file-prev,
+  .changes-file-next { display: flex; min-height: var(--target-min); align-items: center; color: var(--ink-2); }
+
+  /* -- Files (`18b`, `19f`) --------------------------------------------------------------- */
+
+  .changes-files-main { display: flex; min-width: 0; flex-direction: column; gap: 16px; }
+  .changes-index { display: none; }
+
+  .diff-files { display: flex; flex-direction: column; }
+  .diff-file { position: relative; border-bottom: 1px solid var(--border-soft); }
+  .diff-file--ask .diff-summary { padding-right: 56px; }
+  .diff-details > summary { list-style: none; cursor: pointer; }
+  .diff-details > summary::-webkit-details-marker { display: none; }
+  .diff-summary {
+    display: flex;
+    min-height: var(--target-min);
+    align-items: center;
+    gap: 12px;
+    padding: 6px 0;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .diff-path { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+  .diff-dir { color: var(--ink-3); }
+  .diff-binary { color: var(--ink-3); font-size: 12px; }
+  .diff-chevron { color: var(--ink-3); }
+  /* An open patch keeps its file's name above it while it is read (UX pass, B3), and *Ask* is the
+     hunk's alone then: two of them 30px apart asked the same thing (B25). */
+  .diff-details[open] > .diff-summary {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--bg);
+  }
+  .diff-file:has(> .diff-details[open]) > .diff-ask { display: none; }
+  .diff-file--ask:has(> .diff-details[open]) .diff-summary { padding-right: 0; }
+  .diff-details[open] .diff-chevron { transform: rotate(90deg); }
+  .diff-ask { position: absolute; top: 0; right: 0; }
+  .diff-ask-button {
+    min-height: var(--target-min);
+    flex-shrink: 0;
+    padding: 0 8px;
+    color: var(--link);
+    font-family: var(--font-sans);
+    font-size: 12.5px;
+    cursor: pointer;
+  }
+
+  .diff-patch {
+    margin-bottom: 12px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface-1);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    line-height: 1.5;
+    font-variant-ligatures: none;
+  }
+  .diff-hunk {
+    display: flex;
+    min-height: 32px;
+    align-items: center;
+    gap: 8px;
+    padding-left: 12px;
+    border-block: 1px solid var(--border-soft);
+    color: var(--ink-3);
+    font-size: 11.5px;
+  }
+  .diff-hunk:first-child { border-top: 0; }
+  .diff-hunk-text { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+  .diff-line { display: flex; }
+  /* A changed line carries an edge in its own colour as well as its wash, so the `+` and `−`
+     are not all that tells it from context where the wash is faint (UX pass, B25). */
+  .diff-line--add { background: var(--diff-add); box-shadow: inset 2px 0 0 var(--success); }
+  .diff-line--del { background: var(--diff-del); box-shadow: inset 2px 0 0 var(--danger); }
+  .diff-line--meta { color: var(--ink-3); font-style: italic; }
+  .diff-num {
+    flex: none;
+    width: 40px;
+    padding-right: 6px;
+    color: var(--ink-4);
+    text-align: right;
+    user-select: none;
+  }
+  .diff-sign { flex: none; width: 16px; color: var(--ink-3); user-select: none; }
+  .diff-line--add .diff-sign { color: var(--success); }
+  .diff-line--del .diff-sign { color: var(--danger); }
+  .diff-text { min-width: 0; flex: 1; padding-right: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+  /* -- what the merge approval needs beside the diff --------------------------------------- */
+
+  .changes-needs {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-soft);
+  }
+  .changes-doc { border-bottom: 1px solid var(--border-soft); }
+  .changes-doc > summary { list-style: none; cursor: pointer; }
+  .changes-doc > summary::-webkit-details-marker { display: none; }
+  .changes-doc-head {
+    display: flex;
+    min-height: var(--target-min);
+    align-items: center;
+    gap: 10px;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .changes-doc-name { min-width: 0; overflow-wrap: anywhere; }
+  .changes-doc-version { color: var(--ink-3); }
+  .changes-doc-approved { color: var(--success); }
+  .changes-doc-body { margin-bottom: 12px; padding: 12px 14px; border-radius: var(--radius); background: var(--surface-1); }
+  .changes-doc-source {
+    display: flex;
+    min-height: var(--target-min);
+    align-items: center;
+    color: var(--link);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .changes-answers { display: flex; flex-direction: column; gap: 16px; font-size: 13.5px; line-height: 1.55; }
+  .changes-answer { display: flex; flex-direction: column; gap: 4px; }
+  .changes-answer-anchor { padding-left: 10px; border-left: 2px solid var(--border); color: var(--ink-2); }
+  .changes-answer-meta { color: var(--ink-3); font-family: var(--font-mono); font-size: 12px; }
+  .changes-answer-meta a { color: var(--link); }
+  .changes-usage { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+  .changes-usage-figure { font-family: var(--font-mono); font-size: 15px; }
+  .changes-usage-bar { display: block; height: 5px; min-width: 120px; flex: 1; background: var(--track); }
+  .changes-usage-cap { color: var(--ink-3); font-family: var(--font-mono); font-size: 11.5px; }
+
+  /* -- the decision row's commit message, inline on a wide screen (`18f`) ---------------- */
+
+  .decision-commit { display: none; }
+
+  @media (min-width: 1440px) {
+    .decision-commit {
+      display: inline;
+      margin-left: 14px;
+      padding-left: 14px;
+      border-left: 1px solid var(--border);
+      color: var(--ink);
+      font-family: var(--font-sans);
+    }
+    .decision-commit-label {
+      margin-right: 6px;
+      color: var(--ink-3);
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      letter-spacing: var(--tracking-eyebrow);
+      text-transform: uppercase;
+    }
+
+    .changes { max-width: none; }
+    #changes-commits { max-width: 52rem; }
+
+    /* `19g`: the presentation at 680 on the left, the file it points at on the right. */
+    .changes-pres-cols {
+      display: grid;
+      grid-template-columns: var(--measure) minmax(0, 1fr);
+      gap: 0 32px;
+      align-items: start;
+    }
+    .changes-pres-cols .excerpt-code,
+    .changes-pres-cols .excerpt-whole,
+    .changes-pres-cols .excerpt-label { display: none; }
+    .changes-pres-cols .excerpt { border: 0; background: none; }
+    .changes-pres-cols .excerpt-head { min-height: 0; padding: 0; border: 0; }
+    .changes-pres-cols .excerpt-follow {
+      display: inline;
+      color: var(--link);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .changes-follow {
+      position: sticky;
+      top: 0;
+      display: flex;
+      max-height: calc(100dvh - 260px);
+      min-width: 0;
+      flex-direction: column;
+      overflow: auto;
+      border-left: 1px solid var(--border);
+    }
+    .changes-follow-tabs {
+      position: sticky;
+      top: 0;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 0 16px;
+      border-bottom: 1px solid var(--border-soft);
+      background: var(--bg);
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+    .changes-follow-tab {
+      min-height: 40px;
+      padding: 0 10px;
+      border-bottom: 2px solid transparent;
+      color: var(--ink-2);
+      cursor: pointer;
+    }
+    .changes-follow-tab[aria-current="true"] { border-bottom-color: var(--ink); color: var(--ink); }
+    .changes-follow-hint { margin-left: auto; color: var(--ink-3); font-family: var(--font-sans); }
+    .changes-follow .code { padding: 8px 0; }
+    .changes-follow .changes-file-note { margin: 8px 16px; }
+
+    /* `18f`: the file list on the left, the patches beside it. */
+    .changes-files-cols {
+      display: grid;
+      grid-template-columns: 300px minmax(0, 1fr);
+      gap: 0 28px;
+      align-items: start;
+    }
+    .changes-index { position: sticky; top: 0; display: flex; flex-direction: column; gap: 2px; }
+    .changes-index-row {
+      display: flex;
+      min-height: 32px;
+      align-items: center;
+      gap: 8px;
+      padding: 0 8px;
+      border-radius: var(--radius-xs);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      text-align: left;
+      cursor: pointer;
+    }
+    .changes-index-row:hover { background: var(--surface-1); }
+    /* The file in view, by the inset edge every current place wears. */
+    .changes-index-row[aria-current] { box-shadow: inset 2px 0 0 var(--ink); background: var(--surface-1); }
+    .changes-files-main { max-width: 980px; }
+    /* The index carries each file's `+ −`; the patches beside it do not say it again (B21). */
+    .changes-files-cols:has(.changes-index) .diff-summary .ui-diffstat { display: none; }
+  }
+}

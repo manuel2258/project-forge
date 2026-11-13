@@ -1,7 +1,7 @@
 defmodule ForgeWeb.CommandsLiveTest do
   @moduledoc """
   Commands as the operator sees them (`docs/design/ui.md` § Decide and Timeline): a row on the
-  ticket's timeline with its exit status and duration, indented beneath the job that invoked it,
+  ticket's Steps with its exit status and duration, indented beneath the job that invoked it,
   and a page of its own with the script, the argument vector, the commit and the log.
   """
 
@@ -89,13 +89,13 @@ defmodule ForgeWeb.CommandsLiveTest do
     %{parent: parent, finished: finished, pending: pending} = invoked(context)
 
     {:ok, view, _html} =
-      live(context.conn, page(context.project, context.ticket, "?tab=timeline"))
+      live(context.conn, page(context.project, context.ticket, "?tab=steps"))
 
     row = view |> element("#command-#{finished.id}") |> render()
     assert row =~ "build"
     assert row =~ ~s([&quot;--release&quot;])
     assert row =~ "exit 3"
-    assert row =~ "text-error"
+    assert row =~ "text-danger"
     assert row =~ "pl-8"
 
     assert row =~
@@ -123,7 +123,7 @@ defmodule ForgeWeb.CommandsLiveTest do
     {:ok, _} = build |> FakeWorker.assign(context.worker) |> FakeWorker.finish_command(0)
 
     {:ok, view, _html} =
-      live(context.conn, page(context.project, context.ticket, "?tab=timeline"))
+      live(context.conn, page(context.project, context.ticket, "?tab=steps"))
 
     row = view |> element("#command-#{build.id}") |> render()
 
@@ -149,16 +149,20 @@ defmodule ForgeWeb.CommandsLiveTest do
     assert Tickets.get!(context.ticket.id).state == "implementing"
 
     {:ok, view, _html} =
-      live(context.conn, page(context.project, context.ticket, "?tab=timeline"))
+      live(context.conn, page(context.project, context.ticket, "?tab=steps"))
 
     tail = view |> element("#command-#{build.id}-tail") |> render()
     assert tail =~ "fatal: not a git repository"
     assert tail =~ "bytes cut, of #{byte_size(log)}"
     refute tail =~ ~r/\n[a-z]{1,8}\n/
 
-    # The decision is said beside its event, not only its type.
-    assert render(view) =~ "statuses 1 → failed"
-    assert render(view) =~ "checking → implementing on failed"
+    # The decision is said beside its event, not only its type, in what Activity says happened
+    # to the ticket.
+    {:ok, activity, _html} =
+      live(context.conn, page(context.project, context.ticket, "?tab=activity"))
+
+    assert has_element?(activity, "#ticket-events", "statuses 1 → failed")
+    assert has_element?(activity, "#ticket-events", "checking → implementing on failed")
 
     # The next batch passes, and the old failure is no longer shown as the reason for anything.
     [again] = Enum.filter(Jobs.for_ticket(context.ticket.id), &(&1.status == :pending))
@@ -167,7 +171,7 @@ defmodule ForgeWeb.CommandsLiveTest do
     {:ok, _} = passed |> FakeWorker.assign(context.worker) |> FakeWorker.finish_command(0)
 
     {:ok, view, _html} =
-      live(context.conn, page(context.project, context.ticket, "?tab=timeline"))
+      live(context.conn, page(context.project, context.ticket, "?tab=steps"))
 
     refute has_element?(view, "#command-#{build.id}-tail")
     refute has_element?(view, "#command-#{passed.id}-tail")
@@ -177,7 +181,7 @@ defmodule ForgeWeb.CommandsLiveTest do
     %{finished: finished} = invoked(context)
 
     {:ok, view, _html} =
-      live(context.conn, page(context.project, context.ticket, "?tab=timeline"))
+      live(context.conn, page(context.project, context.ticket, "?tab=steps"))
 
     refute has_element?(view, "#command-#{finished.id}-tail")
   end
@@ -197,8 +201,9 @@ defmodule ForgeWeb.CommandsLiveTest do
     assert has_element?(view, ~s(a[href$="/artifacts/build.log/1"] [data-file-type="log"]))
 
     # None of an agent's: no turns, no budget, no prompt.
-    refute html =~ "State prompt"
-    refute html =~ "Turns"
+    refute has_element?(view, "#job-shows")
+    refute has_element?(view, "#job-turns")
+    refute has_element?(view, "#job-manifest")
   end
 
   # Not "declares no artifact" for a command that does, and simply has not ended.

@@ -154,11 +154,16 @@ defmodule Forge.Engine do
     # The outcome a job ended with, or nil when a person chose the transition with no job's outcome
     # behind it — out of a human state, or to unstick a ticket. The event has always recorded the
     # transition's own `when` in that case; the job is told only what actually happened.
+    comment = blank_to_nil(comment)
+
+    # What the job is told a person wrote: this transition's own comment, then the note a rejection
+    # since the last job was made with (`docs/design/ui.md` § The decision row). The event
+    # records only the former; the rejection's note is on its own event.
     entered = %{
       "from" => transition.from,
       "outcome" => outcome,
       "by" => if(actor == :system, do: "engine", else: "person"),
-      "comment" => blank_to_nil(comment)
+      "comment" => with_rejection_note(comment, ticket)
     }
 
     multi
@@ -176,7 +181,7 @@ defmodule Forge.Engine do
           "to" => transition.to,
           "outcome" => outcome || Transition.outcome(transition)
         }
-        |> put_comment(entered["comment"])
+        |> put_comment(comment)
         |> put_source(ticket, workflow, transition, opts)
     })
     |> put_follow_up(ticket, workflow, transition, target, terminal, entered)
@@ -233,6 +238,49 @@ defmodule Forge.Engine do
   end
 
   defp blank_to_nil(_none), do: nil
+
+  # Events that make a workflow job a note is handed to: an agent's, a chat step's conversation. A
+  # rejection's note is for the first of them after it, and no later one. A command state's
+  # commands are made with no arrival to hand it in, so they pass it on to the agent after them
+  # rather than use it up; a conversation a person opens about the ticket logs `chat.opened` too,
+  # but with no `step`, and is never handed it either (`job-prompt.md` § How the job arrived).
+  @job_made ["job.created"]
+
+  @doc """
+  The note the ticket's latest rejection was made with, when no workflow job it would be handed to
+  has been made on the ticket since it; nil otherwise. It is handed to the next such job in
+  `entered.comment`, the way a person's comment on a transition is (`docs/design/ui.md` § The
+  decision row, `job-prompt.md` § How the job arrived): a reject needs a note so that the work
+  done next knows why.
+  """
+  @spec rejection_note(Ticket.t()) :: String.t() | nil
+  def rejection_note(%Ticket{id: id}) do
+    made =
+      from(e in Event,
+        where: e.ticket_id == ^id,
+        where:
+          e.type in @job_made or
+            (e.type == "chat.opened" and not is_nil(e.payload["step"])),
+        select: max(e.seq)
+      )
+      |> Repo.one() || 0
+
+    from(e in Event,
+      where: e.ticket_id == ^id and e.type == "approval.rejected" and e.seq > ^made,
+      order_by: [desc: e.seq],
+      limit: 1,
+      select: e.payload["comment"]
+    )
+    |> Repo.one()
+    |> blank_to_nil()
+  end
+
+  defp with_rejection_note(comment, ticket) do
+    case rejection_note(ticket) do
+      nil -> comment
+      note -> join_note(note, comment)
+    end
+  end
 
   defp put_follow_up(multi, ticket, _workflow, transition, _target, true, _entered) do
     Events.log(multi, :done_event, "ticket.done", :system, %{
@@ -458,20 +506,66 @@ defmodule Forge.Engine do
   Decides the ticket's pending transition. Approving records an approval on the latest
   version of each listed artifact and takes the transition; rejecting records rejections and
   leaves the ticket where it is, pending, for an edit or a manual transition.
+
+  A rejection needs a note: `{:error, :note_required}`, with nothing written, when `comment` is
+  missing or blank. The note is the decision's comment, and the next job made on the ticket reads
+  it (`rejection_note/1`).
+
+  **`seen` is `%{document name => version}` as the person was shown it**, when the caller drew
+  them: every document the transition approves must still be at exactly that version, or the
+  decision is refused with `{:stale, names}` and nothing is written; and the approvals name those
+  versions, not whatever is latest when they are written. Nil decides the latest, for a caller
+  that showed none (the API, `mix forge.approve`).
   """
-  @spec decide(Ticket.t(), String.t(), :approved | :rejected, String.t() | nil) ::
-          {:ok, Ticket.t()} | {:error, term()}
-  def decide(%Ticket{pending_transition: nil}, _user_id, _decision, _comment),
+  @spec decide(
+          Ticket.t(),
+          String.t(),
+          :approved | :rejected,
+          String.t() | nil,
+          %{String.t() => pos_integer()} | nil
+        ) :: {:ok, Ticket.t()} | {:error, term()}
+  def decide(ticket, user_id, decision, comment, seen \\ nil)
+
+  def decide(%Ticket{pending_transition: nil}, _user_id, _decision, _comment, _seen),
     do: {:error, :nothing_pending}
 
-  def decide(%Ticket{pending_transition: pending} = ticket, user_id, decision, comment) do
+  def decide(%Ticket{pending_transition: pending} = ticket, user_id, decision, comment, seen) do
     workflow = Tickets.workflow(ticket)
 
-    with {:ok, transition} <-
-           Core.choose(workflow, pending["from"], pending["to"], pending["outcome"]) do
-      take(ticket, workflow, transition, pending["outcome"], user_id, decision, comment)
+    with :ok <- noted(decision, comment),
+         {:ok, transition} <-
+           Core.choose(workflow, pending["from"], pending["to"], pending["outcome"]),
+         {:ok, pinned} <- as_seen(ticket, transition, seen) do
+      said = %{comment: comment, pinned: pinned}
+      take(ticket, workflow, transition, pending["outcome"], user_id, decision, said)
     end
   end
+
+  # The versions a decision is made on: the latest, when the caller showed none; otherwise exactly
+  # the ones it showed, each still the latest, or none at all.
+  defp as_seen(_ticket, _transition, nil), do: {:ok, %{}}
+
+  defp as_seen(ticket, %Transition{approve: names}, seen) do
+    latest = Map.new(names, &{&1, Artifacts.latest(ticket.id, &1)})
+
+    stale =
+      for(name <- names, Map.get(seen, name) != (latest[name] && latest[name].version), do: name) ++
+        (Map.keys(seen) -- names)
+
+    case stale do
+      [] -> {:ok, for({name, version} <- latest, version != nil, into: %{}, do: {name, version})}
+      names -> {:error, {:stale, names |> Enum.uniq() |> Enum.sort()}}
+    end
+  end
+
+  # **A reject needs a note** (`docs/design/ui.md` § The decision row), and the rule is here, in
+  # the operation, so the API, `mix forge.approve`, a chat's request and the page all meet it:
+  # nothing is written for a rejection whose comment is missing or only whitespace.
+  defp noted(:rejected, comment) do
+    if blank_to_nil(comment), do: :ok, else: {:error, :note_required}
+  end
+
+  defp noted(:approved, _comment), do: :ok
 
   @doc """
   The artifacts the ticket's pending transition is waiting to have approved, by name; none when
@@ -564,7 +658,10 @@ defmodule Forge.Engine do
     with :ok <- not_queued(ticket),
          :ok <- no_live_job(ticket),
          {:ok, transition} <- Core.choose(workflow, ticket.state, to, Keyword.get(opts, :outcome)) do
-      take(ticket, workflow, transition, nil, user_id, :approved, Keyword.get(opts, :comment))
+      take(ticket, workflow, transition, nil, user_id, :approved, %{
+        comment: Keyword.get(opts, :comment),
+        pinned: %{}
+      })
     end
   end
 
@@ -888,7 +985,7 @@ defmodule Forge.Engine do
 
   defp put_again(multi, workflow, %State{prompt: prompt}) when is_binary(prompt) do
     Multi.merge(multi, fn %{ticket: ticket} ->
-      Jobs.put_create(Multi.new(), :next_job, ticket, workflow, ticket.state, arrival(ticket))
+      Jobs.put_create(Multi.new(), :next_job, ticket, workflow, ticket.state, again(ticket))
     end)
   end
 
@@ -901,6 +998,51 @@ defmodule Forge.Engine do
   # How the last attempt of this state arrived, so the next is told the same: the comment a tester
   # sent a build back with is still what the job has to act on (`job-prompt.md` § How the job
   # arrived). Nil when no attempt ran here, which is how a ticket's first state arrives anyway.
+  #
+  # With a rejection made since that attempt, the arrival carries the transition's own comment and
+  # that rejection's note, and no other: running a state again after rejecting what it wrote is how
+  # the note reaches the job that writes it again, and every older note was for an attempt that has
+  # since acted on it. The own comment is read from the transition's event, which records it
+  # without any note (`put_transition/7`), so a note an earlier attempt was handed — and every run
+  # again since has copied — is never in it. With none, the attempt is told exactly what the last
+  # one was, note included: a run that failed has not acted on it.
+  defp again(ticket) do
+    case {arrival(ticket), rejection_note(ticket)} do
+      {nil, nil} ->
+        nil
+
+      {entered, nil} ->
+        entered
+
+      # A first state has no arrival to add to. The prompt names where an arrival came from
+      # (`ForgeCore.Prompt`), and it came from this state, run again by a person.
+      {nil, note} ->
+        %{"from" => ticket.state, "by" => "person", "comment" => note}
+
+      {entered, note} ->
+        Map.put(entered, "comment", join_note(note, own_comment(ticket)))
+    end
+  end
+
+  # After a comment the transition carries of its own (`job-prompt.md` § How the job arrived).
+  defp join_note(note, nil), do: note
+  defp join_note(note, comment), do: comment <> "\n\n" <> note
+
+  # What the transition that brought the ticket into the state it is in was written with: its own
+  # comment, never a note. Nil for a first state no transition has entered, whose arrival is the
+  # one `again/1` makes up.
+  defp own_comment(%Ticket{id: id, state: state}) do
+    Repo.one(
+      from e in Event,
+        where:
+          e.ticket_id == ^id and e.type == "transition.taken" and
+            fragment("?->>'to'", e.payload) == ^state,
+        order_by: [desc: e.seq],
+        limit: 1,
+        select: e.payload["comment"]
+    )
+  end
+
   defp arrival(%Ticket{id: id, state: state}) do
     Repo.one(
       from j in Job,
@@ -914,21 +1056,24 @@ defmodule Forge.Engine do
   # Records approvals (or rejections) for the transition's artifacts, then takes it if approved —
   # or, when the merge it leads to conflicts and the merging state says where a conflict goes,
   # takes that edge instead.
-  defp take(ticket, workflow, transition, outcome, user_id, decision, comment) do
+  #
+  # `said` is what the person decided with: the `comment`, and the versions `pinned` by what they
+  # were shown (`decide/5`), empty for the latest.
+  defp take(ticket, workflow, transition, outcome, user_id, decision, said) do
     if decision == :approved and queues?(workflow, transition) do
-      commit_enqueue(ticket, transition, outcome, user_id, comment)
+      commit_enqueue(ticket, transition, outcome, user_id, said)
     else
-      take_now(ticket, workflow, transition, outcome, user_id, decision, comment)
+      take_now(ticket, workflow, transition, outcome, user_id, decision, said)
     end
   end
 
-  defp take_now(ticket, workflow, transition, outcome, user_id, decision, comment) do
+  defp take_now(ticket, workflow, transition, outcome, user_id, decision, said) do
     case mergeable(ticket, workflow, transition, decision) do
       {:ok, source} ->
-        commit_take(ticket, workflow, transition, outcome, user_id, decision, comment, source)
+        commit_take(ticket, workflow, transition, outcome, user_id, decision, said, source)
 
       {:conflict, edge, conflict} ->
-        commit_conflict(ticket, workflow, transition, edge, conflict, user_id, comment)
+        commit_conflict(ticket, workflow, transition, edge, conflict, user_id, said)
 
       {:error, reason} ->
         {:error, reason}
@@ -1173,9 +1318,11 @@ defmodule Forge.Engine do
   # A person's approval whose merge conflicted, sent down `on_conflict`: the approval is recorded
   # against the version it approved — that is what the person did — and the ticket moves to the
   # target rather than into the merging state. Nothing is merged, so there is no entry action.
-  defp commit_conflict(ticket, workflow, transition, edge, conflict, user_id, comment) do
+  defp commit_conflict(ticket, workflow, transition, edge, conflict, user_id, said) do
+    %{comment: comment, pinned: pinned} = said
+
     ticket
-    |> put_decisions(transition, user_id, :approved, comment, conflict.source)
+    |> put_decisions(transition, user_id, :approved, comment, conflict.source, pinned)
     |> put_conflict(ticket, workflow, edge, transition.to, conflict, actor(user_id), comment)
     |> Repo.transaction()
     |> case do
@@ -1185,8 +1332,9 @@ defmodule Forge.Engine do
     end
   end
 
-  defp commit_take(ticket, workflow, transition, outcome, user_id, decision, comment, source) do
-    multi = put_decisions(ticket, transition, user_id, decision, comment, source)
+  defp commit_take(ticket, workflow, transition, outcome, user_id, decision, said, source) do
+    %{comment: comment, pinned: pinned} = said
+    multi = put_decisions(ticket, transition, user_id, decision, comment, source, pinned)
 
     multi =
       case decision do
@@ -1228,12 +1376,13 @@ defmodule Forge.Engine do
   # version were recorded between the check and the transaction, which nothing here can open: the
   # only writer of a changeset is a job's result, and no job is live while a person takes an edge.
   # So reading it again is an equivalent mutant as far as any test can tell.
-  defp put_decisions(ticket, transition, user_id, decision, comment, source, pinned \\ %{}) do
+  defp put_decisions(ticket, transition, user_id, decision, comment, source, pinned) do
     transition_map = %{"from" => transition.from, "to" => transition.to}
 
     multi =
       Enum.reduce(transition.approve, Multi.new(), fn name, multi ->
-        # `pinned` is Accept's versions, each checked against what the person was shown. Reading
+        # `pinned` is Accept's versions, or a decision's (`decide/5`), each checked against what
+        # the person was shown. Reading
         # the latest here instead is an equivalent mutant as far as a test can tell: a conversation's
         # turn takes the ticket lock Accept holds, so only a writer that takes none — a person
         # editing a document through the API — could commit a newer version in between, and a test
@@ -1538,11 +1687,13 @@ defmodule Forge.Engine do
   defp queues?(workflow, %Transition{to: to} = transition),
     do: Transition.queues?(transition) and Workflow.merges_on_enter?(workflow, to)
 
-  defp commit_enqueue(ticket, transition, outcome, user_id, comment) do
+  defp commit_enqueue(ticket, transition, outcome, user_id, said) do
+    %{comment: comment, pinned: pinned} = said
+
     case Merge.changeset(ticket) do
       {:ok, source} ->
         ticket
-        |> put_decisions(transition, user_id, :approved, comment, source)
+        |> put_decisions(transition, user_id, :approved, comment, source, pinned)
         |> MergeQueue.put_enter(ticket, transition, outcome, source, user_id, %{
           comment: blank_to_nil(comment),
           commit_message_version: Merge.commit_message_version(ticket)

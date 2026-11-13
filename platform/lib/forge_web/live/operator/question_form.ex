@@ -1,16 +1,16 @@
 defmodule ForgeWeb.Operator.QuestionForm do
   @moduledoc """
-  A document's questions, answered together: one form, an option card per choice, a free-text
-  field per question, and one Send. `docs/design/ui.md` § Answering questions is the standard.
+  A document's questions, answered together: one card, a tab per question, a choice row per
+  option, a free-text field per question, and one Send. `docs/design/ui.md` § The question card
+  is the standard.
 
   **Answering a question locks it in; only Send sends.** A job that stopped with three questions
   used to resume on the answer that closed the last blocking one, and read whichever answers had
   landed by then. One Send makes them arrive together.
 
-  **Folding is the width's, not the form's.** Every question is drawn with its radios and its
-  field whether or not it is folded; below `lg` a folded one hides them behind its line, and at
-  `lg` and up nothing folds (`docs/design/ui.md` § Answering questions). CSS decides, so a page held
-  across a resize is right at both widths, and the form's inputs are the same at every width.
+  **One question shows at a time, under its tab**, and every other one is in the form all the same,
+  drawn `hidden`: what is sent is the whole card whichever tab shows. The tab is the page's state
+  (`form:open`), so a re-render keeps it.
 
   **Enter never sends.** The free-text field is `ForgeWeb.Conversations.message_box/1` with Enter a
   new line: a one-line input submitted the form on Enter, before the questions after it were read.
@@ -18,7 +18,7 @@ defmodule ForgeWeb.Operator.QuestionForm do
   Enter from a radio as well.
 
   **The page holds the draft, and only the page.** Every change event carries the whole form —
-  every question's radios and field, folded or not — so what the socket keeps under `:forms` is
+  every question's radios and field, shown or not — so what the socket keeps under `:forms` is
   the form's last state and nothing else. A form nobody has touched is its recommendations.
   Reloading starts again from them, and nobody else sees a half-answer.
 
@@ -44,16 +44,34 @@ defmodule ForgeWeb.Operator.QuestionForm do
   def init, do: %{}
 
   @doc """
-  One document's questions as a form.
+  One document's questions as the question card (`docs/design/ui.md` § The question card): one
+  tab per question, the shown one's text, options and own words, and the foot with what is left
+  and Send.
 
   `id` names the draft; it must change when the questions do — a version id, or a chat reply's
   `Forge.Conversations.reply_ref/1` — so that a draft never outlives what it was drawn for.
+
+  **Every question is in the form whichever tab shows**: the others are drawn `hidden`, their
+  inputs still in the form, so every change event and the Send carry the whole draft.
+
+  `:dock` is drawn in the foot beside Send — the queue's *Later*.
   """
   attr :id, :string, required: true
   attr :questions, :list, required: true
   attr :forms, :map, required: true, doc: "the page's `:forms` assign"
   attr :submit, :string, required: true
   attr :hidden, :list, default: [], doc: "`{name, value}` pairs sent with the form"
+  attr :refusal, :map, default: nil, doc: "the page's `:refusal`: a Send refused is drawn here"
+
+  attr :any_refusal, :boolean,
+    default: true,
+    doc: """
+    draw any card's refused Send, not only this one's: a stale card is drawn again under another
+    id, and the card standing in its place is where the person looks. False for a card beside
+    another that takes them.
+    """
+
+  slot :dock, doc: "drawn in the foot, before Send"
 
   def question_form(assigns) do
     questions = Enum.sort_by(assigns.questions, & &1.line)
@@ -64,6 +82,7 @@ defmodule ForgeWeb.Operator.QuestionForm do
       assign(assigns,
         questions: questions,
         state: state,
+        shown: shown(state, questions),
         left: Enum.count(required, &(not locked?(state.answers[&1.key]))),
         locked: Enum.count(questions, &locked?(state.answers[&1.key])),
         # "Blocking" tells a required question from an optional one; where every question is
@@ -77,43 +96,70 @@ defmodule ForgeWeb.Operator.QuestionForm do
       phx-change="form:change"
       phx-submit={@submit}
       phx-hook=".EnterNeverSends"
-      class="flex flex-col gap-4"
+      class="qcard"
     >
       <input type="hidden" name="form" value={@id} />
       <input :for={{name, value} <- @hidden} type="hidden" name={name} value={value} />
 
-      <div
-        :for={question <- @questions}
-        id={"question-#{@id}-#{question.key}"}
-        data-folded={not open?(@state, question)}
-      >
-        <.folded_question
-          :if={not open?(@state, question)}
-          form={@id}
-          question={question}
-          answer={@state.answers[question.key]}
-        />
-        <.open_question
-          form={@id}
-          question={question}
-          answer={@state.answers[question.key]}
-          optional={not question.blocking}
-          folded={not open?(@state, question)}
-        />
+      <%!-- One tab per question, in the order the agent wrote them; ● once its answer is locked
+            in. A tab is a button and not a link: it changes what the card shows and sends
+            nothing. --%>
+      <div :if={length(@questions) > 1} class="qcard-tabs" role="tablist">
+        <button
+          :for={question <- @questions}
+          id={"tab-#{@id}-#{question.key}"}
+          type="button"
+          role="tab"
+          aria-selected={to_string(question.key == @shown)}
+          class={["qcard-tab", question.key == @shown && "qcard-tab--on"]}
+          phx-click="form:open"
+          phx-value-form={@id}
+          phx-value-key={question.key}
+        >
+          <span aria-hidden="true">{if locked?(@state.answers[question.key]), do: "●", else: "○"}</span>
+          {question.key}
+        </button>
       </div>
 
-      <p :if={@left > 0} class="text-sm/[1.55] opacity-70" id={"form-#{@id}-left"}>
-        {@left} {@kind}{if @left == 1, do: "question", else: "questions"} left
-      </p>
+      <div class="qcard-body">
+        <div
+          :for={{question, index} <- Enum.with_index(@questions, 1)}
+          id={"question-#{@id}-#{question.key}"}
+          data-shown={question.key == @shown}
+          hidden={question.key != @shown}
+        >
+          <.question
+            form={@id}
+            question={question}
+            answer={@state.answers[question.key]}
+            optional={not question.blocking}
+            position={length(@questions) > 1 && "#{index} of #{length(@questions)}"}
+          />
+        </div>
+      </div>
 
-      <button
-        type="submit"
-        disabled={@left > 0 or @locked == 0}
-        phx-disable-with="Sending…"
-        class="h-12 w-full rounded-field bg-base-content px-4 text-sm font-medium text-base-100 disabled:opacity-40"
-      >
-        Send {@locked} {if @locked == 1, do: "answer", else: "answers"}
-      </button>
+      <div class="qcard-foot">
+        <Actions.refused
+          id={"form-#{@id}-refusal"}
+          refusal={@refusal}
+          at={if @any_refusal, do: [:questions], else: [{:form, @id}]}
+        />
+        <p :if={@left > 0} class="qcard-left" id={"form-#{@id}-left"}>
+          {@left} {@kind}{if @left == 1, do: "question", else: "questions"} left
+        </p>
+        <div class="qcard-dock">
+          {render_slot(@dock)}
+          <.button
+            type="submit"
+            variant="primary"
+            fill
+            disabled={@left > 0 or @locked == 0}
+            phx-disable-with="Sending…"
+          >
+            Send {@locked} {if @locked == 1, do: "answer", else: "answers"}
+          </.button>
+        </div>
+      </div>
     </form>
 
     <script :type={Phoenix.LiveView.ColocatedHook} name=".EnterNeverSends">
@@ -136,77 +182,40 @@ defmodule ForgeWeb.Operator.QuestionForm do
   attr :question, :map, required: true
   attr :answer, :map, required: true
   attr :optional, :boolean, required: true
-  attr :folded, :boolean, required: true, doc: "hidden behind its line below `lg`, drawn at `lg`"
+  attr :position, :any, required: true, doc: "`1 of 2`, or false for a card of one"
 
-  defp open_question(assigns) do
+  defp question(assigns) do
     ~H"""
-    <div
-      role="group"
-      aria-label={@question.text}
-      class={["flex-col gap-[11px]", if(@folded, do: "hidden lg:flex", else: "flex")]}
-    >
+    <div role="group" aria-label={@question.text} class="qcard-question">
+      <span :if={@position} class="qcard-position">{@position}</span>
+
       <%!-- Not accent: accent is spent on what waits (`docs/design/ui.md` § Colour), and the
             passage a question is about is context, drawn beside an assumption too. --%>
-      <blockquote
-        :if={@question.anchor}
-        class="border-l-2 border-base-content/30 bg-base-200 py-1 pl-3 text-sm/[1.55] opacity-80"
-      >
-        {@question.anchor}
-      </blockquote>
+      <blockquote :if={@question.anchor} class="qcard-anchor">{@question.anchor}</blockquote>
 
-      <p class="flex items-baseline justify-between gap-3">
-        <span class="text-sm/[1.55] font-medium">{@question.text}</span>
-        <span
-          :if={@optional}
-          class="shrink-0 font-mono text-[11px] tracking-[.14em] uppercase opacity-50"
-        >
-          optional
-        </span>
+      <p class="qcard-text">
+        <span>{@question.text}</span>
+        <span :if={@optional} class="ui-badge">optional</span>
       </p>
 
-      <p :if={@question.assumption} class="text-[12.5px]/[1.5] opacity-70">
-        Assumed: {@question.assumption}
-      </p>
+      <p :if={@question.assumption} class="qcard-assumed">Assumed: {@question.assumption}</p>
 
-      <div :if={@question.options != []} class="flex flex-col gap-2">
-        <label
-          :for={option <- @question.options}
-          class={[
-            "flex min-h-[52px] cursor-pointer items-start gap-3 rounded-field border px-4 py-3",
-            if(@answer["choice"] == option.label,
-              do: "border-primary bg-base-200",
-              else: "border-base-300 hover:border-base-content/30"
-            )
-          ]}
-        >
-          <input
-            type="radio"
-            name={"answers[#{@question.key}][choice]"}
-            value={option.label}
-            checked={@answer["choice"] == option.label}
-            class="radio radio-sm radio-primary mt-0.5 shrink-0"
-          />
-          <span class="flex min-w-0 flex-col gap-0.5">
-            <span class="flex flex-wrap items-baseline gap-x-2">
-              <span class="text-sm font-medium">{option.label}</span>
-              <span
-                :if={option.recommended}
-                class="rounded-selector border border-base-content/30 px-1 font-mono text-[11px] tracking-[.14em] uppercase opacity-60"
-              >
-                recommended
-              </span>
-            </span>
-            <span :if={option.detail} class="text-[13px]/[1.45] opacity-70">{option.detail}</span>
-          </span>
-        </label>
+      <div :if={@question.options != []} class="qcard-options">
+        <.choice_row
+          :for={{option, index} <- Enum.with_index(@question.options)}
+          id={"choice-#{@form}-#{@question.key}-#{index}"}
+          name={"answers[#{@question.key}][choice]"}
+          value={option.label}
+          label={option.label}
+          detail={option.detail}
+          recommended={option.recommended}
+          selected={@answer["choice"] == option.label}
+        />
 
         <%!-- A radio of its own, so clearing is part of the form's state like choosing is. Without
               it a recommendation that started chosen could never become an answer in your own
               words. --%>
-        <label
-          :if={@answer["choice"]}
-          class="flex min-h-[46px] cursor-pointer items-center self-start text-sm text-primary hover:underline"
-        >
+        <label :if={@answer["choice"]} class="qcard-clear">
           <input
             type="radio"
             name={"answers[#{@question.key}][choice]"}
@@ -232,40 +241,95 @@ defmodule ForgeWeb.Operator.QuestionForm do
     """
   end
 
-  attr :form, :string, required: true
-  attr :question, :map, required: true
-  attr :answer, :map, required: true
+  @doc """
+  The split pane a question card sits in, under the content it is about (`docs/design/ui.md`
+  § The question card): a 16px handle above the card, which is sized to what it holds up to a
+  limit the person sets by dragging the handle. Tapping the handle folds the card to its tabs and
+  Send. **The limit is kept per device**, in the browser's storage, by the `.SplitPane` hook;
+  the server never draws it, so a patch does not take it away.
+  """
+  attr :id, :string, required: true
+  slot :inner_block, required: true
 
-  # The line a folded question is below `lg`. Its answer rides the form in the question's own
-  # inputs, drawn beside it and hidden, so every change and the Send carry the whole draft.
-  defp folded_question(assigns) do
+  def split_pane(assigns) do
     ~H"""
-    <button
-      type="button"
-      phx-click="form:open"
-      phx-value-form={@form}
-      phx-value-key={@question.key}
-      class="flex min-h-[52px] w-full items-center gap-3 rounded-field border border-base-300 px-4 py-2 text-left hover:border-base-content/30 lg:hidden"
+    <div
+      id={@id}
+      class="qpane"
+      phx-hook=".SplitPane"
+      phx-mounted={JS.ignore_attributes(["style", "data-folded"])}
     >
-      <span aria-hidden="true" class="opacity-60">✓</span>
-      <span class="flex min-w-0 flex-1 flex-col">
-        <span class="truncate text-[12.5px] opacity-70">{@question.text}</span>
-        <span class="truncate text-sm font-medium">{summary(@answer)}</span>
-      </span>
-      <span class="shrink-0 text-[12.5px] text-primary">change</span>
-    </button>
-    """
-  end
+      <button type="button" class="qpane-handle" aria-label="Fold or resize the questions">
+        <span aria-hidden="true" />
+      </button>
+      {render_slot(@inner_block)}
+    </div>
 
-  defp summary(answer) do
-    Answer.reads(answer["choice"], answer["text"])
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".SplitPane">
+      // The limit is a height in pixels under one key for every card on this device: a limit that
+      // suits a phone does not suit a monitor, and nothing asked for it to follow a person.
+      const KEY = "forge:split-limit"
+      const MIN = 120
+
+      const stored = () => {
+        try { return parseInt(localStorage.getItem(KEY), 10) || null } catch (_) { return null }
+      }
+
+      export default {
+        mounted() {
+          const handle = this.el.querySelector(".qpane-handle")
+          const apply = (px) => { if (px) this.el.style.setProperty("--split-limit", `${px}px`) }
+          apply(stored())
+
+          handle.addEventListener("pointerdown", (down) => {
+            const body = this.el.querySelector(".qcard-body")
+            const start = body ? body.getBoundingClientRect().height : MIN
+            const y0 = down.clientY
+            let moved = false
+            handle.setPointerCapture(down.pointerId)
+
+            const move = (event) => {
+              const dy = y0 - event.clientY
+              if (Math.abs(dy) > 4) moved = true
+              if (!moved) return
+              const max = Math.round(window.innerHeight * 0.85)
+              const px = Math.min(Math.max(Math.round(start + dy), MIN), max)
+              this.limit = px
+              this.el.removeAttribute("data-folded")
+              apply(px)
+            }
+
+            const up = () => {
+              handle.removeEventListener("pointermove", move)
+              handle.removeEventListener("pointerup", up)
+              handle.removeEventListener("pointercancel", up)
+              if (!moved) {
+                this.el.toggleAttribute("data-folded")
+              } else if (this.limit) {
+                try { localStorage.setItem(KEY, String(this.limit)) } catch (_) {}
+              }
+            }
+
+            handle.addEventListener("pointermove", move)
+            handle.addEventListener("pointerup", up)
+            handle.addEventListener("pointercancel", up)
+          })
+
+          // A keyboard press of the handle folds and unfolds it too.
+          handle.addEventListener("click", (event) => {
+            if (event.detail === 0) this.el.toggleAttribute("data-folded")
+          })
+        }
+      }
+    </script>
+    """
   end
 
   @doc """
   Splits `assumed` into those asked in the same document as one of `blocking` — which are answered
   in that document's form, optional — and those asked on their own: `{joined, alone}`. `version`
   reads an item's artifact version id, so the queue's items and a ticket's questions are split by
-  the one rule (`docs/design/ui.md` § Answering questions).
+  the one rule (`docs/design/ui.md` § The question card).
   """
   def join_assumed(blocking, assumed, version \\ & &1.artifact_version_id) do
     held = MapSet.new(blocking, version)
@@ -276,14 +340,15 @@ defmodule ForgeWeb.Operator.QuestionForm do
 
   @doc """
   A form's draft: `answers` by key, each `%{"choice" => label | nil, "text" => text | nil}`,
-  and the keys opened by hand. Untouched, a form's answers are its recommendations.
+  and the tab last chosen or touched, or nil. Untouched, a form's answers are its
+  recommendations.
   """
   def state(forms, id, questions) do
     form = Map.get(forms, id, %{})
 
     %{
       answers: Map.get(form, :answers) || recommendations(questions),
-      open: Map.get(form, :open, MapSet.new())
+      tab: Map.get(form, :tab)
     }
   end
 
@@ -302,11 +367,18 @@ defmodule ForgeWeb.Operator.QuestionForm do
   defp locked?(%{"choice" => choice, "text" => text}), do: choice != nil or text != nil
   defp locked?(_answer), do: false
 
-  # Open while nothing is locked in, or while opened by hand: a locked question folds so the form
-  # stays short on a phone, and tapping its line brings it back. Below `lg` only — the fold is
-  # drawn with `lg:hidden` and `hidden lg:flex`, so at `lg` and up this decides nothing visible.
-  defp open?(state, question),
-    do: not locked?(state.answers[question.key]) or MapSet.member?(state.open, question.key)
+  # The tab shown: the one chosen or last touched, while it is still one of the card's; else the
+  # first question with nothing locked in, else the first. Kept rather than recomputed on every
+  # change, so locking an answer in does not move the card to another question under the thumb.
+  defp shown(state, questions) do
+    keys = Enum.map(questions, & &1.key)
+
+    cond do
+      state.tab in keys -> state.tab
+      first = Enum.find(questions, &(not locked?(state.answers[&1.key]))) -> first.key
+      true -> List.first(keys)
+    end
+  end
 
   # -- events ----------------------------------------------------------------------------------
 
@@ -317,12 +389,15 @@ defmodule ForgeWeb.Operator.QuestionForm do
 
   Everything here arrives off the wire — ids, answers, the reply a form was drawn for — so a
   payload of the wrong shape is ignored rather than raised on, and an id naming nothing is said
-  in a flash. Every write goes through `Forge.Operator`, which checks membership.
+  as a refusal of Send (`ForgeWeb.Operator.Actions.refuse/3`), which the card draws in its foot.
+  Every write goes through `Forge.Operator`, which checks membership.
   """
+  # Clears the last refusal first, as `ForgeWeb.Operator.Actions.handle/3` does: a chat's page
+  # hands its card's events straight here.
   def handle(event, params, socket) do
-    dispatch(event, params, socket)
+    dispatch(event, params, Phoenix.Component.assign(socket, :refusal, nil))
   rescue
-    Ecto.NoResultsError -> {:handled, put_flash(socket, :error, "That no longer exists.")}
+    Ecto.NoResultsError -> {:handled, refused(socket, params["form"], :gone)}
   end
 
   # A change naming no form is dropped by the pattern. Dropping it is an equivalent mutant rather
@@ -330,29 +405,20 @@ defmodule ForgeWeb.Operator.QuestionForm do
   defp dispatch("form:change", %{"form" => id} = params, socket) do
     answers = params |> answers_of() |> Map.new(fn {key, a} -> {key, answer(a)} end)
     form = Map.get(forms(socket), id, %{})
-    open = Map.get(form, :open, MapSet.new())
 
-    # Choosing folds the question; typing keeps it open, so it does not move under the thumb —
-    # and so does clearing a choice, which leaves a question open to be answered in words.
-    open =
+    # The question touched is the one on screen: kept, so the card stays on it.
+    tab =
       case params["_target"] do
-        ["answers", key, "choice"] ->
-          if answers[key]["choice"], do: MapSet.delete(open, key), else: MapSet.put(open, key)
-
-        ["answers", key, "text"] ->
-          MapSet.put(open, key)
-
-        _other ->
-          open
+        ["answers", key, _field] -> key
+        _other -> Map.get(form, :tab)
       end
 
-    {:state, put_form(socket, id, %{answers: answers, open: open})}
+    {:state, put_form(socket, id, %{answers: answers, tab: tab})}
   end
 
   defp dispatch("form:open", %{"form" => id, "key" => key}, socket) do
     form = Map.get(forms(socket), id, %{})
-    open = form |> Map.get(:open, MapSet.new()) |> MapSet.put(key)
-    {:state, put_form(socket, id, Map.put(form, :open, open))}
+    {:state, put_form(socket, id, Map.put(form, :tab, key))}
   end
 
   # A sent form starts again from its recommendations: what is left on it — an assumption not
@@ -371,7 +437,7 @@ defmodule ForgeWeb.Operator.QuestionForm do
          |> put_flash(:info, "Sent #{count} #{if count == 1, do: "answer", else: "answers"}")}
 
       {:error, reason} ->
-        {:handled, refused(socket, reason)}
+        {:handled, refused(socket, id, reason)}
     end
   end
 
@@ -382,7 +448,7 @@ defmodule ForgeWeb.Operator.QuestionForm do
     # thing said is the person's, so no form is drawn for that reply again.
     case Operator.answer_chat(chat, Actions.user(socket), params["reply"], sent(params)) do
       {:ok, _event} -> {:handled, forget(socket, id)}
-      {:error, reason} -> {:handled, refused(socket, reason)}
+      {:error, reason} -> {:handled, refused(socket, id, reason)}
     end
   end
 
@@ -432,19 +498,24 @@ defmodule ForgeWeb.Operator.QuestionForm do
   # newer version — whose form is under another id, so the draft is simply never read again — or
   # because someone answered one of its questions meanwhile, when the same form is drawn again for
   # the questions still asked, and what the person locked in for those is still what they meant.
-  defp refused(socket, :stale) do
-    put_flash(
+  # Left for the card whose Send it was (`{:form, id}`), and drawn in that card's foot.
+  defp refused(socket, id, :gone),
+    do: Actions.refuse(socket, {:form, id}, "That no longer exists.")
+
+  defp refused(socket, id, :stale) do
+    Actions.refuse(
       socket,
-      :error,
+      {:form, id},
       "Some of these questions were answered or changed since the page showed them. " <>
         "Nothing was sent; check what is still asked and send again."
     )
   end
 
-  defp refused(socket, :not_live),
-    do: put_flash(socket, :error, "This conversation has stopped. Reopen it to answer.")
+  defp refused(socket, id, :not_live),
+    do: Actions.refuse(socket, {:form, id}, "This conversation has stopped. Reopen it to answer.")
 
-  defp refused(socket, reason), do: put_flash(socket, :error, "Not sent: #{why(reason)}")
+  defp refused(socket, id, reason),
+    do: Actions.refuse(socket, {:form, id}, "Not sent: #{why(reason)}")
 
   defp why({:unanswered, keys}), do: "answer #{Enum.join(keys, ", ")} first"
   defp why({:not_an_option, key, choice}), do: "#{inspect(choice)} is not an option of #{key}"

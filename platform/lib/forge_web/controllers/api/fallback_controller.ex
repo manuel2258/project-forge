@@ -21,6 +21,17 @@ defmodule ForgeWeb.Api.FallbackController do
   def call(conn, {:error, :nothing_pending}),
     do: error(conn, :conflict, "nothing_pending", "no transition awaits approval")
 
+  # `Forge.Engine.decide/4`'s rule, not the API's: a reject needs a note, so the next job is told
+  # why (`docs/design/ui.md` § The decision row).
+  def call(conn, {:error, :note_required}),
+    do:
+      error(
+        conn,
+        :unprocessable_entity,
+        "note_required",
+        "a rejection needs a comment saying why"
+      )
+
   # The state of the ticket and so the client's to resolve, not a platform fault: decide the
   # pending transition and the next one becomes reachable (`workflow-grammar-v1.md` § Approval).
   def call(conn, {:error, :pending_approval}),

@@ -390,7 +390,7 @@ defmodule ForgeWeb.ChatLiveTest do
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
 
       box = view |> element("#draft") |> render()
-      assert box =~ ~s(phx-hook="ForgeWeb.Conversations.Composer")
+      assert box =~ ~s(phx-hook="ForgeWeb.UI.Forms.Composer")
       assert box =~ ~s|data-newline-on="(pointer: coarse)"|
       assert box =~ ~s(data-max-lines="6")
       assert box =~ ~s(rows="1")
@@ -399,9 +399,10 @@ defmodule ForgeWeb.ChatLiveTest do
       assert hint =~ "Enter sends"
       assert hint =~ "pointer-coarse:hidden"
 
-      # Send is a 46px square, named for a screen reader because it has no word on it.
+      # Send is the round icon inside the field, never a filled button, named for a screen
+      # reader because it has no word on it (`docs/design/ui.md` § Talk).
       send = view |> element(~s(#say button[type="submit"][aria-label="Send"])) |> render()
-      assert send =~ "size-[46px]"
+      assert send =~ "ui-composer-send"
     end
 
     test "an empty message is not sent", %{conn: conn, chat: chat} do
@@ -413,17 +414,25 @@ defmodule ForgeWeb.ChatLiveTest do
       assert length(Conversations.messages(chat.id)) == before
     end
 
-    # Stop and Interrupt are the now line's, and the now line is drawn only while a turn is
-    # open: with no turn open there is nothing to stop, and the composer is the box and Send.
+    # Stop is the now line's, and the now line is drawn only while a turn is open: with no turn
+    # open there is nothing to stop. While one is open, a typed message makes Send *Interrupt and
+    # send* (`15a`) — named for what it costs, and only once there is something to send.
     test "stop and interrupt are there only while a turn is open", %{conn: conn, chat: chat} do
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
       refute has_element?(view, "#now-line")
       refute has_element?(view, "button", "Stop")
+      view |> form("#say", %{"text" => "hello"}) |> render_change()
+      refute has_element?(view, "#say button", "Interrupt and send")
+      refute has_element?(view, ~s(#say input[name="interrupt"]))
 
       running!(chat)
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
       assert has_element?(view, "#now-line button", "Stop")
-      assert has_element?(view, "#now-line button", "Interrupt and send")
+      refute has_element?(view, "#say button", "Interrupt and send")
+
+      view |> form("#say", %{"text" => "actually"}) |> render_change()
+      assert has_element?(view, "#say button", "Interrupt and send")
+      assert has_element?(view, ~s(#say input[name="interrupt"][value="true"]))
     end
 
     test "stop ends the turn without sending anything", %{conn: conn, chat: chat} do
@@ -441,17 +450,104 @@ defmodule ForgeWeb.ChatLiveTest do
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
 
       view |> form("#say", %{"text" => "actually, stop"}) |> render_change()
-      html = view |> element("button", "Interrupt and send") |> render_click()
+      html = view |> form("#say", %{"text" => "actually, stop"}) |> render_submit()
 
       assert html =~ "actually, stop"
     end
   end
 
-  defp running!(chat) do
+  defp running!(chat, attrs \\ %{}) do
     {:ok, running} =
-      chat |> Forge.Jobs.Job.progress_changeset(%{status: :running}) |> Forge.Repo.update()
+      chat
+      |> Forge.Jobs.Job.progress_changeset(Map.merge(%{status: :running}, attrs))
+      |> Forge.Repo.update()
 
     running
+  end
+
+  # The machine a conversation holds, in its details (`15e`): its shape to every member, a link
+  # to its page only for its owner, since the machines' pages are the owner's
+  # (`docs/design/identity.md` § Workers).
+  describe "the machine it holds" do
+    setup %{chat: chat} do
+      owner = Forge.AccountsFixtures.user_fixture()
+
+      machine =
+        Forge.MachinesFixtures.machine_fixture(owner, %{
+          provider_id: "hz-fsn1-2",
+          memory_budget: 8 * 1024 * 1024 * 1024,
+          cores: 4
+        })
+
+      %{owner: owner, machine: machine, chat: running!(chat, %{worker_id: machine.id})}
+    end
+
+    test "a member sees its shape and no link to a page that is not theirs", %{
+      conn: conn,
+      chat: chat
+    } do
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+      assert has_element?(view, "#frame-details #chat-machine", "hz-fsn1-2 · 8 GiB · 4 cores")
+      refute has_element?(view, "#chat-machine-link")
+      refute has_element?(view, ~s(#frame-details a[href^="/workers/"]))
+    end
+
+    test "its owner is linked to its page", %{
+      conn: conn,
+      chat: chat,
+      user: user,
+      machine: machine
+    } do
+      {:ok, _machine} = Forge.Workers.update(machine, %{user_id: user.id})
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+      assert view |> element("#chat-machine-link", "hz-fsn1-2") |> render() =~
+               ~s(href="/workers/#{machine.id}")
+    end
+
+    # `worker_id` outlives the run, so a stopped conversation still names its last machine on
+    # its row; it holds none, and the details say so.
+    test "a stopped conversation holds none", %{conn: conn, chat: chat} do
+      {:ok, _chat} = Conversations.ended(chat, nil, "idle")
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+      assert has_element?(view, "#chat-machine", "none held")
+      refute has_element?(view, "#chat-machine", "hz-fsn1-2")
+    end
+
+    # Send while the agent responds is *Interrupt and send*: the turn in flight is interrupted
+    # before the message goes, which the machine is told first.
+    test "interrupt and send interrupts before it sends", %{
+      conn: conn,
+      chat: chat,
+      machine: machine
+    } do
+      :ok = Forge.Workers.connected(machine.id)
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+      view |> form("#say", %{"text" => "wait"}) |> render_change()
+      view |> form("#say", %{"text" => "wait"}) |> render_submit()
+
+      assert_receive {"interrupt", _payload}
+      assert_receive {"message", %{"text" => "wait"}}
+    end
+
+    test "send with nothing in flight does not interrupt", %{
+      conn: conn,
+      chat: chat,
+      machine: machine
+    } do
+      :ok = Forge.Workers.connected(machine.id)
+      text(chat, "done")
+      turn(chat, 1)
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+      view |> form("#say", %{"text" => "next"}) |> render_submit()
+
+      assert_receive {"message", %{"text" => "next"}}
+      refute_received {"interrupt", _payload}
+    end
   end
 
   # A message *is* a body, so a fenced question block in a reply parses with the same parser a
@@ -557,6 +653,29 @@ defmodule ForgeWeb.ChatLiveTest do
 
     assert html =~ "were answered or changed since the page showed them"
     refute Enum.any?(Conversations.messages(chat.id), &(&1.text =~ "the first"))
+
+    # Said in the card that stands in its place, and gone once that card's own Send goes.
+    assert has_element?(view, "#answer-rows .qcard-foot [role=alert]", "answered or changed")
+
+    [current] =
+      view
+      |> element("#answer-rows form input[name=reply]")
+      |> render()
+      |> then(&Regex.run(~r/value="([^"]+)"/, &1, capture: :all_but_first))
+
+    render_click(view, "chat:questions:send", %{
+      "form" => "chat-#{chat.id}-#{current}",
+      "chat" => chat.id,
+      "reply" => current,
+      "answers" => %{"backend" => %{"text" => "the second"}}
+    })
+
+    assert Enum.any?(Conversations.messages(chat.id), &(&1.text =~ "the second"))
+
+    # The next card the agent asks with starts clean.
+    ask.(3)
+    assert has_element?(view, "#answer-rows form")
+    refute render(view) =~ "answered or changed"
   end
 
   describe "while the agent has the ball" do
@@ -590,7 +709,7 @@ defmodule ForgeWeb.ChatLiveTest do
 
       html = render(view)
       assert html =~ "Here it is."
-      assert html =~ "It is waiting on you."
+      assert has_element?(view, "#top-bar .ui-top-title > .ui-top-sub", "waiting on you")
       refute html =~ ~s(<span class="font-mono text-[17px] leading-none opacity-40">…</span>)
     end
   end
@@ -624,7 +743,8 @@ defmodule ForgeWeb.ChatLiveTest do
     rule = ForgeWeb.Conversations.ending_rule()
 
     assert rule =~ "its branch is deleted"
-    assert view |> element(~s(button[phx-click="close"])) |> render() =~ rule
+    assert view |> element("#chat-end-confirm .ui-confirm-sentence") |> render() =~ rule
+    assert has_element?(view, ~s(#chat-end[phx-click="close"]), "End it")
     assert view |> element("#ending-copy") |> render() =~ "If you end it, #{rule}"
   end
 
@@ -743,9 +863,51 @@ defmodule ForgeWeb.ChatLiveTest do
     {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
     refute has_element?(view, ~s(button[phx-click="reopen"]))
 
-    assert render_hook(view, "reopen", %{}) =~ "still live"
+    render_hook(view, "reopen", %{})
+    assert has_element?(view, "#chat-error[role=alert]", "still live")
     assert %{status: :running, worker_id: worker_id} = Jobs.get!(chat.id)
     assert worker_id == worker.id
+  end
+
+  # The usage lines written out in the details are facts on the facts' edge: with nothing
+  # reported one row in the title menu's words, never `5h —` and `week —` (UX re-check #7); with
+  # a figure, each window's own row.
+  test "the details say the usage as facts, and no figures yet when none", %{
+    conn: conn,
+    user: user,
+    project: project,
+    chat: chat
+  } do
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    view |> element("#title-row h1 button") |> render_click()
+
+    assert has_element?(view, "#chat-facts", "no figures yet")
+    refute view |> element("#chat-facts") |> render() =~ "—"
+    refute has_element?(view, "#chat-usage")
+
+    credential = Forge.ForgeFixtures.pool!(project, Forge.ForgeFixtures.credential_fixture(user))
+    reporting = Forge.ForgeFixtures.chat_fixture(%{project: project})
+
+    reporting
+    |> Ecto.Changeset.change(credential_id: credential.id)
+    |> Forge.Repo.update!()
+
+    :ok =
+      Jobs.record_harness_event(reporting.id, %{
+        type: "job.harness.rate_limit",
+        payload: %{
+          status: "allowed_warning",
+          rate_limit_type: "five_hour",
+          utilization: 0.42,
+          resets_at: System.os_time(:second) + 3600
+        }
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    view |> element("#title-row h1 button") |> render_click()
+
+    refute has_element?(view, "#chat-facts", "no figures yet")
+    assert view |> element("#chat-facts") |> render() =~ "42%"
   end
 
   # And the other way: End is drawn only while it is live, so a close arriving after it stopped
@@ -756,7 +918,10 @@ defmodule ForgeWeb.ChatLiveTest do
     {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
     refute has_element?(view, ~s(button[phx-click="close"]))
 
-    assert render_hook(view, "close", %{}) =~ "already stopped"
+    render_hook(view, "close", %{})
+    # Said in the details, where End was pressed, and not in the dock.
+    assert has_element?(view, "#chat-details #chat-ending-error[role=alert]", "already stopped")
+    refute has_element?(view, "#chat-error")
     assert Jobs.get!(chat.id).status == :finished
   end
 
@@ -769,7 +934,8 @@ defmodule ForgeWeb.ChatLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
 
-    assert view |> element("button", "Reopen") |> render_click() =~ "Could not reopen"
+    view |> element("button", "Reopen") |> render_click()
+    assert has_element?(view, ".chat-dock #chat-error[role=alert]", "Could not reopen")
     assert Conversations.get!(chat.id).status == :finished
   end
 
@@ -856,6 +1022,39 @@ defmodule ForgeWeb.ChatLiveTest do
     refute Enum.any?(
              Conversations.messages(chat.id),
              &(&1.role == :user and &1.text =~ "postgres")
+           )
+  end
+
+  # The card also goes when its questions are answered in another tab while the conversation is
+  # live. The Send that arrives after is refused, and drawn where the card stood.
+  test "a Send whose card was answered elsewhere is refused where the card stood", %{
+    conn: conn,
+    chat: chat,
+    user: user
+  } do
+    text(chat, "```question\nkey: rows\ntext: How many rows?\n```\n")
+    turn(chat, 1)
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    assert has_element?(view, "#answer-rows form")
+    reply = Conversations.reply_ref(Conversations.messages(chat.id))
+
+    {:ok, _event} =
+      Forge.Operator.answer_chat(chat, user, reply, %{"rows" => %{choice: nil, text: "ten"}})
+
+    refute has_element?(view, "#answer-rows form")
+
+    render_click(view, "chat:questions:send", %{
+      "form" => "chat-#{chat.id}-#{reply}",
+      "chat" => chat.id,
+      "reply" => reply,
+      "answers" => %{"rows" => %{"text" => "a thousand"}}
+    })
+
+    assert has_element?(view, "#questions-refusal")
+
+    refute Enum.any?(
+             Conversations.messages(chat.id),
+             &(&1.role == :user and &1.text =~ "a thousand")
            )
   end
 
@@ -963,19 +1162,28 @@ defmodule ForgeWeb.ChatLiveTest do
   } do
     commit_on_chat(project, chat, "NOTES.md", "from a conversation\n")
 
-    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=changes")
-
-    assert view |> element("#chat-commit-message") |> render() =~ "nothing to merge yet"
-    refute has_element?(view, ~s(button[phx-click="merge"]))
+    # The merge is the decision row's — neutral, since nobody is waiting on it — on every view;
+    # with nothing written to say, there is nothing to merge yet and no button to press.
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=talk")
+    assert has_element?(view, "#decision-row.ui-decision--neutral", "nothing to merge yet")
+    assert has_element?(view, "#decision-row button[disabled]", "Merge")
+    refute has_element?(view, "#decision-row", "merges cleanly")
 
     wrote(chat, 1, %{"commit-message" => "Write the notes down\n"})
 
     {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=changes")
+    view |> element("#decision-row button[phx-click='decision:open']") |> render_click()
     block = view |> element("#chat-commit-message") |> render()
 
     assert block =~ "Write the notes down"
-    assert block =~ "view only"
-    assert has_element?(view, ~s(button[phx-click="merge"]))
+    refute block =~ "view only"
+    assert block =~ "commit-message-subject"
+    assert has_element?(view, "#decision-form button[type=submit]", "Merge")
+
+    view |> form("#decision-form") |> render_submit()
+    assert has_element?(view, "#toast", "Merged chat/")
+    assert has_element?(view, "#toast", "into main")
+    refute has_element?(view, "#decision-row")
   end
 
   # Stands in for the worker, which pushes with a token scoped to exactly this ref: the hook

@@ -49,9 +49,13 @@ defmodule ForgeCore.CapacityTest do
       assert Capacity.format(12.0) == "12 windows"
     end
 
-    test "keeps two figures however small the quantity" do
-      assert Capacity.format(0.067) == "0.067 windows"
-      assert Capacity.format(0.0067) == "0.0067 windows"
+    # Precision nobody can use is noise: `0.0020 windows` beside `0.080 windows`.
+    test "never draws more than two decimals, and under a hundredth says so" do
+      assert Capacity.format(0.067) == "0.07 windows"
+      assert Capacity.format(0.08) == "0.08 windows"
+      assert Capacity.format(0.0100) == "0.01 windows"
+      assert Capacity.format(0.0067) == "<0.01 windows"
+      assert Capacity.format(0.0001) == "<0.01 windows"
     end
 
     # "Returns nil when there is nothing truthful to say, so callers render nothing rather than a

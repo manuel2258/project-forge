@@ -39,12 +39,19 @@ defmodule ForgeWeb.OldPinTest do
   # The work screen itself, and not the page a pin that cannot be built gets: both carry the title,
   # so the title says nothing about which one came back.
   defp assert_work_screen(view) do
-    assert has_element?(view, "#work-frame")
+    assert has_element?(view, "#frame.frame--fill")
     refute has_element?(view, "#unreadable-pin")
   end
 
   defp status!(ticket, status),
     do: ticket |> Ecto.Changeset.change(status: status) |> Repo.update!()
+
+  # The row's button drops the panel, which holds the decision's form.
+  defp open!(view) do
+    view |> element("#decision-row button[phx-click='decision:open']") |> render_click()
+    assert has_element?(view, "#decision-panel")
+    view
+  end
 
   describe "the ticket page" do
     test "draws the work screen: title, state, steps and facts", %{
@@ -56,10 +63,10 @@ defmodule ForgeWeb.OldPinTest do
 
       assert html =~ "Persist scores"
       assert_work_screen(view)
-      assert has_element?(view, "#tab-timeline")
+      assert has_element?(view, "#tab-steps")
       assert html =~ "refining"
       assert html =~ ticket.branch
-      assert html =~ "Facts"
+      assert has_element?(view, "#ticket-facts")
     end
 
     for {state, status} <- [
@@ -167,7 +174,7 @@ defmodule ForgeWeb.OldPinTest do
       assert html =~ "Persist scores"
     end
 
-    test "keeps an unsent comment across a reconnect", %{
+    test "keeps an unsent note across a reconnect", %{
       conn: conn,
       project: project,
       ticket: ticket
@@ -175,29 +182,31 @@ defmodule ForgeWeb.OldPinTest do
       ticket = ticket |> old_pin!("review_ready") |> pend_merge()
       changeset!(ticket, "a" <> String.duplicate("0", 39))
 
-      {:ok, view, html} = live(conn, page(project, ticket))
-      assert html =~ ~s(id="approve-#{ticket.id}")
-      assert html =~ ~s(phx-change="draft:change")
-
-      view
-      |> form("#approve-#{ticket.id}", %{"comment" => "typed before it dropped"})
-      |> render_change()
-
       {:ok, view, _html} = live(conn, page(project, ticket))
+      open!(view)
+      assert has_element?(view, ~s(form#decision-form[phx-change="decision:change"]))
 
       view
-      |> form("#approve-#{ticket.id}", %{"comment" => "typed before it dropped"})
+      |> form("#decision-form", %{"note" => "typed before it dropped"})
       |> render_change()
 
-      assert view |> element("#approval-#{ticket.id} textarea[name=comment]") |> render() =~
+      # A rejoin is a fresh mount given the form's change event with what it held.
+      {:ok, view, _html} = live(conn, page(project, ticket))
+      render_hook(view, "decision:change", %{"note" => "typed before it dropped"})
+
+      assert view |> element("#decision-form textarea[name=note]") |> render() =~
                "typed before it dropped"
     end
 
-    test "has its facts as the details sheet", %{conn: conn, project: project, ticket: ticket} do
+    test "has its facts as the details its title drops", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
       {:ok, view, _html} = live(conn, page(project, ticket))
 
-      assert view |> element("dialog#details") |> render() =~ "Facts"
-      assert view |> element("dialog#details") |> render() =~ "Cancel ticket"
+      assert has_element?(view, "#frame-details #ticket-facts")
+      assert view |> element("#frame-details") |> render() =~ "Cancel ticket"
     end
   end
 
@@ -225,11 +234,11 @@ defmodule ForgeWeb.OldPinTest do
       assert has_element?(view, "#docs #doc-refinement\\.md", "refinement.md")
       assert has_element?(view, "#docs #doc-ticket")
 
-      {:ok, view, _html} = live(conn, page(project, ticket) <> "?tab=timeline")
-      assert has_element?(view, "#tab-timeline")
+      {:ok, view, _html} = live(conn, page(project, ticket) <> "?tab=steps")
+      assert has_element?(view, "#tab-steps")
       assert render(view) =~ "refining"
       assert render(view) =~ "refinement.md"
-      assert render(view) =~ "Facts"
+      assert has_element?(view, "#ticket-facts")
     end
 
     test "answers a question", %{conn: conn, project: project, ticket: ticket} do
@@ -270,12 +279,13 @@ defmodule ForgeWeb.OldPinTest do
       ticket = ticket |> old_pin!("review_ready") |> pend_merge()
 
       {:ok, view, _html} = live(conn, page(project, ticket))
+      open!(view)
 
       view
-      |> form("#approval-#{ticket.id} form", %{"comment" => "fine"})
+      |> form("#decision-form", %{"note" => "fine"})
       |> render_submit(%{"decision" => "approved"})
 
-      assert render(view) =~ "approved; now in merged"
+      assert has_element?(view, "#toast", "merged into main")
       assert Tickets.get!(ticket.id).status == :done
     end
 
@@ -301,8 +311,9 @@ defmodule ForgeWeb.OldPinTest do
         |> Repo.update!()
 
       {:ok, view, _html} = live(conn, page(project, ticket))
+      open!(view)
 
-      assert has_element?(view, ~s(#approval-#{ticket.id} button[value="approved"]))
+      assert has_element?(view, ~s(#decision-form button[value="approved"]))
       refute has_element?(view, ~s([id="#{commit_message_id(ticket)}"]))
       refute render(view) =~ "pinned before merges"
     end
@@ -352,13 +363,10 @@ defmodule ForgeWeb.OldPinTest do
   end
 
   describe "the other places a ticket is read" do
-    test "the queue and the board draw it", %{conn: conn, project: project, ticket: ticket} do
+    test "the queue and the project page draw it", %{conn: conn, project: project, ticket: ticket} do
       stuck = status!(ticket, :stuck)
 
       {:ok, _view, html} = live(conn, ~p"/")
-      assert html =~ stuck.title
-
-      {:ok, _view, html} = live(conn, ~p"/board")
       assert html =~ stuck.title
 
       {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}")
@@ -396,18 +404,25 @@ defmodule ForgeWeb.OldPinTest do
       %{ticket: ticket |> old_pin!("review_ready") |> pend_merge(), sha: sha}
     end
 
-    test "says what the merge will carry and offers Approve, on the ticket and the review page",
+    test "says what the merge will carry and offers Approve, on the ticket's Changes",
          %{
            conn: conn,
            project: project,
            ticket: ticket
          } do
-      for path <- [page(project, ticket), page(project, ticket) <> "/review", "/"] do
+      for path <- [page(project, ticket), page(project, ticket) <> "?tab=changes"] do
         {:ok, view, _html} = live(conn, path)
+        open!(view)
 
         assert has_element?(view, ~s([id="#{commit_message_id(ticket)}"]), "pinned before merges")
-        assert has_element?(view, ~s(#approval-#{ticket.id} button[value="approved"]))
+        assert has_element?(view, ~s(#decision-form button[value="approved"]))
       end
+
+      # The queue links to it and decides nothing, and says what the panel says the merge will
+      # write: one rule (`ForgeWeb.Operator.Decision.commit/1`) for both.
+      {:ok, queue, _html} = live(conn, "/")
+      assert has_element?(queue, "#review-#{ticket.id}", "Review the changeset")
+      assert has_element?(queue, "#queue-commit-message", "pinned before merges")
     end
 
     test "a current pin with no message written has no Approve, as before", %{
@@ -421,8 +436,9 @@ defmodule ForgeWeb.OldPinTest do
       current = pend_merge(current)
 
       {:ok, view, _html} = live(conn, page(project, current))
+      open!(view)
 
-      refute has_element?(view, ~s(#approval-#{current.id} button[value="approved"]))
+      refute has_element?(view, ~s(#decision-form button[value="approved"]))
       refute has_element?(view, ~s([id="#{commit_message_id(current)}"]), "pinned before merges")
     end
 
@@ -433,6 +449,7 @@ defmodule ForgeWeb.OldPinTest do
     } do
       commit_message!(ticket, "Written by hand\n")
       {:ok, view, _html} = live(conn, page(project, ticket))
+      open!(view)
 
       assert has_element?(view, ~s([id="#{commit_message_id(ticket)}"]), "Written by hand")
       refute has_element?(view, ~s([id="#{commit_message_id(ticket)}"]), "pinned before merges")
@@ -460,8 +477,11 @@ defmodule ForgeWeb.OldPinTest do
 
       assert has_element?(view, "#unreadable-pin", "can no longer be read")
       assert html =~ "Persist scores"
-      refute has_element?(view, "#work-frame")
-      refute has_element?(view, "#tab-timeline")
+      refute has_element?(view, "#frame.frame--fill")
+
+      # Steps is all it has: no view that would need the workflow to draw.
+      assert has_element?(view, "#tab-steps")
+      for gone <- ~w(changes docs activity), do: refute(has_element?(view, "#tab-#{gone}"))
     end
 
     # Each event goes to a page of its own, with the parameters its handler matches. One of the
@@ -476,7 +496,8 @@ defmodule ForgeWeb.OldPinTest do
 
       events = [
         {"retry", %{"ticket" => id}},
-        {"decide", %{"ticket" => id, "decision" => "approved"}},
+        {"decision:decide", %{"decision" => "approved"}},
+        {"decision:accept", %{"outcome" => "done"}},
         {"transition", %{"ticket" => id, "to" => "implementing"}},
         {"integrate", %{"ticket" => id}},
         {"write_document", %{"ticket" => id, "name" => "plan.md", "content" => "x"}},
@@ -530,7 +551,7 @@ defmodule ForgeWeb.OldPinTest do
                "Re-pinned at #{String.slice(head, 0, 12)}"
 
       assert Tickets.get!(ticket.id).workflow_commit == head
-      assert has_element?(view, "#work-frame")
+      assert has_element?(view, "#frame.frame--fill")
       refute has_element?(view, "#unreadable-pin")
     end
 
@@ -559,20 +580,23 @@ defmodule ForgeWeb.OldPinTest do
       {:ok, view, _html} = live(conn, page(project, ticket))
 
       assert has_element?(view, "#unreadable-pin pre", ~r/\S/)
-      assert has_element?(view, "#ticket-state", "refining")
+      assert has_element?(view, "#title-row .frame-subline", "refining")
       assert has_element?(view, "#docs #doc-ticket")
-      assert has_element?(view, "#timeline li", "ticket.admitted")
+      assert has_element?(view, "#history li", "ticket.admitted")
     end
 
-    test "sends the review page to the ticket's own page", %{
+    # Changes asks the workflow which sub-view to open on; a pin with none has only Steps, and
+    # an address naming Changes, a sub-view or a file lands there rather than raising.
+    test "an address naming Changes draws Steps", %{
       conn: conn,
       project: project,
       ticket: ticket
     } do
-      assert {:error, {:live_redirect, %{to: to}}} =
-               live(conn, page(project, ticket) <> "/review")
+      {:ok, view, _html} =
+        live(conn, page(project, ticket) <> "?tab=changes&sub=files&file=README.md")
 
-      assert to == page(project, ticket)
+      assert has_element?(view, "#unreadable-pin")
+      refute has_element?(view, "#changes")
     end
 
     test "a chat about it still opens", %{conn: conn, project: project, ticket: ticket} do

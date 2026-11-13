@@ -22,6 +22,11 @@ defmodule ForgeWeb.OidcControllerTest do
     Map.put(context, :conn, Plug.Test.init_test_session(conn, %{}))
   end
 
+  # The way back from a provider that said no (`21n`): an OAuth error code instead of a code.
+  defp refused(conn, session, code) do
+    get(conn, ~p"/auth/oidc/test/callback?#{[error: code, state: session.state]}")
+  end
+
   # The first leg, kept so the second has something to verify against.
   defp begin(conn) do
     conn = get(conn, ~p"/auth/oidc/test")
@@ -53,8 +58,8 @@ defmodule ForgeWeb.OidcControllerTest do
     test "an unknown provider is refused without saying which exist", %{conn: conn} do
       conn = get(conn, ~p"/auth/oidc/not-a-provider")
 
-      assert redirected_to(conn) == ~p"/users/log-in"
-      assert Phoenix.Flash.get(conn.assigns.flash, :error) == "No such login provider."
+      assert redirected_to(conn) == ~p"/users/log-in?way=provider"
+      assert Phoenix.Flash.get(conn.assigns.flash, :sign_in_error) == "No such login provider."
     end
   end
 
@@ -108,7 +113,7 @@ defmodule ForgeWeb.OidcControllerTest do
       # And so the same URL a second time is a callback nobody started.
       replay = come_back(recycle(conn), session, sub: "abc", email: "person@example.org")
 
-      assert Phoenix.Flash.get(replay.assigns.flash, :error) =~
+      assert Phoenix.Flash.get(replay.assigns.flash, :sign_in_error) =~
                "already finished or was never started"
 
       refute get_session(replay, :user_token)
@@ -117,9 +122,9 @@ defmodule ForgeWeb.OidcControllerTest do
     test "a callback nobody started is refused", %{conn: conn} do
       conn = get(conn, ~p"/auth/oidc/test/callback?#{[code: "c", state: "s"]}")
 
-      assert redirected_to(conn) == ~p"/users/log-in"
+      assert redirected_to(conn) == ~p"/users/log-in?way=provider"
 
-      assert Phoenix.Flash.get(conn.assigns.flash, :error) =~
+      assert Phoenix.Flash.get(conn.assigns.flash, :sign_in_error) =~
                "already finished or was never started"
 
       refute get_session(conn, :user_token)
@@ -130,7 +135,7 @@ defmodule ForgeWeb.OidcControllerTest do
 
       conn = come_back(conn, session, wrong_key: true)
 
-      assert redirected_to(conn) == ~p"/users/log-in"
+      assert redirected_to(conn) == ~p"/users/log-in?way=provider"
       refute get_session(conn, :user_token)
       assert Forge.Repo.aggregate(Forge.Accounts.Identity, :count) == 0
     end
@@ -141,7 +146,7 @@ defmodule ForgeWeb.OidcControllerTest do
       %{conn: conn, session: session} = begin(conn)
       conn = come_back(conn, session, wrong_key: true)
 
-      message = Phoenix.Flash.get(conn.assigns.flash, :error)
+      message = Phoenix.Flash.get(conn.assigns.flash, :sign_in_error)
 
       assert message == "That login could not be completed."
       refute message =~ "issuer.example.test"
@@ -154,10 +159,10 @@ defmodule ForgeWeb.OidcControllerTest do
 
       conn = come_back(conn, session, sub: "abc", email: existing.email)
 
-      assert redirected_to(conn) == ~p"/users/log-in"
+      assert redirected_to(conn) == ~p"/users/log-in?way=provider"
       refute get_session(conn, :user_token)
 
-      assert Phoenix.Flash.get(conn.assigns.flash, :error) =~
+      assert Phoenix.Flash.get(conn.assigns.flash, :sign_in_error) =~
                "An account already exists for that address"
     end
 
@@ -199,7 +204,7 @@ defmodule ForgeWeb.OidcControllerTest do
 
       conn = come_back(conn, session, email: nil)
 
-      assert Phoenix.Flash.get(conn.assigns.flash, :error) =~ "no email address"
+      assert Phoenix.Flash.get(conn.assigns.flash, :sign_in_error) =~ "no email address"
       refute get_session(conn, :user_token)
     end
 
@@ -208,9 +213,69 @@ defmodule ForgeWeb.OidcControllerTest do
 
       conn = come_back(conn, session, extra: %{"email_verified" => false})
 
-      assert Phoenix.Flash.get(conn.assigns.flash, :error) =~ "has not verified"
+      assert Phoenix.Flash.get(conn.assigns.flash, :sign_in_error) =~ "has not verified"
       refute get_session(conn, :user_token)
       assert Accounts.list_users() == []
+    end
+
+    # The device remembers which provider it last signed in with, by its id — the URL segment —
+    # and nothing about the person (`docs/design/ui.md` § Signing in).
+    test "remembers on the device which provider it signed in with", %{conn: conn} do
+      %{conn: conn, session: session} = begin(conn)
+
+      conn = come_back(conn, session, sub: "abc", email: "person@example.org")
+
+      assert %{value: "oidc:test", http_only: true} = conn.resp_cookies[ForgeWeb.SignIn.cookie()]
+    end
+
+    test "a login that failed remembers nothing", %{conn: conn} do
+      %{conn: conn, session: session} = begin(conn)
+
+      conn = come_back(conn, session, wrong_key: true)
+
+      refute conn.resp_cookies[ForgeWeb.SignIn.cookie()]
+    end
+
+    # 21n: the provider said no, in a registered code, and the login page quotes it.
+    test "a provider that refuses hands the login page its registered code and goes back to it",
+         %{conn: conn} do
+      %{conn: conn, session: session} = begin(conn)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          conn = refused(conn, session, "access_denied")
+
+          assert redirected_to(conn) == ~p"/users/log-in?way=provider"
+          assert Phoenix.Flash.get(conn.assigns.flash, :oidc_refusal) == "access_denied:test"
+          assert Phoenix.Flash.get(conn.assigns.flash, :sign_in_error) == nil
+          refute get_session(conn, :user_token)
+          refute conn.resp_cookies[ForgeWeb.SignIn.cookie()]
+        end)
+
+      assert log =~ "oidc login via test was refused"
+      assert log =~ "error=access_denied"
+    end
+
+    # The code arrives on a URL anybody can write. One that is not registered is not quoted:
+    # it reads as any other failure, so a link cannot put words under the provider's name.
+    test "a refusal in a code that is not registered is not passed on", %{conn: conn} do
+      %{conn: conn, session: session} = begin(conn)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        conn = refused(conn, session, "your_account_is_locked_call_us")
+
+        assert Phoenix.Flash.get(conn.assigns.flash, :oidc_refusal) == nil
+
+        assert Phoenix.Flash.get(conn.assigns.flash, :sign_in_error) ==
+                 "That login could not be completed."
+      end)
+    end
+
+    test "a refusal nobody started is a callback nobody started", %{conn: conn} do
+      conn = get(conn, ~p"/auth/oidc/test/callback?#{[error: "access_denied", state: "s"]}")
+
+      assert Phoenix.Flash.get(conn.assigns.flash, :oidc_refusal) == nil
+      assert Phoenix.Flash.get(conn.assigns.flash, :sign_in_error) =~ "never started"
     end
 
     # The whole point of keeping a log line at all is that an operator can tell a wrong client
@@ -223,7 +288,7 @@ defmodule ForgeWeb.OidcControllerTest do
         ExUnit.CaptureLog.capture_log(fn ->
           conn = come_back(conn, session, token_status: 401)
 
-          assert Phoenix.Flash.get(conn.assigns.flash, :error) =~ "could not be completed"
+          assert Phoenix.Flash.get(conn.assigns.flash, :sign_in_error) =~ "could not be completed"
           refute get_session(conn, :user_token)
         end)
 

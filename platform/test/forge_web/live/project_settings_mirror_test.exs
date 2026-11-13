@@ -47,7 +47,7 @@ defmodule ForgeWeb.ProjectSettingsMirrorTest do
   end
 
   test "an admin adds one and sees it listed", %{conn: conn, project: project} do
-    {:ok, lv, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, lv, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=repository")
 
     html =
       lv
@@ -55,35 +55,43 @@ defmodule ForgeWeb.ProjectSettingsMirrorTest do
       |> render_submit()
 
     assert html =~ "github"
-    assert html =~ "https://github.com/x/y.git"
+    # Breakable only after `/` and `:` (UX pass, D10), so read as text.
+    assert lv
+           |> element("#mirror-github")
+           |> render()
+           |> LazyHTML.from_fragment()
+           |> LazyHTML.text() =~
+             "https://github.com/x/y.git"
+
     assert [%{name: "github"}] = Projects.list_mirrors(project)
 
-    # One block per row below `sm`, keeping its control (`docs/design/ui.md` § The phone).
-    assert has_element?(lv, ~s(table#mirrors.reflow td[data-label="Last push"]))
-    assert has_element?(lv, ~s(table#mirrors tbody tr button[phx-click="remove-mirror"]))
+    assert has_element?(lv, ~s(#mirror-github button[phx-click="remove-mirror"]))
+    assert has_element?(lv, "#mirror-github", "never pushed")
   end
 
   test "a refused URL says so and stores nothing", %{conn: conn, project: project} do
-    {:ok, lv, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, lv, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=repository")
 
     html =
       lv
       |> form("#add-mirror", mirror: %{name: "evil", url: "ext::sh -c id"})
       |> render_submit()
 
+    # Under the form it was typed into, in the rule's own words.
     assert html =~ "https:// or http://"
+    assert has_element?(lv, "#add-mirror #mirror-error", "https:// or http://")
     assert Projects.list_mirrors(project) == []
   end
 
   test "http says what it costs", %{conn: conn, project: project} do
-    {:ok, _lv, html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, _lv, html} = live(conn, ~p"/projects/#{project.name}/settings?section=repository")
 
     assert html =~ "in clear"
   end
 
   # Write-only: the point of moving the token out of the URL was that no surface renders it.
   test "the token is never rendered back", %{conn: conn, project: project} do
-    {:ok, lv, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, lv, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=repository")
 
     lv
     |> form("#add-mirror",
@@ -103,16 +111,17 @@ defmodule ForgeWeb.ProjectSettingsMirrorTest do
 
     {:ok, _} = Forge.Git.run(repo, ["config", "--local", "forge.mirror.github.lastError", "boom"])
 
-    {:ok, _lv, html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, lv, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=repository")
 
-    assert html =~ "failed"
-    assert html =~ "boom"
+    # A failing mirror leads with its status and the remote's own words.
+    assert has_element?(lv, "#mirror-github .settings-danger", "✗ failed")
+    assert has_element?(lv, "#mirror-github .settings-danger", "boom")
   end
 
   test "an admin removes one", %{conn: conn, project: project, owner: owner} do
     :ok = Projects.put_mirror(project, owner, "github", "https://github.com/x/y.git", [])
 
-    {:ok, lv, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, lv, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=repository")
 
     lv
     |> element(~s|button[phx-click="remove-mirror"][phx-value-name="github"]|)
@@ -136,10 +145,13 @@ defmodule ForgeWeb.ProjectSettingsMirrorTest do
     {:ok, _} = Projects.put_member(project, member, :member, owner)
 
     {:ok, lv, _html} =
-      build_conn() |> log_in_user(member) |> live(~p"/projects/#{project.name}/settings")
+      build_conn()
+      |> log_in_user(member)
+      |> live(~p"/projects/#{project.name}/settings?section=repository")
+
+    refute has_element?(lv, "#add-mirror")
 
     render_click(lv, "add-mirror", %{"mirror" => %{"name" => "x", "url" => "https://h/y.git"}})
-
     assert Projects.list_mirrors(project) == []
   end
 end

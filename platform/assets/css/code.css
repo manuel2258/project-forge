@@ -1,0 +1,76 @@
+/* Highlighted code (docs/design/ui.md § The project's repository): the --syntax-* tokens.
+
+   `ForgeWeb.Highlight.code/1` draws a file as rows of a 28px number gutter and the line's text.
+   Lines wrap rather than scroll sideways, and the gutter is never part of a selection, so what a
+   reader copies is the file. Ligatures are off, as for every `pre` (base.css): `|>` drawn as a
+   triangle is not what the file says. */
+.code {
+  --code-gutter: 28px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  font-variant-ligatures: none;
+  tab-size: 4;
+}
+
+.code-line {
+  display: flex;
+}
+
+.code-number {
+  flex: none;
+  width: var(--code-gutter);
+  padding-right: 8px;
+  text-align: right;
+  color: var(--ink-4);
+  user-select: none;
+}
+
+.code-text {
+  flex: 1;
+  min-width: 0;
+  /* A wrapped line hangs under its own indent (`Highlight.hang/1`): the first row starts where
+     the file says, the rest from `--hang`. */
+  padding-left: var(--hang, 2ch);
+  text-indent: calc(-1 * var(--hang, 2ch));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Lumis's classes are its capture names with the dots made dashes (`l-keyword-function`,
+   `l-string-special-symbol`), one class per span. Each rule takes a capture and everything under
+   it by prefix; a later, longer prefix overrides an earlier, shorter one. What is not named here —
+   variables, operators, punctuation, properties — stays ink: six hues for the words that carry
+   the structure, at chroma .08 at most, so code never reads as status (tokens.css). */
+.code [class^="l-keyword"] { color: var(--syntax-keyword); }
+
+.code [class^="l-module"],
+.code [class^="l-type"],
+.code [class^="l-constructor"],
+.code [class^="l-namespace"],
+.code [class^="l-tag"] { color: var(--syntax-module); }
+
+.code [class^="l-function"] { color: var(--syntax-function); }
+
+.code [class^="l-string"],
+.code [class^="l-character"],
+.code [class^="l-markup-raw"],
+.code [class^="l-markup-link"],
+.code [class^="l-diff-plus"] { color: var(--syntax-string); }
+
+/* Elixir's atoms and keyword keys are `string.special.symbol`, so this follows `l-string`. */
+.code [class^="l-string-special-symbol"],
+.code [class^="l-constant"],
+.code [class^="l-boolean"],
+.code [class^="l-label"],
+.code [class^="l-attribute"],
+.code [class^="l-tag-attribute"] { color: var(--syntax-atom); }
+
+.code [class^="l-number"],
+.code [class^="l-diff-minus"] { color: var(--syntax-number); }
+
+.code [class^="l-markup-heading"] { color: var(--syntax-keyword); font-weight: 600; }
+.code [class^="l-markup-strong"] { font-weight: 600; }
+.code [class^="l-markup-italic"] { font-style: italic; }
+
+.code [class^="l-comment"] { color: var(--syntax-comment); font-style: italic; }

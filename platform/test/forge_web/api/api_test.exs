@@ -507,6 +507,20 @@ defmodule ForgeWeb.ApiTest do
     assert %{"items" => [%{"kind" => "approval", "ticket" => ^ref}]} =
              conn |> get(~p"/api/v1/queue") |> json_response(200)
 
+    # A reject needs a note, and the API meets the rule where every caller does: in the
+    # operation, with nothing written (`docs/design/ui.md` § The decision row).
+    for comment <- [nil, "", "  \n"] do
+      assert %{"error" => %{"reason" => "note_required"}} =
+               conn
+               |> post(~p"/api/v1/tickets/#{name}/1/approve", %{
+                 decision: "rejected",
+                 comment: comment
+               })
+               |> json_response(422)
+    end
+
+    assert Tickets.get!(ticket.id).pending_transition != nil
+
     assert %{"state" => "planning", "pending_transition" => nil} =
              conn
              |> post(~p"/api/v1/tickets/#{name}/1/approve", %{comment: "ok"})

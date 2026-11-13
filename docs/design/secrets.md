@@ -125,7 +125,7 @@ person opening it, and the names; each run's `job.secrets` says what it then hel
   it asks for). A process's environment cannot change under it.
 - **A reopened conversation holds the same names**, at their current versions. One deleted since
   is not held, and both sides are told, rather than the agent finding the variable missing halfway
-  through a turn: the conversation's page — *⚠ `STRIPE_TEST_KEY` was deleted and this conversation
+  through a turn: the conversation's page — *△ `STRIPE_TEST_KEY` was deleted and this conversation
   no longer holds it*, read from the latest run's `job.secrets` — and the agent, whose spec carries
   the gone names beside the held ones, so its manifest, or the continuation a resumed session
   reads, says which variables are no longer set (`job-prompt.md` § Secrets). The run goes ahead

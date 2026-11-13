@@ -160,10 +160,22 @@ defmodule Forge.Events do
 
   @topic "tickets"
 
-  @doc "Tells subscribers that `ticket_id` changed. Pages reload on it."
-  @spec notify(String.t()) :: :ok
+  @doc """
+  Tells subscribers that `ticket_id` changed. Pages reload on it.
+
+  It also tells the frame's queue count, on `"queue"`, which project the change was in
+  (`subscribe_queue/0`). The ticket's project is read here, once, at the sender, so that each of
+  the frames listening can decide from the message alone whether it is one of theirs before it
+  reads anything (`CLAUDE.md` § Rules). A ticket that is gone has no project, and nothing to recount.
+  """
+  @spec notify(String.t() | nil) :: :ok
   def notify(ticket_id) do
     Phoenix.PubSub.broadcast(Forge.PubSub, @topic, {:ticket_changed, ticket_id})
+
+    case ticket_id && lookup(Forge.Tickets.Ticket, ticket_id) do
+      nil -> :ok
+      project_id -> queue_changed(project_id)
+    end
   end
 
   @doc "Subscribes the caller to `{:ticket_changed, ticket_id}` messages for every ticket."
@@ -180,20 +192,43 @@ defmodule Forge.Events do
   can decide from the head of its clause whether the change is one it shows, before it reads
   anything (`CLAUDE.md` § Rules: a handler on a global topic filters before it does any work).
   """
-  @spec notify_chat(map()) :: :ok
-  def notify_chat(%{kind: :chat, id: id, project_id: project_id, ticket_id: ticket_id}) do
+  #
+  # **The queue hears it only when `queue: true`**, the default. A conversation waiting on its
+  # reader is a queue item, so a change in whether it waits is the queue's too — but every
+  # signed-in page on the node hears the queue's topic and recounts on it, so a reply streaming
+  # one content block at a time says so only with the block that makes it wait
+  # (`Forge.Jobs.record_harness_event/2`).
+  @spec notify_chat(map(), keyword()) :: :ok
+  def notify_chat(job, opts \\ [])
+
+  def notify_chat(%{kind: :chat, id: id, project_id: project_id, ticket_id: ticket_id}, opts) do
     Phoenix.PubSub.broadcast(
       Forge.PubSub,
       @chats_topic,
       {:chat_changed, id, project_id, ticket_id}
     )
+
+    if Keyword.get(opts, :queue, true), do: queue_changed(project_id), else: :ok
   end
 
-  def notify_chat(_job), do: :ok
+  def notify_chat(_job, _opts), do: :ok
 
   @doc "Subscribes the caller to `{:chat_changed, id, project_id, ticket_id}` for every chat."
   @spec subscribe_chats() :: :ok | {:error, term()}
   def subscribe_chats, do: Phoenix.PubSub.subscribe(Forge.PubSub, @chats_topic)
+
+  @queue_topic "queue"
+
+  defp queue_changed(project_id),
+    do: Phoenix.PubSub.broadcast(Forge.PubSub, @queue_topic, {:queue_changed, project_id})
+
+  @doc """
+  Subscribes the caller to `{:queue_changed, project_id}`: something in that project may have
+  joined or left somebody's queue. The frame's count hears it (`ForgeWeb.Frame`); it carries the
+  project and nothing else, so a listener matches it against its own projects before any read.
+  """
+  @spec subscribe_queue() :: :ok | {:error, term()}
+  def subscribe_queue, do: Phoenix.PubSub.subscribe(Forge.PubSub, @queue_topic)
 
   @doc """
   Tells everything that draws a job that it changed: the ticket's pages, and the lists of
@@ -298,6 +333,14 @@ defmodule Forge.Events do
 
   defp describe(%Event{type: "chat.turn", payload: %{"turn" => turn}}, _bound), do: "turn #{turn}"
 
+  # A version written, by its name and number: the id beside them is for a machine to follow, and
+  # read as a 36-character string wrapped over a phone's width (UX pass, B10).
+  defp describe(
+         %Event{type: "artifact.version_written", payload: %{"artifact" => name, "version" => v}},
+         _bound
+       ),
+       do: "wrote #{name} v#{v}"
+
   # The scheduler's sentence (`Forge.Jobs.record_wait/3`). The reason code beside it is for
   # comparing one pass with the next, not for reading; without this the operator would read
   # `reason="at_capacity" text="Waiting for room: …"` under a job.
@@ -331,6 +374,13 @@ defmodule Forge.Events do
        do: "statuses #{Enum.map_join(statuses, ", ", &(&1 || "none"))} → #{outcome}"
 
   defp describe(%Event{type: "ticket.stuck", payload: %{"reason" => reason}}, _bound), do: reason
+
+  # A decision, with the note it was made with: a rejection always has one, and Activity draws it
+  # with the rejection (`docs/design/ui.md` § The decision row).
+  defp describe(%Event{type: "approval." <> decision, payload: %{"from" => from} = p}, bound)
+       when decision in ["approved", "rejected"] do
+    "#{decision} #{from} → #{p["to"]}" <> note(p["comment"], bound)
+  end
 
   defp describe(%Event{type: "ticket.merged", payload: %{"sha" => sha} = p}, _bound),
     do: "merged as #{short(sha)}#{if p["already"], do: " (it was already there)"}"
@@ -383,6 +433,25 @@ defmodule Forge.Events do
     end
   end
 
+  # A proposal's fate, in words (review fixes 7, L3): these are logged against the job that
+  # proposed, so a chat's Activity drew `version_id="…"` and a ticket's id under them, which
+  # `docs/design/ui.md` § Activity rules out. The ids are for whoever opens the raw log.
+  defp describe(%Event{type: "proposal.accepted", payload: %{"artifact" => name} = p}, _bound),
+    do: "#{name} admitted#{if p["number"], do: " as ##{p["number"]}"}"
+
+  defp describe(%Event{type: "proposal.declined", payload: %{"artifact" => name}}, _bound),
+    do: "#{name} declined"
+
+  defp describe(%Event{type: "proposal.reopened", payload: %{"artifact" => name}}, _bound),
+    do: "#{name} reopened"
+
+  defp describe(%Event{type: "proposal.refused", payload: %{"files" => files} = p}, _bound),
+    do:
+      "#{count(length(files), "proposal")} refused, past #{p["cap"]} a job: #{Enum.join(files, ", ")}"
+
+  defp describe(%Event{type: "proposal.unreadable", payload: %{"reasons" => reasons}}, _bound),
+    do: Enum.map_join(reasons, "; ", fn {file, why} -> "#{file} cannot be read: #{why}" end)
+
   defp describe(%Event{payload: payload}, _bound) when map_size(payload) == 0, do: ""
 
   defp describe(%Event{payload: payload}, bound) do
@@ -397,6 +466,11 @@ defmodule Forge.Events do
   defp left_words("cancelled"), do: "cancelled, and left the merge queue"
   defp left_words("needs_person"), do: "left the merge queue: it needs a person's approval again"
   defp left_words(reason), do: "left the merge queue (#{reason})"
+
+  defp note(comment, bound) when is_binary(comment) and comment != "",
+    do: ": " <> bounded(comment, 160, bound)
+
+  defp note(_none, _bound), do: ""
 
   defp bounded(text, most, :bounded), do: String.slice(text, 0, most)
   defp bounded(text, _most, :whole), do: text

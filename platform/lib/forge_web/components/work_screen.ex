@@ -1,107 +1,30 @@
 defmodule ForgeWeb.WorkScreen do
   @moduledoc """
-  The frame a conversation and a ticket are both drawn in (`docs/design/ui.md` § The work screen),
-  and the tabs they share.
+  What a conversation and a ticket both draw inside the frame (`docs/design/ui.md` § The frame):
+  a state row, then the body of the view on screen, which is the page's only scroller.
 
-  **The frame fills the viewport exactly**, inside `Layouts.app`'s `frame={:work}`: a fixed
-  header, the context strip, a row of tabs, a body that is the page's only scroller, and — on a
-  conversation — a fixed footer holding the composer. The page never scrolls as a whole, so the
-  box you type in is never below the fold. The rail is the details sheet below `lg` and beside
-  the body at `lg` and up (`ForgeWeb.Sheet`), opened from the strip.
-
-  The tab is in the URL (`?tab=changes`, by patch), so back, reload and a pushed link land on it.
-  A count of zero is drawn muted and never hidden, so the tabs never move.
+  The frame itself is `Layouts.app` with `fill`: the title and the parent are its top bar, the
+  views its strip and title-row tabs (`views/2`), the facts its details panel. The view is in the
+  URL (`?tab=changes`, by patch), so back, reload and a pushed link land on it. A count of zero is
+  drawn muted and never hidden, so the tabs never move.
   """
 
   use Phoenix.Component
 
   import ForgeWeb.Actions, only: [clip: 1, keep_open: 0, line: 1]
+  import ForgeWeb.UI.Data, only: [eyebrow: 1]
 
   alias Forge.Artifacts
-  alias ForgeWeb.{FileType, Layouts, Sheet}
+  alias ForgeWeb.FileType
 
-  attr :tabs, :list, required: true, doc: "`{key, label, count | nil}`, in order"
-  attr :tab, :string, required: true, doc: "the key of the tab being shown"
-  attr :path, :string, required: true, doc: "the page's own path, which each tab patches to"
-  attr :strip_label, :string, default: "Details"
-
-  attr :capacity, :any,
-    default: nil,
-    doc: "the page's pool (`ForgeWeb.Capacity`), whose gauge ends the strip"
-
-  slot :header, required: true
-  slot :strip, required: true, doc: "the context strip's identifiers"
-  slot :inner_block, required: true, doc: "the body: the tab being shown"
-  slot :footer, doc: "what sits under the body — a conversation's composer"
-  slot :rail, required: true, doc: "the facts: the rail at `lg`, the details sheet below it"
-
-  def frame(assigns) do
-    ~H"""
-    <div class="flex min-h-0 flex-1 flex-col lg:flex-row">
-      <div class="flex min-h-0 min-w-0 flex-1 flex-col lg:pr-8">
-        <%!-- The header and the strip are what give way when the frame is short — the
-              on-screen keyboard is up — so the tabs and the composer stay: `min-h-0` and
-              `overflow-hidden` let this block shrink, where everything else in the column
-              keeps its height and the body scrolls. --%>
-        <div class="min-h-0 shrink overflow-hidden">
-          <header>{render_slot(@header)}</header>
-
-          <%!-- One line of identifiers. Below `lg` it is how the rail is reached, so it is a
-                control; at `lg` the rail is beside it and the sheet will not open. --%>
-          <button
-            type="button"
-            id="context-strip"
-            phx-click={Sheet.open("details")}
-            aria-label={@strip_label}
-            class="mt-1 flex min-h-[46px] w-full items-center gap-3 text-left font-mono text-[12px] opacity-70 lg:pointer-events-none lg:min-h-0 lg:py-1"
-          >
-            <span class="flex min-w-0 flex-1 items-center gap-x-3 overflow-hidden whitespace-nowrap">
-              {render_slot(@strip)}
-              <Layouts.capacity_gauge
-                :if={@capacity not in [nil, %{}]}
-                capacity={@capacity}
-                prefix="strip"
-              />
-            </span>
-            <span class="shrink-0 lg:hidden" aria-hidden="true">details ›</span>
-          </button>
-        </div>
-
-        <nav
-          id="work-tabs"
-          class="flex shrink-0 overflow-x-auto border-b border-base-300"
-          aria-label="Views of this work"
-        >
-          <.link
-            :for={{key, label, count} <- @tabs}
-            patch={"#{@path}?tab=#{key}"}
-            id={"tab-#{key}"}
-            aria-current={key == @tab && "page"}
-            class={[
-              "-mb-px flex h-[46px] shrink-0 items-center gap-1.5 border-b-2 px-3 text-sm",
-              if(key == @tab,
-                do: "border-base-content font-medium",
-                else: "border-transparent opacity-60 hover:opacity-100"
-              )
-            ]}
-          >
-            {label}
-            <span :if={count} class={["font-mono text-[11.5px]", count == 0 && "opacity-40"]}>
-              {count}
-            </span>
-          </.link>
-        </nav>
-
-        <div class="flex min-h-0 flex-1 flex-col">{render_slot(@inner_block)}</div>
-
-        <div :if={@footer != []} class="shrink-0">{render_slot(@footer)}</div>
-      </div>
-
-      <Sheet.sheet id="details" label="Details" rail>
-        {render_slot(@rail)}
-      </Sheet.sheet>
-    </div>
-    """
+  @doc """
+  The object's views as the frame takes them, from `{key, label, count | nil}` in order: each
+  patches the page's own `path` to `?tab=key`.
+  """
+  @spec views([{String.t(), String.t(), non_neg_integer() | nil}], String.t()) :: [map()]
+  def views(tabs, path) do
+    for {key, label, count} <- tabs,
+        do: %{key: key, label: label, count: count, patch: "#{path}?tab=#{key}"}
   end
 
   @doc "A tab's body when it is not the transcript: it scrolls, and nothing else does."
@@ -110,124 +33,168 @@ defmodule ForgeWeb.WorkScreen do
 
   def body(assigns) do
     ~H"""
-    <div id={@id} class="min-h-0 flex-1 overflow-y-auto overscroll-contain py-4">
+    <%!-- No top padding: the frame's body already has it, and the two together put the first row
+          56px under the bar (UX pass, B28). --%>
+    <div id={@id} class="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-4">
       {render_slot(@inner_block)}
     </div>
     """
   end
 
   @doc """
-  The Docs tab (`docs/design/ui.md` § Docs): every artifact written, one row each with its type's
-  icon (§ Artifact types) and its latest version linked, earlier versions as links beneath;
-  approval marks only where approval is possible; and what the last turn wrote that was not
-  recorded, with why.
+  The Docs view (`docs/design/ui.md` § Docs, `6a`): every artifact written, one row each — its
+  type's tile (§ Artifact types), its name and latest version, who wrote it and when, and its
+  approval mark only where approval is possible — with its earlier versions as links folded under
+  it, and what the last turn wrote that was not recorded, with why.
+
+  **Grouped by what each asks of you** when the docs carry a `group` (a ticket's do): *Waiting
+  on you*, then *Built from*, then *Produced*. A conversation's docs carry none and are one list.
 
   A document's row is collapsed until it is opened, and opens to the document **rendered** — or
   to its text, when its name says text, a log or code. A file or a presentation has no body here:
   its row is the link to its bytes.
 
-  A doc is what `doc/4` builds.
+  A doc is what `doc/5` builds; a page may add `by`, who wrote the latest version in words.
   """
   attr :docs, :list, required: true
   attr :unrecorded, :map, default: %{}
   attr :empty, :string, default: "Nothing written yet."
+  attr :now, :any, default: nil, doc: "the moment ages are measured from; none drawn without it"
 
   def docs(assigns) do
+    assigns = assign(assigns, :groups, groups(assigns.docs))
+
     ~H"""
-    <p :if={@docs == [] and @unrecorded == %{}} class="text-sm opacity-60">{@empty}</p>
+    <p :if={@docs == [] and @unrecorded == %{}} class="text-sm text-ink-2">{@empty}</p>
 
-    <section
-      :for={doc <- @docs}
-      id={"doc-#{doc.name}"}
-      class="relative min-w-0 border-b border-base-300/60"
-    >
-      <%!-- The version link is beside the summary, not inside it: the summary is a control of
-            its own, and one tap meaning two things is what `ui.md` § The affordance rule
-            forbids. --%>
-      <details :if={doc.latest.body} class="group" phx-mounted={keep_open()}>
-        <summary class="flex min-h-[46px] cursor-pointer list-none items-center gap-3 py-1.5 pr-16 [&::-webkit-details-marker]:hidden">
-          <span aria-hidden="true" class="w-3 shrink-0 text-[12.5px] opacity-40 group-open:rotate-90">
-            ▸
-          </span>
-          <.doc_name entry={doc} />
-        </summary>
-        <div class="mb-3 min-w-0 rounded-box bg-base-200 px-4 py-3">
-          <FileType.document_body body={doc.latest.body} />
-        </div>
-      </details>
-      <.link
-        :if={doc.latest.body}
-        href={doc.latest.href}
-        aria-label={"#{doc.name} v#{doc.latest.version}"}
-        class="absolute top-0 right-0 flex min-h-[46px] items-center gap-3 pl-3 font-mono text-[12.5px] hover:underline"
-      >
-        <span :if={doc.latest.author} class="opacity-50">{doc.latest.author}</span>
-        v{doc.latest.version} <span class="opacity-40" aria-hidden="true">›</span>
-      </.link>
-
-      <.link
-        :if={!doc.latest.body}
-        href={doc.latest.href}
-        class="flex min-h-[46px] items-center gap-3 py-1.5 hover:bg-base-200"
-      >
-        <span aria-hidden="true" class="w-3 shrink-0"></span>
-        <.doc_name entry={doc} />
-        <span :if={doc.latest.author} class="shrink-0 font-mono text-[12.5px] opacity-50">
-          {doc.latest.author}
-        </span>
-        <span class="shrink-0 font-mono text-[12.5px]">v{doc.latest.version}</span>
-        <span class="shrink-0 font-mono text-[12.5px] opacity-40" aria-hidden="true">›</span>
-      </.link>
-
-      <p :if={doc.earlier != []} class="flex flex-wrap items-center gap-x-3 pl-6 text-[12.5px]">
-        <span class="opacity-50">earlier</span>
-        <.link
-          :for={version <- doc.earlier}
-          href={version.href}
-          class="flex min-h-[46px] items-center font-mono text-primary hover:underline"
-        >
-          v{version.version}<span :if={version.author} class="ml-1 opacity-50">{version.author}</span>
-        </.link>
-      </p>
-    </section>
+    <div :for={{group, docs} <- @groups} id={group && "docs-#{group}"} class="work-docs">
+      <div :if={group} class="work-docs-head">
+        <.eyebrow>{group_label(group)}</.eyebrow>
+      </div>
+      <.doc_row :for={doc <- docs} doc={doc} now={@now} />
+    </div>
 
     <%!-- Without this a document that did not arrive is only absent, which reads the same as
           one that was never written. --%>
     <ul :if={@unrecorded != %{}} id="unrecorded" class="mt-5 flex flex-col gap-2">
       <li :for={{name, why} <- Enum.sort(@unrecorded)} class="text-[12.5px]">
         <span class="font-mono break-all">{name}</span>
-        <span class="text-error">not recorded:</span>
-        <span class="opacity-70">{why}</span>
+        <span class="text-danger">not recorded:</span>
+        <span class="text-ink-2">{why}</span>
       </li>
     </ul>
     """
   end
 
+  @order [:waiting, :built_from, :produced]
+
+  # In the order a person reads them; a group with nothing in it is not drawn. Docs without a
+  # group are one list with no heading.
+  defp groups(docs) do
+    if Enum.any?(docs, &Map.has_key?(&1, :group)) do
+      by = Enum.group_by(docs, & &1.group)
+      for group <- @order, by[group], do: {group, by[group]}
+    else
+      if docs == [], do: [], else: [{nil, docs}]
+    end
+  end
+
+  defp group_label(:waiting), do: "Waiting on you"
+  defp group_label(:built_from), do: "Built from"
+  defp group_label(:produced), do: "Produced"
+
+  attr :doc, :map, required: true
+  attr :now, :any, required: true
+
+  defp doc_row(assigns) do
+    ~H"""
+    <section id={"doc-#{@doc.name}"} class="work-doc">
+      <%!-- The version link is beside the summary, not inside it: the summary is a control of
+            its own, and one tap meaning two things is what `ui.md` § The affordance rule
+            forbids. --%>
+      <details :if={@doc.latest.body} class="group" phx-mounted={keep_open()}>
+        <summary class="work-doc-row">
+          <.doc_name entry={@doc} now={@now} />
+        </summary>
+        <div class="work-doc-body">
+          <FileType.document_body body={@doc.latest.body} />
+        </div>
+      </details>
+      <.link
+        :if={@doc.latest.body}
+        href={@doc.latest.href}
+        aria-label={"#{@doc.name} v#{@doc.latest.version}"}
+        class="work-doc-version"
+      >
+        v{@doc.latest.version} <span aria-hidden="true">›</span>
+      </.link>
+
+      <.link :if={!@doc.latest.body} href={@doc.latest.href} class="work-doc-row">
+        <.doc_name entry={@doc} now={@now} />
+        <span class="work-doc-version-inline">
+          v{@doc.latest.version} <span aria-hidden="true">›</span>
+        </span>
+      </.link>
+
+      <%!-- Folded: the latest is what is read, and a long history would push the next row away. --%>
+      <details :if={@doc.earlier != []} class="work-doc-earlier-fold">
+        <summary class="work-doc-earlier-count">
+          {length(@doc.earlier)} earlier {if length(@doc.earlier) == 1,
+            do: "version",
+            else: "versions"}
+        </summary>
+        <.link
+          :for={version <- @doc.earlier}
+          href={version.href}
+          class="work-doc-earlier"
+        >
+          <span>
+            {meta(["v#{version.version}", "superseded", version.author, ago(version.at, @now)])}
+          </span>
+          <span aria-hidden="true">›</span>
+        </.link>
+      </details>
+    </section>
+    """
+  end
+
+  defp ago(_at, nil), do: nil
+  defp ago(nil, _now), do: nil
+  defp ago(at, now), do: ForgeWeb.Format.ago_phrase(at, now)
+
+  defp meta(parts), do: parts |> Enum.reject(&is_nil/1) |> Enum.join(" · ")
+
   attr :entry, :map, required: true
+  attr :now, :any, required: true
 
   # What a row says of its artifact, open or closed: its type, its name and where it stands.
   defp doc_name(assigns) do
     ~H"""
     <FileType.file_icon artifact={@entry} />
-    <span class="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 font-mono text-[12.5px]">
-      <span class="min-w-0 break-all">{@entry.name}</span>
-      <span :if={@entry.kind == :presentation} class="tracking-[.14em] uppercase opacity-50">
-        view only
+    <span class="work-doc-text">
+      <%!-- The version once, at the row's end, where its link is: drawn here as well it was
+            `plan.md v2 … v2 ›` (UX pass, B29). --%>
+      <span class="work-doc-name">
+        <span class="min-w-0 break-all">{@entry.name}</span>
       </span>
-      <span :if={@entry.approved} class="text-success">✓ approved</span>
-      <span :if={@entry.approvable and not @entry.approved} class="text-warning">◇ unapproved</span>
+      <span class="work-doc-meta">
+        {meta([@entry[:by] || @entry.latest.author, ago(@entry.latest[:at], @now)])}
+      </span>
       <%!-- The icon already says this to a screen reader; said again it is said twice. --%>
-      <span :if={@entry.type == :apk} class="basis-full opacity-60" aria-hidden="true">
-        Android app
-      </span>
+      <span :if={@entry.type == :apk} class="work-doc-meta" aria-hidden="true">Android app</span>
+    </span>
+    <span class="work-doc-mark">
+      <span :if={@entry.kind == :presentation} class="text-ink-3">view only</span>
+      <span :if={@entry.approved} class="text-success">✓ approved</span>
+      <span :if={@entry.approvable and not @entry.approved} class="text-accent-text">◇ unapproved</span>
     </span>
     """
   end
 
   @doc """
-  One entry of the Docs tab: `%{name, kind, type, latest, earlier, approvable, approved}`, from an
+  One entry of the Docs view: `%{name, kind, type, latest, earlier, approvable, approved}`, from an
   artifact and the versions of it to show, oldest first. `type` is `ForgeWeb.FileType.of/1`'s.
-  `latest` is `%{version, href, body}`, where a document's body is
+  `latest` is `%{version, href, author, at, body}`, where a document's body is
   `ForgeWeb.FileType.render_document/3`'s and a blob's or a presentation's is nil. `earlier` is
   the versions before it, newest first, and the approval fields are about the latest. `href`
   gives a version number's address, and `approvable` is the page's to say: where approval is
@@ -251,6 +218,7 @@ defmodule ForgeWeb.WorkScreen do
         version: latest.version,
         href: href.(latest.version),
         author: ForgeWeb.Format.author(latest.author),
+        at: latest.inserted_at,
         # A blob's bytes are in the store, and drawing its row does not read them.
         body:
           if(artifact.kind == :document,
@@ -262,7 +230,8 @@ defmodule ForgeWeb.WorkScreen do
           %{
             version: version.version,
             href: href.(version.version),
-            author: ForgeWeb.Format.author(version.author)
+            author: ForgeWeb.Format.author(version.author),
+            at: version.inserted_at
           }
         end,
       approvable: approvable,
@@ -281,7 +250,7 @@ defmodule ForgeWeb.WorkScreen do
         {length(@commits)} {if length(@commits) == 1, do: "commit", else: "commits"} on its branch
       </h2>
       <ol class="mt-3 flex flex-col">
-        <li :for={commit <- @commits} class="border-b border-base-300/60">
+        <li :for={commit <- @commits} class="border-b border-border-soft">
           <ForgeWeb.Diff.commit_row commit={commit} now={@now} />
         </li>
       </ol>
@@ -293,10 +262,12 @@ defmodule ForgeWeb.WorkScreen do
   What the merge commit will say, read-only, directly above the control that merges
   (`docs/design/ui.md` § Changes).
 
-  An agent's text, used as written: there is no editor here and never will be one. Drawn dashed
-  and `view only` like a presentation, which is the closest existing treatment for prose nobody
-  approves — `commit-message` is an ordinary document and not a presentation artifact, so it is
-  this component and not the presentation one. Absent, it says there is nothing to merge yet
+  An agent's text, used as written: there is no editor here and never will be one. **One drawing
+  wherever a merge is decided** — the decision panel, the queue's approval, Changes, a chat's
+  merge — as git will write it: the subject in mono 13/500, a blank line, the body in mono
+  `pre-wrap`, on `--surface-1` with no border (it is read, not tapped) and no *view only* (nothing
+  near it is editable). It replaced three shapes for one object, one of which ran the body into the
+  subject's sentence (UX pass, A15, B11, B23). Absent, it says there is nothing to merge yet
   instead of drawing an empty box.
 
   **It shows the string the commit will carry**, which is the version's body and not its raw
@@ -307,27 +278,37 @@ defmodule ForgeWeb.WorkScreen do
   attr :id, :string, default: "commit-message"
 
   def commit_message(assigns) do
+    assigns = assign(assigns, :message, assigns.version && message(assigns.version))
+
     ~H"""
     <section id={@id}>
       <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
         The commit it will make
+        <span :if={@version} class="ml-1 normal-case tracking-normal">
+          · commit-message v{@version.version}
+        </span>
       </h2>
-      <div
-        :if={@version}
-        class="mt-2 min-w-0 rounded-box border border-dashed border-base-300 px-4 py-3"
-      >
-        <header class="flex min-h-[46px] flex-wrap items-center gap-x-3 font-mono text-[12.5px]">
-          <span class="min-w-0 break-all">commit-message</span>
-          <span class="opacity-60">v{@version.version}</span>
-          <span class="tracking-[.14em] uppercase opacity-50">view only</span>
-        </header>
-        <pre class="mt-1 overflow-x-auto whitespace-pre-wrap font-mono text-[12.5px]/[1.55]">{ForgeCore.Document.body(@version.content)}</pre>
+      <div :if={@version} class="commit-message mt-2 min-w-0 rounded-card bg-surface-1 px-4 py-3">
+        <p class="commit-message-subject">{elem(@message, 0)}</p>
+        <pre :if={elem(@message, 1) != ""} class="commit-message-body">{elem(@message, 1)}</pre>
       </div>
       <p :if={is_nil(@version)} class="mt-2 text-sm/[1.55] opacity-70">
         Nothing has written the message this merge would carry, so there is nothing to merge yet.
       </p>
     </section>
     """
+  end
+
+  @doc """
+  A commit message as git keeps it: `{subject, body}`, the subject its first line and the body
+  what follows the blank line, from the version's body (`ForgeCore.Document.body/1`).
+  """
+  @spec message(%{content: String.t()}) :: {String.t(), String.t()}
+  def message(%{content: content}) do
+    case content |> ForgeCore.Document.body() |> String.trim() |> String.split("\n", parts: 2) do
+      [subject, body] -> {subject, String.trim(body)}
+      [subject] -> {subject, ""}
+    end
   end
 
   # What the harness says about itself rather than about the work: Claude Code turns every
@@ -398,10 +379,15 @@ defmodule ForgeWeb.WorkScreen do
   attr :shown, :integer, required: true
   attr :notices, :boolean, required: true
   attr :heading, :string, required: true
+  attr :since, :any, default: nil, doc: "the person's previous look: what is newer is marked"
 
   attr :class, :any,
     default: nil,
     doc: "for the list: a page that is not a work screen bounds it itself, since no tab body does"
+
+  attr :hrefs, :map,
+    default: %{},
+    doc: "`version_hrefs/1` of the page's docs: where a version an event names is read"
 
   def activity(assigns) do
     entries = entries(assigns.events, assigns.notices)
@@ -414,45 +400,70 @@ defmodule ForgeWeb.WorkScreen do
       )
 
     ~H"""
-    <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">{@heading}</h2>
+    <div class="work-act-head">
+      <.eyebrow>{@heading}</.eyebrow>
+    </div>
 
-    <ol class={["mt-3 flex flex-col", @class]} id={@id}>
-      <%!-- Two rows narrow, one row wide. The type column is 196px because the longest type in
-            the product, `artifact.version_written`, is 24 mono characters and a column narrower
-            than its content does not clip — it overlaps the next one. --%>
+    <ol class={["work-acts", @class]} id={@id}>
+      <%!-- What happened first, when it happened at the row's end (`5d`): the time is the least
+            of what a row says. --%>
       <%!-- Keyed and named by the event, so a row a reader opened is still that event's row after
             a newer one is drawn above it — by index, every row was another event's next time. --%>
       <li
         :for={entry <- @entries}
         :key={seq(entry)}
         id={"#{@id}-#{seq(entry)}"}
-        class="grid grid-cols-[64px_1fr] gap-x-2 border-b border-base-300/60 py-1.5 font-mono text-[12.5px] sm:grid-cols-[64px_196px_1fr]"
+        class={[
+          "work-act",
+          turn?(entry) && "work-act--turn",
+          @since && new?(entry, @since) && "work-act--new"
+        ]}
       >
+        <%!-- Every event that has a form in words is drawn in it, never as its type and payload
+              — a 36-character `version_id` wrapped over three lines of a phone was noise
+              (UX pass, B10). The raw form is the job page's raw log. --%>
         <%= case entry do %>
-          <% {:action, event, action} -> %>
-            <span class="pt-1 opacity-50">{Calendar.strftime(event.inserted_at, "%H:%M:%S")}</span>
-            <div class="min-w-0 sm:col-span-2" data-activity="action">
+          <% {:action, _event, action} -> %>
+            <div class="work-act-main" data-activity="action">
               <.line line={{:one, action}} />
             </div>
+          <% {:event, %{type: "chat.turn"} = event} -> %>
+            <%!-- A turn is where one exchange ends and the next begins: a divider, not a row. --%>
+            <span class="work-act-turn" data-activity="turn">turn {event.payload["turn"]}</span>
+          <% {:event, %{type: "chat.message"} = event} -> %>
+            <div class="work-act-main work-act-said" data-activity="message">
+              <span class="work-act-who">{ForgeWeb.Format.author(event.actor) || "you"}:</span>
+              <span class="work-act-words"><.clip text={Forge.Events.detail(event)} /></span>
+            </div>
+          <% {:event, %{type: "artifact.version_written", payload: %{"artifact" => name, "version" => v}}} -> %>
+            <div class="work-act-main work-act-said" data-activity="wrote">
+              <span class="work-act-who">wrote</span>
+              <.link :if={@hrefs[{name, v}]} href={@hrefs[{name, v}]} class="work-act-version">
+                {name} v{v} ›
+              </.link>
+              <span :if={!@hrefs[{name, v}]} class="work-act-version">{name} v{v}</span>
+            </div>
           <% {:event, event} -> %>
-            <span class="opacity-50">{Calendar.strftime(event.inserted_at, "%H:%M:%S")}</span>
-            <%!-- A memory row's type in `warning`: not waiting on a person, and not an error
-                  either (`docs/design/capacity.md` § Memory, which a job holds rather than
-                  spends). --%>
-            <span class={[
-              "min-w-0 truncate",
-              String.ends_with?(event.type, "error") && "text-error",
-              event.type == "job.harness.memory" && "text-warning"
-            ]}>
-              {String.replace_prefix(event.type, "job.harness.", "")}
-            </span>
-            <%!-- Wrapped, never truncated, and past 200 characters opened in place
-                  (`docs/design/ui.md` § Activity): the whole of an agent's text, not the
-                  bounded line a list draws. --%>
-            <div class="col-start-2 min-w-0 break-words opacity-70 sm:col-start-3">
-              <.clip text={Forge.Events.detail(event)} />
+            <div class="work-act-main">
+              <%!-- A memory row's type in `warning`: not waiting on a person, and not an error
+                    either (`docs/design/capacity.md` § Memory, which a job holds rather than
+                    spends). --%>
+              <span class={[
+                "work-act-type truncate",
+                String.ends_with?(event.type, "error") && "text-danger",
+                event.type == "job.harness.memory" && "text-warning"
+              ]}>
+                {label(event.type)}
+              </span>
+              <%!-- Wrapped, never truncated, and past 200 characters opened in place
+                    (`docs/design/ui.md` § Activity): the whole of an agent's text, not the
+                    bounded line a list draws. --%>
+              <div class="work-act-detail break-words">
+                <.clip text={Forge.Events.detail(event)} />
+              </div>
             </div>
         <% end %>
+        <span :if={!turn?(entry)} class="work-act-time">{Calendar.strftime(at(entry), "%H:%M:%S")}</span>
       </li>
     </ol>
 
@@ -461,7 +472,7 @@ defmodule ForgeWeb.WorkScreen do
         :if={@more}
         type="button"
         phx-click="more"
-        class="min-h-[46px] rounded-field border border-base-300 px-4 text-sm hover:border-base-content/30"
+        class="ui-btn ui-btn--secondary ui-btn--md"
       >
         Load {ForgeWeb.JobStream.page()} more
       </button>
@@ -472,13 +483,38 @@ defmodule ForgeWeb.WorkScreen do
         type="button"
         phx-click="notices"
         id="job-notices"
-        class="min-h-[46px] rounded-field px-4 text-sm opacity-60 hover:opacity-100"
+        class="ui-btn ui-btn--quiet ui-btn--md"
       >
         {if @notices, do: "Hide", else: "Show"} {@notice_count} harness notices
       </button>
     </div>
     """
   end
+
+  defp at({:action, event, _action}), do: event.inserted_at
+  defp at({:event, event}), do: event.inserted_at
+
+  defp turn?({:event, %{type: "chat.turn"}}), do: true
+  defp turn?(_entry), do: false
+
+  # A row's head: what the harness's own types are called once their prefix is gone, and the
+  # agent's words named as the agent's rather than as `text`.
+  defp label("job.harness.text"), do: "agent"
+  defp label(type), do: String.replace_prefix(type, "job.harness.", "")
+
+  @doc """
+  Where each version the docs name is read, by `{name, version}`: what Activity links a written
+  version to, so it is the address Docs links it to, in the page's own scope.
+  """
+  @spec version_hrefs([map()]) :: %{{String.t(), pos_integer()} => String.t()}
+  def version_hrefs(docs) do
+    for doc <- docs, version <- [doc.latest | doc.earlier], into: %{} do
+      {{doc.name, version.version}, version.href}
+    end
+  end
+
+  # Since the person last looked: what arrived after it is marked.
+  defp new?(entry, since), do: DateTime.compare(at(entry), since) == :gt
 
   defp seq({:action, event, _action}), do: event.seq
   defp seq({:event, event}), do: event.seq

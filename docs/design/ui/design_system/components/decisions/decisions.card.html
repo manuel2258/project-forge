@@ -1,0 +1,26 @@
+<!-- @dsCard group="Components" viewport="700x400" name="Decisions" -->
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../../styles.css">
+<style>body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font-sans);-webkit-font-smoothing:antialiased}button{font:inherit}</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../components/_preview.js"></script>
+</head><body><div id="root"></div>
+<script type="text/babel">
+(async () => {
+const NS = await loadForge('../../');
+const { TopBar, DecisionRow, DropPanel } = NS;
+const App = () => <div style={{ padding:16, display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
+  <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
+    <div style={{ border:'1px solid var(--border)', borderRadius:10, overflow:'hidden' }}><TopBar title="Sound toggle in settings" context="game" subline="#39 · review · waiting on you" /><DecisionRow kind="changeset" title={<>changeset v1 <span style={{color:'var(--success)',fontWeight:400}}>+48</span> <span style={{color:'var(--danger)',fontWeight:400}}>−6</span></>} meta="✓ check 21s · review → merging" action="Approve" /></div>
+    <div style={{ border:'1px solid var(--border)', borderRadius:10, overflow:'hidden' }}><DecisionRow kind="branch" tone="neutral" title="chat/3f9a21c0 +71 −18" meta="2 commits · merges cleanly into main" action="Merge" /></div>
+  </div>
+  <div style={{ position:'relative', height:360, border:'1px solid var(--border)', borderRadius:10, overflow:'hidden' }}>
+    <DecisionRow kind="doc" title="brief.md v2" meta="written 3m ago" action="Accept" open>
+      <DropPanel title="Accept step shaping" body="Ends the chat step, approves brief.md v2 and moves to planning." warning={{ title:'1 open question will stay unanswered', body:'Planning starts from brief.md v2 as written.' }} secondary="Answer first" primary="Accept anyway" />
+    </DecisionRow>
+  </div>
+</div>;
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+})();
+</script></body></html>

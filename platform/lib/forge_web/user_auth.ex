@@ -77,6 +77,21 @@ defmodule ForgeWeb.UserAuth do
     end
   end
 
+  @doc """
+  The user a request's session or remember-me cookie names, read exactly as
+  `fetch_current_scope_for_user/2` reads it, or nil — for a page drawn where no pipeline ran, as
+  an address no route matched is (`ForgeWeb.ErrorHTML`). It writes nothing to the response.
+  """
+  @spec session_user(Plug.Conn.t()) :: Forge.Accounts.User.t() | nil
+  def session_user(conn) do
+    with {token, _conn} <- conn |> fetch_session() |> ensure_user_token(),
+         {user, _inserted_at} <- Accounts.get_user_by_session_token(token) do
+      user
+    else
+      nil -> nil
+    end
+  end
+
   defp ensure_user_token(conn) do
     if token = get_session(conn, :user_token) do
       {token, conn}
@@ -243,9 +258,11 @@ defmodule ForgeWeb.UserAuth do
   def on_mount(:require_node_admin, params, session, socket) do
     case on_mount(:require_approved, params, session, socket) do
       {:cont, socket} ->
+        # Said, rather than a quiet trip to the queue: this page's existence is no secret, and
+        # the person is told whose it is (`ForgeWeb.NotAllowed`, `ui.md` § Not found).
         if socket.assigns.current_scope.user.node_admin,
           do: {:cont, socket},
-          else: {:halt, Phoenix.LiveView.redirect(socket, to: ~p"/")}
+          else: raise(ForgeWeb.NotAllowed)
 
       halted ->
         halted
@@ -260,7 +277,7 @@ defmodule ForgeWeb.UserAuth do
     else
       socket =
         socket
-        |> Phoenix.LiveView.put_flash(:error, "You must log in to access this page.")
+        |> Phoenix.LiveView.put_flash(:sign_in_error, "You must log in to access this page.")
         |> Phoenix.LiveView.redirect(to: ~p"/users/log-in")
 
       {:halt, socket}
@@ -275,7 +292,10 @@ defmodule ForgeWeb.UserAuth do
     else
       socket =
         socket
-        |> Phoenix.LiveView.put_flash(:error, "You must re-authenticate to access this page.")
+        |> Phoenix.LiveView.put_flash(
+          :sign_in_error,
+          "You must re-authenticate to access this page."
+        )
         |> Phoenix.LiveView.redirect(to: ~p"/users/log-in")
 
       {:halt, socket}
@@ -309,7 +329,7 @@ defmodule ForgeWeb.UserAuth do
       conn
     else
       conn
-      |> put_flash(:error, "You must log in to access this page.")
+      |> put_flash(:sign_in_error, "You must log in to access this page.")
       |> maybe_store_return_to()
       |> redirect(to: ~p"/users/log-in")
       |> halt()

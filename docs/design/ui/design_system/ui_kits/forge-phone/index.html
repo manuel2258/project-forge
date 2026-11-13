@@ -1,0 +1,79 @@
+<!-- @startingPoint section="Screens" subtitle="Queue → changeset → approve, phone" viewport="412x860" -->
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>forge · phone UI kit</title>
+<link rel="stylesheet" href="../../styles.css">
+<style>html,body{margin:0;height:100%;background:oklch(11% 0.006 300);color:var(--ink);font-family:var(--font-sans);-webkit-font-smoothing:antialiased}button,input{font:inherit}#root{display:flex;justify-content:center;padding:24px 0}</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../components/_preview.js"></script>
+</head><body><div id="root"></div>
+<script type="text/babel">
+(async () => {
+const NS = await loadForge('../../');
+const { TopBar, BottomStrip, DecisionRow, DropPanel, ContextCard, Button, Eyebrow, DiffStat, Toast, Field, StateLabel } = NS;
+const STEPS = ['triage','shaping','planning','impl.','review','merging','done'];
+const ITEMS = [
+  { id: 'game#39', title: 'Sound toggle in settings', kind: 'approval · review → merging', age: '1h', sentence: 'Sound toggle in settings is ready to merge.', cur: 4, next: 5, facts: ['review · visit 1', '3 jobs · 0.41 w', 'admitted 2d ago'], files: [['lib/game/', 'settings.ex', 21, 3], ['lib/game/', 'audio.ex', 14, 3], ['test/game/', 'settings_test.exs', 13, 0]], msg: 'Add a sound toggle to settings.', said: 'Matches the brief. The toggle is read once at boot.' },
+  { id: 'game#37', title: 'Score on the end screen', kind: 'approval · review → merging', age: '25m', sentence: 'Score on the end screen is ready to merge.', cur: 4, next: 5, facts: ['review · visit 2', '4 jobs · 0.55 w', 'admitted 3d ago'], files: [['lib/game/', 'end_screen.ex', 30, 8]], msg: 'Show the final score on the end screen.', said: 'The second visit fixed the rounding.' },
+];
+const Phone = ({ children }) => <div style={{ position: 'relative', width: 412, height: 860, boxSizing: 'border-box', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 18, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>{children}</div>;
+const Files = ({ files }) => <div>{files.map(([d, n, a, r]) => <div key={n} style={{ display: 'flex', minHeight: 40, alignItems: 'center', gap: 10, borderBottom: '1px solid var(--border-soft)', fontFamily: 'var(--font-mono)', fontSize: 12.5 }}><span style={{ flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}><span style={{ opacity: .5 }}>{d}</span>{n}</span><span style={{ color: 'var(--success)' }}>+{a}</span><span style={{ color: 'var(--danger)', minWidth: 22 }}>−{r}</span></div>)}</div>;
+const total = f => f.reduce((s, x) => [s[0] + x[2], s[1] + x[3]], [0, 0]);
+
+function QueueItem({ item, i, n, onOpen, onLater }) {
+  const [a, r] = total(item.files);
+  return <>
+    <TopBar title="Queue" menu left={null} subline={<><span style={{ color: 'var(--accent-text)' }}>{i + 1} of {n}</span><span style={{ opacity: .55 }}> · {n - i} decisions</span></>} right={<span style={{ display: 'flex', alignItems: 'center', padding: '0 6px' }}><Button variant="secondary" size="sm">All {n}</Button></span>} />
+    <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '14px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><span style={{ width: 8, height: 8, boxSizing: 'border-box', border: '1px solid var(--link)' }} /><span style={{ flex: 1 }}><Eyebrow>{item.kind}</Eyebrow></span><span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, opacity: .6 }}>waiting {item.age}</span></div>
+      <p style={{ margin: 0, fontSize: 19, lineHeight: 1.3, fontWeight: 500, letterSpacing: '-.01em' }}>{item.sentence}</p>
+      <ContextCard id={item.id} title={item.title} type="feature" steps={STEPS} current={item.cur} next={item.next} facts={item.facts} />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '12px 14px', border: '1px solid var(--border)', borderRadius: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5 }}>changeset v1</span><DiffStat added={a} removed={r} files={item.files.length} /><span style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'var(--success)' }}>✓ check</span></div>
+        <Eyebrow>Will commit</Eyebrow><span style={{ fontSize: 13.5, fontWeight: 600 }}>{item.msg}</span>
+        <Eyebrow>Reviewer said</Eyebrow><span style={{ fontSize: 13, lineHeight: 1.5, opacity: .85 }}>“{item.said}”</span>
+      </div>
+    </div>
+    <div style={{ flexShrink: 0, display: 'flex', gap: 8, padding: '10px 12px 16px', borderTop: '1px solid var(--border)' }}><Button variant="quiet" onClick={onLater}>Later</Button><Button variant="outline" chevron fill onClick={onOpen}>Review the changeset</Button></div>
+  </>;
+}
+
+function Changes({ item, queueCount, onBack, onApprove }) {
+  const [open, setOpen] = React.useState(false);
+  const [note, setNote] = React.useState('');
+  const [a, r] = total(item.files);
+  return <>
+    <TopBar title={item.title} context="game" queueCount={queueCount} subline={<><span style={{ opacity: .6 }}>{item.id.split('game')[1]} · </span><StateLabel state="waiting">review · waiting on you</StateLabel></>} left={undefined} />
+    <DecisionRow kind="changeset" title={<>changeset v1 <span style={{ color: 'var(--success)', fontWeight: 400 }}>+{a}</span> <span style={{ color: 'var(--danger)', fontWeight: 400 }}>−{r}</span></>} meta={<><span style={{ color: 'var(--success)' }}>✓ check 21s</span> · review → merging</>} action="Approve" open={open} onToggle={() => setOpen(!open)}>
+      <DropPanel title="Approve changeset v1" body={'Moves ' + item.id + ' from review to merging. Merging rebases onto main and runs the full check.'} onClose={() => setOpen(false)}
+        secondary="Reject" secondaryVariant="danger" primary="Approve v1" onPrimary={() => onApprove(note)} onSecondary={() => {}}>
+        <Field label="Note, optional" placeholder="Kept with the approval; required to reject" value={note} onChange={e => setNote(e.target.value)} />
+      </DropPanel>
+    </DecisionRow>
+    <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: '10px 12px', borderRadius: 6, background: 'var(--surface-1)' }}><Eyebrow>Will commit</Eyebrow><span style={{ fontSize: 13.5, fontWeight: 600 }}>{item.msg}</span></div>
+      <Files files={item.files} />
+    </div>
+    <BottomStrip active="Changes" tabs={[{ label: 'Steps' }, { label: 'Changes', count: item.files.length }, { label: 'Docs', count: 2 }, { label: 'Activity', count: 31 }]} />
+  </>;
+}
+
+function App() {
+  const [i, setI] = React.useState(0);
+  const [view, setView] = React.useState('queue');
+  const [toast, setToast] = React.useState(null);
+  const done = i >= ITEMS.length;
+  React.useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), 4000); return () => clearTimeout(t); }, [toast]);
+  return <Phone>
+    {done ? <>
+      <TopBar title="Queue" menu left={null} subline="0 decisions" />
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 10, padding: '0 24px' }}><Eyebrow tone="success">End of queue</Eyebrow><span style={{ fontSize: 22, fontWeight: 600, letterSpacing: '-.02em' }}>Nothing needs you. Work continues without you.</span><span style={{ marginTop: 8 }}><Button variant="secondary" size="lg" onClick={() => { setI(0); setView('queue'); }}>Start over</Button></span></div>
+    </> : view === 'queue'
+      ? <QueueItem item={ITEMS[i]} i={i} n={ITEMS.length} onOpen={() => setView('changes')} onLater={() => setI(i + 1)} />
+      : <Changes item={ITEMS[i]} queueCount={ITEMS.length - i} onApprove={() => { setToast({ title: 'Approved changeset v1', detail: ITEMS[i].id + ' · merging started' }); setI(i + 1); setView('queue'); }} />}
+    {toast && <Toast title={toast.title} detail={toast.detail} bottom={90} />}
+  </Phone>;
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+})();
+</script></body></html>

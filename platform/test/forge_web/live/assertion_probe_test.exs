@@ -25,7 +25,12 @@ defmodule ForgeWeb.AssertionProbeTest do
     "main" => ~s(matches `data-phx-main` on every LiveView root),
     "error" => ~s(matches flash and form-error markup the layout renders unconditionally),
     "true" => ~s(matches any boolean attribute rendered into the markup),
-    "forge" => ~s(matches the product name in the header of every page)
+    "forge" => ~s(matches the product name in the header of every page),
+    "Queue" => ~s(matches the frame's header, whose queue link is on every signed-in page),
+    "Projects" =>
+      ~s(matches the header's menu switch, which reads `Projects ▾` off a top-level page),
+    "5h" => ~s(matches the usage digits in the header of every page with a reported window),
+    "wk" => ~s(matches the usage digits in the header of every page with a reported window)
   }
 
   # Only a bare literal on the right of `=~`. A test asserting on data it created itself —

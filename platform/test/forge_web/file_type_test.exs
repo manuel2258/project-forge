@@ -103,7 +103,7 @@ defmodule ForgeWeb.FileTypeTest do
       end
     end
 
-    # Markdown is styled only inside `.doc` (`app.css`, `ui.md` § Documents); text is a `pre`.
+    # Markdown is styled only inside `.doc` (`doc.css`, `ui.md` § Documents); text is a `pre`.
     test "draws Markdown in the document styles and text as preformatted" do
       draw = fn name ->
         body = FileType.render_document(name, doc("# a\n"), @scope)
@@ -147,25 +147,31 @@ defmodule ForgeWeb.FileTypeTest do
       end
     end
 
-    # Each type its own icon, as `ui.md` § Artifact types tables them.
-    test "draws each type's own icon" do
-      for {name, kind, class} <- [
-            {"plan.md", :document, "hero-document-text-mini"},
-            {"notes.txt", :document, "hero-bars-3-bottom-left-mini"},
-            {"build.log", :blob, "hero-command-line-mini"},
-            {"schema.json", :blob, "hero-code-bracket-mini"},
-            {"home.png", :blob, "hero-photo-mini"},
-            {"site.zip", :blob, "hero-archive-box-mini"},
-            {"app.apk", :blob, "hero-device-phone-mobile-mini"},
-            {"pkg", :blob, "hero-cube-mini"}
+    # Each type its own glyph, as `ui.md` § Artifact types tables them — and only the glyph, so
+    # a screen reader hears the tile's label and not the letters.
+    test "draws each type's own glyph" do
+      for {name, kind, glyph} <- [
+            {"plan.md", :document, "md"},
+            {"notes.txt", :document, "txt"},
+            {"build.log", :blob, "log"},
+            {"schema.json", :blob, "{}"},
+            {"home.png", :blob, "img"},
+            {"site.zip", :blob, "zip"},
+            {"app.apk", :blob, "apk"},
+            {"pkg", :blob, "file"},
+            {"changeset", :blob, "±"}
           ] do
-        assert [_icon] = Floki.find(icon(name, kind), "." <> class), name
+        assert [shown] = Floki.find(icon(name, kind), "[aria-hidden=true]"), name
+        assert Floki.text(shown) == glyph, name
       end
     end
 
+    # The handoff's `TypeIcon`: 26px in a row, 20 in a chip, and a word set smaller than a mark.
     test "is smaller in a chip than in a row" do
-      assert icon("plan.md", :document) |> Floki.attribute("class") |> hd() =~ "size-7"
+      assert icon("plan.md", :document) |> Floki.attribute("class") |> hd() =~ "size-[26px]"
       assert icon("plan.md", :document, :chip) |> Floki.attribute("class") |> hd() =~ "size-5"
+      assert icon("plan.md", :document) |> Floki.attribute("class") |> hd() =~ "text-[9.5px]"
+      assert icon("changeset", :blob) |> Floki.attribute("class") |> hd() =~ "text-[12px]"
     end
 
     # The Changes tab's `+n −m`: a changeset is a change, not a file.

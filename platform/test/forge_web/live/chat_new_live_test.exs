@@ -103,7 +103,7 @@ defmodule ForgeWeb.ChatNewLiveTest do
   test "the first message box sends on enter too", %{conn: conn, project: project} do
     {:ok, _view, html} = live(conn, ~p"/chats/new?project=#{project.name}")
 
-    assert html =~ ~s(phx-hook="ForgeWeb.Conversations.Composer")
+    assert html =~ ~s(phx-hook="ForgeWeb.UI.Forms.Composer")
     assert html =~ ~s|data-newline-on="(pointer: coarse)"|
     assert html =~ "Enter sends"
   end
@@ -273,7 +273,7 @@ defmodule ForgeWeb.ChatNewLiveTest do
     } do
       {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
 
-      assert render(view) =~ "No worker is connected"
+      assert render(view) =~ "no machine is connected"
       refute has_element?(view, ~s(select#chat_model))
 
       view
@@ -431,6 +431,36 @@ defmodule ForgeWeb.ChatNewLiveTest do
       assert chat.cores == 2
     end
 
+    # Folded to one line because they are rarely changed (`12d`): the line says what it will run
+    # on, the platform's figures until something is typed, and it opens on its own once anything
+    # in it holds something — so a figure is never folded out of sight.
+    test "the machine is one folded line naming what it will run on", %{
+      conn: conn,
+      project: project
+    } do
+      {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
+      defaults = Jobs.default_resources()
+      memory = ForgeCore.Workflow.Resources.humanize(defaults.memory)
+
+      assert has_element?(view, "#chat-machine-fold:not([open]) summary", "Machine · #{memory}")
+      assert has_element?(view, "#chat-machine-fold #chat_memory")
+
+      # The first message is the last field, the one a person finishes on: Enter sends from it,
+      # and first it sent before the machine was reached (UX pass, B18).
+      form = view |> element("#chat-form") |> render()
+      {fold, _} = :binary.match(form, ~s(id="chat-machine-fold"))
+      {message, _} = :binary.match(form, ~s(id="chat_text"))
+      assert fold < message
+      # Start is the dock's, outside the form it submits.
+      assert has_element?(view, ~s(button[type=submit][form="chat-form"]), "Start the chat")
+
+      view
+      |> form("#chat-form", %{"chat" => %{"text" => "x", "memory" => "4GiB", "cores" => "2"}})
+      |> render_change()
+
+      assert has_element?(view, "#chat-machine-fold[open] summary", "Machine · 4GiB · 2 cores")
+    end
+
     test "saying nothing is the platform's own figures", %{conn: conn, project: project} do
       {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
 
@@ -517,12 +547,12 @@ defmodule ForgeWeb.ChatNewLiveTest do
       %{conn: conn, project: project} = ctx
       {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
 
-      assert has_element?(view, ~s(select#chat_harness option[value="claude_code"][selected]))
+      assert has_element?(view, ~s(#chat-harness-switch input[value="claude_code"][checked]))
       assert has_element?(view, "#chat_model")
 
       {:ok, project} = Projects.set_harness(project, "codex")
       {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
-      assert has_element?(view, ~s(select#chat_harness option[value="codex"][selected]))
+      assert has_element?(view, ~s(#chat-harness-switch input[value="codex"][checked]))
       assert has_element?(view, ~s(input#chat_model[placeholder="Codex's own default"]))
     end
 

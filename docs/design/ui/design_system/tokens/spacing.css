@@ -1,0 +1,42 @@
+:root {
+  /* frame (phone) */
+  --bar-top: 52px;          /* top bar */
+  --bar-decision: 60px;     /* decision row pinned under the top bar */
+  --bar-strip: 56px;        /* bottom strip of views */
+  --bar-composer: 64px;     /* reply composer */
+  --usage-5h: 3px;          /* usage line above the top bar */
+  --usage-week: 2px;        /* usage line below the top bar */
+  /* frame (desktop) */
+  --bar-header-desk: 56px;
+  --bar-decision-desk: 56px;
+  --column-list: 360px;
+  --column-context: 400px;
+  --measure: 680px;
+  --measure-wide: 820px;
+
+  /* hit targets and controls */
+  --target-min: 44px;
+  --control-xl: 52px;       /* primary action, choice rows */
+  --control-lg: 48px;       /* fields, secondary actions */
+  --control-md: 42px;       /* decision-row button */
+  --control-tab: 40px;      /* strip tabs */
+  --control-sm: 36px;       /* row actions, copy */
+  --control-desk: 34px;     /* desktop buttons and fields */
+  --control-desk-sm: 28px;
+
+  /* spacing */
+  --space-1: 2px; --space-2: 4px; --space-3: 6px; --space-4: 8px; --space-5: 10px;
+  --space-6: 12px; --space-7: 14px; --space-8: 16px; --space-9: 20px; --space-10: 24px;
+  --space-11: 30px; --space-12: 40px;
+  --gutter-phone: 20px;
+  --gutter-desk: 30px;
+
+  /* radii */
+  --radius-xs: 4px;   /* badges, inner segmented thumb */
+  --radius-sm: 5px;   /* desktop buttons */
+  --radius: 6px;      /* buttons, fields, rows */
+  --radius-card: 8px; /* cards, notices */
+  --radius-panel: 14px; /* sheets and drop panels (outer corners only) */
+  --radius-device: 18px;
+  --radius-pill: 999px;
+}

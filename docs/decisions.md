@@ -84,7 +84,7 @@ These decisions are settled. They are not to be reopened.
   (`docs/design/conversations.md` § In the queue, and on the phone); then to every waiting kind,
   once the phone became a client the operator develops from rather than an inbox for questions.
   See `docs/design/ui.md` § The phone.*
-- Additional views: ticket timeline, job view showing the pinned input manifest, board, and merge approval showing the diff alongside the verification report, the documents the change was built from, the questions answered, and total cost.
+- Additional views: ticket timeline, job view showing the pinned input manifest, and merge approval showing the diff alongside the verification report, the documents the change was built from, the questions answered, and total cost. *Amended by the UI redesign (`docs/design/ui.md`): the board is dropped — a project's tickets are one list and its workflow a map with the open tickets on it — and the review page is folded into the ticket's Changes view, where the merge approval still shows the documents the change was built from, the questions answered and the cost, under Files and in the approval's panel. Reverses "board" in this list; the person deciding the redesign confirmed it. `/board` and the review page's address are gone.*
 - Live output is shown on a page about one piece of work that the operator has opened — a
   conversation's reply and tool calls, a ticket's running job, a job's stream — and never on a
   list, board or queue. *Reverses an earlier decision ("there is no live transcript view"), which

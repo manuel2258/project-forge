@@ -12,6 +12,7 @@ defmodule ForgeWeb.ChatWorkScreenTest do
 
   use ForgeWeb.ConnCase, async: false
 
+  import ExUnit.CaptureLog
   import Phoenix.LiveViewTest
   import Forge.GitFixtures
   import Forge.MergeFixtures
@@ -69,15 +70,16 @@ defmodule ForgeWeb.ChatWorkScreenTest do
   end
 
   describe "the frame" do
-    # The viewport exactly, with the body the only scroller: the page never scrolls as a whole,
-    # so the box you type in is never below the fold. The hook is what sizes it where the
+    # The viewport exactly, with the transcript the only scroller: the page never scrolls as a
+    # whole, so the box you type in is never below the fold. The hook is what sizes it where the
     # browser ignores `interactive-widget`.
-    test "is the work frame, sized from the visual viewport", %{conn: conn, chat: chat} do
+    test "is the frame, filled, sized from the visual viewport", %{conn: conn, chat: chat} do
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
 
-      frame = view |> element("#work-frame") |> render()
+      frame = view |> element("#frame") |> render()
       assert frame =~ ~s(phx-hook="ForgeWeb.Layouts.ViewportFrame")
-      assert frame =~ "h-dvh"
+      assert has_element?(view, "#frame.frame--fill")
+      assert has_element?(view, ".frame-composer form#say")
     end
 
     test "declares that the keyboard resizes the content", %{conn: conn, chat: chat} do
@@ -86,31 +88,34 @@ defmodule ForgeWeb.ChatWorkScreenTest do
       assert html =~ "interactive-widget=resizes-content"
     end
 
-    # On a phone the bar is not drawn on a work screen: the back affordance and the composer
-    # take its place, as in any messaging app. Every other page keeps it.
-    test "draws no bottom bar, where every other page does", %{conn: conn, chat: chat} do
+    # A conversation has views, so it has a strip; the list of conversations is a top-level page
+    # and has none (`docs/design/ui.md` § The bottom strip).
+    test "draws its views as the strip, where a top-level page draws none", %{
+      conn: conn,
+      chat: chat
+    } do
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
-      refute has_element?(view, "nav.fixed.bottom-0")
+      assert has_element?(view, ".frame-strip #tab-talk")
 
       {:ok, chats, _html} = live(conn, ~p"/chats")
-      assert has_element?(chats, "nav.fixed.bottom-0")
+      refute has_element?(chats, ".frame-strip")
     end
 
-    # Below `lg` the rail is the details sheet, reached from the context strip; the sheet is a
-    # native dialog and holds everything the rail does, End it included.
-    test "puts the facts, and ending, in the details sheet the strip opens", %{
+    # The rail is the details, dropped from the title at every width; they hold everything the
+    # rail did, End it included, and are folded until the title is tapped.
+    test "puts the facts, and ending, in the details the title drops", %{
       conn: conn,
       chat: chat
     } do
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
 
-      assert has_element?(view, "dialog#details.modal.modal-bottom")
-      assert has_element?(view, ~s(dialog#details button[phx-click="close"]), "End it")
-      assert has_element?(view, "dialog#details dd", "chat/#{chat.id}")
+      assert has_element?(view, ~s(#frame-details button[phx-click="close"]), "End it")
+      assert has_element?(view, "#frame-details dd", "chat/#{chat.id}")
+      assert has_element?(view, ".frame-drop--details[hidden]")
 
-      strip = view |> element("#context-strip") |> render()
-      assert strip =~ "forge:sheet-open"
-      assert strip =~ "#details"
+      view |> element("#top-bar .ui-top-title") |> render_click()
+      refute has_element?(view, ".frame-drop--details[hidden]")
+      assert has_element?(view, "#top-bar .ui-top-menu", "▴")
     end
   end
 
@@ -145,7 +150,7 @@ defmodule ForgeWeb.ChatWorkScreenTest do
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
 
       docs = view |> element("#tab-docs") |> render()
-      assert docs =~ ~r/opacity-40[^>]*>\s*0\s*</
+      assert docs =~ ~r/ui-count--muted[^>]*>\s*0\s*</
     end
   end
 
@@ -191,7 +196,7 @@ defmodule ForgeWeb.ChatWorkScreenTest do
     end
 
     # A single newline is a break in a chat message, where Markdown joins the lines. The HTML
-    # keeps the newline inside the paragraph; `msg` is what draws it (`app.css`).
+    # keeps the newline inside the paragraph; `msg` is what draws it (`doc.css`).
     test "keeps the line breaks a message was written with", %{conn: conn, project: project} do
       {:ok, chat} = Conversations.open(project, "first line\nsecond line")
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
@@ -200,18 +205,19 @@ defmodule ForgeWeb.ChatWorkScreenTest do
       assert box =~ "first line\nsecond line"
     end
 
-    test "draws the person's boxes on the second surface and the agent's bordered", %{
-      conn: conn,
-      chat: chat
-    } do
+    # A border means it can be tapped (`ui.md` § The affordance rule): the agent's words are read,
+    # so they are told apart from the person's by their surface, not by an edge.
+    test "draws the person's boxes on the second surface and the agent's on the first, unbordered",
+         %{conn: conn, chat: chat} do
       text(chat, "Hello.")
       turn(chat, 1)
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
 
-      assert view |> element(~s([data-said="you"])) |> render() =~ "bg-base-200"
+      assert view |> element(~s([data-said="you"])) |> render() =~ "bg-surface-2"
       agent = view |> element(~s([data-said="agent"])) |> render()
-      assert agent =~ "border"
-      refute agent =~ "bg-base-200"
+      assert agent =~ "bg-surface-1"
+      refute agent =~ "border"
+      refute agent =~ "bg-surface-2"
     end
   end
 
@@ -240,7 +246,7 @@ defmodule ForgeWeb.ChatWorkScreenTest do
 
       assert has_element?(view, ~s([data-action="edit"]), "parser.ex")
       assert has_element?(view, ~s([data-action="edit"]), "+2 −1")
-      assert has_element?(view, ~s([data-action="bash"].text-error), "$ mix test")
+      assert has_element?(view, ~s([data-action="bash"].text-danger), "$ mix test")
       assert has_element?(view, ~s([data-action="bash"]), "✗")
       # A failure shows its excerpt's first lines without being asked.
       assert has_element?(view, "[data-failure]", "1 test, 1 failure")
@@ -252,7 +258,9 @@ defmodule ForgeWeb.ChatWorkScreenTest do
       assert has_element?(view, ~s([data-action="other"]), "Frobnicate")
     end
 
-    # A plan is drawn once per turn, as its latest version, rather than once per update.
+    # A plan is drawn once per turn, as its latest version, rather than once per update — and
+    # while the turn is open it is the dock's band and only the band: the checklist in the
+    # transcript as well drew the plan twice on one screen (UX pass, B16).
     test "draw a turn's plan once, as it stands now", %{conn: conn, chat: chat} do
       running!(chat)
       todos = fn status -> [%{"content" => "Write the parser", "status" => status}] end
@@ -263,9 +271,40 @@ defmodule ForgeWeb.ChatWorkScreenTest do
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
       html = view |> element("#messages") |> render()
 
+      assert Regex.scan(~r/data-action="todo"/, html) == []
+      assert has_element?(view, "#plan", "1/1")
+      assert view |> element("#plan") |> render() =~ "☑"
+
+      # Once the turn ends the band goes, and the transcript keeps the plan, once, as it stood.
+      text(chat, "Done.")
+      turn(chat, 1)
+      refute has_element?(view, "#plan")
+      html = view |> element("#messages") |> render()
+
       assert [_one] = Regex.scan(~r/data-action="todo"/, html)
       assert html =~ "☑"
       refute html =~ "☐"
+    end
+
+    # The band is the open turn's plan; a turn that has ended keeps its own checklist.
+    test "an ended turn keeps its plan while the open one's is the band", %{
+      conn: conn,
+      chat: chat
+    } do
+      running!(chat)
+      todo = fn content -> %{"todos" => [%{"content" => content, "status" => "completed"}]} end
+      tool(chat, "p1", "TodoWrite", todo.("First step"), {false, "ok"})
+      text(chat, "Done with that.")
+      turn(chat, 1)
+      tool(chat, "p2", "TodoWrite", todo.("Second step"), {false, "ok"})
+
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      html = view |> element("#messages") |> render()
+
+      assert [_one] = Regex.scan(~r/data-action="todo"/, html)
+      assert html =~ "First step"
+      refute html =~ "Second step"
+      assert has_element?(view, "#plan", "Second step")
     end
 
     # Live, every line; once the turn ends, each run between two boxes is one line that
@@ -424,7 +463,7 @@ defmodule ForgeWeb.ChatWorkScreenTest do
       ceiling: 2 * 1024 ** 3
     })
 
-    assert has_element?(view, "#chat-memory", "⚠ reached its ceiling · peak 2.0 GiB of 2 GiB")
+    assert has_element?(view, "#chat-memory", "reached its ceiling · peak 2.0 GiB of 2 GiB")
 
     {:ok, _chat} =
       Conversations.record_turn(chat, %{
@@ -438,7 +477,7 @@ defmodule ForgeWeb.ChatWorkScreenTest do
       })
 
     {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
-    assert has_element?(view, "#chat-memory", "⚠ 1 OOM kill · peak 2.0 GiB of 2 GiB")
+    assert has_element?(view, "#chat-memory", "1 OOM kill · peak 2.0 GiB of 2 GiB")
   end
 
   describe "the now line" do
@@ -585,7 +624,7 @@ defmodule ForgeWeb.ChatWorkScreenTest do
       assert row =~ "<details"
       # The tab is drawn again as the branch moves; a row the reader opened stays open.
       assert row =~ ~s(phx-mounted="[[&quot;ignore_attrs&quot;)
-      assert row =~ "+defmodule Parser do"
+      assert row =~ ~r/diff-line--add.*defmodule Parser do/s
       assert row =~ ~s(data-hunk="1")
 
       assert view |> element("#tab-changes") |> render() =~ ~r/>\s*1\s*</
@@ -595,8 +634,8 @@ defmodule ForgeWeb.ChatWorkScreenTest do
       commit_over_http(project, Jobs.chat_branch(chat), "lib/lexer.ex", "defmodule Lexer do\nend")
 
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=changes")
-      # And sums the change up on the strip, whichever tab is open.
-      assert has_element?(view, "#context-strip", "+4 −0 over 2 files")
+      # And sums the change up in the wide screen's right column, whichever view is open.
+      assert has_element?(view, "#chat-aside-branch", "+4 −0 over 2 files")
 
       assert view
              |> element("#changes-files")
@@ -691,29 +730,179 @@ defmodule ForgeWeb.ChatWorkScreenTest do
 
     # Merging reports a conflict on the page, and a turn streaming on is not a reason to take
     # the sentence away: what the harness streams is added to the page, not a reload of it.
-    test "keeps a merge's conflict sentence while a turn streams", %{
+    # A conflict is known as the page loads (`Forge.Merge.check_chat/1`) and said on the row in
+    # red, before anyone presses Merge; a turn streaming meanwhile does not take it away.
+    test "says a merge conflicts on its row, and keeps saying it while a turn streams", %{
       conn: conn,
       chat: chat,
       project: project
     } do
       commit_over_http(project, Jobs.chat_branch(chat), "README.md", "the branch's version")
       diverge_main(project, "README.md", "the trunk's version")
-      # The page draws no merge button until something has written what the commit would say.
       chat_commit_message!(chat)
 
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=changes")
-      view |> element(~s(button[phx-click="merge"])) |> render_click()
-      assert has_element?(view, "#changes", "It does not merge cleanly")
+      assert has_element?(view, "#decision-row #decision-conflict.text-danger", "README.md")
+      # Nothing on the row opens a panel with a Merge in it that would be refused (UX pass, B7).
+      refute has_element?(view, "#decision-row button[phx-click='decision:open']")
+      render_click(view, "decision:open", %{})
+      refute has_element?(view, "#decision-panel")
+
+      # A press that arrives anyway merges nothing, and the row still says why in red.
+      {:ok, main} = Forge.Git.resolve(Projects.repo_path(project), "refs/heads/main")
+      render_hook(view, "decision:merge", %{})
+      assert Forge.Git.resolve(Projects.repo_path(project), "refs/heads/main") == {:ok, main}
+      assert has_element?(view, "#decision-row #decision-conflict.text-danger", "README.md")
 
       text(chat, "Still thinking.")
-      assert has_element?(view, "#changes", "It does not merge cleanly")
+      assert has_element?(view, "#decision-conflict", "README.md")
     end
 
-    test "carries the merge", %{conn: conn, chat: chat} do
+    # The conflict's two ways out (`15c`): the row's button is Resolve, which goes straight to
+    # Changes (UX pass, B7), and Changes draws the conflict with them as rows — asking the agent
+    # to rebase fills the composer with the paths and sends nothing; taking it by hand is the
+    # fetch command.
+    test "draws a conflict's two ways out on Changes", %{
+      conn: conn,
+      chat: chat,
+      project: project
+    } do
+      running!(chat)
+      commit_over_http(project, Jobs.chat_branch(chat), "README.md", "the branch's version")
+      diverge_main(project, "README.md", "the trunk's version")
       chat_commit_message!(chat)
-      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=changes")
 
-      assert has_element?(view, ~s(#changes button[phx-click="merge"]))
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      refute has_element?(view, "#decision-row button", "Resolve")
+      refute has_element?(view, "#chat-conflict")
+
+      # A link, and drawn as one: `›` (`ui.md` § The affordance rule).
+      assert has_element?(view, "#decision-row a.ui-btn--chevron", "Resolve")
+
+      view
+      |> element(~s(#decision-row a[href="/chats/#{chat.id}?tab=changes"]), "Resolve")
+      |> render_click()
+
+      assert_patch(view, ~p"/chats/#{chat.id}?tab=changes")
+      refute has_element?(view, "#decision-panel")
+      # On Changes the row still says the conflict, but draws no button: it would lead where it
+      # stands, above the ways out it points at (UX re-check #11).
+      assert has_element?(view, "#decision-row #decision-conflict", "README.md")
+      refute has_element?(view, "#decision-row .ui-btn")
+
+      assert has_element?(view, "#chat-conflict", "Does not merge cleanly")
+      assert has_element?(view, "#chat-conflict", "README.md")
+      assert has_element?(view, "#chat-fetch", "git fetch ")
+      assert has_element?(view, "#chat-fetch", Jobs.chat_branch(chat))
+
+      before = length(Conversations.messages(chat.id))
+      view |> element("#ask-rebase") |> render_click()
+
+      assert view |> element("#draft") |> render() =~ "Rebase onto main: README.md conflict."
+      assert length(Conversations.messages(chat.id)) == before
+    end
+
+    # The page stays connected after its viewer leaves the project: the press is checked against
+    # who they are when it arrives (`Forge.Operator.merge_chat/2`).
+    test "a press by somebody no longer in the project merges nothing", %{
+      chat: chat,
+      project: project,
+      user: admin
+    } do
+      chat_commit_message!(chat)
+      member = Forge.AccountsFixtures.user_fixture()
+      {:ok, _} = Projects.put_member(project, member, :member, admin)
+      {:ok, view, _html} = live(log_in_user(build_conn(), member), ~p"/chats/#{chat.id}")
+      assert has_element?(view, "#decision-row button", "Merge")
+      {:ok, main} = Forge.Git.resolve(Projects.repo_path(project), "refs/heads/main")
+
+      :ok = Projects.remove_member(project, member, admin)
+
+      log = capture_log(fn -> render_hook(view, "decision:merge", %{}) end)
+
+      assert Forge.Git.resolve(Projects.repo_path(project), "refs/heads/main") == {:ok, main}
+      assert log =~ ":forbidden"
+    end
+
+    test "a branch that merges cleanly draws no ways out", %{
+      conn: conn,
+      chat: chat,
+      project: project
+    } do
+      running!(chat)
+      commit_over_http(project, Jobs.chat_branch(chat), "lib/new.ex", "defmodule New do\nend")
+      chat_commit_message!(chat)
+
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=changes")
+      assert has_element?(view, "#decision-row button", "Merge")
+      refute has_element?(view, "#chat-conflict")
+
+      # A press that arrives anyway puts nothing in the draft.
+      render_click(view, "rebase:ask", %{})
+      refute view |> element("#draft") |> render() =~ "Rebase onto"
+    end
+
+    # On a wide screen the merge is the right column (`15f`): the same operation from a form of
+    # its own, refused the same way.
+    test "the right column merges, and is refused on a conflict like the row", %{
+      conn: conn,
+      chat: chat,
+      project: project
+    } do
+      commit_over_http(project, Jobs.chat_branch(chat), "README.md", "the branch's version")
+      diverge_main(project, "README.md", "the trunk's version")
+      chat_commit_message!(chat)
+
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      # The two ways out where Merge would be, not a disabled Merge (UX pass, B7).
+      refute has_element?(view, "#aside-merge-form")
+      assert has_element?(view, "#aside-conflict", "README.md")
+
+      assert has_element?(
+               view,
+               "#aside-conflict #aside-take-by-hand #aside-chat-fetch",
+               "git fetch "
+             )
+
+      # The agent can be asked from here as from Changes.
+      view |> element("#aside-conflict #aside-ask-rebase") |> render_click()
+      assert view |> element("#draft") |> render() =~ "Rebase onto main: README.md conflict."
+
+      render_hook(view, "decision:merge", %{})
+      assert has_element?(view, "#aside-merge-error", "It does not merge cleanly")
+    end
+
+    # What the merge panel was opened on is the branch as it then was: new commits are another
+    # merge, and the panel folds rather than stay open over what it did not show
+    # (`ForgeWeb.Operator.Decision.put/2`).
+    test "the merge panel folds when the branch moves under it", %{
+      conn: conn,
+      chat: chat,
+      project: project
+    } do
+      chat_commit_message!(chat)
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      view |> element("#decision-row button[phx-click='decision:open']") |> render_click()
+      assert has_element?(view, "#decision-panel")
+
+      # A reload with nothing new keeps it open.
+      send(view.pid, {:ticket_changed, nil})
+      assert has_element?(view, "#decision-panel")
+
+      commit_over_http(project, Jobs.chat_branch(chat), "lib/more.ex", "defmodule More do\nend")
+      send(view.pid, {:ticket_changed, nil})
+      refute has_element?(view, "#decision-panel")
+      assert has_element?(view, "#decision-row", "2 commits")
+    end
+
+    test "the merge is the decision row, on every view", %{conn: conn, chat: chat} do
+      chat_commit_message!(chat)
+
+      for tab <- ~w(talk changes docs activity) do
+        {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=#{tab}")
+        assert has_element?(view, "#decision-row.ui-decision--neutral", "Merge")
+        refute has_element?(view, "#changes button", "Merge")
+      end
     end
   end
 
@@ -761,9 +950,9 @@ defmodule ForgeWeb.ChatWorkScreenTest do
         |> render()
         |> Floki.parse_fragment!()
         |> Floki.find("a")
-        |> Enum.map(&String.trim(Floki.text(&1)))
+        |> Enum.map(&(&1 |> Floki.text() |> String.split() |> Enum.join(" ")))
 
-      assert links == ["v3 ›", "v2", "v1"]
+      assert ["v3 ›", "v2 · superseded" <> _, "v1 · superseded" <> _] = links
     end
 
     # Approval is a ticket's, and a project conversation's documents belong to no ticket: there
@@ -836,6 +1025,50 @@ defmodule ForgeWeb.ChatWorkScreenTest do
       assert length(rows.()) > ForgeWeb.JobStream.page()
     end
 
+    # What has a form in words is drawn in it (UX pass, B10): a version written as its name and
+    # number, linked where Docs links it; a turn as a divider; a message as who said what. Never
+    # a type and its payload, never a `version_id`.
+    test "says in words what has words", %{conn: conn, chat: chat} do
+      wrote(chat, 1, %{"notes.md" => "# Notes\n"})
+      wrote(chat, 2, %{"notes.md" => "# Better notes\n"})
+      {:ok, _event} = Conversations.send(chat, "Yes, try it.")
+
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=activity")
+      html = view |> element("#job-events") |> render()
+
+      assert has_element?(
+               view,
+               ~s(#job-events [data-activity="wrote"] a[href="/chats/#{chat.id}/artifacts/notes.md/1"]),
+               "notes.md v1"
+             )
+
+      # The latest and an earlier one alike: each where Docs links it.
+      assert has_element?(
+               view,
+               ~s(#job-events [data-activity="wrote"] a[href="/chats/#{chat.id}/artifacts/notes.md/2"]),
+               "notes.md v2"
+             )
+
+      assert has_element?(view, ~s(#job-events .work-act--turn [data-activity="turn"]), "turn 1")
+      refute has_element?(view, "#job-events .work-act--turn .work-act-time")
+      assert has_element?(view, ~s(#job-events [data-activity="message"]), "you:")
+      assert has_element?(view, ~s(#job-events [data-activity="message"]), "Yes, try it.")
+
+      refute html =~ "version_id"
+      refute html =~ "artifact.version_written"
+      refute html =~ "chat.message"
+      refute html =~ "chat.turn"
+    end
+
+    test "names the agent's words as the agent's", %{conn: conn, chat: chat} do
+      text(chat, "Looking at the lexer.")
+
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=activity")
+
+      assert has_element?(view, "#job-events .work-act-type", "agent")
+      refute has_element?(view, "#job-events .work-act-type", "text")
+    end
+
     test "is live", %{conn: conn, chat: chat} do
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=activity")
 
@@ -850,13 +1083,13 @@ defmodule ForgeWeb.ChatWorkScreenTest do
     String.replace_prefix(content, "\n", "")
   end
 
+  # What the composer holds, and so what *Interrupt and send* would send: the textarea's text.
   defp sent_by_interrupt(view) do
     view
-    |> element(~s(button[phx-click="force"]))
+    |> element("#draft")
     |> render()
     |> Floki.parse_fragment!()
-    |> Floki.attribute("phx-value-text")
-    |> List.first()
+    |> Floki.text()
   end
 
   defp eventually(check, tries \\ 40) do

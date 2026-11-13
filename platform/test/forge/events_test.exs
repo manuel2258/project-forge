@@ -274,6 +274,52 @@ defmodule Forge.EventsTest do
       assert Events.summary(%Event{type: "chat.turn", payload: %{"turn" => 3}}) == "turn 3"
     end
 
+    # A version written is its name and number; the id beside them is a machine's, and wrapped
+    # over three lines of a phone it was the row (UX pass, B10).
+    test "a version written is its name and number, never its id" do
+      event = %Event{
+        type: "artifact.version_written",
+        payload: %{
+          "artifact" => "commit-message",
+          "version" => 1,
+          "version_id" => "a6c09c8b-3311"
+        }
+      }
+
+      assert Events.summary(event) == "wrote commit-message v1"
+      assert Events.detail(event) == "wrote commit-message v1"
+    end
+
+    # Logged against the job that proposed, so a chat's Activity draws them: in words, never a
+    # `version_id`, a ticket's id or a payload's keys (review fixes 7, L3).
+    test "a proposal's fate is a sentence, never its ids" do
+      ids = %{"version_id" => "a6c09c8b-3311", "ticket_id" => "b6c0aa11-0001"}
+
+      sentences =
+        for {type, payload} <- [
+              {"proposal.accepted",
+               Map.merge(ids, %{"artifact" => "proposal-1", "number" => 44})},
+              {"proposal.declined",
+               Map.merge(ids, %{"artifact" => "proposal-2", "number" => nil})},
+              {"proposal.reopened",
+               %{"artifact" => "proposal-3", "version_id" => "c1", "declined_version_id" => "d1"}},
+              {"proposal.refused", %{"files" => ["six.md", "seven.md"], "cap" => 5}},
+              {"proposal.unreadable", %{"reasons" => %{"odd.md" => "no title"}}}
+            ] do
+          Events.detail(%Event{type: type, payload: payload})
+        end
+
+      assert sentences == [
+               "proposal-1 admitted as #44",
+               "proposal-2 declined",
+               "proposal-3 reopened",
+               "2 proposals refused, past 5 a job: six.md, seven.md",
+               "odd.md cannot be read: no title"
+             ]
+
+      for sentence <- sentences, do: refute(sentence =~ ~r/_id|=/)
+    end
+
     # The scheduler's sentence, which the ticket and conversation pages draw under a waiting
     # job. The reason code beside it is for comparing passes, and the general clause would put
     # both on the page as data.

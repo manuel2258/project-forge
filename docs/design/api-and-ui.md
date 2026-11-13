@@ -137,32 +137,43 @@ with 400, 401, 403, 404, 409 or 422. No envelope, no HATEOAS, no versioning beyo
 
 ## Pages
 
-Mobile-first LiveView, one column, large tap targets. Session login from the generated auth
-flow; public registration is disabled. An account is created from the command line
-(`mix forge.user.add`) or by a first login through a configured OIDC provider, which makes a
-pending account that a node admin has to approve (`design/identity.md` § Approval).
+Mobile-first LiveView, drawn in one frame on every signed-in page (`design/ui.md` § The frame).
+Session login from the generated auth flow; public registration is disabled. An account is created
+from the command line (`mix forge.user.add`) or by a first login through a configured OIDC
+provider, which makes a pending account that a node admin has to approve (`design/identity.md`
+§ Approval).
 
-- `/` — the queue: one card per item, answerable in place. A document's questions are one form
-  — options to lock in, free text beside them, one Send (`design/ui.md` § Answering questions);
-  approvals have approve and reject; stuck and review items list the transitions, and a
-  stuck item says whether its state can be run again (`retry`).
-  Non-blocking questions asked on their own follow the last card as a digest of lines, each
-  leading to its ticket, and are not cards (`design/ui.md` § Not waiting on you); one asked in
-  the same document as a blocking question is in that document's form instead, optional.
-  `GET /queue` serves every one as an item of kind `assumption`.
-- `/tickets/:project/:number` — timeline: state, cost, pending decision, open questions,
-  jobs, artifacts with the latest document rendered, events.
-- `/tickets/:project/:number/review` — the merge decision: the diff, the documents the change was
-  built from, whatever an agent presented about it, the message its merge would commit, the
-  questions answered, the total cost, and the approval that pins the changeset by version.
-  Reached by a link from the queue's approval item and from the ticket page.
+The pages, as `design/ui.md` draws them in the redesign:
+
+- `/` — the queue: one item per screen, oldest first, with *Later*, an *All* sheet and the end of
+  the pass (`design/ui.md` § The queue). A document's questions are one card — options to lock in,
+  free text beside them, one Send (`design/ui.md` § The question card); a stuck item offers its
+  ways forward, including whether its state can be run again (`retry`). **An approval links to the
+  ticket's Changes or Docs, where it is decided; the queue decides nothing.** Non-blocking
+  questions asked on their own follow the pass as lines, each leading to its ticket
+  (`design/ui.md` § Not waiting on you); one asked in the same document as a blocking question is
+  in that document's card instead, optional. `GET /queue` serves every one as an item of kind
+  `assumption`.
+- `/tickets/:project/:number` — the ticket: Steps, Changes, Docs, Activity, and its decision row.
+  **Changes is the merge decision**: the presentation, the diff, the commits, the documents the
+  change was built from, the questions answered, the ticket's usage, and — in the decision row's
+  panel — the message its merge would commit and the approval that pins the changeset by version.
 - `/tickets/:project/:number/jobs/:id` — the pinned manifest and the harness events.
-- `/board` — tickets by state per project.
+- `/projects`, `/projects/:name` (Tickets, Merge, Chats, Workflow, Proposals), its settings and
+  its repository; `/chats`; `/workers` and `/templates`; `/usage`; `/accounts` for a node admin;
+  `/users/settings`, the You page.
 
-`/projects/:name` grows a Proposals section when the project has open ones: what each says, the
-ticket or conversation it came from, and Accept and Decline. `/tickets/:project/:number` names
-what that ticket's own jobs proposed in its rail and links to the project page, so the affordance
-that commits exists in one place rather than two.
+**There is no `/board` and no `/tickets/:project/:number/review` page** in the redesign: the
+project's Tickets and Workflow replace the board, and the ticket's Changes replaces the review page.
+The API's `GET …/review` stays — it is the merge decision as data, and nothing about it was a page.
+Neither address answers any more: each lands on the Not found page inside the frame, which says
+where it went (`design/ui.md` § Not found).
+
+`/projects/:name` has a Proposals view: open ones grouped by the ticket or conversation they came
+from, each with Admit and Decline, and the history of what became of them (`design/ui.md`
+§ Proposals). `/tickets/:project/:number` names
+what that ticket's own jobs proposed in its details (dropped from its title) and links to the
+project page, so the affordance that commits exists in one place rather than two.
 
 **Proposals are never queue items.** The queue's decisions are what will not move until a person
 acts, and a proposal blocks nothing — no job waits on it and no ticket is stuck behind it. That is
@@ -172,7 +183,7 @@ not the whole queue any more: beneath the decisions it serves open non-blocking 
 the project page, where its Accept and Decline are, and counted in the daily digest. See
 `design/ticket-proposals.md` § Where it surfaces.
 
-Pages subscribe to their ticket (or all tickets for the queue and board) and reload when an
+Pages subscribe to their ticket (or all tickets for the queue) and reload when an
 operation completes anywhere, including from the API or a running job.
 
 ## Push
@@ -189,17 +200,21 @@ one digest push a day at a configured UTC hour, sent when the reader has somethi
 open non-blocking question or an open ticket proposal. The last two are counted separately in it
 (`N assumed`, `N proposed`) and never in its title's `N waiting on you`, because they are not
 waiting on anyone. Subscriptions the push service reports gone are deleted. The service worker
-shows the notification and opens its link on tap: the work screen, on Decide for a ticket and on
-Talk for a conversation.
+shows the notification and opens its link on tap: the ticket, on the view holding what waits, or
+a conversation's Talk. A ticket's link names no view, so the ticket opens on the one holding what
+waits (`Forge.Push.describe/1`).
 
 ## Message state
 
-Every action is a LiveView event over the socket; the page shows a confirmation flash on
-success and the reason on failure. A lost connection is shown by the framework's reconnect
-banner — which is all it is shown by, so the banner must never be the notice that something was
-also taken: on the operator's own surfaces, what was typed and not sent survives the rejoin that
-follows it, and `design/ui.md` § A reconnect is not a reload holds both the mechanism and the
-seven settings and log-in forms where it does not hold yet. Offline compose and retry queues
+Every action is a LiveView event over the socket; the page shows a toast on success and the
+reason where the person acted on failure, and a lost connection is shown by the top bar itself
+(`design/ui.md` § Transient states): a toast is the `:info` flash, a refusal is the page's own
+state drawn beside what was pressed, and the top bar replaces the framework's reconnect banner.
+That is all a lost connection is shown by, so it must never be the notice that
+something was also taken: on the operator's own surfaces, what was typed and not sent survives the
+rejoin that follows it, and `design/ui.md` § A reconnect is not a reload holds both the mechanism and the
+six settings, worker and log-in forms where it does not hold yet (`reconnect_test.exs`
+`@unrecoverable`). Offline compose and retry queues
 are out of the PoC.
 
 ## Documents in the browser
@@ -207,8 +222,8 @@ are out of the PoC.
 Documents are Markdown rendered server-side and sanitised before display, because agents
 wrote them; inline code is escaped at the AST level since the renderer leaves it raw, and
 front matter is stripped textually so an unparseable one never reaches the page. Open
-questions are answered on the ticket's Decide tab, as one form per document
-(`design/ui.md` § Answering questions).
+questions are answered in the question card, one per document, on the ticket and in the queue
+(`design/ui.md` § The question card).
 
 ## Not in this slice
 

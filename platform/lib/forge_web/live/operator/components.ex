@@ -10,10 +10,7 @@ defmodule ForgeWeb.Operator.Components do
   """
   use ForgeWeb, :html
 
-  import ForgeWeb.Indicators
-
   alias ForgeWeb.Operator.Drafts
-  alias ForgeWeb.WorkScreen
 
   @doc """
   The field that picks a model, wherever one is picked.
@@ -59,9 +56,10 @@ defmodule ForgeWeb.Operator.Components do
 
       <p class="mt-1.5 text-[12.5px] opacity-60">
         <%= if @options == [] do %>
-          No worker is connected, so there is nothing to offer. Type a name, or leave it for {@fallback}.
+          No credential in the pool lists a model and no machine is connected, so there is
+          nothing to offer. Type a name, or leave it for {@fallback}.
         <% else %>
-          Offered by the workers connected now.
+          The models the pool's credentials offer, and the aliases of the machines connected now.
         <% end %>
       </p>
     </div>
@@ -181,7 +179,7 @@ defmodule ForgeWeb.Operator.Components do
         id={@id <> "-below"}
         type="button"
         hidden
-        class="absolute right-3 bottom-3 min-h-[46px] rounded-field border border-base-300 bg-base-100 px-3 font-mono text-[12.5px] shadow-none hover:border-base-content/30"
+        class="absolute right-3 bottom-3 min-h-[46px] rounded-md border border-border bg-bg px-3 font-mono text-[12.5px] shadow-none hover:border-border-strong"
       ></button>
     </div>
 
@@ -236,360 +234,12 @@ defmodule ForgeWeb.Operator.Components do
   end
 
   @doc """
-  The shape that commits something on a single tap — a transition, running a state again: 52px,
-  label left, `›` right, sends on tap. A question's options are not this shape: they lock an
-  answer in and the form's Send commits (`ForgeWeb.Operator.QuestionForm`).
-  """
-  attr :rest, :global,
-    include: ~w(phx-click phx-value-ticket phx-value-to phx-disable-with type name value form)
-
-  attr :class, :string, default: nil
-  slot :inner_block, required: true
-
-  def answer_row(assigns) do
-    ~H"""
-    <button
-      type="button"
-      class={[
-        "flex h-[52px] w-full items-center justify-between gap-3 rounded-field",
-        "border border-base-300 bg-base-200 px-4 text-left",
-        "hover:border-base-content/30",
-        @class
-      ]}
-      {@rest}
-    >
-      <span class="text-sm font-medium">{render_slot(@inner_block)}</span>
-      <span aria-hidden="true" class="opacity-40">›</span>
-    </button>
-    """
-  end
-
-  @doc """
-  An approval. The version is inside the button label, because approval attaches to an exact
-  version and never to whatever is latest.
-
-  **It shows what it approves** (`docs/design/ui.md` § The queue item): each pinned document
-  rendered, under its name and version, in a box that scrolls inside itself, between the sentence
-  and Approve. A blob is its name, linked; a changeset is not drawn, since `href` is nil for it —
-  the diff is its rendering, linked beside the card in the queue and on Decide, and on the same
-  page as the card on the Changes tab and the review page.
-
-  The comment is a box Enter breaks a line in: as a one-line input, Enter submitted the form with
-  its first button, and the first button is Approve (`docs/design/ui.md` § The affordance rule).
-  """
-  attr :ticket, :map, required: true
-  attr :pending, :map, required: true
-  attr :approve, :list, default: [], doc: "what the approval pins, each built by `pinned/4`"
-  attr :drafts, :map, required: true, doc: "the page's `:drafts` assign"
-
-  attr :commit_message, :any,
-    default: nil,
-    doc: "the `commit-message` version a merging approval will commit, or nil when there is none"
-
-  def approval_card(assigns) do
-    # One name for the draft, because three places have to agree on it: the form's `id`, the
-    # hidden field the change event carries it in, and the lookup the box is drawn from. Three
-    # interpolated literals is three chances for the draft to stop coming back, silently.
-    #
-    # **Whether this approval merges is asked of the ticket's workflow**, not passed in, so every
-    # page that draws this card agrees without being told: the card is the one place all four
-    # approval surfaces share — the review page, the queue, Decide and the Changes tab — and
-    # showing the message on one of them meant the other three approved text nobody had seen.
-    # `Forge.Engine.approval_merges?/1` is the one definition, and it asks what the entry action
-    # asks rather than guessing from the names the approval pins.
-    assigns =
-      assigns
-      |> assign(:draft, "approve-#{assigns.ticket.id}")
-      |> assign(:merges, Forge.Engine.approval_merges?(assigns.ticket))
-
-    # A pin from before merges carried a written message has no state that could write one, so its
-    # merge says what earlier releases wrote (`Forge.Merge.legacy_message?/1`, the same question
-    # the merge asks) and the card says so in place of a block with nothing to show.
-    assigns =
-      assign(
-        assigns,
-        :legacy,
-        assigns.merges and is_nil(assigns.commit_message) and
-          Forge.Merge.legacy_message?(assigns.ticket)
-      )
-
-    ~H"""
-    <div class="flex flex-col gap-[11px]" id={"approval-#{@ticket.id}"}>
-      <p class="text-sm/[1.55] opacity-70">
-        Approving pins
-        <%= for {pin, i} <- Enum.with_index(@approve) do %>
-          <span :if={i > 0}>, </span><span class="font-mono text-[12.5px]">{pin.name} v{pin.version}</span>
-        <% end %>
-        at <span class="font-mono text-[12.5px]">{@pending["to"]}</span>. A later edit does not
-        inherit this approval.
-      </p>
-
-      <section
-        :for={pin <- @approve}
-        :if={pin.href}
-        id={"approving-#{@ticket.id}-#{pin.name}"}
-        class="flex min-w-0 flex-col"
-      >
-        <.link
-          href={pin.href}
-          class="flex min-h-[46px] items-center gap-2 self-start font-mono text-[12.5px] hover:underline"
-        >
-          <ForgeWeb.FileType.file_icon artifact={pin} />
-          {pin.name} <span class="opacity-60">v{pin.version}</span>
-        </.link>
-        <div
-          :if={pin.body}
-          tabindex="0"
-          aria-label={"#{pin.name} v#{pin.version}"}
-          class="max-h-[50vh] min-w-0 overflow-y-auto overscroll-contain rounded-box bg-base-200 px-4 py-3"
-        >
-          <ForgeWeb.FileType.document_body body={pin.body} />
-        </div>
-      </section>
-
-      <%!-- What the merge will commit, read-only, directly above the control that approves it
-            (`docs/design/ui.md` § Changes). --%>
-      <WorkScreen.commit_message
-        :if={@merges and not @legacy}
-        version={@commit_message}
-        id={commit_message_id(@ticket)}
-      />
-      <section :if={@legacy} id={commit_message_id(@ticket)}>
-        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
-          The commit it will make
-        </h2>
-        <p class="mt-2 text-sm/[1.55] opacity-70">
-          This ticket was pinned before merges carried a written message, so its merge says what
-          earlier releases wrote.
-        </p>
-        <p class="mt-1 min-w-0 break-words font-mono text-[12.5px]/[1.55]">
-          Merge {@ticket.branch}: {@ticket.title}
-        </p>
-      </section>
-
-      <%!-- `id` and `phx-change` are what make the comment survive a reconnect: without both of
-            them the client has no form to copy and replay, and the new mount draws the box
-            empty (`ForgeWeb.Operator.Drafts`). --%>
-      <form
-        id={@draft}
-        phx-change="draft:change"
-        phx-submit="decide"
-        class="flex flex-col gap-2"
-      >
-        <input type="hidden" name="draft" value={@draft} />
-        <input type="hidden" name="ticket" value={@ticket.id} />
-        <ForgeWeb.Conversations.message_box
-          id={"approval-comment-#{@ticket.id}"}
-          name="comment"
-          value={Drafts.field(@drafts, @draft, "comment")}
-          enter={:newline}
-          placeholder="comment (optional)"
-          aria-label="Comment on this approval"
-        />
-        <button
-          :if={not (@merges and is_nil(@commit_message) and not @legacy)}
-          type="submit"
-          name="decision"
-          value="approved"
-          phx-disable-with="Sending…"
-          class="flex h-[52px] w-full items-center justify-between gap-3 rounded-field border border-base-300 bg-base-200 px-4 text-left hover:border-base-content/30"
-        >
-          <span class="text-sm font-medium">{approve_label(@approve)}</span>
-          <span aria-hidden="true" class="opacity-40">›</span>
-        </button>
-        <button
-          type="submit"
-          name="decision"
-          value="rejected"
-          phx-disable-with="Sending…"
-          class="flex h-12 w-full items-center px-4 text-left text-sm opacity-60 hover:opacity-100"
-        >
-          Reject
-        </button>
-      </form>
-    </div>
-    """
-  end
-
-  @doc """
-  The id of the block an approval card draws the commit message in, from the one definition the
-  card itself draws it under: a test that looked for a second copy of this string would pass
-  while the operator saw nothing.
+  The id of the block an approval's panel draws the commit message in
+  (`ForgeWeb.Operator.Decision`), from the one definition the panel itself draws it under: a test
+  that looked for a second copy of this string would pass while the operator saw nothing.
   """
   @spec commit_message_id(map()) :: String.t()
   def commit_message_id(%{id: id}), do: "approving-#{id}-commit-message"
-
-  defp approve_label([]), do: "Approve"
-  defp approve_label([pin]), do: "Approve #{pin.name} v#{pin.version}"
-  defp approve_label(pins), do: "Approve #{length(pins)} versions"
-
-  @doc """
-  One version an approval pins, as `approval_card/1` draws it: `%{name, kind, version, href,
-  body}`, `kind` read from what the version holds, since a pin is built from a version alone.
-  `href` is the version's address, and nil for the changeset, whose rendering is the diff on
-  `…/review` rather than anything at an artifact address; `body` is the document as
-  `ForgeWeb.FileType.render_document/3` draws it, and nil for anything that is not one — a blob
-  is never laid out.
-
-  Rendered here, when the page loads, and not in the card, which is drawn again on every change.
-  """
-  @spec pinned(String.t(), map(), String.t(), map()) :: map()
-  def pinned(project, ticket, name, version) do
-    changeset? = name == ForgeCore.Workflow.changeset_artifact()
-
-    %{
-      name: name,
-      kind: if(is_binary(version.content), do: :document, else: :blob),
-      version: version.version,
-      href:
-        if(not changeset?,
-          do: ~p"/tickets/#{project}/#{ticket.number}/artifacts/#{name}/#{version.version}"
-        ),
-      body:
-        if(is_binary(version.content),
-          do:
-            ForgeWeb.FileType.render_document(
-              name,
-              version,
-              Forge.References.ticket_scope(project, ticket)
-            )
-        )
-    }
-  end
-
-  @doc """
-  Open ticket proposals, each with the two things a person can do about it.
-
-  Not a queue item, and that is the decision rather than an omission: the queue is for what will
-  not move until someone acts, and a proposal blocks nothing — no job waits on it and no ticket
-  is stuck behind it (`docs/design/ticket-proposals.md` § Where it surfaces). Eighteen jobs
-  proposing two each is how the queue's promise that you can reach the end of it stops being
-  true, and it would be spent on the one class of item that could have waited.
-
-  `Accept` carries the verb and the `›`, like every affordance that commits; `Decline` is the
-  quiet one beside it, as `Reject` is on an approval.
-
-  `types` is the project's ticket types when there is a choice to make — `%{name, parses}` each —
-  and empty otherwise. The type a proposal suggests is preselected only if it is one of them now; a
-  suggestion that is not is said, and nothing is preselected (`docs/design/ticket-types.md`
-  § Proposals). A type whose workflow does not parse is offered marked as such, as on the ticket
-  form.
-  """
-  attr :proposals, :list, required: true
-  attr :types, :list, default: []
-  attr :drafts, :map, required: true, doc: "the page's `:drafts` assign"
-
-  def proposals(assigns) do
-    ~H"""
-    <div :for={p <- @proposals} class="border-b border-base-300/60 py-[18px]">
-      <div class="flex items-baseline gap-2">
-        <h3 class="text-sm font-medium">{p.title || "Could not be read"}</h3>
-        <span class="font-mono text-[11px] opacity-50">{p.file}</span>
-      </div>
-
-      <p class="mt-1 text-[12.5px]/[1.5] opacity-70 whitespace-pre-line">{p.body}</p>
-
-      <%!-- Only where there is a type to choose: a project without types mentions none. --%>
-      <p :if={p[:suggested] && @types != []} class="mt-1 font-mono text-[11px] opacity-60">
-        {suggestion(p.suggested, @types)}
-      </p>
-
-      <p class="mt-1 font-mono text-[11px] opacity-50">
-        proposed by
-        <.link
-          :if={p.ticket_number}
-          navigate={~p"/tickets/#{p.project}/#{p.ticket_number}"}
-          class="hover:underline"
-        >
-          ticket {p.ticket_number}
-        </.link>
-        <span :if={is_nil(p.ticket_number)}>a conversation</span>
-      </p>
-
-      <form
-        id={"propose-#{p.version_id}"}
-        phx-change="draft:change"
-        phx-submit="decide_proposal"
-        class="mt-3 flex flex-col gap-2"
-      >
-        <input type="hidden" name="draft" value={"propose-#{p.version_id}"} />
-        <input type="hidden" name="version_id" value={p.version_id} />
-        <%!-- The chosen type is part of the draft too: a reconnect that put the comment back and
-              not the choice would still have taken something nobody was told about. --%>
-        <select
-          :if={@types != [] and p.readable}
-          name="ticket_type"
-          aria-label="Ticket type"
-          class="select w-full"
-        >
-          <option value="">Choose a type</option>
-          <option
-            :for={type <- @types}
-            value={type.name}
-            selected={type.name == chosen(@drafts, p)}
-          >
-            {if type.parses, do: type.name, else: "#{type.name} — does not parse"}
-          </option>
-        </select>
-        <%!-- Enter breaks a line: as a one-line input it submitted with the first button, which
-              is Accept (`docs/design/ui.md` § The affordance rule). --%>
-        <ForgeWeb.Conversations.message_box
-          id={"proposal-comment-#{p.version_id}"}
-          name="comment"
-          value={Drafts.field(@drafts, "propose-#{p.version_id}", "comment")}
-          enter={:newline}
-          placeholder="comment (optional)"
-          aria-label="Comment on this proposal"
-        />
-        <button
-          :if={p.readable}
-          type="submit"
-          name="decision"
-          value="accepted"
-          phx-disable-with="Admitting…"
-          class="flex h-[52px] w-full items-center justify-between gap-3 rounded-field border border-base-300 bg-base-200 px-4 text-left hover:border-base-content/30"
-        >
-          <span class="text-sm font-medium">Accept as a ticket</span>
-          <span aria-hidden="true" class="opacity-40">›</span>
-        </button>
-        <p :if={not p.readable} class="text-[12.5px] opacity-60">
-          This cannot be read as a proposal, so it cannot be admitted. Decline it.
-        </p>
-        <button
-          type="submit"
-          name="decision"
-          value="declined"
-          phx-disable-with="Sending…"
-          class="flex h-12 w-full items-center px-4 text-left text-sm opacity-60 hover:opacity-100"
-        >
-          Decline
-        </button>
-      </form>
-    </div>
-    """
-  end
-
-  @doc """
-  The transitions a person may take. Each carries a verb: `Move to planning ›`, never `→ planning`.
-  """
-  attr :ticket, :map, required: true
-  attr :transitions, :list, required: true
-
-  def transition_card(assigns) do
-    ~H"""
-    <div class="flex flex-col gap-2" id={"transitions-#{@ticket.id}"}>
-      <.answer_row
-        :for={to <- @transitions}
-        phx-click="transition"
-        phx-disable-with="Sending…"
-        phx-value-ticket={@ticket.id}
-        phx-value-to={to}
-      >
-        Move to {to}
-      </.answer_row>
-    </div>
-    """
-  end
 
   @doc """
   Where a queued ticket stands in its project's merge queue, in the words a person reads: "2nd of
@@ -613,6 +263,13 @@ defmodule ForgeWeb.Operator.Components do
   defp ordinal(n) when rem(n, 10) == 3, do: "#{n}rd"
   defp ordinal(n), do: "#{n}th"
 
+  @doc "What taking a ticket out of the merge queue does, said before it is done."
+  @spec take_out_sentence() :: String.t()
+  def take_out_sentence,
+    do:
+      "Take this ticket out of the merge queue? Its approval is withdrawn and it has to be " <>
+        "approved again. An integration already running will finish, but will not merge."
+
   @doc """
   A ticket in the merge queue (`docs/design/ui.md` § Decide and Timeline): where it stands, what is
   happening to it, and *Take out of queue*, which is an unapproval. It stands where the approval
@@ -632,36 +289,18 @@ defmodule ForgeWeb.Operator.Components do
       <p id="merge-queue-doing" class="text-sm/[1.55] opacity-70">
         {String.capitalize(merge_queue_doing(@place))}.
       </p>
-      <.answer_row
+      <.confirm
         id={"take-out-#{@ticket.id}"}
+        label="Take out of queue"
+        act="Take it out"
+        sentence={take_out_sentence()}
+        size="md"
+        fill
         phx-click="take-out"
         phx-disable-with="Taking out…"
         phx-value-ticket={@ticket.id}
-        data-confirm="Take this ticket out of the merge queue? Its approval is withdrawn and it has to be approved again. An integration already running will finish, but will not merge."
-      >
-        Take out of queue
-      </.answer_row>
+      />
     </div>
-    """
-  end
-
-  @doc """
-  Runs the state the ticket rests in again (`docs/design/ui.md` § Decide and Timeline): after a
-  failure, or after a success whose documents a person wants done afresh. An answer row, because
-  it commits something — it spends a job.
-  """
-  attr :ticket, :map, required: true
-
-  def retry_row(assigns) do
-    ~H"""
-    <.answer_row
-      id={"retry-#{@ticket.id}"}
-      phx-click="retry"
-      phx-disable-with="Starting…"
-      phx-value-ticket={@ticket.id}
-    >
-      Run {@ticket.state} again
-    </.answer_row>
     """
   end
 
@@ -715,12 +354,12 @@ defmodule ForgeWeb.Operator.Components do
         rows="6"
         required
         phx-debounce="200"
-        class="w-full rounded-field border border-base-300 bg-transparent px-3 py-2 text-sm placeholder:opacity-40 focus:outline-none focus:border-base-content/40"
+        class="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm placeholder:opacity-40 focus:outline-none focus:border-border-strong"
       >{Drafts.field(@drafts, @draft, "content", @latest && @latest.content)}</textarea>
       <button
         type="submit"
         phx-disable-with="Saving…"
-        class="h-12 self-end rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
+        class="h-12 self-end rounded-md bg-ink px-4 text-sm font-medium text-bg"
       >
         Save {@name}
       </button>
@@ -728,99 +367,31 @@ defmodule ForgeWeb.Operator.Components do
     """
   end
 
-  @doc "The mono footer of identifiers under a queue item."
-  attr :project, :string, required: true
-  attr :ticket, :map, required: true
-  attr :topology, :atom, default: :unknown
-  attr :artifact, :string, default: nil
-  attr :version, :integer, default: nil
-
-  def identifiers(assigns) do
-    ~H"""
-    <div class="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[12.5px] opacity-60">
-      <.link navigate={~p"/tickets/#{@project}/#{@ticket.number}"} class="hover:opacity-100">
-        {@project}#{@ticket.number}
-      </.link>
-      <span aria-hidden="true">·</span>
-      <.state name={@ticket.state} topology={@topology} />
-      <span :if={@artifact} aria-hidden="true">·</span>
-      <%!-- Every artifact name in the product links to its exact version; see
-            docs/design/ui.md § Addressable artifact versions. --%>
-      <.link
-        :if={@artifact}
-        href={~p"/tickets/#{@project}/#{@ticket.number}/artifacts/#{@artifact}/#{@version}"}
-        class="hover:opacity-100"
-      >
-        {@artifact} v{@version}
-      </.link>
-    </div>
-    """
-  end
-
-  @doc "A ticket as an identifier plus its title, for the board and lists."
-  attr :ticket, :map, required: true
-  attr :project, :string, required: true
-
-  def ticket_link(assigns) do
-    ~H"""
-    <.link
-      navigate={~p"/tickets/#{@project}/#{@ticket.number}"}
-      class="flex min-h-[46px] flex-col justify-center gap-0.5"
-    >
-      <span class="font-mono text-[11px] opacity-60">{@project}#{@ticket.number}</span>
-      <span class="text-[13px] leading-snug">{@ticket.title}</span>
-    </.link>
-    """
-  end
-
-  @doc """
-  One `label / value` row of a facts rail. Nine of these were written out by hand across the
-  ticket, job, review and project pages before it existed.
-  """
-  attr :label, :string, required: true
-  attr :value, :string, default: nil, doc: "the value, when it is plain text"
-  slot :inner_block, doc: "the value, when it is markup"
-
-  def fact(assigns) do
-    ~H"""
-    <div class="flex min-w-0 justify-between gap-3">
-      <dt class="opacity-50">{@label}</dt>
-      <dd class="truncate font-mono">{@value}{render_slot(@inner_block)}</dd>
-    </div>
-    """
-  end
-
   @doc """
   A secret shown the one time it can be: only its hash is kept, so nothing can draw it again. A
   freshly issued git token on project settings, and a freshly minted machine's environment on the
-  workers page (`docs/design/ui.md` § Project settings, § The workers page) — one block, so the
-  two cannot come to say different things about what happens once it is dismissed.
-
-  `note` follows the sentence every one of them says; the inner block is the value and whatever
-  goes after it; *Done* sends `done`, whose handler drops the value from the page.
+  machines page (`docs/design/ui.md` § Tokens, § Machines) — **one block, so the two cannot come
+  to say different things** about what happens once it is dismissed: the same notice, the
+  values to copy, and one button that drops it from the screen.
   """
   attr :id, :string, required: true
-  attr :done, :string, required: true, doc: "the event Done sends"
-  slot :note
-  slot :inner_block, required: true
+  attr :done, :string, required: true, doc: "the event the button sends"
+  slot :note, doc: "what it is good for, after the notice's first sentence"
+  slot :inner_block, required: true, doc: "the values to copy"
 
   def shown_once(assigns) do
     ~H"""
-    <section id={@id} class="mt-6 rounded-box border border-success p-4">
-      <h2 class="font-mono text-[11px] tracking-[.14em] uppercase text-success">
-        Copy this now
-      </h2>
-      <p class="mt-2 text-sm/[1.55] opacity-80">
-        Only its hash is kept, so this is the one time it can be shown. {render_slot(@note)}
+    <section id={@id} class="shown-once">
+      <.notice tone="warning" title="Copy it now. It is not shown again.">
+        Only its hash is kept. {render_slot(@note)}
+      </.notice>
+      <div class="shown-once-copies">{render_slot(@inner_block)}</div>
+      <p class="shown-once-note">
+        Leaving this page drops it from the screen. If you lose it, make another.
       </p>
-      {render_slot(@inner_block)}
-      <button
-        type="button"
-        phx-click={@done}
-        class="mt-3 flex min-h-[46px] items-center text-sm text-primary hover:underline"
-      >
-        Done
-      </button>
+      <.button type="button" variant="primary" size="xl" fill phx-click={@done}>
+        I have copied it
+      </.button>
     </section>
     """
   end
@@ -849,18 +420,20 @@ defmodule ForgeWeb.Operator.Components do
         {@label}
       </p>
       <div class={["flex items-stretch gap-2", @label && "mt-2"]}>
-        <div class="min-w-0 flex-1 rounded-box bg-base-200 px-4 py-3">
+        <div class="min-w-0 flex-1 rounded-card bg-surface-2 px-4 py-3">
           <%!-- A `pre`, because the formatter leaves its content alone: a value laid out on lines
                 of its own would be drawn with the template's indentation in front of it. --%>
           <pre :if={@multiline} id={@id} class="font-mono text-[12.5px] whitespace-pre-wrap break-all">{@value}</pre>
-          <p :if={not @multiline} id={@id} class="font-mono text-[12.5px] break-all">{@value}</p>
+          <p :if={not @multiline} id={@id} class="font-mono text-[12.5px] [overflow-wrap:break-word]">
+            {breakable(@value)}
+          </p>
         </div>
         <button
           type="button"
           id={@id <> "-copy"}
           phx-hook=".CopyToClipboard"
           data-target={@id}
-          class="min-h-[46px] shrink-0 rounded-field border border-base-300 px-3 text-sm hover:border-base-content/30"
+          class="min-h-[46px] shrink-0 rounded-md border border-border-control px-3 text-sm hover:bg-surface-2"
         >
           <span data-label>Copy</span>
         </button>
@@ -903,27 +476,32 @@ defmodule ForgeWeb.Operator.Components do
     """
   end
 
-  # What a proposal's suggested type is, against the types there are to choose between — drawn
-  # only when there are some.
-  defp suggestion(type, types) do
-    if type in Enum.map(types, & &1.name),
-      do: "suggests #{type}",
-      else: "suggests #{type}, which is not a type here"
+  @doc """
+  A one-line value that may break only after a `/` or a `:` — a URL, a path, a ref — and so is
+  never cut inside `.git`, a word or after the hyphen of a project's name (UX pass, C3, D10; UX
+  re-check #8). Escaped part by part, each part an `.ui-unbroken` inline block — the browser breaks
+  a hyphen otherwise, and `white-space: nowrap` would let a part longer than the line (a token)
+  run off the screen, where an inline block wraps inside itself only then — joined with `<wbr>`.
+  Neither adds text: what is copied is the value. A value with spaces in it — a header line, a
+  command — breaks at its spaces as text does, and is left as it is.
+  """
+  @spec breakable(String.t()) :: Phoenix.HTML.safe() | String.t()
+  def breakable(value) do
+    if String.match?(value, ~r/\s/), do: value, else: break_after_separators(value)
+  end
+
+  defp break_after_separators(value) do
+    value
+    |> String.split(~r{(?<=[/:])})
+    |> Enum.map_join(
+      "<wbr>",
+      &~s(<span class="ui-unbroken">#{&1 |> Phoenix.HTML.html_escape() |> Phoenix.HTML.safe_to_string()}</span>)
+    )
+    |> Phoenix.HTML.raw()
   end
 
   # The version a document editor was drawn from, as its hidden field carries it: `"0"` when
   # there is none, so a first write and a write over somebody else's first write are told apart.
   defp version_of(nil), do: "0"
   defp version_of(%{version: version}), do: to_string(version)
-
-  # The type a proposal's select is drawn on: what the person chose if they chose, and the
-  # suggestion until they do. `Drafts.field/4` cannot carry the fallback here, because choosing
-  # the empty option is a choice — *Choose a type*, deliberately back to nothing — and a draft
-  # holding `""` must beat the suggestion rather than fall through to it.
-  defp chosen(drafts, proposal) do
-    case Drafts.field(drafts, "propose-#{proposal.version_id}", "ticket_type", nil) do
-      nil -> proposal[:suggested]
-      type -> type
-    end
-  end
 end

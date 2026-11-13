@@ -1,0 +1,468 @@
+/* The project area's styles (docs/design/ui.md). Edited only by the slice that builds that area.
+
+   The projects page (§ The projects page, 11a–11e) and New project (§ Creating things, 11c–11e).
+   Below 1024px the projects are list rows; from it, one table, and from 1440 New project in the
+   context column beside it. Both markups are drawn and one is shown. */
+
+@layer components {
+  /* -- the rows (11a) ------------------------------------------------------------------------ */
+  .project-rows .ui-row { padding: 16px 4px 16px 12px; margin-left: -12px; }
+  .project-rows .ui-row-title { font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
+  .project-rows .ui-row-meta { flex-wrap: wrap; gap: 4px 12px; font-size: 12px; }
+  .project-rows .ui-row-body { gap: 6px; }
+  .project-rows .ui-row-latest { white-space: normal; }
+  .project-waiting { display: flex; align-self: flex-start; }
+  .project-running { color: var(--info); }
+  .project-runs-on { opacity: .55; }
+  .project-danger { color: var(--danger); }
+
+  /* -- the table (11e) ----------------------------------------------------------------------- */
+  .projects-table { display: none; font-size: 14px; }
+  .projects-table-head,
+  .projects-table-row {
+    display: grid;
+    grid-template-columns: minmax(8rem, 1.2fr) 5rem 5rem 4rem minmax(12rem, 1.8fr) minmax(12rem, 2fr) 1rem;
+    align-items: center;
+    gap: 16px;
+    padding: 0 12px 0 10px;
+  }
+  .projects-table-head {
+    min-height: 36px;
+    font-family: var(--font-mono);
+    font-size: var(--text-eyebrow);
+    letter-spacing: var(--tracking-eyebrow);
+    text-transform: uppercase;
+    opacity: .5;
+  }
+  .projects-table-row {
+    min-height: 56px;
+    border-bottom: 1px solid var(--border-soft);
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .projects-table-row:hover { background: var(--surface-selected); text-decoration: none; }
+  .projects-table-row--waiting { box-shadow: inset 2px 0 0 var(--accent); }
+  .projects-table-name { font-family: var(--font-sans); font-size: 15px; font-weight: 600; }
+  .projects-table-zero { color: var(--ink-4); }
+  .projects-table-runs-on:not(.project-danger) { opacity: .6; }
+  .projects-table-latest { font-family: var(--font-sans); font-size: 13px; opacity: .7; }
+
+  /* From 1024, not 1440: on a portrait screen (1080) the list rows stretched to the width put the
+     count 950px from the name; the table fits (ux/c.md C17). New project's table stays a wide
+     screen's, by its own rule below. */
+  @media (width >= 1024px) {
+    .project-rows { display: none; }
+    .projects-table { display: block; }
+  }
+
+  /* -- none yet (11b) ------------------------------------------------------------------------ */
+  .project-none { display: flex; max-width: 26rem; flex-direction: column; gap: 12px; margin: 18vh auto 0; font-size: 14px; line-height: 1.55; }
+  .project-none p { opacity: .75; }
+  .project-none-title { font-size: 18px; font-weight: 600; letter-spacing: -.015em; }
+  .project-address {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 12px;
+    margin-top: 8px;
+    border-radius: var(--radius-md);
+    background: var(--surface-1);
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+  .project-address > :first-child { opacity: .55; }
+  .project-address-value { overflow-wrap: anywhere; }
+
+  /* The dock: the page's one action at its foot. */
+  .project-dock { display: flex; padding: 10px 0 12px; }
+  .project-dock > .ui-btn { width: 100%; }
+
+  /* -- New project (11c, 11d; 11e beside the table) ------------------------------------------- */
+  /* The table is a wide screen's only; below it the page is the form. The whole content column
+     goes, not only its body: left in place it kept its share of the height and pushed the form
+     down an empty phone screen. */
+  @media (width < 1440px) {
+    .frame-main:has(> .frame-body > .project-new-table) { display: none; }
+  }
+  .project-new { display: flex; max-width: 34rem; flex-direction: column; gap: 16px; font-size: 14px; line-height: 1.55; }
+  .project-new-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .project-new-head h2 { font-size: 20px; font-weight: 600; letter-spacing: -.02em; }
+  .project-new-close { display: none; padding: 4px 8px; color: var(--ink); opacity: .6; }
+  /* Below a wide screen the frame's title already says "New project"; the column says it only
+     beside the table, where it also closes back to the list. */
+  @media (width < 1440px) {
+    .project-new:not(:has(.project-step)) .project-new-head { display: none; }
+  }
+  @media (width >= 1440px) {
+    .project-new-close { display: inline; }
+  }
+  .project-new-lede { opacity: .75; }
+  .project-new code { font-family: var(--font-mono); font-size: 12.5px; }
+  .project-new-form { display: flex; flex-direction: column; gap: 16px; }
+  .project-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 12px;
+    border-radius: var(--radius-md);
+    background: var(--surface-2);
+  }
+  .project-preview-url { font-family: var(--font-mono); font-size: 12.5px; overflow-wrap: anywhere; }
+  .project-preview-note { font-size: 12.5px; opacity: .6; }
+  /* Drawn from the first render, so it never pushes the button down: blank, the address with a
+     placeholder; refused, struck. */
+  .project-preview--blank .project-preview-url { color: var(--ink-4); }
+  .project-preview--invalid .project-preview-url { color: var(--ink-3); text-decoration: line-through; }
+  .project-preview--invalid .project-preview-note { color: var(--danger); opacity: 1; }
+  .project-new-small { font-size: 12.5px; opacity: .6; }
+  .project-step { display: flex; flex-direction: column; gap: 8px; padding-bottom: 16px; border-bottom: 1px solid var(--border-soft); }
+  .project-step > p { font-size: 13px; opacity: .65; }
+  .project-step-primary { min-height: 64px; justify-content: space-between; }
+  .project-step-links { display: flex; flex-wrap: wrap; gap: 4px 20px; font-size: 14px; }
+  .project-link { color: var(--link); }
+
+  /* On a phone the form's one button stays in reach at the foot of the scroller. */
+  @media (width < 768px) {
+    .project-new .project-dock { position: sticky; bottom: 0; background: var(--bg); }
+  }
+
+  /* -- the project page (7a–7h) --------------------------------------------------------------
+     Every section is drawn; below 1440px only the one in `data-view` shows — the strip picks it
+     on a phone, the title row's tabs on a portrait screen, where the tickets are a table across
+     the whole column and the facts are the title's details (UX pass, C1 + A32). From 1440 the
+     map goes on top, the tickets left with the facts under them, and the rest right (7h). */
+  .project-page { display: flex; flex-direction: column; gap: 28px; font-size: 14px; }
+  .project-section { display: none; flex-direction: column; gap: 10px; min-width: 0; }
+  /* The page's head: its actions from 768, and the forge release notice above every view, so
+     nothing in it is hidden on a phone (ui.md § The project page). */
+  .project-head { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .project-head:not(:has(.project-notices)) { display: none; }
+  .project-notices { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  .project-notice-text { overflow-wrap: anywhere; }
+  .project-notice-text code { font-family: var(--font-mono); font-size: 12.5px; }
+  .project-notice-link { display: inline-flex; min-height: var(--target-min); align-items: center; }
+  .project-side { display: contents; }
+  .project-page[data-view="tickets"] [data-section="tickets"],
+  .project-page[data-view="merge"] [data-section="merge"],
+  .project-page[data-view="chats"] [data-section="chats"],
+  .project-page[data-view="workflow"] [data-section="workflow"],
+  .project-page[data-view="proposals"] [data-section="proposals"] { display: flex; }
+  .project-actions,
+  .project-rail,
+  .tickets-table,
+  .workflow-map-wrap,
+  .project-desk { display: none; }
+
+  .project-section-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
+  .project-subhead { margin-top: 6px; font-family: var(--font-mono); font-size: var(--text-eyebrow); letter-spacing: var(--tracking-eyebrow); text-transform: uppercase; opacity: .55; }
+  .project-hint { font-size: 12.5px; line-height: 1.5; opacity: .6; }
+  .project-empty { font-size: 13.5px; opacity: .6; }
+  .project-filter { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 12px; }
+  .project-filter a { display: inline-flex; min-width: 32px; min-height: 32px; align-items: center; justify-content: center; border: 1px solid var(--border-control); border-radius: var(--radius-pill); }
+  .project-more { min-height: 46px; align-self: flex-start; font-family: var(--font-mono); font-size: 11.5px; color: var(--link); }
+
+  /* Ticket rows (7a): three lines, 14px around. */
+  .ticket-rows { display: flex; flex-direction: column; }
+  .ticket-row { padding: 14px 4px 14px 12px; margin-left: -12px; }
+  .ticket-row:hover { background: var(--surface-selected); text-decoration: none; }
+  .ticket-row-head { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
+  .ticket-row-number { flex-shrink: 0; font-family: var(--font-mono); font-size: 12px; opacity: .55; }
+  .ticket-row-title { min-width: 0; flex: 1 1 0%; }
+  .ticket-row-age { flex-shrink: 0; margin-left: auto; font-family: var(--font-mono); font-size: 11.5px; opacity: .5; }
+  .ticket-row-meta { flex-wrap: wrap; gap: 4px 10px; }
+  .ticket-doing { opacity: .7; }
+  .ticket-doing--accent { color: var(--accent-text); opacity: 1; }
+  .ticket-doing--info { color: var(--info); opacity: 1; }
+  .ticket-usage { opacity: .55; }
+  .ticket-latest--decision { opacity: 1; color: var(--ink); white-space: normal; }
+  .ticket-row--history { opacity: .75; }
+  .project-ticket-list { display: flex; flex-direction: column; gap: 6px; }
+  .project-ticket-list > .ui-eyebrow { margin-top: 10px; }
+  .ticket-history { margin-top: 12px; }
+  .ticket-history-summary { display: flex; min-height: 46px; align-items: center; gap: 10px; cursor: pointer; }
+  .ticket-history-hint { font-family: var(--font-mono); font-size: 11px; opacity: .45; }
+
+  /* The tickets table (7g, 7h): the row's three lines as columns. */
+  .tickets-table { font-size: 13px; }
+  .tickets-table-head,
+  .tickets-table-row {
+    display: grid;
+    grid-template-columns: 3.5rem minmax(16rem, 3fr) minmax(8rem, 1fr) minmax(8rem, 1fr) 5.5rem 3.5rem;
+    align-items: center;
+    gap: 14px;
+    padding: 0 10px;
+  }
+  .tickets-table-head { min-height: 32px; font-family: var(--font-mono); font-size: var(--text-eyebrow); letter-spacing: var(--tracking-eyebrow); text-transform: uppercase; opacity: .5; }
+  .tickets-table-row { min-height: 52px; padding-top: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border-soft); color: var(--ink); font-family: var(--font-mono); font-size: 12px; }
+  .tickets-table-row:hover { background: var(--surface-selected); text-decoration: none; }
+  .tickets-table-row--waiting { box-shadow: inset 2px 0 0 var(--accent); }
+  .tickets-table-title { display: flex; min-width: 0; flex-direction: column; gap: 2px; font-family: var(--font-sans); }
+  .tickets-table-title .ticket-row-title { font-size: 14px; font-weight: 500; }
+  .tickets-table-step { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+  /* Usage is a figure: right-aligned, so a column of them reads down. */
+  .tickets-table .ticket-usage { font-variant-numeric: tabular-nums; text-align: right; }
+  .ticket-usage--high { color: var(--warning); opacity: 1; }
+  .ticket-history-mark { display: inline-block; font-family: var(--font-mono); font-size: 11px; opacity: .55; transition: transform .15s; }
+  .ticket-history[open] .ticket-history-mark { transform: rotate(90deg); }
+  .ticket-history-summary { list-style: none; }
+  .ticket-history-summary::-webkit-details-marker { display: none; }
+
+  /* The merge queue (7b): the place is the headline. */
+  .merge-rows { display: flex; flex-direction: column; }
+  .merge-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 14px; padding: 12px 0; border-bottom: 1px solid var(--border-soft); }
+  /* Take out is destructive (it withdraws an approval): small, red, in the row's slot for acts —
+     a footer line on a phone, the first line's end from 768 — and its confirm opens across the
+     row (ui.md § The confirm, UX re-check #12, #13). */
+  .merge-take-out { flex: 1 0 100%; }
+  @media (min-width: 768px) { .merge-take-out { flex: 0 0 auto; } }
+  /* The rank is a quiet figure, not the loudest thing on the screen (UX pass, C14). */
+  .merge-place { min-width: 1.6em; font-family: var(--font-mono); font-size: 13px; font-weight: 600; line-height: 1.6; opacity: .7; }
+  .merge-body { display: flex; min-width: 0; flex: 1 1 0%; flex-direction: column; gap: 4px; }
+  /* The status line sits directly under the title: the link's 46px target is padding that
+     overlaps its neighbours, not a line of its own (it left an empty line in every row). */
+  .merge-ticket { display: flex; align-items: baseline; gap: 8px; padding: 12px 0; margin: -12px 0; color: var(--ink); }
+  .merge-number { flex-shrink: 0; font-family: var(--font-mono); font-size: 12px; opacity: .55; }
+  .merge-title { font-weight: 500; }
+  /* The state is an identifier, in mono; what is happening to it is a sentence, in sans. */
+  .merge-doing { font-size: 13px; opacity: .7; }
+  .merge-state { margin-right: 6px; font-family: var(--font-mono); font-size: 11.5px; }
+  .recent-merges { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+  .recent-merge { display: flex; min-height: 40px; align-items: center; gap: 10px; border-bottom: 1px solid var(--border-soft); color: var(--ink); }
+  .recent-merge-sha { font-family: var(--font-mono); font-size: 11.5px; opacity: .7; }
+  .recent-merge-title { min-width: 0; flex: 1 1 0%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* Chats (7c). */
+  .project-chat-rows { display: flex; flex-direction: column; }
+  .project-chat-rows .ui-row-meta { flex-wrap: wrap; gap: 4px 10px; }
+  .project-chat-rows .ui-row-title { font-weight: 400; white-space: normal; }
+  .chat-start { padding: 8px 0 10px; }
+  .chat-start-error { padding-bottom: 6px; }
+
+  /* Workflow (7d): the flow on a line and dots, as a ticket's Steps. */
+  .workflow-type { display: flex; flex-direction: column; gap: 8px; }
+  .workflow-type[hidden] { display: none; }
+  .workflow-source { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; font-size: 13px; }
+  .workflow-type-name { font-family: var(--font-mono); font-size: 13px; font-weight: 600; }
+  .workflow-release { font-family: var(--font-mono); font-size: 11px; color: var(--link); }
+  .not-types { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; opacity: .8; }
+  .wf-flow { display: flex; flex-direction: column; }
+  .wf-step { position: relative; display: flex; gap: 12px; padding: 0 0 18px 2px; }
+  .wf-step::before { position: absolute; top: 14px; bottom: 0; left: 6px; width: 1px; background: var(--border); content: ""; }
+  .wf-step:last-child::before { display: none; }
+  .wf-step-dot { position: relative; z-index: 1; width: 9px; height: 9px; flex-shrink: 0; margin-top: 5px; border-radius: 50%; background: var(--ink-4); }
+  /* A workflow's states are not live: the flow draws its marks in ink-2, so `▸ triage` does not
+     read as a ticket running now. Blue is the map's ticket dots' (UX pass, C16). */
+  .wf-step--job .wf-step-dot,
+  .wf-step--human .wf-step-dot { background: var(--ink-3); }
+  .wf-flow .ui-state .ui-state-mark { color: var(--ink-2); }
+  .wf-step-count { margin-left: auto; font-size: 11.5px; opacity: .7; }
+  .wf-step-body { display: flex; min-width: 0; flex-direction: column; gap: 3px; font-family: var(--font-mono); font-size: 12px; }
+  .wf-step-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .wf-step-initial { color: var(--ink-3); font-size: 11px; }
+  .wf-step-job { overflow-wrap: anywhere; opacity: .75; }
+  .wf-step-budget,
+  .wf-step-on { opacity: .5; }
+  .wf-step-link { color: var(--link); }
+
+  /* The map (7g, 7h), drawn by the server as SVG. */
+  .wf-map-scroll { overflow-x: auto; padding-bottom: 4px; }
+  .wf-map { display: block; font-family: var(--font-mono); }
+  .wf-map-rect { fill: var(--surface-1); stroke: var(--border); }
+  .wf-map-box--human .wf-map-rect { fill: var(--surface-2); }
+  .wf-map-box--terminal { opacity: .7; }
+  .wf-map-rect--selected { stroke: var(--ink); stroke-width: 1.5; }
+  a.wf-map-box:hover .wf-map-rect { stroke: var(--border-strong); }
+  .wf-map-name { fill: var(--ink); font-size: 12.5px; font-weight: 600; }
+  .wf-map-box--job .wf-map-mark { fill: var(--info); }
+  .wf-map-box--human .wf-map-mark { fill: var(--link); }
+  .wf-map-job { fill: var(--ink-3); font-size: 12px; }
+  .wf-map-count { fill: var(--ink); font-size: 12.5px; font-weight: 600; }
+  .wf-map-edge path { fill: none; stroke: var(--ink-4); stroke-width: 1.2; }
+  .wf-map-edge--link path { stroke: var(--link); }
+  .wf-map-head { fill: var(--ink-4); }
+  .wf-map-label { fill: var(--ink-3); font-size: 10px; }
+  .wf-map-more { fill: var(--ink-3); font-size: 10px; }
+  .wf-map-dot--waiting { fill: var(--accent); }
+  .wf-map-dot--running { fill: var(--info); }
+  /* Stuck waits on you: amber like a wait, a ring so the map still tells it from a question. */
+  .wf-map-dot--stuck { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+  .wf-map-dot--idle { fill: var(--ink-4); }
+  .workflow-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; font-family: var(--font-mono); font-size: 11px; opacity: .7; }
+  .wf-map-dot-key { display: inline-block; width: 8px; height: 8px; margin-right: -6px; border-radius: 50%; }
+  .wf-map-dot-key.wf-map-dot--waiting { background: var(--accent); }
+  .wf-map-dot-key.wf-map-dot--running { background: var(--info); }
+  .wf-map-dot-key.wf-map-dot--stuck { box-shadow: inset 0 0 0 1.5px var(--accent); }
+  .wf-map-dot-key.wf-map-dot--idle { background: var(--ink-4); }
+
+  /* The facts (7f): the details panel and, from 768, the rail. */
+  .project-facts-body { display: flex; flex-direction: column; gap: 14px; font-size: 13px; }
+  .project-facts-links { display: flex; gap: 16px; }
+  .project-facts-links a { display: inline-flex; min-height: var(--target-min); align-items: center; }
+
+  /* + New (21c) and the release block (21c, 21d). */
+  .new-sheet { display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px; }
+  .new-sheet-row {
+    display: grid;
+    min-height: 64px;
+    align-items: center;
+    padding: 10px 4px;
+    border-bottom: 1px solid var(--border-soft);
+    color: var(--ink);
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .new-sheet-name { font-size: 15px; font-weight: 600; }
+  .new-sheet-detail { grid-column: 1; font-size: 13px; opacity: .6; }
+  .new-sheet-chevron { grid-column: 2; grid-row: 1 / span 2; opacity: .4; }
+  .release-block { display: flex; flex-direction: column; gap: 10px; padding: 14px; margin-top: 12px; border-radius: var(--radius-md); background: var(--surface-1); }
+  .release-head { display: flex; align-items: center; gap: 8px; }
+  .release-mark { font-family: var(--font-mono); color: var(--link); }
+  .release-title { font-size: 15px; font-weight: 600; }
+  .release-text { font-size: 13.5px; line-height: 1.55; }
+  .release-file { font-family: var(--font-mono); font-size: 12px; opacity: .6; }
+  .release-link { color: var(--link); overflow-wrap: anywhere; }
+  .release-draft-text { font-size: 13.5px; opacity: .8; }
+  .release-form { display: flex; flex-direction: column; gap: 10px; }
+
+  /* The ticket form's first step (12e). */
+  .first-step { display: flex; flex-direction: column; gap: 4px; padding: 12px; border-radius: var(--radius-md); background: var(--surface-2); }
+  .first-step-line { display: flex; flex-wrap: wrap; gap: 0 6px; align-items: baseline; font-family: var(--font-mono); font-size: 12.5px; }
+  .first-step-job { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-3); }
+  .ticket-new-fact { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+  .ticket-new-fact-value { font-family: var(--font-mono); font-size: 12.5px; }
+
+  @media (width >= 768px) {
+    .project-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .project-head:not(:has(.project-notices)) { display: flex; }
+    .project-ticket-list,
+    .workflow-flow-wrap { display: none; }
+    .tickets-table,
+    .workflow-map-wrap,
+    .project-desk { display: block; }
+  }
+
+  @media (width >= 1440px) {
+    /* No views on a wide screen (7h): everything is on the page, so the title row's tabs go. */
+    #frame:has(#project-page) .frame-title-row .ui-tabs { display: none; }
+
+    /* The facts sit under the tickets, not at the foot of a right column twice as long: the
+       side's extra height goes into the last row, so the left column does not end in a void. */
+    .project-page {
+      display: grid;
+      align-items: start;
+      gap: 28px 40px;
+      grid-template-areas: "actions actions" "workflow workflow" "tickets side" "rail side";
+      grid-template-columns: minmax(0, 1fr) 26rem;
+      grid-template-rows: auto auto auto 1fr;
+    }
+    .project-page .project-section { display: flex; }
+    .project-head { grid-area: actions; }
+    [data-section="tickets"] { grid-area: tickets; }
+    .project-side { display: flex; flex-direction: column; gap: 28px; grid-area: side; }
+    [data-section="workflow"] { grid-area: workflow; }
+    .project-rail { display: block; padding-top: 20px; border-top: 1px solid var(--border-soft); grid-area: rail; }
+  }
+
+  /* -- proposals (7e, 8a–8g) -----------------------------------------------------------------
+     Below 768 the Proposals view is the list, or the reader once one is chosen. From 768 the
+     overview draws them in brief, and the view itself is the page: the reader under the list
+     (8g), and beside it from 1440 (8e). */
+  .proposals-overview { display: none; }
+  .proposals-full { display: flex; flex-direction: column; gap: 12px; }
+  .proposals-open { display: flex; flex-direction: column; gap: 20px; }
+  .proposals-list { display: flex; min-width: 0; flex-direction: column; gap: 10px; }
+  .proposals-reader { display: none; min-width: 0; flex-direction: column; gap: 8px; }
+  .project-page[data-reading="true"] .proposals-list { display: none; }
+  .project-page[data-reading="true"] .proposals-reader { display: flex; }
+  /* On a phone the reader is one object with its own `‹ Proposals`: the list's tabs and Select
+     are a second level of navigation over it, and go while it is open (UX pass, C8). */
+  .project-page[data-reading="true"] .proposals-full > .project-section-head { display: none; }
+  .proposal-back { display: inline-flex; min-height: 46px; align-items: center; color: var(--link); font-size: 13px; }
+
+  .proposal-groups { display: flex; flex-direction: column; gap: 18px; }
+  .proposal-group-head { display: flex; min-height: 40px; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 600; }
+  .proposal-group-source { min-width: 0; flex: 1 1 0%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .proposal-group-meta { flex-shrink: 0; font-family: var(--font-mono); font-size: 11.5px; font-weight: 400; opacity: .5; }
+  .proposal-box {
+    display: inline-flex;
+    width: 22px;
+    height: 22px;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+  }
+  .proposal-box[aria-checked="true"],
+  .proposal-box[aria-checked="mixed"] { border-color: var(--ink); background: var(--ink); color: var(--bg); }
+  .proposal-rail { display: flex; flex-direction: column; margin-left: 6px; border-left: 1px solid var(--border); }
+  .proposal-row { display: flex; min-height: 52px; align-items: flex-start; gap: 10px; padding: 10px 4px 10px 14px; border-bottom: 1px solid var(--border-soft); color: var(--ink); }
+  .proposal-row:hover { background: var(--surface-selected); text-decoration: none; }
+  .proposal-row--reading { box-shadow: inset 2px 0 0 var(--ink); }
+  .proposal-row--select { cursor: pointer; }
+  .proposal-check { width: 18px; height: 18px; margin-top: 2px; flex-shrink: 0; accent-color: var(--ink); }
+  .proposal-row-text { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+  .proposal-row-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 14px; font-weight: 500; }
+  .proposal-row-body { display: -webkit-box; overflow: hidden; font-size: 13px; line-height: 1.45; opacity: .65; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+
+  .proposal-reader { display: flex; flex-direction: column; gap: 10px; }
+  .proposal-reader-position { font-family: var(--font-mono); font-size: 11.5px; opacity: .5; }
+  .proposal-reader-source { font-size: 13px; opacity: .7; }
+  .proposal-reader-title { font-size: 20px; font-weight: 600; letter-spacing: -.015em; line-height: 1.3; }
+  .proposal-reader-body { font-size: 15px; }
+  .proposal-suggestion { font-family: var(--font-mono); font-size: 11.5px; opacity: .6; }
+  .proposal-reader-form,
+  .proposal-bulk { display: flex; flex-direction: column; gap: 10px; }
+  .proposal-type { display: flex; flex-direction: column; gap: 4px; }
+  .proposal-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  /* The reader's verbs stay in the thumb zone on a phone: they stick to the foot of the scroller
+     while the proposal above them scrolls (ui.md § Proposals, UX pass C8). */
+  .proposal-reader-form .proposal-actions { position: sticky; bottom: 0; z-index: 1; padding: 10px 0; background: var(--bg); }
+  .proposal-admit-why { font-size: 12.5px; opacity: .65; }
+  .proposal-ask { padding-top: 6px; border-top: 1px solid var(--border-soft); }
+  .proposal-bulk { padding: 10px 0 12px; }
+  .proposal-bulk-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .proposal-bulk-count { flex-shrink: 0; font-size: 14px; font-weight: 600; white-space: nowrap; }
+
+  .proposal-history { display: flex; flex-direction: column; }
+  .proposal-decided { display: flex; flex-direction: column; gap: 4px; padding: 12px 0; border-bottom: 1px solid var(--border-soft); }
+  .proposal-decided-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .proposal-decided-line { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-family: var(--font-mono); font-size: 12px; }
+  /* A decline is a person's decision, not a failure: ink-3 with ○, as a cancelled thing is. */
+  .proposal-declined { color: var(--ink-3); }
+  .proposal-decided--reopened { opacity: .6; }
+  .proposal-reason { font-family: var(--font-sans); font-size: 13px; opacity: .8; }
+  .proposal-decided-by { font-size: 12px; opacity: .55; }
+  .proposal-decided .ui-btn { align-self: flex-start; }
+
+  @media (width >= 1440px) {
+    .proposals-overview { display: flex; flex-direction: column; gap: 8px; }
+    .proposals-full { display: none; }
+    .proposal-rail--brief .proposal-row { min-height: 40px; }
+
+    /* The Proposals view is the page on a wide screen too: nothing else is drawn beside it. */
+    .project-page[data-view="proposals"] { display: block; }
+    .project-page[data-view="proposals"] > :not(.project-side),
+    .project-page[data-view="proposals"] .project-side > :not([data-section="proposals"]) { display: none; }
+    .project-page[data-view="proposals"] .proposals-overview { display: none; }
+    .project-page[data-view="proposals"] .proposals-full { display: flex; }
+  }
+
+  @media (width >= 768px) {
+    .project-page[data-view="proposals"] .proposals-list,
+    .project-page[data-view="proposals"] .proposals-reader { display: flex; }
+    .proposal-back { display: none; }
+    .proposals-reader { padding-top: 16px; border-top: 1px solid var(--border); }
+    .project-page[data-reading="true"] .proposals-full > .project-section-head { display: flex; }
+    /* A form is read at a form's width, not stretched across the reader's column. */
+    .proposal-reader-form { max-width: 480px; }
+    .proposal-reader-form .proposal-actions { position: static; padding: 0; }
+  }
+
+  @media (width >= 1440px) {
+    .proposals-open { display: grid; align-items: start; gap: 40px; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); }
+    .proposals-reader { padding-top: 0; padding-left: 32px; border-top: 0; border-left: 1px solid var(--border); }
+  }
+}

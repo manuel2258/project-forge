@@ -1,8 +1,8 @@
 defmodule ForgeWeb.TicketWorkScreenTest do
   @moduledoc """
-  A ticket as a work screen (`docs/design/ui.md` § The work screen, § Decide and Timeline):
-  which tab it opens on, what Decide holds and counts, the ticket's conversations on its
-  timeline, the change and its approval on Changes, *Ask about this* going to a conversation, and
+  A ticket in the frame (`docs/design/ui.md` § The ticket): which view it opens on, what Steps
+  holds where Decide used to, the ticket's conversations under Steps, the change and its approval
+  on Changes, *Ask about this* going to a conversation, and
   the running job's activity arriving while the page is open — here and on the job page.
   """
 
@@ -100,20 +100,98 @@ defmodule ForgeWeb.TicketWorkScreenTest do
     view |> element(within) |> render() |> Floki.parse_fragment!() |> Floki.find(selector)
   end
 
-  describe "the tab it opens on" do
-    test "is Decide while something waits on you", %{conn: conn, project: project, ticket: ticket} do
+  # The row's button drops the panel, which holds the decision's form.
+  defp open!(view) do
+    view |> element("#decision-row button[phx-click='decision:open']") |> render_click()
+    assert has_element?(view, "#decision-panel")
+    view
+  end
+
+  # A document's approval waiting into planning: Docs is where it is read.
+  defp pend_document(ticket) do
+    {:ok, _version} =
+      Artifacts.record_version(ticket.id, "refinement.md", :document, :system, %{
+        content: "---\noutcome: done\n---\n# Refinement\n"
+      })
+
+    ticket
+    |> Ecto.Changeset.change(
+      status: :active,
+      pending_transition: %{
+        "from" => "refining",
+        "to" => "planning",
+        "outcome" => "done",
+        "approve" => ["refinement.md"]
+      }
+    )
+    |> Forge.Repo.update!()
+  end
+
+  describe "the view it opens on" do
+    test "is Changes while a changeset approval waits", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
       pend_merge(ticket)
 
       {:ok, view, _html} = live(conn, page(project, ticket))
-      assert has_element?(view, ~s(#tab-decide[aria-current="page"]))
-      assert has_element?(view, "#approval-#{ticket.id}")
+      assert has_element?(view, ~s(#tab-changes[aria-current="page"]))
+      assert has_element?(view, "#changes")
     end
 
-    test "is the Timeline otherwise", %{conn: conn, project: project, ticket: ticket} do
-      {:ok, view, _html} = live(conn, page(project, ticket))
+    # Not only a merge: an approval of the changeset into a state that does not merge is read on
+    # Changes too.
+    test "is Changes for a changeset approval that does not merge", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      changeset!(ticket, head_of(project))
 
-      assert has_element?(view, ~s(#tab-timeline[aria-current="page"]))
-      assert has_element?(view, "#timeline")
+      ticket
+      |> Ecto.Changeset.change(
+        state: "implementing",
+        status: :active,
+        pending_transition: %{
+          "from" => "implementing",
+          "to" => "verifying",
+          "outcome" => nil,
+          "approve" => ["changeset"]
+        }
+      )
+      |> Forge.Repo.update!()
+
+      {:ok, view, _html} = live(conn, page(project, ticket))
+      assert has_element?(view, ~s(#tab-changes[aria-current="page"]))
+    end
+
+    test "is Docs while a document's approval waits", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      pend_document(ticket)
+
+      {:ok, view, _html} = live(conn, page(project, ticket))
+      assert has_element?(view, ~s(#tab-docs[aria-current="page"]))
+      assert has_element?(view, "#docs-waiting #doc-refinement\\.md")
+    end
+
+    test "is Steps while questions wait, and otherwise", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      {:ok, view, _html} = live(conn, page(project, ticket))
+      assert has_element?(view, ~s(#tab-steps[aria-current="page"]))
+      assert has_element?(view, "#steps")
+
+      [job] = Jobs.for_ticket(ticket.id)
+      ask!(ticket, job, [blocking("backend")])
+
+      {:ok, view, _html} = live(conn, page(project, ticket))
+      assert has_element?(view, ~s(#tab-steps[aria-current="page"]))
     end
 
     test "is the one the URL names", %{conn: conn, project: project, ticket: ticket} do
@@ -121,28 +199,30 @@ defmodule ForgeWeb.TicketWorkScreenTest do
 
       {:ok, view, _html} = live(conn, page(project, ticket, "?tab=docs"))
       assert has_element?(view, ~s(#tab-docs[aria-current="page"]))
-      refute has_element?(view, "#approval-#{ticket.id}")
+      refute has_element?(view, "#changes")
     end
-  end
 
-  describe "Decide" do
-    # What the queue would count for this ticket, from the queue's own reading of it.
-    test "counts what the queue counts for the ticket", %{
+    # The Decide tab is gone, and a link to it — a push sent before it went, a bookmark — lands
+    # where what waits is, as any view the ticket does not have does.
+    test "is the default for a view the ticket no longer has", %{
       conn: conn,
       project: project,
       ticket: ticket
     } do
-      {:ok, view, _html} = live(conn, page(project, ticket))
-      assert view |> element("#tab-decide") |> render() =~ ~r/opacity-40[^>]*>\s*0\s*</
-
       pend_merge(ticket)
-      {:ok, view, _html} = live(conn, page(project, ticket))
-      assert view |> element("#tab-decide") |> render() =~ ~r/>\s*1\s*</
-    end
 
-    # Decide is the third of the four surfaces an approval card is drawn on, and approving the
-    # changeset here merges as it does anywhere else (`docs/design/ui.md` § Changes).
-    test "shows the message the merge would commit, and no Approve without one", %{
+      for gone <- ~w(decide timeline nonsense) do
+        {:ok, view, _html} = live(conn, page(project, ticket, "?tab=#{gone}"))
+        assert has_element?(view, ~s(#tab-changes[aria-current="page"]))
+        refute has_element?(view, "#tab-#{gone}")
+      end
+    end
+  end
+
+  describe "the current step, where Decide was" do
+    # The approval is the decision row, not a card: the current step says where it is, and the
+    # panel shows the message the merge would commit (`docs/design/ui.md` § The decision row).
+    test "points at the row, whose panel shows the message, and no Approve without one", %{
       conn: conn,
       project: project,
       ticket: ticket
@@ -150,24 +230,28 @@ defmodule ForgeWeb.TicketWorkScreenTest do
       changeset!(ticket, head_of(project))
       pend_merge(ticket)
 
-      {:ok, view, _html} = live(conn, page(project, ticket))
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=steps"))
+      assert has_element?(view, "#steps #approval-pinned", "changeset v1")
+      refute has_element?(view, "#steps #decision-form")
+      open!(view)
 
       assert view |> element("##{commit_message_id(ticket)}") |> render() =~
                "nothing to merge yet"
 
-      refute has_element?(view, ~s(#decide button[value="approved"]))
+      refute has_element?(view, ~s(#decision-form button[value="approved"]))
 
       commit_message!(ticket, "Persist the scores\n")
       {:ok, view, _html} = live(conn, page(project, ticket))
+      open!(view)
 
       assert view |> element("##{commit_message_id(ticket)}") |> render() =~ "Persist the scores"
-      assert has_element?(view, ~s(#decide button[value="approved"]))
+      assert has_element?(view, ~s(#decision-form button[value="approved"]), "Approve v1")
     end
 
-    # Same rule on the ticket's own page: the link to the diff is drawn because the decision
+    # Same rule on the ticket's own page: the change is what it opens on because the decision
     # enters a state that merges, not because of what it pins
     # (`Forge.Engine.merge_decision?/2`).
-    test "a merging approval of something else still links to the change", %{
+    test "a merging approval of something else still opens on the change", %{
       conn: conn,
       project: project,
       ticket: ticket
@@ -194,46 +278,44 @@ defmodule ForgeWeb.TicketWorkScreenTest do
 
       {:ok, view, _html} = live(conn, page(project, ticket))
 
-      assert has_element?(view, ~s(a[href="#{page(project, ticket, "/review")}"]))
+      assert has_element?(view, "#changes #changes-switch")
     end
 
-    # An assumption is in the queue and waits on nobody, so it is in no count of what waits.
-    test "does not count an assumption", %{conn: conn, project: project, ticket: ticket} do
+    # The pane goes with its last card. A Send that arrives after the same questions were
+    # answered in another tab is refused — and drawn where the pane stood, not nowhere.
+    test "a Send whose card has gone since is refused where the pane stood", %{
+      conn: conn,
+      project: project,
+      ticket: ticket,
+      user: user
+    } do
       [job] = Jobs.for_ticket(ticket.id)
+      ask!(ticket, job, [blocking("backend")])
+      version = Artifacts.latest(ticket.id, "refinement.md")
 
-      {:ok, _version} =
-        Artifacts.record_version(ticket.id, "refinement.md", :document, {:job, job.id}, %{
-          content: """
-          ---
-          outcome: done
-          ---
-          # Refinement
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=docs"))
+      assert has_element?(view, "#question-pane")
 
-          ```question
-          key: backend
-          text: Which backend?
-          options: [{label: a, detail: About a}, {label: b, detail: About b}]
-          blocking: true
-          ```
-
-          ```question
-          key: naming
-          text: Which naming?
-          options: [{label: a, detail: About a, recommended: true}, {label: b, detail: About b}]
-          blocking: false
-          assumption: went with a
-          ```
-          """
+      {:ok, _ticket} =
+        Forge.Operator.answer_all(Tickets.get!(ticket.id), user, version.id, %{
+          "backend" => %{choice: "a", text: nil}
         })
 
-      {:ok, view, _html} = live(conn, page(project, ticket))
-      assert view |> element("#tab-decide") |> render() =~ ~r/>\s*1\s*</
+      render_hook(view, "questions:send", %{
+        "form" => version.id,
+        "ticket" => ticket.id,
+        "version" => version.id,
+        "answers" => %{"backend" => %{"choice" => "b", "text" => ""}}
+      })
+
+      refute has_element?(view, "#question-pane")
+      assert has_element?(view, "#questions-gone-refusal", "Nothing was sent")
     end
 
     # An assumption is answered here — the queue's digest sends it here — but nothing waits on
-    # the answer, so it is not under "Waiting on you" and it draws no accent. Asked beside a
-    # blocking question, it is in that document's form instead, optional
-    # (`docs/design/ui.md` § Answering questions).
+    # the answer, so it is under Steps and not in the question pane, and it draws no accent. Asked
+    # beside a blocking question, it is in that document's form in the pane instead, optional
+    # (`docs/design/ui.md` § The question card).
     test "keeps an assumption apart from what waits", %{
       conn: conn,
       project: project,
@@ -243,24 +325,26 @@ defmodule ForgeWeb.TicketWorkScreenTest do
       ask!(ticket, job, [non_blocking("naming")])
 
       {:ok, view, _html} = live(conn, page(project, ticket))
-      assert has_element?(view, ~s(#tab-timeline[aria-current="page"]))
+      assert has_element?(view, ~s(#tab-steps[aria-current="page"]))
+      refute has_element?(view, "#question-pane")
+      assert has_element?(view, "#steps #assumed " <> question(ticket, "naming"))
 
-      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=decide"))
-      assert has_element?(view, "#nothing-to-decide")
-      refute has_element?(view, "#hoisted-decision")
-      assert has_element?(view, "#assumed " <> question(ticket, "naming"))
-
-      # Opened, so its passage is drawn — and drawn without accent too.
-      view |> element("#assumed button[phx-click='form:open']") |> render_click()
+      # Its passage is drawn — and drawn without accent too.
       assert view |> element("#assumed") |> render() =~ "The naming passage"
       refute view |> element("#assumed") |> render() =~ "accent"
 
       ask!(ticket, job, [blocking("backend"), non_blocking("naming")])
       {:ok, view, _html} = live(conn, page(project, ticket))
 
-      assert has_element?(view, "#hoisted-decision " <> question(ticket, "backend"))
-      assert has_element?(view, "#hoisted-decision " <> question(ticket, "naming"))
+      assert has_element?(view, "#question-pane " <> question(ticket, "backend"))
+      assert has_element?(view, "#question-pane " <> question(ticket, "naming"))
       refute has_element?(view, "#assumed")
+
+      # On every view: answered from where the person is reading.
+      for tab <- ~w(changes docs activity) do
+        {:ok, view, _html} = live(conn, page(project, ticket, "?tab=#{tab}"))
+        assert has_element?(view, "#question-pane " <> question(ticket, "backend"))
+      end
     end
 
     # A form of assumptions only has nothing it must wait for — but nothing to send either, until
@@ -278,7 +362,7 @@ defmodule ForgeWeb.TicketWorkScreenTest do
           "blocking: false\nassumption: went with a\n```\n"
       ])
 
-      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=decide"))
+      {:ok, view, _html} = live(conn, page(project, ticket))
       assert has_element?(view, "#assumed button[type=submit][disabled]")
 
       view
@@ -314,25 +398,109 @@ defmodule ForgeWeb.TicketWorkScreenTest do
         set: [inserted_at: DateTime.add(DateTime.utc_now(:second), -3600, :second)]
       )
 
-      {:ok, _view, html} = live(conn, page(project, ticket, "?tab=decide"))
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=docs"))
+      html = view |> element("#question-pane") |> render()
 
       [{o, _}] = :binary.matches(html, "form-#{older.id}") |> Enum.take(1)
       [{n, _}] = :binary.matches(html, "form-#{newer.id}") |> Enum.take(1)
       assert o < n
     end
 
-    test "with nothing waiting, says so and what would put something there", %{
+    # A job is running: nothing waits, so the current step offers nothing and the dock holds
+    # only the running job's chip, which opens its page (`5d`) — on Changes and Docs. Steps and
+    # Activity lead with the job's own row, so the chip there said it twice (UX pass, B27).
+    test "with nothing waiting, offers nothing, and the dock is the job's chip off Steps", %{
       conn: conn,
       project: project,
       ticket: ticket
     } do
-      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=decide"))
+      [job] = Jobs.for_ticket(ticket.id)
+      running!(job)
+      {:ok, view, _html} = live(conn, page(project, ticket))
 
-      assert has_element?(view, "#nothing-to-decide", "Nothing here is waiting on you")
+      refute has_element?(view, "#ways-forward")
+      refute has_element?(view, "#question-pane")
+      refute has_element?(view, "#approval-pinned")
+      refute has_element?(view, "#job-chip")
+      assert has_element?(view, "#job-row-#{job.id}")
+
+      {:ok, activity, _html} = live(conn, page(project, ticket, "?tab=activity"))
+      refute has_element?(activity, "#job-chip")
+
+      for tab <- ~w(changes docs) do
+        {:ok, view, _html} = live(conn, page(project, ticket, "?tab=#{tab}"))
+
+        assert has_element?(
+                 view,
+                 ~s(#job-chip[href="#{page(project, ticket, "/jobs/#{job.id}")}"]),
+                 "refining #1"
+               )
+      end
+
+      # Something waiting takes the dock's place from the chip.
+      pend_merge(Tickets.get!(ticket.id))
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=docs"))
+      refute has_element?(view, "#job-chip")
+    end
+
+    # Amber is a person being waited on (`ui.md` § Colour): the current step's dot is info while
+    # its job runs, and amber only once something waits — here, the merge decision's row.
+    test "draws its dot amber only while the ticket waits on a person", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      [job] = Jobs.for_ticket(ticket.id)
+      running!(job)
+      {:ok, view, _html} = live(conn, page(project, ticket))
+      assert has_element?(view, "#steps .ticket-step--current.ticket-step--running")
+      refute has_element?(view, "#steps .ticket-step--waiting")
+
+      # A job that stopped to ask waits on a person too.
+      {:ok, _job} = job |> Jobs.Job.progress_changeset(%{status: :waiting}) |> Forge.Repo.update()
+      {:ok, view, _html} = live(conn, page(project, ticket))
+      assert has_element?(view, "#steps .ticket-step--current.ticket-step--waiting")
+
+      pend_merge(Tickets.get!(ticket.id))
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=steps"))
+      assert has_element?(view, "#steps .ticket-step--current.ticket-step--waiting")
+    end
+
+    test "draws a ticket that has ended with a muted dot", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      ticket |> Ecto.Changeset.change(state: "merged", status: :done) |> Forge.Repo.update!()
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=steps"))
+      assert has_element?(view, "#steps .ticket-step--current.ticket-step--ended")
     end
   end
 
-  describe "the Timeline" do
+  describe "Steps" do
+    # A job that has spent nothing says nothing of it: `0 windows` beside every job that has not
+    # started was the figure the row's end gave to nobody (UX pass, A11, B9).
+    test "leaves a zero spend out of a job's row and its step", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      [job] = Jobs.for_ticket(ticket.id)
+      running!(job)
+      {:ok, view, _html} = live(conn, page(project, ticket))
+
+      refute view |> element("#job-row-#{job.id}") |> render() =~ "windows"
+      refute view |> element("#step-0 .ticket-step-detail") |> render() =~ "windows"
+      assert has_element?(view, "#step-0 .ticket-step-detail", "1 job")
+
+      Forge.Repo.update_all(from(j in Jobs.Job, where: j.id == ^job.id), set: [usage: 300_000])
+      {:ok, view, _html} = live(conn, page(project, ticket))
+      spent = ForgeWeb.Format.windows(300_000)
+
+      assert has_element?(view, "#job-row-#{job.id} .ticket-job-spent", spent)
+      assert has_element?(view, "#step-0 .ticket-step-detail", "1 job · #{spent}")
+    end
+
     # A conversation started from a ticket was findable from the project page and not from the
     # ticket it is about. The live one is a section of its own above, even when the ended one was
     # used more recently; the order within a section is the same one every list has.
@@ -347,7 +515,7 @@ defmodule ForgeWeb.TicketWorkScreenTest do
       {:ok, _other} = Conversations.open(project, "about the project")
       said_at(live_one, "left alone", 3600)
 
-      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=timeline"))
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=steps"))
       chats = view |> element("#ticket-chats") |> render()
 
       assert chats =~ "/chats/#{live_one.id}"
@@ -371,7 +539,7 @@ defmodule ForgeWeb.TicketWorkScreenTest do
       said_at(older, "old", 3600)
       said_at(newer, "new", 1800)
 
-      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=timeline"))
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=steps"))
       assert chat_order(view) == [newer.id, older.id]
 
       # Another ticket's, or none: the list is not woken, so a change behind its back stays unseen.
@@ -403,67 +571,55 @@ defmodule ForgeWeb.TicketWorkScreenTest do
       {:ok, view, _html} = live(conn, page(project, ticket, "?tab=changes"))
 
       assert has_element?(view, ~s(#changes-files li[data-path="lib/score.ex"]))
-      assert has_element?(view, "#context-strip", ~r/\+1 −0 over 1 file\b/)
+      assert count(view, "changes") == 1
+
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=changes&sub=commits"))
       assert view |> element("#commits") |> render() =~ String.slice(sha, 0, 7)
     end
 
-    # Reading a change and approving it are adjacent — and only when the approval is what the
-    # ticket waits on.
-    test "carries the changeset approval at its foot, when that is what waits", %{
+    # Reading a change and approving it are adjacent: the row is pinned above the diff, on this
+    # view as on every other, and only while an approval is what the ticket waits on.
+    test "has the changeset approval pinned above it, when that is what waits", %{
       conn: conn,
       project: project,
       ticket: ticket,
       sha: sha
     } do
       {:ok, view, _html} = live(conn, page(project, ticket, "?tab=changes"))
-      refute has_element?(view, "#changes-approval")
-
-      # An approval of something else is Decide's, not the diff's.
-      {:ok, _ticket} =
-        ticket
-        |> Ecto.Changeset.change(
-          pending_transition: %{
-            "from" => "refining",
-            "to" => "planning",
-            "outcome" => nil,
-            "approve" => ["refinement.md"]
-          }
-        )
-        |> Forge.Repo.update()
-
-      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=changes"))
-      refute has_element?(view, "#changes-approval")
+      refute has_element?(view, "#decision-row")
 
       changeset!(ticket, sha)
       pend_merge(ticket)
+      commit_message!(ticket, "Persist the scores\n\nThey were lost on restart.\n")
+
+      for tab <- ~w(changes docs activity steps) do
+        {:ok, view, _html} = live(conn, page(project, ticket, "?tab=#{tab}"))
+        assert has_element?(view, "#decision-row", "changeset v1")
+      end
 
       {:ok, view, _html} = live(conn, page(project, ticket, "?tab=changes"))
+      # The row names its size, from the diff below it.
+      assert has_element?(view, "#decision-row .ui-diffstat", "+1")
+      open!(view)
+      assert has_element?(view, ~s(#decision-form button[value="approved"]), "Approve v1")
 
-      # Nothing has written what the merge would say, so this surface offers no Approve either
-      # (`docs/design/ui.md` § Changes).
-      assert has_element?(view, "#changes-approval ##{commit_message_id(ticket)}")
-      refute has_element?(view, ~s(#changes-approval button[value="approved"]))
+      # The operator reads what the merge will commit on this surface too.
+      assert view |> element("#decision-panel ##{commit_message_id(ticket)}") |> render() =~
+               "Persist the scores"
 
-      commit_message!(ticket, "Persist the scores\n")
-      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=changes"))
+      # And above the files, before anything else on a phone (`18b`), drawn as the panel draws it:
+      # the subject, then the body apart from it (UX pass, B11).
+      assert has_element?(
+               view,
+               "#changes-will-commit .commit-message-subject",
+               "Persist the scores"
+             )
 
       assert has_element?(
                view,
-               "#changes-approval #approval-#{ticket.id}",
-               "Approve changeset v1"
+               "#changes-will-commit .commit-message-body",
+               "They were lost on restart."
              )
-
-      # The operator reads what the merge will commit on this surface too, not only on the
-      # review page.
-      assert view |> element("#changes-approval ##{commit_message_id(ticket)}") |> render() =~
-               "Persist the scores"
-
-      # The card draws a pinned document, not a changeset: the diff above it is its rendering.
-      # The commit message's own block is the other section in the card, so this asks for the
-      # box a pin would be drawn in by its own id.
-      refute has_element?(view, "#approving-#{ticket.id}-changeset")
-
-      assert has_element?(view, ~s(#changes a[href="#{page(project, ticket, "/review")}"]))
     end
 
     # There is no composer on a ticket, so the reference goes to one: the ticket's live
@@ -569,11 +725,24 @@ defmodule ForgeWeb.TicketWorkScreenTest do
 
       links = found(view, ~s(section[id="doc-plan.md"] a), "#docs")
 
-      assert Enum.map(links, &String.trim(Floki.text(&1))) == ["v3 ›", "v2", "v1"]
+      assert [latest, "v2 · superseded" <> _, "v1 · superseded" <> _] =
+               Enum.map(links, &(&1 |> Floki.text() |> String.split() |> Enum.join(" ")))
+
+      assert latest == "v3 ›"
 
       # Each to its own version's address: the latest's link is the latest's.
       assert links |> Enum.flat_map(&Floki.attribute(&1, "href")) |> Enum.map(&Path.basename/1) ==
                ["3", "2", "1"]
+
+      # The earlier ones are folded under a count (`ui.md` § Docs), the latest is not.
+      assert has_element?(
+               view,
+               ~s(section[id="doc-plan.md"] details.work-doc-earlier-fold summary),
+               "2 earlier versions"
+             )
+
+      assert has_element?(view, ~s(section[id="doc-plan.md"] details a[href$="/1"]))
+      refute has_element?(view, ~s(section[id="doc-plan.md"] details a[href$="/3"]))
     end
 
     # `docs/design/ui.md` § Docs: collapsed until it is opened, so one long plan does not push
@@ -596,6 +765,9 @@ defmodule ForgeWeb.TicketWorkScreenTest do
       assert mounted =~ "open"
 
       assert details |> Floki.find("summary") |> Floki.text() =~ "plan.md"
+      # The version once, at the row's end where it is a link: not after the name as well, which
+      # read `plan.md v1 … v1 ›` (UX pass, B29).
+      refute details |> Floki.find("summary") |> Floki.text() =~ "v1"
       assert Floki.raw_html(details) =~ "<h1>Plan</h1>"
 
       assert Floki.find(details, "a") == []
@@ -718,12 +890,12 @@ defmodule ForgeWeb.TicketWorkScreenTest do
       # The chip's own size, smaller than a row's tile.
       assert has_element?(
                view,
-               ~s(#details a[href$="/artifacts/plan.md/1"] [data-file-type="markdown"].size-5)
+               ~s(#frame-details a[href$="/artifacts/plan.md/1"] [data-file-type="markdown"].size-5)
              )
 
       assert has_element?(
                view,
-               ~s(#details a[href$="/artifacts/changeset/1"] [data-file-type="changeset"]),
+               ~s(#frame-details a[href$="/artifacts/changeset/1"] [data-file-type="changeset"]),
                "±"
              )
     end
@@ -749,7 +921,18 @@ defmodule ForgeWeb.TicketWorkScreenTest do
 
       {:ok, view, _html} = live(conn, page(project, ticket, "?tab=docs"))
       assert "◇ unapproved" in mark.(view, "refinement.md")
+      # It waits on you, so it is amber, not a warning (UX re-check #4).
+      assert has_element?(
+               view,
+               ~s(section[id="doc-refinement.md"] span.text-accent-text),
+               "◇ unapproved"
+             )
+
       refute Enum.any?(mark.(view, "notes.md"), &(&1 =~ "approved"))
+
+      # And on its chip under the step, in the same amber.
+      {:ok, view, _html} = live(conn, page(project, ticket))
+      assert has_element?(view, ".ticket-chip span.text-accent-text", "◇ unapproved")
 
       {:ok, _} =
         Ecto.Multi.new()
@@ -805,21 +988,6 @@ defmodule ForgeWeb.TicketWorkScreenTest do
       assert view |> element("#job-events") |> render() =~ "$ mix test"
     end
 
-    # The rail's latest events are the ticket's, and a running job's stream is some of them.
-    test "keeps the rail's latest events current while the job runs", %{
-      conn: conn,
-      project: project,
-      ticket: ticket
-    } do
-      [job] = Jobs.for_ticket(ticket.id)
-      running!(job)
-      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=activity"))
-
-      tool(job, "b1", "mix test")
-
-      assert view |> element("#details") |> render() =~ "job.harness.tool_use"
-    end
-
     # The count on the tab is what the tab draws: a call and its result are one row.
     test "counts on its tab the rows it draws", %{conn: conn, project: project, ticket: ticket} do
       [job] = Jobs.for_ticket(ticket.id)
@@ -852,9 +1020,6 @@ defmodule ForgeWeb.TicketWorkScreenTest do
       send(view.pid, {:job_event, job.id, event})
 
       assert [_once] = Regex.scan(~r/\$ mix compile/, view |> element("#job-events") |> render())
-
-      assert [_once] =
-               Regex.scan(~r/job\.harness\.tool_use/, view |> element("#details") |> render())
     end
 
     # A ticket moves on to a new job, and the page moves with it: what the new job does is what
@@ -877,6 +1042,29 @@ defmodule ForgeWeb.TicketWorkScreenTest do
       tool(next, "n1", "mix next")
 
       assert view |> element("#job-events") |> render() =~ "$ mix next"
+    end
+
+    # A version the job wrote is `wrote plan.md v1 ›`, linked where Docs links it — on a ticket as
+    # on a conversation, which was the only screen that pinned it (review fixes 7, L5).
+    test "links a version the job wrote to where Docs reads it", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      [job] = Jobs.for_ticket(ticket.id)
+
+      {:ok, _version} =
+        Artifacts.record_version(ticket.id, "plan.md", :document, {:job, job.id}, %{
+          content: "# Plan\n"
+        })
+
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=activity"))
+
+      assert has_element?(
+               view,
+               ~s(#job-events [data-activity="wrote"] a[href="/tickets/#{project.name}/#{ticket.number}/artifacts/plan.md/1"]),
+               "plan.md v1"
+             )
     end
 
     test "is not woken by another ticket's job", %{conn: conn, project: project, ticket: ticket} do
@@ -965,7 +1153,7 @@ defmodule ForgeWeb.TicketWorkScreenTest do
         }
       })
 
-    assert has_element?(view, "#job-memory", "⚠ 2 OOM kills · peak 2.0 GiB of 2 GiB")
+    assert has_element?(view, "#job-memory", "2 OOM kills · peak 2.0 GiB of 2 GiB")
 
     row = view |> element("#job-events li", "a process was killed for memory") |> render()
     assert row =~ ~s(text-warning)
@@ -989,6 +1177,317 @@ defmodule ForgeWeb.TicketWorkScreenTest do
 
     tool(job, "b1", "mix test")
     assert view |> element("#job-events") |> render() =~ "$ mix test"
+  end
+
+  # A refinement written and its job over, then stuck: planning is offered, and so is the state
+  # again (`docs/design/ui.md` § Steps).
+  defp stuck_with_refinement(ticket) do
+    for job <- Jobs.for_ticket(ticket.id) do
+      job
+      |> Ecto.Changeset.change(status: :finished, outcome: :converged)
+      |> Forge.Repo.update!()
+    end
+
+    {:ok, _version} =
+      Artifacts.record_version(ticket.id, "refinement.md", :document, :system, %{
+        content: "---\noutcome: done\n---\n# Refinement\n"
+      })
+
+    {:ok, stuck} = Forge.Engine.stick(Tickets.get!(ticket.id), "a reason")
+    stuck
+  end
+
+  describe "ways forward" do
+    test "are choice rows on the current step, nothing picked, the dock naming the one picked", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      stuck_with_refinement(ticket)
+      {:ok, view, _html} = live(conn, page(project, ticket))
+
+      assert has_element?(
+               view,
+               ~s(#steps .ticket-step--current #ways-forward input[value="to:planning"])
+             )
+
+      assert has_element?(view, "#ways-forward #way-again")
+      refute has_element?(view, "#ways-forward input[checked]")
+      assert has_element?(view, "#forward-button[disabled]", "Pick a way forward")
+      # The same button under the choices it commits, which the CSS shows from 768 in place of
+      # the dock's (UX pass, B1): it submits the same form and names the same pick.
+      assert has_element?(
+               view,
+               ~s(#steps .ticket-step--current #forward-inline #forward-button-inline[form="ways-forward"][disabled]),
+               "Pick a way forward"
+             )
+
+      assert has_element?(view, ".ticket-dock--forward #forward-button")
+
+      view |> form("#ways-forward", %{"way" => "to:planning"}) |> render_change()
+
+      refute has_element?(view, "#forward-button[disabled]")
+      assert has_element?(view, "#forward-button", "Move to planning")
+      refute has_element?(view, "#forward-button-inline[disabled]")
+      assert has_element?(view, "#forward-button-inline", "Move to planning")
+      assert has_element?(view, ~s(#ways-forward input[value="to:planning"][checked]))
+
+      # The dock's button is Steps': on another view there is nothing on screen it would take.
+      {:ok, docs, _html} = live(conn, page(project, ticket, "?tab=docs"))
+      refute has_element?(docs, "#forward-button")
+      refute has_element?(docs, "#forward-button-inline")
+    end
+
+    test "take the one picked through the operation that takes it anywhere", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      stuck_with_refinement(ticket)
+      {:ok, view, _html} = live(conn, page(project, ticket))
+
+      view |> form("#ways-forward", %{"way" => "to:planning"}) |> render_submit()
+
+      # A person taking it approves what it approves; the ticket is in planning, with nothing
+      # left to pick.
+      assert %{state: "planning", status: :active} = Tickets.get!(ticket.id)
+      refute has_element?(view, "#ways-forward")
+    end
+
+    test "run the state again when that is the one picked", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      stuck_with_refinement(ticket)
+      {:ok, view, _html} = live(conn, page(project, ticket))
+
+      assert view |> form("#ways-forward", %{"way" => "again"}) |> render_submit() =~
+               "Running refining again"
+
+      assert Tickets.get!(ticket.id).status == :active
+      assert [_first, %{attempt: 2}] = Jobs.for_ticket(ticket.id)
+    end
+
+    # The stuck reason heads the step it happened in: why, before the ways on.
+    test "follow why the ticket stuck", %{conn: conn, project: project, ticket: ticket} do
+      stuck_with_refinement(ticket)
+      {:ok, view, _html} = live(conn, page(project, ticket))
+
+      assert has_element?(view, ".ticket-step--current #stuck-reason", "Stuck: a reason.")
+      # A stuck ticket waits on a person: its step is the amber one.
+      assert has_element?(view, ".ticket-step--waiting #stuck-reason")
+      # In amber, with no △: stuck is a wait, not a warning (UX re-check #4).
+      assert has_element?(view, "#stuck-reason.text-accent-text")
+      refute has_element?(view, "#stuck-reason.text-warning")
+    end
+  end
+
+  describe "the details" do
+    test "say what it is, what it has spent, its facts and its lifecycle", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      {:ok, view, _html} = live(conn, page(project, ticket))
+      details = view |> element("#frame-details") |> render()
+
+      assert details =~ "#{project.name}##{ticket.number}"
+      assert has_element?(view, "#ticket-facts", ticket.branch)
+      assert has_element?(view, "#ticket-facts", "refining · visit 1")
+      # No usage figure reported: the row is left out rather than drawn `5h — · week —`.
+      refute has_element?(view, "#ticket-facts", "week")
+
+      # Nothing spent yet: said in words, with the allowance and no meter at zero (UX re-check #7).
+      assert has_element?(view, "#ticket-usage", "nothing spent yet")
+      allowance = Forge.Tickets.workflow(ticket).limits.ticket_tokens
+
+      assert has_element?(
+               view,
+               "#ticket-usage",
+               "allowance #{ForgeWeb.Format.windows(allowance)}"
+             )
+
+      refute has_element?(view, "#ticket-usage .ticket-usage-track")
+
+      # Once it has spent, the figure of the allowance and the meter.
+      {:ok, spent} =
+        ticket |> Ecto.Changeset.change(usage: 300_000) |> Forge.Repo.update()
+
+      {:ok, spent_view, _html} = live(conn, page(project, spent))
+      assert has_element?(spent_view, "#ticket-usage", ForgeWeb.Format.windows(300_000))
+      assert has_element?(spent_view, "#ticket-usage", "of #{ForgeWeb.Format.windows(allowance)}")
+      assert has_element?(spent_view, "#ticket-usage .ticket-usage-track")
+
+      assert has_element?(view, "#frame-details #cancel-ticket")
+
+      view |> element("#frame-details #cancel-ticket") |> render_click()
+      assert Tickets.get!(ticket.id).status == :cancelled
+      assert has_element?(view, "#frame-details #restore-ticket")
+    end
+
+    # Ways forward live on Steps; the details lead there rather than offering them twice.
+    test "lead to the ways forward when there are some", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=docs"))
+      refute has_element?(view, "#details-ways")
+
+      stuck_with_refinement(ticket)
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=docs"))
+
+      assert has_element?(
+               view,
+               ~s(#details-ways[href="#{page(project, ticket, "?tab=steps")}"]),
+               "Ways forward"
+             )
+    end
+  end
+
+  # The daily cap is the clock's to lift, so the ticket says when (`capacity.md` § Four
+  # exhaustions, three treatments): `paused · spend 6h 12m`, neutral, in its subline.
+  describe "paused on the daily cap" do
+    test "says so, with the time until it lifts", %{conn: conn, project: project, ticket: ticket} do
+      previous = Application.get_env(:forge, Forge.Spend, [])
+      Application.put_env(:forge, Forge.Spend, daily_tokens: 0)
+      on_exit(fn -> Application.put_env(:forge, Forge.Spend, previous) end)
+
+      {:ok, view, _html} = live(conn, page(project, ticket))
+      subline = view |> element("#title-row .frame-subline") |> render()
+
+      assert subline =~ ~r/paused · spend (\d+h )?\d+m/
+      refute subline =~ "waiting on you"
+    end
+
+    # The cap holds back a job not yet started; a ticket whose job is running is not paused by it.
+    test "is said only while a job waits to start", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      previous = Application.get_env(:forge, Forge.Spend, [])
+      Application.put_env(:forge, Forge.Spend, daily_tokens: 0)
+      on_exit(fn -> Application.put_env(:forge, Forge.Spend, previous) end)
+
+      [job] = Jobs.for_ticket(ticket.id)
+      running!(job)
+
+      {:ok, view, _html} = live(conn, page(project, ticket))
+      refute view |> element("#title-row .frame-subline") |> render() =~ "paused"
+    end
+
+    # The countdown is drawn again on the minute, and whether the cap still holds with it: it
+    # can lift before midnight.
+    test "moves on with the clock, and goes when the cap lifts", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      previous = Application.get_env(:forge, Forge.Spend, [])
+      Application.put_env(:forge, Forge.Spend, daily_tokens: 0)
+      on_exit(fn -> Application.put_env(:forge, Forge.Spend, previous) end)
+
+      {:ok, view, _html} = live(conn, page(project, ticket))
+      assert view |> element("#title-row .frame-subline") |> render() =~ "paused · spend"
+      drawn = :sys.get_state(view.pid).socket.assigns.now
+
+      Application.put_env(:forge, Forge.Spend, previous)
+      send(view.pid, :spend_tick)
+
+      refute view |> element("#title-row .frame-subline") |> render() =~ "paused"
+      assert DateTime.after?(:sys.get_state(view.pid).socket.assigns.now, drawn)
+    end
+
+    test "counts down to midnight UTC" do
+      paused = &ForgeWeb.TicketLive.spend_paused/1
+      assert paused.(~U[2026-11-10 17:48:00Z]) == "paused · spend 6h 12m"
+      assert paused.(~U[2026-11-10 23:30:30Z]) == "paused · spend 29m"
+      # The countdown `Format.until/2` draws, and under a minute none at all: never "spend now".
+      assert paused.(~U[2026-11-10 23:59:30Z]) == "paused · spend"
+    end
+  end
+
+  describe "Talk" do
+    test "is a view while the ticket has a live conversation, and leads to it", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      {:ok, view, _html} = live(conn, page(project, ticket))
+      refute has_element?(view, "#tab-talk")
+
+      {:ok, chat} = Conversations.open(project, "about the score", ticket: ticket)
+      {:ok, view, _html} = live(conn, page(project, ticket))
+      assert has_element?(view, ~s(#tab-talk[href="/chats/#{chat.id}"]))
+
+      {:ok, _ended} = Conversations.ended(chat, nil, "idle")
+      {:ok, view, _html} = live(conn, page(project, ticket))
+      refute has_element?(view, "#tab-talk")
+    end
+  end
+
+  describe "Docs, grouped by what each asks of you" do
+    test "puts what the decision waits on first, then what it was built from, then the rest", %{
+      conn: conn,
+      project: project,
+      ticket: ticket,
+      user: user
+    } do
+      [job] = Jobs.for_ticket(ticket.id)
+
+      {:ok, _} =
+        Artifacts.record_version(ticket.id, "notes.md", :document, {:user, user.id}, %{
+          content: "# Notes\n"
+        })
+
+      {:ok, _} =
+        Artifacts.record_version(ticket.id, "log.txt", :document, {:job, job.id}, %{
+          content: "ran\n"
+        })
+
+      pend_document(ticket)
+
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=docs"))
+
+      assert has_element?(view, "#docs-waiting #doc-refinement\\.md")
+      assert has_element?(view, "#docs-built_from #doc-notes\\.md", "a person")
+      assert has_element?(view, "#docs-produced #doc-log\\.txt", "agent · refining #1")
+
+      html = view |> element("#docs") |> render()
+
+      at =
+        for group <- ~w(docs-waiting docs-built_from docs-produced),
+            do: elem(:binary.match(html, group), 0)
+
+      assert at == Enum.sort(at)
+
+      # Nothing waits once the approval is decided: no group of that name at all.
+      Tickets.get!(ticket.id)
+      |> Ecto.Changeset.change(pending_transition: nil)
+      |> Forge.Repo.update!()
+
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=docs"))
+      refute has_element?(view, "#docs-waiting")
+      assert has_element?(view, "#docs-produced #doc-refinement\\.md")
+    end
+
+    # With width, the document a decision waits on is read beside the view (`16i`).
+    test "the document waited on is drawn for the wide screen's column", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      {:ok, view, _html} = live(conn, page(project, ticket))
+      refute has_element?(view, "#aside-document")
+
+      pend_document(ticket)
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=steps"))
+
+      assert has_element?(view, ".frame-aside #aside-document", "refinement.md v1")
+      assert view |> element("#aside-document") |> render() =~ "<h1>Refinement</h1>"
+    end
   end
 
   # `docs/design/ui.md` § Decide and Timeline: a human state's documents are written where the
@@ -1028,9 +1527,9 @@ defmodule ForgeWeb.TicketWorkScreenTest do
       ticket: ticket
     } do
       ticket = rest_in_review(ticket)
-      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=decide"))
+      {:ok, view, _html} = live(conn, page(project, ticket))
 
-      assert has_element?(view, "#write-test-report\\.md", "not written yet")
+      assert has_element?(view, "#steps #writable #write-test-report\\.md", "not written yet")
 
       view
       |> form("#write-test-report\\.md", %{content: "The save button does nothing.\n"})
@@ -1048,8 +1547,8 @@ defmodule ForgeWeb.TicketWorkScreenTest do
 
     # A job state's documents are its job's to write; offering them here would be a person
     # overwriting the contract between two states from a form that does not say so. Stuck, so
-    # Decide is drawing — the state again, since `planning` approves a refinement that does not
-    # exist yet — and would draw an editor beside it.
+    # the current step offers its ways forward — the state again, since `planning` approves a
+    # refinement that does not exist yet — and would draw an editor beside them.
     test "are not offered while a job state holds the ticket", %{
       conn: conn,
       project: project,
@@ -1060,9 +1559,9 @@ defmodule ForgeWeb.TicketWorkScreenTest do
       end
 
       {:ok, ticket} = ticket |> Ecto.Changeset.change(status: :stuck) |> Forge.Repo.update()
-      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=decide"))
+      {:ok, view, _html} = live(conn, page(project, ticket))
 
-      assert has_element?(view, "#retry-#{ticket.id}")
+      assert has_element?(view, "#ways-forward #way-again")
       refute has_element?(view, ~s(form[phx-submit="write_document"]))
     end
   end

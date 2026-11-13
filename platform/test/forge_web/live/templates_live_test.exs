@@ -80,7 +80,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
   end
 
   test "a credential is added and its secret never reaches the page", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/templates")
+    {:ok, view, _html} = live(conn, ~p"/templates?view=credentials")
 
     html =
       view
@@ -97,7 +97,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
   # of it: the token sat in this LiveView's state, and `<.input>` rendered it back into the page
   # as the password field's value.
   test "a token being typed is in neither the page nor the state", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/templates")
+    {:ok, view, _html} = live(conn, ~p"/templates?view=credentials")
 
     html =
       view
@@ -115,7 +115,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
   # reached without an account has no credential to make, and the form should not pretend
   # otherwise.
   test "a provider that needs no credential is not offered one", %{conn: conn} do
-    {:ok, _view, html} = live(conn, ~p"/templates")
+    {:ok, _view, html} = live(conn, ~p"/templates?view=credentials")
 
     assert [_form] = Regex.scan(~r/id="credential-form"/, html)
 
@@ -129,7 +129,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
   # But a *template* for that provider is exactly the case that carries no credential, and it
   # has to stay creatable.
   test "a template for a provider that needs no credential is creatable", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/templates")
+    {:ok, view, _html} = live(conn, ~p"/templates?new=1")
 
     # Choosing it is what takes the credential select away, and with it the credential of the
     # provider the form was on — a local template carries none.
@@ -149,11 +149,11 @@ defmodule ForgeWeb.TemplatesLiveTest do
       |> render_submit()
 
     assert html =~ "here"
-    assert html =~ "0 of 1 made"
+    assert html =~ "0 of 1"
   end
 
   test "a template is created and shows what a machine from it will be", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/templates")
+    {:ok, view, _html} = live(conn, ~p"/templates?new=1")
 
     html =
       view
@@ -171,7 +171,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
     assert html =~ "build"
     assert html =~ "8.0 GiB"
     assert html =~ "4 cores"
-    assert html =~ "0 of 3 made"
+    assert html =~ "0 of 3"
     # Nothing ticked means any kind, the same reading a worker that reported none gets.
     assert html =~ "any kind"
   end
@@ -179,7 +179,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
   # The units the grammar accepts, so an operator who writes `8GiB` in a workflow writes the
   # same thing here. A field this rejects must not silently become a template with no memory.
   test "a memory size that is not one is refused rather than stored", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/templates")
+    {:ok, view, _html} = live(conn, ~p"/templates?new=1")
 
     html =
       view
@@ -192,13 +192,13 @@ defmodule ForgeWeb.TemplatesLiveTest do
     # this would complain that the memory must be greater than zero — which sends somebody
     # looking for a number they never typed instead of at the word they did.
     assert html =~ "memory can&#39;t be blank"
-    refute html =~ "0 of 1 made"
+    refute html =~ "0 of 1"
   end
 
   # A machine smaller than the least one job can run in makes nothing anybody can use, and the
   # refusal names the minimum rather than leaving the operator to find it.
   test "a machine smaller than one job is refused, and the minimum is named", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/templates")
+    {:ok, view, _html} = live(conn, ~p"/templates?new=1")
 
     html =
       view
@@ -214,7 +214,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
       |> render_submit()
 
     assert html =~ "memory must be at least 512MiB, the least a job can run in"
-    refute html =~ "0 of 1 made"
+    refute html =~ "0 of 1"
 
     html =
       view
@@ -240,7 +240,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
     user: user
   } do
     template = template_for(user)
-    {:ok, view, _html} = live(conn, ~p"/templates")
+    {:ok, view, _html} = live(conn, ~p"/templates?template=#{template.id}")
 
     view
     |> element(~s(button[phx-click=edit-template][phx-value-id="#{template.id}"]))
@@ -261,12 +261,12 @@ defmodule ForgeWeb.TemplatesLiveTest do
     project = project_for(user)
     template = template_for(user)
 
-    {:ok, view, html} = live(conn, ~p"/templates")
+    {:ok, view, html} = live(conn, ~p"/templates?template=#{template.id}")
     assert html =~ "never used"
 
     html =
       view
-      |> element("#template-#{template.id} form[phx-submit=assign]")
+      |> element("#template-detail form[phx-submit=assign]")
       |> render_submit(%{"template" => template.id, "project" => project.id})
 
     assert html =~ project.name
@@ -278,6 +278,29 @@ defmodule ForgeWeb.TemplatesLiveTest do
       |> render_click()
 
     assert html =~ "never used"
+  end
+
+  # The select offers what is not assigned yet, starting on a blank, and goes once nothing is left
+  # (UX pass, D5).
+  test "Assign offers only the projects the template is not assigned to", %{
+    conn: conn,
+    user: user
+  } do
+    assigned = project_for(user)
+    other = project_for(user)
+    template = template_for(user)
+    {:ok, _} = Provisioning.assign(user, template.id, assigned.id)
+
+    {:ok, view, _html} = live(conn, ~p"/templates?template=#{template.id}")
+    select = view |> element("#template-detail form[phx-submit=assign] select") |> render()
+
+    refute select =~ ~s(value="#{assigned.id}")
+    assert select =~ ~s(value="#{other.id}")
+    assert select =~ ~r/<option value="" disabled="" selected="">add a project…/
+
+    {:ok, _} = Provisioning.assign(user, template.id, other.id)
+    {:ok, view, _html} = live(conn, ~p"/templates?template=#{template.id}")
+    refute has_element?(view, "#template-detail form[phx-submit=assign]")
   end
 
   # The scoping rule on the page rather than in the context: another person's rows are not
@@ -310,12 +333,10 @@ defmodule ForgeWeb.TemplatesLiveTest do
     elsewhere = project_for(Forge.AccountsFixtures.user_fixture())
     template = template_for(user)
 
-    {:ok, view, _html} = live(conn, ~p"/templates")
+    {:ok, view, _html} = live(conn, ~p"/templates?template=#{template.id}")
 
-    html =
-      view
-      |> element("#template-#{template.id} form[phx-submit=assign]")
-      |> render_submit(%{"template" => template.id, "project" => elsewhere.id})
+    # The viewer is in no project, so there is no form to submit: the event is sent by hand.
+    html = render_submit(view, "assign", %{"template" => template.id, "project" => elsewhere.id})
 
     assert html =~ "not in that project"
     assert Provisioning.for_project(elsewhere.id) == []
@@ -327,10 +348,10 @@ defmodule ForgeWeb.TemplatesLiveTest do
     mine = template_for(user)
     theirs = template_for(Forge.AccountsFixtures.user_fixture())
 
-    {:ok, view, _html} = live(conn, ~p"/templates")
+    {:ok, view, _html} = live(conn, ~p"/templates?template=#{mine.id}")
 
     view
-    |> element("#template-#{mine.id} form[phx-submit=assign]")
+    |> element("#template-detail form[phx-submit=assign]")
     |> render_submit(%{"template" => theirs.id, "project" => project.id})
 
     assert Provisioning.for_project(project.id) == []
@@ -340,7 +361,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
   # machine that exists instead of typing a name that does not — and the platform still never
   # parses the size it hands back (`docs/design/provisioning.md` § Where a machine comes from).
   test "the provider's own machine sizes are offered", %{conn: conn} do
-    {:ok, _view, html} = live(conn, ~p"/templates")
+    {:ok, _view, html} = live(conn, ~p"/templates?new=1")
 
     assert html =~ "small — 2.0 GiB, 2 cores"
     assert html =~ "large — 8.0 GiB, 8 cores"
@@ -352,45 +373,48 @@ defmodule ForgeWeb.TemplatesLiveTest do
   # anything. A catalogue is a question about an account; with no account there is nothing to
   # ask (`docs/design/provisioning.md` § Where a machine comes from).
   test "a provider with no credential of its own is not asked for a catalogue", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/templates")
+    {:ok, view, _html} = live(conn, ~p"/templates?new=1")
 
     html = view |> form("#template-form", template: %{provider: "hetzner"}) |> render_change()
 
     refute html =~ "could not read"
-    assert html =~ "Add a hetzner credential above"
+    assert html =~ "Add a hetzner credential first"
     # And nothing to fill in or submit, rather than a form that cannot work.
-    refute html =~ "Create it"
+    refute html =~ "Make it"
     refute html =~ "Max machines"
   end
 
   # The other half of the same rule: the fields arrive with the account that pays for them, and
   # leave with it. The credential is chosen for the operator because there is no choosing none.
   test "the rest of the form comes and goes with the credential", %{conn: conn, credential: c} do
-    {:ok, view, html} = live(conn, ~p"/templates")
+    {:ok, view, html} = live(conn, ~p"/templates?new=1")
     assert html =~ "small — 2.0 GiB, 2 cores"
 
-    html =
-      view
-      |> element("button[phx-click=delete-credential][phx-value-id=\"#{c.id}\"]")
-      |> render_click()
+    # Removed from the credentials view while the form is not on screen; the form, opened again,
+    # has nothing to fill in.
+    render_patch(view, ~p"/templates?view=credentials")
+    render_click(view, "delete-credential", %{"id" => c.id})
+    html = render_patch(view, ~p"/templates?new=1")
 
     refute html =~ "small — 2.0 GiB, 2 cores"
-    refute html =~ "Create it"
-    assert html =~ "Add a fake credential above"
+    refute html =~ "Make it"
+    assert html =~ "Add a fake credential first"
 
-    html =
-      view
-      |> form("#credential-form", credential: %{name: "again", provider: "fake", token: "t"})
-      |> render_submit()
+    render_patch(view, ~p"/templates?view=credentials")
 
+    view
+    |> form("#credential-form", credential: %{name: "again", provider: "fake", token: "t"})
+    |> render_submit()
+
+    html = render_patch(view, ~p"/templates?new=1")
     assert html =~ "small — 2.0 GiB, 2 cores"
-    assert html =~ "Create it"
+    assert html =~ "Make it"
   end
 
   # A template that named no credential could only fall back to the node's own token, which is
   # the thing per-user credentials replaced (`docs/design/provisioning.md` § Whose account).
   test "the credential select offers no way to choose none", %{conn: conn} do
-    {:ok, _view, html} = live(conn, ~p"/templates")
+    {:ok, _view, html} = live(conn, ~p"/templates?new=1")
 
     options = options_of(html, "template[provider_credential_id]")
 
@@ -401,7 +425,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
   # Picking one fills the two numbers that go with it, rather than leaving three figures to be
   # copied off a price list with one of them got wrong.
   test "choosing a size fills the memory and cores that go with it", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/templates")
+    {:ok, view, _html} = live(conn, ~p"/templates?new=1")
 
     html =
       view
@@ -421,7 +445,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
   # recognised on every event and wrote the shape's memory back over what had been typed. Only
   # a *change* of size fills.
   test "a memory edited by hand survives a change to another field", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/templates")
+    {:ok, view, _html} = live(conn, ~p"/templates?new=1")
 
     view
     |> form("#template-form", template: %{provider: "fake", size: "large"})
@@ -437,7 +461,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
 
   # But choosing a different size still fills, which is what the autofill is for.
   test "choosing another size fills the numbers again", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/templates")
+    {:ok, view, _html} = live(conn, ~p"/templates?new=1")
 
     view
     |> form("#template-form", template: %{provider: "fake", size: "large"})
@@ -454,7 +478,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
 
   # The round trip end to end: what the autofill writes has to survive being submitted.
   test "a template created from an autofilled size keeps that size", %{conn: conn, user: user} do
-    {:ok, view, _html} = live(conn, ~p"/templates")
+    {:ok, view, _html} = live(conn, ~p"/templates?new=1")
 
     view
     |> form("#template-form", template: %{provider: "fake", size: "large"})
@@ -474,7 +498,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
   # Hetzner has no image upload, so what a template names is a snapshot the operator already
   # made. The form offers what the driver can see rather than asking for an id to be pasted.
   test "the provider's own images are offered", %{conn: conn} do
-    {:ok, _view, html} = live(conn, ~p"/templates")
+    {:ok, _view, html} = live(conn, ~p"/templates?new=1")
 
     assert html =~ "forge-worker"
     assert html =~ "the node&#39;s default"
@@ -491,7 +515,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
     end
 
     test "offers a prompt where the default was", %{conn: conn} do
-      {:ok, _view, html} = live(conn, ~p"/templates")
+      {:ok, _view, html} = live(conn, ~p"/templates?new=1")
 
       images = options_of(html, "template[image]")
       assert images =~ ~s(<option value="">choose one</option>)
@@ -509,7 +533,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
     test "the edit form offers a prompt where the default was, too", %{conn: conn, user: user} do
       template = template_for(user, %{size: "small", image: "forge-worker"})
 
-      {:ok, view, _html} = live(conn, ~p"/templates")
+      {:ok, view, _html} = live(conn, ~p"/templates?template=#{template.id}")
 
       view
       |> element(~s(button[phx-click=edit-template][phx-value-id="#{template.id}"]))
@@ -530,7 +554,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
       conn: conn,
       user: user
     } do
-      {:ok, view, _html} = live(conn, ~p"/templates")
+      {:ok, view, _html} = live(conn, ~p"/templates?new=1")
 
       html =
         view
@@ -545,7 +569,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
   end
 
   test "a template records the image it was given", %{conn: conn, user: user} do
-    {:ok, view, _html} = live(conn, ~p"/templates")
+    {:ok, view, _html} = live(conn, ~p"/templates?new=1")
 
     view
     |> form("#template-form",
@@ -589,7 +613,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
     end
 
     test "each image is offered with its build and protocol, or as unlabelled", %{conn: conn} do
-      {:ok, _view, html} = live(conn, ~p"/templates")
+      {:ok, _view, html} = live(conn, ~p"/templates?new=1")
       options = options_of(html, "template[image]")
 
       assert options =~ "new · build aaaaaaaaaaaa current · protocol 1"
@@ -599,7 +623,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
 
     # From the listing the page holds, never from the form: the params are the client's.
     test "a saved template records what its image carries", %{conn: conn, user: user} do
-      {:ok, view, _html} = live(conn, ~p"/templates")
+      {:ok, view, _html} = live(conn, ~p"/templates?new=1")
 
       view
       |> form("#template-form",
@@ -654,7 +678,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
           image_protocol: 0
         })
 
-      {:ok, view, _html} = live(conn, ~p"/templates")
+      {:ok, view, _html} = live(conn, ~p"/templates?template=#{template.id}")
 
       view
       |> element(~s(button[phx-click=edit-template][phx-value-id="#{template.id}"]))
@@ -725,17 +749,17 @@ defmodule ForgeWeb.TemplatesLiveTest do
     # option says, which is the only thing that proves the page is reading the mark.
     test "the mark is offered as a choice, naming the snapshot it means", %{conn: conn} do
       marking("snap-a")
-      {:ok, _view, html} = live(conn, ~p"/templates")
+      {:ok, _view, html} = live(conn, ~p"/templates?new=1")
       assert options_of(html, "template[image]") =~ ~s(<option value="latest">latest · a</option>)
 
       marking("snap-b")
-      {:ok, _view, html} = live(conn, ~p"/templates")
+      {:ok, _view, html} = live(conn, ~p"/templates?new=1")
       assert options_of(html, "template[image]") =~ ~s(<option value="latest">latest · b</option>)
     end
 
     test "the snapshot that carries it says so beside its own labels", %{conn: conn} do
       marking("snap-b")
-      {:ok, _view, html} = live(conn, ~p"/templates")
+      {:ok, _view, html} = live(conn, ~p"/templates?new=1")
       options = options_of(html, "template[image]")
 
       assert options =~ "b · build bbbbbbbbbbbb · protocol 2 · carries latest"
@@ -746,7 +770,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
     # would mean, so the option is there and says there is nothing behind it yet.
     test "with nothing marked the choice says so rather than vanishing", %{conn: conn} do
       Forge.Provider.Fake.listing([%{id: "snap-a", name: "a", build: nil, protocol: nil}])
-      {:ok, _view, html} = live(conn, ~p"/templates")
+      {:ok, _view, html} = live(conn, ~p"/templates?new=1")
 
       assert options_of(html, "template[image]") =~
                ~s(<option value="latest">latest · none marked yet</option>)
@@ -757,7 +781,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
     # the row says nothing about which snapshot it is on until its first machine.
     test "saving a template on the mark records the snapshot it means", %{conn: conn, user: user} do
       marking("snap-b")
-      {:ok, view, _html} = live(conn, ~p"/templates")
+      {:ok, view, _html} = live(conn, ~p"/templates?new=1")
 
       view
       |> form("#template-form",
@@ -804,7 +828,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
         %{id: "snap-fresh", name: "fresh", build: nil, protocol: nil, current: true}
       ])
 
-      {:ok, view, _html} = live(conn, ~p"/templates")
+      {:ok, view, _html} = live(conn, ~p"/templates?template=#{template.id}")
 
       view
       |> element(~s(button[phx-click=edit-template][phx-value-id="#{template.id}"]))
@@ -855,7 +879,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
 
     on_exit(&Forge.Provider.Fake.allow/0)
 
-    {:ok, _view, html} = live(conn, ~p"/templates")
+    {:ok, _view, html} = live(conn, ~p"/templates?new=1")
     options = options_of(html, "template[image]")
 
     assert options =~ "new · build aaaaaaaaaaaa · protocol 1"
@@ -867,7 +891,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
   # — the local one boots its host's image whatever a template says. A provider that does
   # require one is the describe above.
   test "a template that names none leaves it to the driver", %{conn: conn, user: user} do
-    {:ok, view, _html} = live(conn, ~p"/templates")
+    {:ok, view, _html} = live(conn, ~p"/templates?new=1")
 
     view
     |> form("#template-form",
@@ -882,7 +906,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
   test "a template is removed", %{conn: conn, user: user} do
     template = template_for(user, %{name: "goes-away"})
 
-    {:ok, view, html} = live(conn, ~p"/templates")
+    {:ok, view, html} = live(conn, ~p"/templates?template=#{template.id}")
     assert html =~ "goes-away"
 
     html =
@@ -900,7 +924,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
     test "a template's fields are changed in place", %{conn: conn, user: user} do
       template = template_for(user, %{name: "before", memory: 8 * 1024 * 1024 * 1024, cores: 4})
 
-      {:ok, view, _html} = live(conn, ~p"/templates")
+      {:ok, view, _html} = live(conn, ~p"/templates?template=#{template.id}")
 
       view
       |> element(~s(button[phx-click=edit-template][phx-value-id="#{template.id}"]))
@@ -934,7 +958,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
       theirs = template_for(Forge.AccountsFixtures.user_fixture(), %{name: "not-yours"})
       mine = template_for(user, %{name: "mine"})
 
-      {:ok, view, _html} = live(conn, ~p"/templates")
+      {:ok, view, _html} = live(conn, ~p"/templates?template=#{mine.id}")
 
       render_click(view, "edit-template", %{"id" => theirs.id})
       refute has_element?(view, ~s(form#edit-template-#{theirs.id}))
@@ -952,22 +976,217 @@ defmodule ForgeWeb.TemplatesLiveTest do
       assert Forge.Repo.get!(Provisioning.Template, theirs.id).name == "not-yours"
     end
 
-    # One catalogue, keyed on the provider being edited, so only one form may be open.
-    test "the create form steps aside while a template is being edited", %{conn: conn, user: user} do
+    # One catalogue, keyed on the provider being edited, so only one form may be open: opening the
+    # new one puts the edit away rather than holding both.
+    test "only one form is open at a time", %{conn: conn, user: user} do
       template = template_for(user)
 
-      {:ok, view, _html} = live(conn, ~p"/templates")
-      assert has_element?(view, "#template-form")
+      {:ok, view, _html} = live(conn, ~p"/templates?template=#{template.id}")
+      refute has_element?(view, "#template-form")
 
       view
       |> element(~s(button[phx-click=edit-template][phx-value-id="#{template.id}"]))
       |> render_click()
 
+      assert has_element?(view, "#edit-template-#{template.id}")
       refute has_element?(view, "#template-form")
 
-      view |> element(~s(button[phx-click=cancel-edit])) |> render_click()
+      # While editing, only the form: no ceiling card above it, no Projects or Remove under its
+      # Save, and Cancel beside Save (UX pass, D16).
+      refute has_element?(view, "#template-detail .template-ceiling-card")
+      refute has_element?(view, "#template-projects")
+      refute has_element?(view, "#delete-template-#{template.id}-ask")
+      assert has_element?(view, "#edit-template-#{template.id} .template-dock button", "Cancel")
+
+      render_patch(view, ~p"/templates?new=1")
       assert has_element?(view, "#template-form")
+      refute has_element?(view, "#edit-template-#{template.id}")
     end
+  end
+
+  # **Ceilings in money** (`docs/design/ui.md` § Templates and credentials): the maximum times the
+  # price of one machine, in the currency the provider's catalogue names, and nothing where it
+  # names no price — never a zero, which would read as free.
+  describe "a template's ceiling" do
+    setup do
+      on_exit(&Forge.Provider.Fake.allow/0)
+
+      Forge.Provider.Fake.offering([
+        %{
+          size: "large",
+          memory: 8 * 1024 * 1024 * 1024,
+          cores: 8,
+          price_hourly: Decimal.new("0.011"),
+          currency: "USD"
+        },
+        %{size: "small", memory: 2 * 1024 * 1024 * 1024, cores: 2, price_hourly: nil}
+      ])
+
+      :ok
+    end
+
+    defp text_of(view, selector) do
+      view
+      |> element(selector)
+      |> render()
+      |> Floki.parse_fragment!()
+      |> Floki.text()
+      |> String.replace(~r/\s+/, " ")
+    end
+
+    test "is the maximum times the price, in the catalogue's own currency", %{
+      conn: conn,
+      user: user,
+      credential: c
+    } do
+      priced =
+        template_for(user, %{size: "large", max_workers: 4, provider_credential_id: c.id})
+
+      {:ok, view, _html} = live(conn, ~p"/templates")
+
+      row = text_of(view, "#template-#{priced.id}")
+      assert row =~ "up to $0.044/h"
+      assert row =~ "4 × $0.011/h"
+      refute row =~ "€"
+
+      assert text_of(view, "#top-bar .ui-top-title > .ui-top-sub") =~
+               "yours only · 1 template · up to $0.044/h"
+
+      # A month at the ceiling, beside the hour (UX pass, D24): 0.044 × 730 = 32.12.
+      assert row =~ "≈ $32/mo"
+
+      {:ok, view, _html} = live(conn, ~p"/templates?template=#{priced.id}")
+      assert text_of(view, "#template-detail .template-ceiling-figure") =~ "$0.044/h 4 × $0.011/h"
+      assert text_of(view, "#template-monthly") =~ "≈ $32/mo at the ceiling"
+    end
+
+    test "is not drawn where the provider names no price", %{
+      conn: conn,
+      user: user,
+      credential: c
+    } do
+      unpriced =
+        template_for(user, %{size: "small", max_workers: 4, provider_credential_id: c.id})
+
+      {:ok, view, _html} = live(conn, ~p"/templates")
+
+      row = text_of(view, "#template-#{unpriced.id}")
+      assert row =~ "no price from the provider"
+      refute row =~ "up to"
+      refute row =~ "0.000"
+      refute text_of(view, "#top-bar .ui-top-title > .ui-top-sub") =~ "up to"
+    end
+
+    # The catalogue is a call to the provider's API: once per account per page, whatever the
+    # number of rows that read it.
+    test "reads each account's catalogue once, however many templates name it", %{
+      conn: conn,
+      user: user,
+      credential: c
+    } do
+      Forge.Provider.Fake.watch()
+      template_for(user, %{size: "large", provider_credential_id: c.id})
+      template_for(user, %{size: "small", provider_credential_id: c.id})
+      template_for(user, %{size: "large", max_workers: 3, provider_credential_id: c.id})
+
+      {:ok, _view, _html} = live(conn, ~p"/templates")
+
+      # Two mounts — the page as first served, and the connected one — so two reads, not six.
+      assert_receive {:provider_shapes, _secret}
+      assert_receive {:provider_shapes, _secret}
+      refute_receive {:provider_shapes, _secret}, 50
+    end
+
+    test "is what a credential is liable for", %{conn: conn, user: user, credential: c} do
+      template_for(user, %{size: "large", max_workers: 2, provider_credential_id: c.id})
+      template_for(user, %{size: "large", max_workers: 1, provider_credential_id: c.id})
+
+      {:ok, other} =
+        Provisioning.create_credential(user, %{
+          name: "other-acct",
+          provider: "fake",
+          secret: %{"token" => "u"}
+        })
+
+      template_for(user, %{size: "large", max_workers: 5, provider_credential_id: other.id})
+
+      {:ok, view, _html} = live(conn, ~p"/templates?view=credentials")
+
+      assert text_of(view, "#credential-#{c.id}") =~ "named by 2 templates · up to $0.033/h"
+      assert text_of(view, "#credential-#{other.id}") =~ "named by 1 template · up to $0.055/h"
+    end
+
+    test "changes in the form as the size and the maximum do", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/templates?new=1")
+
+      view
+      |> form("#template-form", template: %{size: "large", max_workers: "3"})
+      |> render_change()
+
+      ceiling = text_of(view, "#template-form-ceiling")
+      assert ceiling =~ "Up to $0.033/h"
+      assert ceiling =~ "3 × $0.011/h"
+    end
+  end
+
+  # A full template is new work waiting: its slots are the one amber thing on these pages.
+  test "a template at its maximum draws its slots full", %{conn: conn, user: user} do
+    full = template_for(user, %{max_workers: 1})
+    room = template_for(user, %{max_workers: 2})
+
+    {:ok, _, _} =
+      Forge.Workers.create(
+        Map.put(Forge.Provisioning.Template.worker_attrs(full), :user_id, user.id)
+      )
+
+    {:ok, view, _html} = live(conn, ~p"/templates")
+
+    assert has_element?(view, "#template-#{full.id} .template-slots--full", "1 of 1")
+    refute has_element?(view, "#template-#{room.id} .template-slots--full")
+  end
+
+  # The none-yet page (`14e`) ticks what is done and offers the next step, nothing more.
+  describe "none yet" do
+    test "ticks the credential once there is one, and offers a template next", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/templates")
+
+      assert has_element?(view, "#none-yet .templates-step--done", "Add a credential")
+      refute has_element?(view, "#none-yet .templates-step--done", "Make a template")
+      assert has_element?(view, ~s(#none-yet-next[href="/templates?new=1"]), "Make a template")
+    end
+
+    test "without a credential ticks nothing and offers one", %{
+      conn: conn,
+      user: user,
+      credential: c
+    } do
+      :ok = Provisioning.delete_credential(user, c.id)
+      {:ok, view, _html} = live(conn, ~p"/templates")
+
+      refute has_element?(view, "#none-yet .templates-step--done")
+
+      assert has_element?(
+               view,
+               ~s(#none-yet-next[href="/templates?view=credentials"]),
+               "Add a credential"
+             )
+    end
+
+    test "names the projects that have nothing to run on", %{conn: conn, user: user} do
+      project = project_for(user)
+      {:ok, _view, html} = live(conn, ~p"/templates")
+      assert html =~ "#{project.name} has nothing to run on."
+    end
+  end
+
+  # The id is the URL's; somebody else's template opens nothing, as a missing one does not.
+  test "another person's template does not open", %{conn: conn} do
+    theirs = template_for(Forge.AccountsFixtures.user_fixture(), %{name: "their-secret"})
+
+    {:ok, view, html} = live(conn, ~p"/templates?template=#{theirs.id}")
+
+    refute has_element?(view, "#template-detail")
+    refute html =~ "their-secret"
   end
 
   describe "a template that keeps failing" do

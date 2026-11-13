@@ -157,14 +157,14 @@ The platform reads the recorded release itself and shows it (`ui.md` § The proj
 page and the agent read the same file at the same path, and a test holds the path in
 `platform.md`.
 
-- It reads from the **tip of the default branch**, the same commit the page's workflow block
+- It reads from the **tip of the default branch**, the same commit the page's Workflow view
   reads, through git's object store by the fixed path and never from a checkout on disk, so a
   symlink committed in its place is never followed: the blob git holds is the link's target path,
   and that text is judged like any other content (`../VERSION` is *not a release*; a link whose
   target is the text `0.19.0` would read as `0.19.0`, which is what a file holding it says too).
-- **With no default branch** — nothing to read the file from — the line says *not recorded* and
-  no notice is drawn, since the page's own "cannot take a ticket" block already speaks for that
-  repository.
+- **With no default branch** — nothing to read the file from — the *forge release* fact says *not
+  recorded* and no notice is drawn, since the Workflow view's own "cannot take a ticket" notice
+  already speaks for that repository.
 - It reads at most 64 bytes, the bound a release record uses for a version. A larger file is
   *not a release* and is never read. A directory or a submodule at the path is *not recorded*.
 - What the file holds is shown as plain text, with control characters collapsed to spaces and cut
@@ -172,8 +172,8 @@ page and the agent read the same file at the same path, and a test holds the pat
 - The page's chat link has a request written by the platform that names only the release the
   platform runs. Nothing from the file reaches it. Opening it writes nothing; the person sends the
   message.
-- Nothing is a new write or a new permission. The line and the notice are read-scoped as the page
-  is.
+- Nothing is a new write or a new permission. The fact and the notice are read-scoped as the
+  page is.
 
 ## Not verified here
 

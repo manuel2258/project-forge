@@ -140,13 +140,21 @@ defmodule Forge.Operator do
     end
   end
 
-  @doc "Decides the pending transition."
-  @spec decide(Ticket.t(), actor(), :approved | :rejected, String.t() | nil) ::
-          {:ok, Ticket.t()} | {:error, term()}
-  def decide(%Ticket{} = ticket, actor, decision, comment)
+  @doc """
+  Decides the pending transition — on exactly the versions in `seen` (`%{name => version}`) when
+  the caller drew them, else on the latest (`Forge.Engine.decide/5`).
+  """
+  @spec decide(
+          Ticket.t(),
+          actor(),
+          :approved | :rejected,
+          String.t() | nil,
+          %{String.t() => pos_integer()} | nil
+        ) :: {:ok, Ticket.t()} | {:error, term()}
+  def decide(%Ticket{} = ticket, actor, decision, comment, seen \\ nil)
       when decision in [:approved, :rejected] do
     with :ok <- allow(ticket, actor, :use),
-         {:ok, ticket} <- Engine.decide(ticket, Actor.of(actor), decision, comment) do
+         {:ok, ticket} <- Engine.decide(ticket, Actor.of(actor), decision, comment, seen) do
       notify(ticket)
     end
   end
@@ -412,15 +420,22 @@ defmodule Forge.Operator do
   @doc "Sets the project's default model."
   @spec set_model(Project.t(), User.t(), String.t() | nil) ::
           {:ok, Project.t()} | {:error, term()}
-  def set_model(%Project{} = project, %User{} = user, model) do
-    with :ok <- allow(project, user, :manage), do: Projects.set_model(project, model, user)
-  end
+  def set_model(%Project{} = project, %User{} = user, model),
+    do: set_defaults(project, user, %{model: model})
 
   @doc "Sets the project's default effort."
   @spec set_effort(Project.t(), User.t(), String.t() | nil) ::
           {:ok, Project.t()} | {:error, term()}
-  def set_effort(%Project{} = project, %User{} = user, effort) do
-    with :ok <- allow(project, user, :manage), do: Projects.set_effort(project, effort, user)
+  def set_effort(%Project{} = project, %User{} = user, effort),
+    do: set_defaults(project, user, %{effort: effort})
+
+  @doc """
+  Sets the project's default model and effort in one write, or neither — project settings' one
+  Save (`Forge.Projects.set_defaults/3`). A project admin's.
+  """
+  @spec set_defaults(Project.t(), User.t(), map()) :: {:ok, Project.t()} | {:error, term()}
+  def set_defaults(%Project{} = project, %User{} = user, attrs) do
+    with :ok <- allow(project, user, :manage), do: Projects.set_defaults(project, attrs, user)
   end
 
   @doc "Sets the project's default harness."
@@ -549,6 +564,56 @@ defmodule Forge.Operator do
          {:ok, decision} <- Proposals.decline(version_id, Actor.of(actor), comment) do
       notify_origin(version_id)
       {:ok, decision}
+    end
+  end
+
+  @doc """
+  Declines several proposals with one shared reason (`docs/design/ui.md` § Proposals), **refused
+  whole**: every id is resolved and checked for the actor first — membership, as for one, and all
+  of them in one project — and only then is anything written, in one transaction. One the actor
+  may not decline, one in another project, or one that does not exist answers `:not_found` for
+  the lot, as one alone would; one someone decided meanwhile answers `:already_decided` and rolls
+  the others back.
+  """
+  @spec decline_proposals([String.t()], actor(), String.t() | nil) ::
+          {:ok, [Forge.Proposals.Decision.t()]} | {:error, term()}
+  def decline_proposals(version_ids, actor, reason \\ nil)
+  def decline_proposals([], _actor, _reason), do: {:ok, []}
+
+  def decline_proposals(version_ids, actor, reason) when is_list(version_ids) do
+    with :ok <- allow_proposals(version_ids, actor),
+         {:ok, decisions} <- Proposals.decline_all(version_ids, Actor.of(actor), reason) do
+      Enum.each(version_ids, &notify_origin/1)
+      {:ok, decisions}
+    end
+  end
+
+  # Every one found, every one in the same project, and that project the actor's to use. Asked
+  # before `decline_all/3` writes anything: a guard per write inside the loop would have declined
+  # the first few and then refused.
+  defp allow_proposals(version_ids, actor) do
+    found = Enum.map(version_ids, &Proposals.get/1)
+
+    with false <- Enum.any?(found, &is_nil/1),
+         [project_id] <- found |> Enum.map(& &1.job.project_id) |> Enum.uniq(),
+         true <- Access.can?(scope_of(actor, Forge.Projects.get!(project_id)), :use) do
+      :ok
+    else
+      _missing_mixed_or_not_theirs -> {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Reopens a declined proposal (`docs/design/ticket-proposals.md` § Deciding): anyone who may
+  decline it may, through the same guard — a proposal in a project the actor is not in answers as
+  one that does not exist. Only a declined one; anything else is `:not_declined`.
+  """
+  @spec reopen_proposal(String.t(), actor()) :: {:ok, term()} | {:error, term()}
+  def reopen_proposal(version_id, actor) do
+    with :ok <- allow_proposal(version_id, actor),
+         {:ok, version} <- Proposals.reopen(version_id, Actor.of(actor)) do
+      notify_origin(version_id)
+      {:ok, version}
     end
   end
 

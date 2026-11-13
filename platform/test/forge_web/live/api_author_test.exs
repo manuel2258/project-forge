@@ -55,17 +55,19 @@ defmodule ForgeWeb.ApiAuthorTest do
     ticket
   end
 
-  test "the ticket page and the review page draw an API author, revoked or not, and the queue still loads",
+  test "the ticket's Docs and Changes draw an API author, revoked or not, and the queue still loads",
        ctx do
     %{conn: conn, project: project, token: token} = ctx
     ticket = written_through_the_api(project, token)
 
     for _revoked <- [false, true] do
-      {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
-      assert html =~ "API · release-bot"
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=docs")
+      assert has_element?(view, "#docs", "API · release-bot")
 
-      {:ok, _view, review} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
-      assert review =~ "API · release-bot"
+      {:ok, view, _html} =
+        live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=changes&sub=files")
+
+      assert has_element?(view, "#changes-answers", "API · release-bot")
 
       assert {:ok, _view, _queue} = live(conn, ~p"/")
 

@@ -2,18 +2,18 @@ defmodule ForgeWeb.Transcript do
   @moduledoc """
   A conversation's transcript: each turn in the order it happened (`docs/design/ui.md` § Talk).
 
-  Every text block is its own box, full width on both sides — the person's on `base-200`, the
-  agent's on `base-100` with a border — and a micro label heads each speaker's run. What the
-  agent did sits between its boxes as action lines (`ForgeWeb.Actions`): every line while the
-  turn is open, and each run folded into one line once it has ended, with a failure kept visible
-  beneath the fold.
+  Every text block is its own box, full width on both sides — the person's on `surface-2`, the
+  agent's on `surface-1`, without a border, since nothing in it is tapped — and a micro label
+  heads each speaker's run. What the agent did sits between its boxes as action lines
+  (`ForgeWeb.Actions`): every line while the turn is open, and each run folded into one line once
+  it has ended, with a failure kept visible beneath the fold.
 
   **A notice is the platform's own line**, standing where the turn it is about stands and wearing
   neither side's label: a turn whose work did not reach the branch
   (`docs/design/ui.md` § Talk).
 
   **A message keeps the line breaks it was written with.** The body is Markdown, which joins
-  single newlines into one paragraph; the `msg` class restores them (`app.css`). That is a rule of
+  single newlines into one paragraph; the `msg` class restores them (`doc.css`). That is a rule of
   the transcript's styles and nothing else — a document is rendered as a document.
   """
 
@@ -30,6 +30,10 @@ defmodule ForgeWeb.Transcript do
   attr :refs, :map,
     default: %{},
     doc: "`resolve/3`'s answer: what each text's images and links mean, by `{index, position}`"
+
+  attr :banded, :boolean,
+    default: false,
+    doc: "whether the dock's plan band is drawn: the open turn's checklist is then the band's"
 
   def transcript(assigns) do
     assigns = assign(assigns, entries: entries(assigns.messages))
@@ -54,7 +58,7 @@ defmodule ForgeWeb.Transcript do
         <span>· {Format.ago(message.at, @now)}</span>
       </div>
 
-      <div :if={message.role == :user} class="rounded-box bg-base-200 px-4 py-3" data-said="you">
+      <div :if={message.role == :user} class="rounded-card bg-surface-2 px-4 py-3" data-said="you">
         <div class="doc msg text-sm/[1.6] break-words">
           {Markdown.to_html(message.text, Map.get(@refs, {index, :user}, %{}))}
         </div>
@@ -66,14 +70,14 @@ defmodule ForgeWeb.Transcript do
         refs={@refs}
         index={index}
         folded={message.turn != nil or not @live}
+        banded={@banded}
       />
 
       <%!-- Neither side's: the platform saying this turn's work is not on the branch, which
             otherwise only the machine's log says (`docs/design/conversations.md` § Commits).
             `chat-uncommitted` carries no styling — it is how a test names this line. --%>
-      <p :if={message.role == :notice} class="chat-uncommitted flex gap-2 text-sm/[1.55] text-warning">
-        <span aria-hidden="true">⚠</span>
-        <span>{message.text}</span>
+      <p :if={message.role == :notice} class="chat-uncommitted text-sm/[1.55] text-warning">
+        {message.text}
       </p>
     </li>
     """
@@ -126,6 +130,7 @@ defmodule ForgeWeb.Transcript do
   attr :index, :integer, required: true
   attr :folded, :boolean, required: true
   attr :refs, :map, required: true
+  attr :banded, :boolean, default: false
 
   defp turn(assigns) do
     todos = assigns.message.items |> actions() |> latest_todo()
@@ -134,18 +139,25 @@ defmodule ForgeWeb.Transcript do
       assign(assigns,
         segments: segments(assigns.message.items),
         todo: todos,
-        todo_at: first_todo_id(assigns.message.items)
+        # While the turn is open and the dock draws its plan band, the band is the plan: the
+        # checklist drawn here as well made the plan three times on one screen (UX pass, B16). A
+        # `todo_at` no call has draws no checklist; an ended turn keeps its own.
+        todo_at:
+          if(assigns.banded and not assigns.folded,
+            do: :in_band,
+            else: first_todo_id(assigns.message.items)
+          )
       )
 
     ~H"""
     <%= for {segment, position} <- Enum.with_index(@segments) do %>
       <div
         :if={match?({:text, _}, segment)}
-        class="rounded-box border border-base-300 bg-base-100 px-4 py-3"
+        class="rounded-card bg-surface-1 px-4 py-3"
         data-said="agent"
       >
         <div class="doc msg text-sm/[1.6] break-words">
-          {Markdown.to_html(elem(segment, 1), Map.get(@refs, {@index, position}, %{}))}
+          {Markdown.to_html(asked(elem(segment, 1)), Map.get(@refs, {@index, position}, %{}))}
         </div>
       </div>
       <.run
@@ -158,6 +170,52 @@ defmodule ForgeWeb.Transcript do
       />
     <% end %>
     """
+  end
+
+  @doc """
+  An agent's text with each ```question block it asked in drawn as what it asks — the question and
+  its options, quoted — rather than as the block's YAML: the answer is the card in the dock, and
+  the bubble only says what was asked. The blocks replaced are the ones `ForgeCore.Document`
+  reads as questions, cut at the lines its own scan found them on
+  (`ForgeCore.Document.question_spans/1`), so a fence the parser does not read as a question — one
+  inside another code block — stays as written, and no question's words land on another block.
+  Left as it stands when the questions do not parse.
+  """
+  @spec asked(String.t()) :: String.t()
+  def asked(text) do
+    # No fence without three backticks: most of what an agent says is not parsed at all. Dropping
+    # the check is an equivalent mutant — the parser finds no question there either.
+    with true <- String.contains?(text, "```"),
+         {:ok, %{questions: [_ | _] = questions}} <-
+           ForgeCore.Document.parse(text, blocking: :always) do
+      at = Map.new(questions, &{&1.line, &1})
+      spans = Map.new(ForgeCore.Document.question_spans(text))
+
+      text
+      |> String.replace_prefix("\uFEFF", "")
+      |> String.split(~r/\r?\n/)
+      |> Enum.with_index(1)
+      |> Enum.reduce({[], 0}, &replace_line(&1, &2, at, spans))
+      |> elem(0)
+      |> Enum.reverse()
+      |> Enum.join("\n")
+    else
+      _none -> text
+    end
+  end
+
+  # A question's opening line becomes what it asks, and the rest of its span is dropped.
+  defp replace_line({line, number}, {out, skip_to}, at, spans) do
+    cond do
+      number <= skip_to -> {out, skip_to}
+      Map.has_key?(at, number) -> {[said(at[number]) | out], Map.fetch!(spans, number)}
+      true -> {[line | out], skip_to}
+    end
+  end
+
+  defp said(%{text: text, options: options}) do
+    labels = Enum.map_join(options, " · ", & &1.label)
+    if labels == "", do: "> **Asked:** #{text}", else: "> **Asked:** #{text}\n>\n> #{labels}"
   end
 
   # Text blocks one by one, and the calls between two of them as one run.

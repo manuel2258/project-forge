@@ -1,0 +1,24 @@
+:root {
+  --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+
+  --text-eyebrow: 10.5px;   /* mono, uppercase, +.14em */
+  --text-meta: 11.5px;      /* mono sublines, ids, ages */
+  --text-small: 12.5px;     /* hints, captions */
+  --text-ui: 13.5px;        /* buttons, rows, tabs (13px in the strip) */
+  --text-tab: 13px;
+  --text-body: 14.5px;      /* reading text */
+  --text-title: 15px;       /* top-bar titles, item titles */
+  --text-panel: 16px;       /* drop-panel titles */
+  --text-sentence: 19px;    /* the queue's one-line ask */
+  --text-h1: 22px;          /* desktop page titles */
+
+  --leading-body: 1.6;
+  --leading-ui: 1.45;
+  --leading-title: 1.3;
+  --tracking-eyebrow: .14em;
+  --tracking-title: -.02em;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+}

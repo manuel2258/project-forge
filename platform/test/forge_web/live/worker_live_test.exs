@@ -76,19 +76,19 @@ defmodule ForgeWeb.WorkerLiveTest do
     assert accepted_text =~ Calendar.strftime(at, "%Y-%m-%d %H:%M:%S")
 
     # An error is drawn as one, and nothing else is — a warning included.
-    assert view |> element("#line-#{refused.id}") |> render() =~ "text-error"
-    refute view |> element("#line-#{accepted.id}") |> render() =~ "text-error"
+    assert view |> element("#line-#{refused.id}") |> render() =~ "text-danger"
+    refute view |> element("#line-#{accepted.id}") |> render() =~ "text-danger"
 
     :ok = Log.record(w.id, "unreachable", :warning, "not heard from")
     send(view.pid, :refresh)
     [warned | _] = Log.for_worker(w.id)
     assert text_of(view, "#line-#{warned.id}") =~ "unreachable not heard from"
-    refute view |> element("#line-#{warned.id}") |> render() =~ "text-error"
+    refute view |> element("#line-#{warned.id}") |> render() =~ "text-danger"
 
     # Headed by the same line that heads the machine's block on /workers.
     assert text_of(view, "#machine") =~ "#{String.slice(w.id, 0, 8)} fake creating"
     assert text_of(view, "#machine") =~ "not connected managed"
-    refute header_class(view) =~ "opacity-50"
+    refute header_class(view) =~ "machine--gone"
   end
 
   test "a machine with nothing written says so", %{conn: conn, user: user} do
@@ -156,6 +156,66 @@ defmodule ForgeWeb.WorkerLiveTest do
     assert header =~ "0.2.1 (8rh57whmgk6m) · current"
   end
 
+  # An inner page like every other: the queue button on the left of its top bar (the handoff's
+  # RULES § 9 names `12g` as drawn without one).
+  test "the top bar keeps the queue button", %{conn: conn, user: user} do
+    w = worker(user)
+    {:ok, view, _html} = live(conn, ~p"/workers/#{w.id}")
+
+    assert has_element?(view, ~s(#top-bar a.ui-queue-btn[href="/"]))
+    assert text_of(view, "#top-bar .ui-top-title > .ui-top-name") =~ String.slice(w.id, 0, 8)
+  end
+
+  test "the subline says how it stands and where it comes from", %{conn: conn, user: user} do
+    w = worker(user, %{managed: false})
+    {:ok, view, _html} = live(conn, ~p"/workers/#{w.id}")
+
+    assert text_of(view, "#top-bar .ui-top-title > .ui-top-sub") =~
+             "creating · permanent · no project"
+
+    {:ok, []} = Workers.retire(w, by: :owner)
+    {:ok, view, _html} = live(conn, ~p"/workers/#{w.id}")
+
+    assert text_of(view, "#top-bar .ui-top-title > .ui-top-sub") =~
+             "destroyed just now · permanent · no project"
+  end
+
+  # A job id opens its job page — **only in a project the viewer is in**: the machine is the
+  # owner's, the work it ran is a project's (`docs/design/identity.md` § Workers).
+  test "a job id links to its page only where the viewer may open it", %{conn: conn, user: user} do
+    w = worker(user)
+    mine = Forge.ForgeFixtures.project_fixture()
+    Forge.ForgeFixtures.join!(mine, user)
+    ticket = Forge.ForgeFixtures.ticket_fixture(%{project: mine})
+    seen = Forge.ForgeFixtures.job_fixture(%{ticket: ticket})
+    chat = Forge.ForgeFixtures.chat_fixture(%{project: mine})
+    unseen = Forge.ForgeFixtures.job_fixture()
+
+    for job <- [seen, chat, unseen] do
+      :ok =
+        Log.accept(w.id, %{
+          "at" => DateTime.to_iso8601(DateTime.utc_now()),
+          "type" => "job.accepted",
+          "message" => "took it on",
+          "job_id" => job.id
+        })
+    end
+
+    {:ok, view, html} = live(conn, ~p"/workers/#{w.id}")
+
+    assert has_element?(
+             view,
+             ~s(#log a[href="/tickets/#{mine.name}/#{ticket.number}/jobs/#{seen.id}"]),
+             "job #{String.slice(seen.id, 0, 8)}"
+           )
+
+    assert has_element?(view, ~s(#log a[href="/chats/#{chat.id}"]))
+    # Its short id, as text and never a link: the page does not say whose project it ran in.
+    assert html =~ "job #{String.slice(unseen.id, 0, 8)}"
+    refute html =~ unseen.id
+    refute html =~ "/jobs/#{unseen.id}"
+  end
+
   # **Somebody else's machine is not here, as a missing one is not** — the same answer, so the
   # page cannot be used to learn which ids exist (`docs/design/identity.md` § Sequencing).
   test "another person's machine is not here, and neither is a missing one", %{conn: conn} do
@@ -180,13 +240,13 @@ defmodule ForgeWeb.WorkerLiveTest do
 
     {:ok, view, _html} =
       list
-      |> element("#worker-#{w.id} a", "Log")
+      |> element("#worker-#{w.id} a.machine-head")
       |> render_click()
       |> follow_redirect(conn, ~p"/workers/#{w.id}")
 
     assert text_of(view, "#machine") =~ "destroyed"
     # Dimmed, as its block is on /workers.
-    assert header_class(view) =~ "opacity-50"
+    assert header_class(view) =~ "machine--gone"
     assert render(view) =~ "by its owner, from the workers page"
   end
 end

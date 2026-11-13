@@ -49,6 +49,19 @@ defmodule Forge.AccountsGovernanceTest do
     end
   end
 
+  describe "the accounts waiting" do
+    # Refused before it was approved: no longer waiting on anybody, so in no admin's count.
+    test "are the pending ones, and not one suspended before it was approved" do
+      admin = node_admin_fixture()
+      waiting = pending_user_fixture()
+      {:ok, _refused} = Accounts.suspend_user(pending_user_fixture(), admin)
+
+      assert Accounts.count_pending_users() == 1
+      assert [%{id: id}] = Accounts.list_pending_users()
+      assert id == waiting.id
+    end
+  end
+
   describe "suspend_user/2 and reinstate_user/2" do
     test "suspending stops the account acting, reinstating lets it act again" do
       admin = node_admin_fixture()
@@ -61,6 +74,39 @@ defmodule Forge.AccountsGovernanceTest do
       {:ok, reinstated} = Accounts.reinstate_user(suspended, admin)
       assert User.active?(reinstated)
       assert last_event("user.reinstated").payload["user_id"] == user.id
+    end
+
+    # Suspending signs the account out on its next request: a node admin who did it to themselves,
+    # or to the last admin able to act, would leave nobody who could reinstate anyone.
+    test "refuses to suspend yourself" do
+      admin = node_admin_fixture()
+      _other = node_admin_fixture()
+
+      assert {:error, :self} = Accounts.suspend_user(admin, admin)
+      assert User.active?(Accounts.get_user!(admin.id))
+    end
+
+    # The last admin who can act is never suspended, and no rule of its own is needed for it: the
+    # actor must be an admin who can act (read again at the act), and is not the account suspended
+    # (`:self`), so one is always left. A suspended admin's stale page is refused as the actor.
+    test "the last node admin who can act cannot be suspended by one who cannot" do
+      only = node_admin_fixture()
+      other = node_admin_fixture()
+      {:ok, _other} = Accounts.suspend_user(other, only)
+
+      assert {:error, :forbidden} = Accounts.suspend_user(only, other)
+      assert User.active?(Accounts.get_user!(only.id))
+
+      # With a second admin who can act, the first may be suspended.
+      third = node_admin_fixture()
+      assert {:ok, suspended} = Accounts.suspend_user(only, third)
+      refute User.active?(suspended)
+    end
+
+    test "suspends an account that is no admin whoever else is one" do
+      only = node_admin_fixture()
+      assert {:ok, suspended} = Accounts.suspend_user(user_fixture(), only)
+      refute User.active?(suspended)
     end
   end
 
@@ -93,14 +139,73 @@ defmodule Forge.AccountsGovernanceTest do
       assert Accounts.get_user!(only.id).node_admin
     end
 
-    test "a suspended node admin still counts as one for the last-admin rule" do
+    # One rule for "an admin who can act" (review fixes 7, M1): the flag and `User.active?/1`, the
+    # rule `suspend_user/2` holds. A suspended admin reinstates nobody, so the only active one
+    # dropping their own flag left a node no page could govern again.
+    test "the only admin who can act may not drop their own flag beside a suspended one" do
       only = node_admin_fixture()
-      {:ok, only} = Accounts.suspend_user(only, only)
+      other = node_admin_fixture()
+      {:ok, _other} = Accounts.suspend_user(other, only)
 
-      # Deliberate: the rule counts rows carrying the flag, not rows that may currently act.
-      # Reinstating is one field, so a suspended admin is recoverable; a demoted last admin is
-      # not. If this is ever changed, it must be changed knowing that.
       assert {:error, :last_node_admin} = Accounts.set_node_admin(only, only, false)
+      assert Accounts.get_user!(only.id).node_admin
+
+      # The suspended one may lose it: an admin who can act is left.
+      assert {:ok, demoted} = Accounts.set_node_admin(other, only, false)
+      refute demoted.node_admin
+    end
+  end
+
+  # Every governing act asks again who is acting, when it acts (review fixes 7, H1): a page holds
+  # the user it mounted with, and an admin suspended or demoted while `/accounts` was open went on
+  # approving, and reinstated themselves.
+  describe "the actor, read again at the act" do
+    setup do
+      admin = node_admin_fixture()
+      stale = node_admin_fixture()
+      %{admin: admin, stale: stale}
+    end
+
+    test "a suspended admin governs nothing", %{admin: admin, stale: stale} do
+      {:ok, _suspended} = Accounts.suspend_user(stale, admin)
+      pending = pending_user_fixture()
+
+      assert {:error, :forbidden} = Accounts.approve_user(pending, stale)
+      assert {:error, :forbidden} = Accounts.reinstate_user(stale, stale)
+      assert {:error, :forbidden} = Accounts.suspend_user(user_fixture(), stale)
+      assert {:error, :forbidden} = Accounts.set_node_admin(user_fixture(), stale, true)
+      assert {:error, :forbidden} = Accounts.delete_unapproved_user(pending, stale)
+
+      refute User.active?(Accounts.get_user!(pending.id))
+      refute User.active?(Accounts.get_user!(stale.id))
+    end
+
+    test "a demoted admin governs nothing", %{admin: admin, stale: stale} do
+      {:ok, _demoted} = Accounts.set_node_admin(stale, admin, false)
+      pending = pending_user_fixture()
+
+      assert {:error, :forbidden} = Accounts.approve_user(pending, stale)
+      assert {:error, :forbidden} = Accounts.set_node_admin(stale, stale, true)
+      assert {:error, :forbidden} = Accounts.delete_unapproved_user(pending, stale)
+      refute Accounts.get_user!(stale.id).node_admin
+    end
+  end
+
+  describe "suspending signs the account out" do
+    test "its sessions are deleted and its open pages told to disconnect" do
+      admin = node_admin_fixture()
+      user = user_fixture()
+      token = Accounts.generate_user_session_token(user)
+      kept = Accounts.generate_user_session_token(admin)
+      topic = "users_sessions:#{Base.url_encode64(token)}"
+      ForgeWeb.Endpoint.subscribe(topic)
+
+      {:ok, _suspended} = Accounts.suspend_user(user, admin)
+
+      assert_receive %Phoenix.Socket.Broadcast{topic: ^topic, event: "disconnect"}
+      refute Forge.Repo.get_by(Forge.Accounts.UserToken, token: token, context: "session")
+      # Only theirs.
+      assert Forge.Repo.get_by(Forge.Accounts.UserToken, token: kept, context: "session")
     end
   end
 

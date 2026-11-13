@@ -159,6 +159,45 @@ defmodule Forge.ReleaseTickets do
   end
 
   @doc """
+  What a release ticket is the release of (`docs/design/ui.md` § Steps, `21e`): the project's
+  previous release that reached its terminal state, by its title — its version, once its own
+  workflow named one — and the tickets merged after it, newest first. Nil when the project has no
+  earlier release: the platform keeps no git tags to read a previous version from.
+
+  *After* is after the previous release's ticket last changed, which is when it went done; a
+  release is never an entry, this one or another.
+  """
+  @spec since(Ticket.t()) :: %{version: String.t(), tickets: [Ticket.t()]} | nil
+  def since(%Ticket{} = ticket) do
+    previous =
+      Repo.one(
+        from t in Ticket,
+          where:
+            t.project_id == ^ticket.project_id and t.number < ^ticket.number and
+              t.status == :done and fragment("? -> 'release' = 'true'::jsonb", t.workflow),
+          order_by: [desc: t.number],
+          limit: 1
+      )
+
+    if previous do
+      merged =
+        Repo.all(
+          from t in Ticket,
+            join: e in Forge.Events.Event,
+            on: e.ticket_id == t.id,
+            where:
+              t.project_id == ^ticket.project_id and e.type == "ticket.merged" and
+                e.inserted_at > ^previous.updated_at and
+                not fragment("coalesce(? -> 'release' = 'true'::jsonb, false)", t.workflow),
+            order_by: [desc: e.inserted_at],
+            select: t
+        )
+
+      %{version: previous.title, tickets: Enum.uniq_by(merged, & &1.id)}
+    end
+  end
+
+  @doc """
   Adds to `multi` the check that restoring `ticket` does not make a second release open: a
   cancelled release is not open, so `start/3` allows another beside it, and bringing the first
   back would otherwise leave two. Adds nothing for a ticket that is not a release. Takes the same

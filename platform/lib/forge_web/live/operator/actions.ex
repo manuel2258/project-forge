@@ -1,10 +1,16 @@
 defmodule ForgeWeb.Operator.Actions do
   @moduledoc """
   The LiveView events behind the operator cards, shared by every page that shows them.
-  Each calls `Forge.Operator` as the logged-in user and reports the result as a flash.
+  Each calls `Forge.Operator` as the logged-in user. Done, it says so in a toast (the `:info`
+  flash); refused, it leaves `:refusal` — the event refused and the words — for the page to draw
+  where that event was sent from (`refused/1`, `docs/design/ui.md` § Errors stay where you acted).
+  A page that hands events here assigns `refusal: nil` on mount.
   """
 
+  use Phoenix.Component
+
   import Phoenix.LiveView, only: [put_flash: 3]
+  import ForgeWeb.UI.Feedback, only: [error_note: 1]
 
   require Logger
   require ForgeWeb.Operator.Admission
@@ -20,14 +26,46 @@ defmodule ForgeWeb.Operator.Actions do
   (`ForgeWeb.Operator.QuestionForm`) or a card's (`ForgeWeb.Operator.Drafts`), which needs no
   reload; `:unknown` for anything else.
   """
+  # Every event clears the last refusal first: a refusal stays only until the next thing done.
   def handle(event, params, socket) do
+    socket = assign(socket, :refusal, nil)
+
     with :unknown <- QuestionForm.handle(event, params, socket),
          :unknown <- Drafts.handle(event, params, socket) do
       act_on(event, params, socket)
     end
   rescue
-    Ecto.NoResultsError -> {:handled, put_flash(socket, :error, "That ticket no longer exists.")}
+    Ecto.NoResultsError -> {:handled, refuse(socket, event, "That ticket no longer exists.")}
   end
+
+  @doc """
+  Leaves a refusal of `event` for the page to draw where it was sent from — an event's name, or
+  `{:form, id}` for a question card's Send: never a toast, and it stays until the next event
+  handled here replaces it.
+  """
+  @spec refuse(Phoenix.LiveView.Socket.t(), term(), String.t()) :: Phoenix.LiveView.Socket.t()
+  def refuse(socket, event, text), do: assign(socket, :refusal, %{at: event, text: text})
+
+  @doc """
+  The refusal of one of the events `at`, drawn where they are sent from — the details, a notice,
+  the dock — and nothing when the last refusal was another's.
+  """
+  attr :id, :string, required: true
+  attr :refusal, :map, default: nil, doc: "the page's `:refusal` assign"
+
+  attr :at, :list,
+    required: true,
+    doc: "the events whose refusal belongs here; `:questions` is any question card's Send"
+
+  def refused(assigns) do
+    ~H"""
+    <.error_note :if={here?(@refusal, @at)} id={@id}>{@refusal.text}</.error_note>
+    """
+  end
+
+  defp here?(nil, _at), do: false
+  defp here?(%{at: {:form, _id} = form}, at), do: form in at or :questions in at
+  defp here?(%{at: event}, at), do: event in at
 
   # A submit that committed forgets the draft its own form named, so the comment on an approval
   # does not come back on the next one and a saved document is drawn from the version just
@@ -42,7 +80,7 @@ defmodule ForgeWeb.Operator.Actions do
 
       {:error, reason} ->
         {:handled,
-         socket |> refused(params, reason) |> put_flash(:error, "Failed: #{describe(reason)}")}
+         socket |> keep_typed(params, reason) |> refuse(event, "Failed: #{describe(reason)}")}
     end
   end
 
@@ -52,19 +90,10 @@ defmodule ForgeWeb.Operator.Actions do
   # words: the text safe in the box, and no gesture that would send it. The refusal is the
   # warning; repeating the gesture is the decision to write over what arrived
   # (`docs/design/ui.md` § A reconnect is not a reload).
-  defp refused(socket, params, {:stale_document, _name, version}),
+  defp keep_typed(socket, params, {:stale_document, _name, version}),
     do: Drafts.put(socket, params["draft"], "base", to_string(version))
 
-  defp refused(socket, _params, _reason), do: socket
-
-  defp act("decide", %{"ticket" => id, "decision" => decision} = params, socket) do
-    decision = if decision == "rejected", do: :rejected, else: :approved
-    comment = blank_to_nil(params["comment"])
-
-    with {:ok, ticket} <- Operator.decide(ticket(id), user(socket), decision, comment) do
-      {:ok, "#{decision}; now in #{ticket.state}"}
-    end
-  end
+  defp keep_typed(socket, _params, _reason), do: socket
 
   defp act("transition", %{"ticket" => id, "to" => to}, socket) do
     with {:ok, ticket} <- Operator.transition(ticket(id), user(socket), to) do
@@ -143,71 +172,77 @@ defmodule ForgeWeb.Operator.Actions do
 
   @doc "The person acting, as every operator event is attributed."
   def user(socket), do: socket.assigns.current_scope.user
-  defp blank_to_nil(""), do: nil
-  defp blank_to_nil(value), do: value
 
-  defp describe({:job_live, state}), do: "a job for #{state} is still live"
-  defp describe({:step_live, state}), do: "#{state} is a conversation; Accept it to move on"
-  defp describe({:invalid_document, errors}), do: ForgeCore.Error.format(errors)
-  defp describe(:nothing_pending), do: "nothing awaits approval"
+  @doc """
+  A refusal from `Forge.Operator`, in the words a person acts on. Shared with
+  `ForgeWeb.Operator.Decision`, which draws it inside the decision's panel.
+  """
+  @spec describe(term()) :: String.t()
+  def describe({:job_live, state}), do: "a job for #{state} is still live"
+  def describe({:step_live, state}), do: "#{state} is a conversation; Accept it to move on"
+  def describe({:invalid_document, errors}), do: ForgeCore.Error.format(errors)
+  def describe(:nothing_pending), do: "nothing awaits approval"
 
-  defp describe({:stale_document, name, version}),
+  def describe(:note_required),
+    do: "a reject needs a note saying what should change; the next job reads it"
+
+  def describe({:stale_document, name, version}),
     do:
       "#{name} is at v#{version} now, written since this page was drawn; nothing was saved. " <>
         "What you typed is still in the box — save again to write it over v#{version}"
 
-  defp describe(:no_such_transition), do: "no such transition"
-  defp describe({:no_version, name}), do: "#{name} has no version to approve"
-  defp describe({:no_job_in, state}), do: "no job runs in #{state}"
-  defp describe({:not_retryable, status}), do: "a #{status} ticket cannot be run again"
-  defp describe({:not_cancellable, status}), do: "a #{status} ticket cannot be cancelled"
-  defp describe({:release_open, _ticket} = reason), do: Admission.explain(reason)
-  defp describe({:not_cancelled, _status}), do: "only a cancelled ticket can be restored"
-  defp describe({:not_active, :cancelled}), do: "the ticket is cancelled; restore it first"
-  defp describe({:not_repinnable, status}), do: "a #{status} ticket cannot be re-pinned"
-  defp describe(:already_pinned), do: "the ticket is already pinned at the default branch's head"
-  defp describe(:pending_approval), do: "decide the pending approval first"
-  defp describe(:queued), do: "the ticket is in the merge queue; take it out first"
-  defp describe(:merging), do: "it is being merged right now, which cannot be taken back"
+  def describe(:no_such_transition), do: "no such transition"
+  def describe({:no_version, name}), do: "#{name} has no version to approve"
+  def describe({:no_job_in, state}), do: "no job runs in #{state}"
+  def describe({:not_retryable, status}), do: "a #{status} ticket cannot be run again"
+  def describe({:not_cancellable, status}), do: "a #{status} ticket cannot be cancelled"
+  def describe({:release_open, _ticket} = reason), do: Admission.explain(reason)
+  def describe({:not_cancelled, _status}), do: "only a cancelled ticket can be restored"
+  def describe({:not_active, :cancelled}), do: "the ticket is cancelled; restore it first"
+  def describe({:not_repinnable, status}), do: "a #{status} ticket cannot be re-pinned"
+  def describe(:already_pinned), do: "the ticket is already pinned at the default branch's head"
+  def describe(:pending_approval), do: "decide the pending approval first"
+  def describe(:queued), do: "the ticket is in the merge queue; take it out first"
+  def describe(:merging), do: "it is being merged right now, which cannot be taken back"
 
-  defp describe({:not_queued, {:merged, _}}),
+  def describe({:not_queued, {:merged, _}}),
     do: "it has already merged, so there is nothing to take out"
 
-  defp describe({:not_queued, {:taken_out, _}}),
+  def describe({:not_queued, {:taken_out, _}}),
     do: "someone has already taken it out of the merge queue"
 
-  defp describe({:not_queued, {:left, reason}}),
+  def describe({:not_queued, {:left, reason}}),
     do: "it is no longer in the merge queue (#{reason})"
 
-  defp describe({:not_queued, nil}), do: "it is not in the merge queue"
-  defp describe(:merges_cleanly), do: "it merges cleanly now, so there is nothing to integrate"
+  def describe({:not_queued, nil}), do: "it is not in the merge queue"
+  def describe(:merges_cleanly), do: "it merges cleanly now, so there is nothing to integrate"
 
-  defp describe({:merge_conflict, paths}),
+  def describe({:merge_conflict, paths}),
     do: "it conflicts with the default branch in #{Enum.join(paths, ", ")}"
 
   # Its sibling, which fell to the catch-all and so told a person to read the server log for a
   # refusal that has a reason to hand.
-  defp describe({:merge_impossible, reason}) when is_binary(reason),
+  def describe({:merge_impossible, reason}) when is_binary(reason),
     do: "the merge could not be attempted: #{reason}"
 
-  defp describe({:merge_impossible, reason}),
+  def describe({:merge_impossible, reason}),
     do: "the merge could not be attempted: #{inspect(reason)}"
 
-  defp describe({:no_state, state}),
+  def describe({:no_state, state}),
     do: "the default branch's workflow has no state #{state}; move the ticket first"
 
-  defp describe({:ticket_type_gone, _name, path}),
+  def describe({:ticket_type_gone, _name, path}),
     do: "#{path} is not on the default branch any more, so there is nothing to re-pin to"
 
-  defp describe(reason) when Admission.type_reason(reason), do: Admission.explain(reason)
+  def describe(reason) when Admission.type_reason(reason), do: Admission.explain(reason)
 
-  defp describe(errors) when is_list(errors),
+  def describe(errors) when is_list(errors),
     do: "the default branch's workflow does not parse: " <> ForgeCore.Error.format(errors)
 
-  defp describe({:ambiguous, outcomes}),
+  def describe({:ambiguous, outcomes}),
     do: "ambiguous; pick an outcome: #{Enum.join(outcomes, ", ")}"
 
-  defp describe(other) do
+  def describe(other) do
     Logger.error("operator action failed: #{inspect(other)}")
     "something went wrong; see the server log"
   end

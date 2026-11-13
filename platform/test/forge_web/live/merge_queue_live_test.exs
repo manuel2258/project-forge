@@ -82,10 +82,14 @@ defmodule ForgeWeb.MergeQueueLiveTest do
       assert has_element?(view, "#merge-queue-place", "2nd of 2")
       assert has_element?(view, "#merge-queue-doing", "Waiting for 1 ahead")
       assert has_element?(view, "#merge-queue-#{second.id}")
-      assert has_element?(view, "#take-out-#{second.id}", "Take out of queue")
+      assert has_element?(view, "#take-out-#{second.id}-ask", "Take out of queue")
 
-      # What the confirm promises about an integration already running.
-      assert render(view) =~ "will finish, but will not merge"
+      # What the confirm promises about an integration already running, in place, beside the
+      # button that does it.
+      assert view |> element("#take-out-#{second.id}-confirm") |> render() =~
+               "will finish, but will not merge"
+
+      assert has_element?(view, ~s(#take-out-#{second.id}[phx-click="take-out"]), "Take it out")
 
       # Nothing offers to approve what is approved, or to move a ticket the line owns.
       refute has_element?(view, ~s|button[phx-value-decision="approved"]|)
@@ -116,24 +120,25 @@ defmodule ForgeWeb.MergeQueueLiveTest do
       assert has_element?(view, "#merge-queue-doing", "Being merged")
     end
 
-    test "tells the queue's story on the timeline", %{conn: conn, project: project, user: user} do
+    test "tells the queue's story under Steps", %{conn: conn, project: project, user: user} do
       ticket = queued!(project, user, "Story", "a.txt")
       {:ok, _out} = Operator.take_out(ticket, user)
 
-      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=timeline")
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=steps")
 
       assert has_element?(view, "#queue-history li", "queued to merge into merged")
       assert has_element?(view, "#queue-history li", "taken out of the merge queue")
 
-      # Oldest first.
-      html = render(view)
+      # Oldest first. Read from the history itself: the details, drawn earlier in the page, name
+      # the latest events too.
+      html = view |> element("#queue-history") |> render()
       {queued, _} = :binary.match(html, "queued to merge into merged")
       {out, _} = :binary.match(html, "taken out of the merge queue; its approval")
       assert queued < out
     end
 
     @tag plain: true
-    test "draws no merge queue on the timeline of a ticket the queue never held",
+    test "draws no merge queue under Steps of a ticket the queue never held",
          %{conn: conn, project: project, user: user} do
       {:ok, ticket} = Tickets.admit(project, %{title: "Plain", body: "x"}, {:user, user.id})
       changeset!(ticket, commit_over_http(project, ticket.branch, "a.txt", "contents"))
@@ -141,17 +146,17 @@ defmodule ForgeWeb.MergeQueueLiveTest do
       assert {:ok, merged} = Operator.decide(pend_merge(ticket), user, :approved, nil)
       assert merged.state == "merged"
 
-      {:ok, view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=timeline")
+      {:ok, view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=steps")
 
       refute has_element?(view, "#queue-history")
       refute html =~ "Merge queue"
     end
 
-    test "says on the timeline that it merged", %{conn: conn, project: project, user: user} do
+    test "says under Steps that it merged", %{conn: conn, project: project, user: user} do
       ticket = queued!(project, user, "Merged story", "a.txt")
       assert {:merged, _id} = Engine.advance_queue(project.id)
 
-      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=timeline")
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=steps")
 
       assert has_element?(view, "#queue-history li", "merged as")
       assert has_element?(view, "#queue-history li", "merged, and left the merge queue")
@@ -165,7 +170,7 @@ defmodule ForgeWeb.MergeQueueLiveTest do
 
       assert MergeQueue.entry(ticket) == nil
       refute has_element?(view, "#merge-queue-#{ticket.id}")
-      assert has_element?(view, "#transitions-#{ticket.id}")
+      assert has_element?(view, "#ways-forward")
     end
 
     test "refuses a take-out that is too late in words, not an error page",
@@ -208,12 +213,34 @@ defmodule ForgeWeb.MergeQueueLiveTest do
       assert html =~ "Merge queue"
       assert [first.id, second.id] == queue_ids(view)
       assert has_element?(view, "#queue-#{first.id}", "next to be merged")
-      assert has_element?(view, "#queue-#{second.id}", "2nd of 2")
+      # The rank says the place, and the line does not say it again.
+      assert has_element?(view, ~s(#queue-#{second.id} .merge-place[aria-label="2nd of 2"]), "2")
+      refute has_element?(view, "#queue-#{second.id} .merge-doing", "2nd of 2")
 
-      view |> element("#queue-#{first.id} button", "Take out") |> render_click()
+      # Out of the line behind a confirm in the row, saying what it withdraws.
+      assert view |> element("#queue-#{first.id} .ui-confirm-panel") |> render() =~
+               "Its approval is withdrawn"
+
+      view |> element("#merge-take-out-#{first.id}", "Take it out") |> render_click()
 
       assert queue_ids(view) == [second.id]
       assert MergeQueue.entry(first) == nil
+    end
+
+    # A take-out someone else already made, pressed from this page: refused in words, at the
+    # merge queue it was pressed in.
+    test "says a take-out it refused at the merge queue", %{
+      conn: conn,
+      project: project,
+      user: user
+    } do
+      ticket = queued!(project, user, "Taken out elsewhere", "a.txt")
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}")
+
+      {:ok, _ticket} = Operator.take_out(ticket, user)
+      render_click(view, "take-out", %{"ticket" => ticket.id})
+
+      assert has_element?(view, "#merge-queue #merge-refusal", "someone has already taken it out")
     end
 
     test "shows the ticket's own state beside its place", %{conn: conn, project: project} do
@@ -223,9 +250,15 @@ defmodule ForgeWeb.MergeQueueLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}")
 
-      assert has_element?(view, "#queue-#{ticket.id}", "integrating · being integrated")
-      # A target a thumb can hit below `sm`, not a 12px link to hunt for.
-      assert view |> element("#queue-#{ticket.id} a") |> render() =~ "min-h-[46px]"
+      # Said once: a ticket being integrated has no place to name beside what is happening.
+      line = view |> element("#queue-#{ticket.id} .merge-doing") |> render()
+      # The state in mono, the sentence beside it.
+      assert view |> element("#queue-#{ticket.id} .merge-state") |> render() =~ "integrating"
+      assert line =~ ~r/being integrated; it keeps its place · approved just now/
+      assert length(String.split(line, "being integrated")) == 2
+      # A target a thumb can hit below `sm`, not a 12px link to hunt for: `.merge-ticket` pads the
+      # link to 46px over its neighbours rather than taking a line of its own (UX re-check #12).
+      assert has_element?(view, "#queue-#{ticket.id} a.merge-ticket")
     end
 
     test "draws a long title wrapped and markup as text", %{
@@ -273,17 +306,15 @@ defmodule ForgeWeb.MergeQueueLiveTest do
     end
   end
 
-  describe "the boards and the operator's queue" do
-    test "flag a queued ticket without moving it from its column",
+  describe "the project's tickets and the operator's queue" do
+    test "flag a queued ticket on its row, which keeps its state",
          %{conn: conn, project: project, user: user} do
       ticket = queued!(project, user, "Flagged", "a.txt")
 
-      {:ok, view, _html} = live(conn, ~p"/board")
-      assert has_element?(view, ~s|[id^="column-"]|, "queued 1/1")
-      assert has_element?(view, ~s|[id^="column-"]|, ticket.title)
-
       {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}")
-      assert has_element?(view, ~s|[id^="column-"]|, "queued 1/1")
+      assert has_element?(view, "#tickets-rest-#{ticket.number}", "queued 1/1")
+      assert has_element?(view, "#tickets-rest-#{ticket.number}", ticket.title)
+      assert has_element?(view, "#tickets-rest-#{ticket.number}", ticket.state)
     end
 
     test "the operator's queue lists no decision for a queued ticket and draws no merge queue",

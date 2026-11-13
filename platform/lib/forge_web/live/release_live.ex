@@ -32,18 +32,19 @@ defmodule ForgeWeb.ReleaseLive do
     <Layouts.app
       flash={@flash}
       current_scope={@current_scope}
+      frame={@frame}
       capacity={@capacity}
-      active={:board}
-      measure="74rem"
+      title={ReleaseComponents.heading(@record)}
+      subline={"#{@project.name} · release · #{ReleaseComponents.date(@record)}"}
+      context={{@project.name, ~p"/projects/#{@project.name}"}}
+      back={{"Releases", ~p"/projects/#{@project.name}/releases"}}
+      views={ForgeWeb.ProjectLive.strip(@project, %{}, :navigate)}
+      measure="44rem"
     >
-      <.link
-        navigate={~p"/projects/#{@project.name}/releases"}
-        class="flex min-h-[46px] items-center font-mono text-[12.5px] opacity-60 hover:opacity-100"
-      >
-        ‹ Releases
-      </.link>
-
-      <div class="mt-2">
+      <div id="release-page" class="releases">
+        <.link navigate={~p"/projects/#{@project.name}/releases"} class="release-target">
+          ‹ Releases
+        </.link>
         <ReleaseComponents.entry record={@record} project={@project} link={false} />
       </div>
     </Layouts.app>

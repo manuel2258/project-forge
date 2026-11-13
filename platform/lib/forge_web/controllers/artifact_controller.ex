@@ -19,8 +19,8 @@ defmodule ForgeWeb.ArtifactController do
     ForgeWeb.Access.project_scope!(conn.assigns.current_scope, project)
 
     case version(ticket.id, artifact, params["version"]) do
-      # A changeset is a commit, and the diff is its rendering.
-      {:error, :not_a_file} -> redirect(conn, to: ~p"/tickets/#{name}/#{number}/review")
+      # A changeset is a commit, and the ticket's Changes view is its rendering.
+      {:error, :not_a_file} -> redirect(conn, to: ~p"/tickets/#{name}/#{number}?tab=changes")
       found -> serve(conn, artifact, found)
     end
   end

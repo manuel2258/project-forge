@@ -31,7 +31,6 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # Operator surfaces: :browser + require_authenticated_user + require_approved_user,
     # live_session :operator (on_mount :require_approved), then membership per page.
     "/" => :member,
-    "/board" => :member,
     # The caller's own machines only (`Workers.list/1`); what reaches a project is the assignment
     # actions below.
     "/workers" => :approved,
@@ -55,13 +54,16 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/projects/:name/releases/:id" => :member,
     "/tickets/new" => :member,
     "/tickets/:project/:number" => :member,
-    "/tickets/:project/:number/review" => :member,
     "/tickets/:project/:number/jobs/:job_id" => :member,
     "/tickets/:project/:number/artifacts/:name/:version" => :member,
     "/chats" => :member,
     "/chats/new" => :member,
     "/chats/:id" => :member,
     "/chats/:id/artifacts/:name/:version" => :member,
+
+    # The caller's own credentials' windows; spend in a project they are not in is one unnamed
+    # line (`Forge.Usage.breakdown/5`).
+    "/usage" => :self,
 
     # Account governance, the only thing the node-wide flag unlocks.
     "/accounts" => :node_admin,
@@ -140,18 +142,23 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"accounts_live.ex", "demote"} => :node_admin,
     {"accounts_live.ex", "delete"} => :node_admin,
     {"chat_live.ex", "send"} => :member,
-    {"chat_live.ex", "force"} => :member,
     # The question form's draft is the page's alone; its Send goes through
     # `Operator.answer_chat/4`, which resolves the chat off the wire and checks membership.
+    {"frame.ex", "frame:menu"} => :local,
+    {"frame.ex", "frame:details"} => :local,
+    {"frame.ex", "frame:usage"} => :local,
+    {"frame.ex", "frame:close"} => :local,
+    {"usage_live.ex", "by"} => :local,
     {"chat_live.ex", "form:change"} => :local,
     {"chat_live.ex", "form:open"} => :local,
     {"chat_live.ex", "chat:questions:send"} => :member,
     {"chat_live.ex", "stop"} => :member,
     {"chat_live.ex", "close"} => :member,
     {"chat_live.ex", "reopen"} => :member,
-    {"chat_live.ex", "merge"} => :member,
     {"chat_live.ex", "draft"} => :local,
     {"chat_live.ex", "ask"} => :local,
+    # The paths are read from the page's own decision, never the wire; it only fills the draft.
+    {"chat_live.ex", "rebase:ask"} => :local,
     {"chat_live.ex", "more"} => :local,
     {"chat_live.ex", "notices"} => :local,
     {"chat_new_live.ex", "open"} => :member,
@@ -159,20 +166,27 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # The id is the client's, so the chat is read and then authorised: being able to see the
     # list is not being able to end a row named by an id somebody supplied.
     {"chats_live.ex", "end-chat"} => :member,
+    # The project is looked up among the viewer's own, then `Operator.open_chat/4` checks again.
+    {"chats_live.ex", "chat:start"} => :member,
+    {"chats_live.ex", "start:change"} => :local,
     {"job_live.ex", "more"} => :local,
     {"job_live.ex", "notices"} => :local,
+    {"job_live.ex", "pane"} => :local,
+    {"job_live.ex", "show"} => :local,
     # Navigates to a conversation with the reference in the address; sends nothing.
     {"ticket_live.ex", "ask"} => :local,
     {"ticket_live.ex", "more"} => :local,
     {"ticket_live.ex", "notices"} => :local,
+    # A way forward picked is page state; taking it is `transition` or `retry`, guarded in
+    # `Forge.Operator` like every other.
+    {"ticket_live.ex", "forward:pick"} => :local,
+    {"ticket_live.ex", "forward"} => :member,
     {"project_new_live.ex", "create"} => :approved,
     {"project_new_live.ex", "validate"} => :local,
     {"project_settings_live.ex", "issue"} => :manage,
     {"project_settings_live.ex", "revoke"} => :manage,
-    {"project_settings_live.ex", "model"} => :manage,
-    {"project_settings_live.ex", "effort"} => :manage,
-    {"project_settings_live.ex", "harness"} => :manage,
-    {"project_settings_live.ex", "codex"} => :manage,
+    {"project_settings_live.ex", "defaults"} => :manage,
+    {"project_settings_live.ex", "set-role"} => :manage,
     {"project_settings_live.ex", "add-member"} => :manage,
     {"project_settings_live.ex", "remove-member"} => :manage,
     # Same check as `issue`/`revoke`/`model`/`effort`/`add-member`/`remove-member` above:
@@ -185,6 +199,15 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # `Operator.start_release/3` asks for `:manage`, and the page draws the block for an admin only
     # (`docs/design/ticket-types.md` § Releases).
     {"project_live.ex", "release:start"} => :manage,
+    # `Operator.open_chat/4` asks for `:use`.
+    {"project_live.ex", "chat:start"} => :member,
+    # `Operator.decline_proposals/3` resolves every id to its project and refuses the lot unless
+    # the actor may use it; `accept_proposal/4` checks each (`allow_proposal/2`).
+    {"project_live.ex", "proposals:bulk"} => :member,
+    # `Operator.reopen_proposal/2`, through the same `allow_proposal/2` as a decline.
+    {"project_live.ex", "proposal:reopen"} => :member,
+    # `Operator.send_chat/4` asks for `:use` on the chat's own project.
+    {"project_live.ex", "proposal:ask"} => :member,
     # Both resolve inside the project and ask for `:manage` in `Forge.Operator`; the value is
     # passed through and never assigned (`docs/design/secrets.md` § Surfaces).
     {"project_settings_live.ex", "set-secret"} => :manage,
@@ -194,15 +217,22 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"project_settings_live.ex", "dismiss"} => :local,
     {"project_settings_live.ex", "toggle-spent"} => :local,
     {"project_settings_live.ex", "validate"} => :local,
+    {"project_settings_live.ex", "defaults-change"} => :local,
+    {"project_settings_live.ex", "defaults-discard"} => :local,
     # The repository view holds three things: which branch, which directory has been read, and
     # which file has been opened. Each is the page's own state, read out of the repository the
     # mount already allowed, and reaches no context and no database.
-    {"repo_live.ex", "branch"} => :local,
     {"repo_live.ex", "expand"} => :local,
-    {"repo_live.ex", "open"} => :local,
+    {"repo_live.ex", "search"} => :local,
     {"queue_live.ex", "push:subscribe"} => :self,
     {"queue_live.ex", "push:unsubscribe"} => :self,
     {"queue_live.ex", "push:error"} => :local,
+    # The pass is the page's own: Later reorders it and a picked way forward is a draft.
+    {"queue_live.ex", "queue:later"} => :local,
+    {"queue_live.ex", "queue:pick"} => :local,
+    # Taken through `ForgeWeb.Operator.Actions`, which resolves the ticket off the wire and goes
+    # through `Forge.Operator`'s membership check (`retry`, `transition`).
+    {"queue_live.ex", "queue:way"} => :member,
     {"ticket_new_live.ex", "create"} => :member,
     {"ticket_new_live.ex", "validate"} => :local,
     {"workers_live.ex", "toggle-destroyed"} => :local,
@@ -253,6 +283,13 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"user_live/confirmation.ex", "submit"} => :public,
     {"user_live/login.ex", "submit_magic"} => :public,
     {"user_live/login.ex", "submit_password"} => :public,
+    # Which sign-in screen is drawn, and the sent screen folded back to the address field.
+    {"user_live/login.ex", "switch-way"} => :local,
+    {"user_live/login.ex", "another-address"} => :local,
+    # This browser's push subscription, stored against the caller and nobody else (`Forge.Push`).
+    {"user_live/settings.ex", "push:subscribe"} => :self,
+    {"user_live/settings.ex", "push:unsubscribe"} => :self,
+    {"user_live/settings.ex", "push:error"} => :local,
     # Inference credentials. Each reads the row scoped to the caller before acting on it — the id
     # is the client's — and `credential-change` only re-renders the form, with the typed secret
     # dropped (`docs/design/credentials.md`).
@@ -269,11 +306,10 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"user_live/settings.ex", "validate_email"} => :self,
     {"user_live/settings.ex", "validate_password"} => :self,
 
-    # Dispatched rather than matched: the queue, the ticket and the review page hand every event
+    # Dispatched rather than matched: the queue and the ticket hand every event
     # they do not match to `ForgeWeb.Operator.Actions`, which hands the question form's to
     # `ForgeWeb.Operator.QuestionForm`. Each that writes goes through `Forge.Operator`, and each
     # takes its ticket or chat off the wire, which the operation resolves before it checks.
-    {"operator/actions.ex", "decide"} => :member,
     {"operator/actions.ex", "transition"} => :member,
     {"operator/actions.ex", "cancel-ticket"} => :member,
     {"operator/actions.ex", "restore-ticket"} => :member,
@@ -285,21 +321,34 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # A card's draft is the page's alone, the same as a question form's: nothing is written
     # until the form it sits in is submitted, and that submit carries its own guard.
     {"project_live.ex", "draft:change"} => :local,
+    {"project_live.ex", "tickets:filter"} => :local,
+    {"project_live.ex", "workflow:type"} => :local,
+    {"project_live.ex", "proposals:list"} => :local,
+    {"project_live.ex", "proposals:skip"} => :local,
+    {"project_live.ex", "proposals:selecting"} => :local,
+    {"project_live.ex", "proposals:select"} => :local,
+    {"project_live.ex", "proposals:group"} => :local,
     {"operator/drafts.ex", "draft:change"} => :local,
     {"operator/question_form.ex", "form:change"} => :local,
     {"operator/question_form.ex", "form:open"} => :local,
     {"operator/question_form.ex", "questions:send"} => :member,
     {"operator/question_form.ex", "chat:questions:send"} => :member,
-    # A chat step's Accept area. The two pages dispatch every `step:` event to
-    # `ForgeWeb.Operator.StepAccept`; picking and the confirm are the page's alone, and the press
-    # is `Operator.accept_step/4`, which asks for the project's `:use` and the person's standing
-    # as it is when pressed.
-    {"chat_live.ex", "step:"} => :member,
-    {"ticket_live.ex", "step:"} => :member,
-    {"operator/step_accept.ex", "step:pick"} => :local,
-    {"operator/step_accept.ex", "step:review"} => :local,
-    {"operator/step_accept.ex", "step:cancel"} => :local,
-    {"operator/step_accept.ex", "step:accept"} => :member
+    # The decision row (`docs/design/ui.md` § The decision row). Two pages dispatch every
+    # `decision:` event to `ForgeWeb.Operator.Decision`; opening, folding and what the panel's form
+    # holds are the page's alone, and each press goes through `Forge.Operator` — `decide/4`,
+    # `accept_step/4`, `merge_chat/2` — which asks for the project's `:use` and the person's
+    # standing as it is when pressed. Approve and Reject read the ticket again by the page's id.
+    {"chat_live.ex", "decision:"} => :member,
+    {"ticket_live.ex", "decision:"} => :member,
+    # Which file the wide Changes pane shows beside the presentation (`ForgeWeb.Changes`): a
+    # bounded read of the changeset's commit, on a page whose mount already asked for membership.
+    {"ticket_live.ex", "changes:follow"} => :local,
+    {"operator/decision.ex", "decision:open"} => :local,
+    {"operator/decision.ex", "decision:close"} => :local,
+    {"operator/decision.ex", "decision:change"} => :local,
+    {"operator/decision.ex", "decision:decide"} => :member,
+    {"operator/decision.ex", "decision:accept"} => :member,
+    {"operator/decision.ex", "decision:merge"} => :member
   }
 
   # Worker channel messages. Each addresses a job by an id off the wire, so each must resolve it

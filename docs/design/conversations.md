@@ -245,7 +245,8 @@ a branch you merge.
 
 **A chat's branch merges from the chat's own page.** That page is shaped like a ticket's: the
 conversation, and beside it the diff of `chat/<id>` against the default branch, with a merge
-affordance. `Forge.Merge` learns to take a ref rather than only a ticket's approved changeset,
+affordance — in the redesign a **neutral** decision row, because nobody is waiting on a chat's
+merge (`ui.md` § A chat). `Forge.Merge` learns to take a ref rather than only a ticket's approved changeset,
 and merges it the way it merges everything — `merge-tree` in the object database, pushed by path
 so the repository's own hooks run.
 
@@ -282,8 +283,9 @@ scope exists to close.
 
 Pressing merge with no `commit-message` version yet is refused the same way a conflicting branch
 is, and **the page says so rather than offering a button that fails**: where the branch has
-something to merge, the message sits above the merge control read-only, and where no version
-exists the page says there is nothing to merge yet and draws no button.
+something to merge, the message is drawn read-only with the merge control — in the redesign, in the
+merge row's panel — and where no version exists the page says there is nothing to merge yet and
+draws no button.
 
 **What the chat's merge takes is the branch as it is when merge is pressed, not the diff the page
 drew.** `Merge.perform_chat/2` resolves `chat/<id>` at the click. A conversation that is still
@@ -450,7 +452,7 @@ ticket chat is given for a refused move.
 - **Secrets** are the state's `secrets`, not the person's pick: the scheduler treats a step like a
   job, so one the project has not set keeps it from starting (before a machine, as for a job) and
   is recorded as its wait reason, `no_secret`, drawn on both pages: on the conversation's, and on
-  the ticket's row for the step and in its Decide card. A step sticks no ticket for it, as no
+  the ticket's, under the step on Steps. A step sticks no ticket for it, as no
   conversation does, and unlike a job, which does.
 - **Spend** — each turn adds its usage, in weighted tokens, to `ticket.usage` as well as to the conversation. The
   ticket allowance never stops it.
@@ -1022,16 +1024,35 @@ clock alone.
 ## The page
 
 A conversation's page is shaped like a ticket's, because it is the same kind of thing: work with
-a branch, a cost and a record. The conversation is its Talk tab; the diff of `chat/<id>` against
-the default branch, its commits and the merge affordance are Changes; what it has written —
-rendered, every version a link to itself (`docs/design/ui.md` § Addressable artifact versions),
-and what the last turn wrote that was not recorded, with why (§ Commits) — is Docs; what it has
-spent is the rail. Its reply and its tool calls stream — see `docs/design/ui.md` § Motion and
-structure, which used to forbid that and no longer does.
+a branch, a cost and a record (`docs/design/ui.md` § A chat). The conversation is its Talk view;
+the diff of `chat/<id>` against the default branch and its commits are Changes, and the merge is a
+neutral decision row pinned above every view; what it has written — rendered, every version a link
+to itself (`docs/design/ui.md` § Addressable artifact versions), and what the last turn wrote that
+was not recorded, with why (§ Commits) — is Docs; what it has spent, the machine it holds and
+ending it are the details its title drops. Its reply and its tool calls stream — see
+`docs/design/ui.md` § Motion and structure, which used to forbid that and no longer does.
 
-**The page is a work screen** (`docs/design/ui.md` § The work screen): tabs for Talk, Changes,
-Docs and Activity, a composer that never leaves the viewport, and the rail as a sheet on a phone.
-Two things it adds are this note's to state:
+**The machine it holds** is in its details: the provider, memory and cores of the worker it is on,
+to every member of its project, and *none held* when it holds none. The link to that machine's own
+page is drawn only for the machine's owner, because the machines pages show their owner's rows and
+nobody else's (`identity.md` § Workers); a member who does not own it sees its shape and not where
+it leads.
+
+**A conversation is started where its list is.** The chats list and a project's Chats each have a
+composer in the dock that starts one in place — the list with a project picker beside it, the one
+surface with no project to carry — and `/chats/new` stays, for *Ask about this* on a ticket and for
+the limits and secrets a first message rarely needs (`docs/design/ui.md` § A new chat).
+
+**A step's conversation draws its ticket's frame** (`docs/design/ui.md` § The Accept area): the
+ticket as its title, the step's Accept as its decision row, and the ticket's views beside Talk.
+
+All four are built: the decision row (`Operator.Decision.row`, a merge in neutral or a step's
+Accept), the details with the machine it holds (`ChatViews.details`), the list composers on
+`/chats` and a project's Chats, and the ticket's frame for a step's conversation. The merge sits in
+the decision row and, on a wide screen, the column beside the conversation (`docs/design/ui.md`
+§ A chat, `15f`); there is no rail.
+
+Two things the page adds are this note's to state:
 
 - **A transcript turn carries what the agent did, not only what it said.** The fold that builds
   the transcript from the event log used to keep four event types and drop the rest, and joined a

@@ -1,0 +1,304 @@
+/* The machines area's styles (docs/design/ui.md). Edited only by the slice that builds that area. */
+
+/* Machines, templates and credentials (docs/design/ui.md § Machines; 12f, 12g, 12o, 14a–14f).
+   Inside the components layer, as the primitives are, so a utility on an element still wins. */
+@layer components {
+  /* The summary over the list: how many there are, and the slots they fill (12f). */
+  .machines-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 4px 0 2px; font-family: var(--font-mono); font-size: 12px; }
+  .machines-count { color: var(--ink-2); }
+  .machines-slots { display: flex; flex: 1 1 160px; gap: 3px; min-width: 120px; max-width: 360px; }
+  .machines-slot { height: 4px; flex: 1 1 0%; border-radius: 1px; background: var(--track); }
+  .machines-slot--busy { background: var(--info); }
+  .machines-slot--up { background: var(--ink-3); }
+  .machines-bar { display: flex; align-items: center; gap: 8px; margin-left: auto; font-family: var(--font-sans); }
+  .machines-none { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-top: 12px; padding: 14px 16px; border-radius: var(--radius-card); background: var(--surface-1); font-size: 14px; }
+  .machines-none p { flex: 1 1 220px; }
+  #no-templates { max-width: 36rem; }
+  .machines-mint { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; max-width: 28rem; }
+  .machines-mint-title { font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
+  .machines-mint .ui-btn--fill { flex: 1 1 auto; }
+  .machines-error { margin-top: 12px; }
+  .machines-empty { margin-top: 24px; color: var(--ink-3); font-size: 14px; line-height: 1.55; }
+  .machines-note { margin-top: 24px; color: var(--ink-3); font-size: 13px; line-height: 1.55; }
+  .machines-table { margin-top: 10px; }
+  .machines-columns { display: none; }
+
+  /* A machine: the head is the link to its log, everything else sits under it. */
+  .machine { border-bottom: 1px solid var(--border-soft); }
+  .machine--gone { opacity: .5; }
+  .machine-head {
+    display: grid;
+    grid-template-columns: 14px minmax(0, 1fr) auto auto 14px;
+    grid-template-areas:
+      "dot name flag status chevron"
+      ".   doing doing doing chevron"
+      ".   where where where chevron";
+    align-items: center;
+    gap: 3px 8px;
+    padding: 14px 0 10px;
+    color: inherit;
+    text-decoration: none;
+  }
+  .machine-head:hover .machine-name { text-decoration: underline; }
+  .machine-dot { display: inline-block; width: 7px; height: 7px; border-radius: var(--radius-pill); background: var(--ink-4); }
+  .machine-dot--on { background: var(--success); }
+  /* Busy or ready and not connected: the state worth seeing, in danger (UX pass, D14). */
+  .machine-dot--danger { background: var(--danger); }
+  .machine-head > .machine-dot { grid-area: dot; }
+  .machine-name { grid-area: name; overflow: hidden; font-family: var(--font-mono); font-size: 14px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+  .machine-flag { grid-area: flag; font-family: var(--font-mono); font-size: 11.5px; }
+  .machine-status { grid-area: status; font-family: var(--font-mono); font-size: 12px; text-align: right; }
+  .machine-doing { grid-area: doing; min-width: 0; font-size: 14px; line-height: 1.4; overflow-wrap: anywhere; }
+  .machine-where { grid-area: where; min-width: 0; color: var(--ink-3); font-family: var(--font-mono); font-size: 11.5px; overflow-wrap: anywhere; }
+  .machine-version { display: none; }
+  .machine-chevron { grid-area: chevron; color: var(--ink-4); }
+
+  .machine-more { display: flex; flex-direction: column; gap: 6px; padding: 0 0 12px 22px; font-size: 12.5px; }
+  .machine-more:empty { display: none; }
+  .machine-ids { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; font-family: var(--font-mono); font-size: 11.5px; }
+  .machine-line { font-size: 13px; line-height: 1.5; }
+  .machine-meters { display: grid; gap: 10px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .machine-meter { min-width: 0; }
+  .machine-meter-figure { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-family: var(--font-mono); font-size: 12px; }
+  .machine-meter-track { height: 3px; margin-top: 4px; background: var(--track); }
+  .machine-meter-fill { height: 100%; background: var(--ink-3); }
+  .machine-meter-detail { margin-top: 4px; color: var(--ink-3); font-family: var(--font-mono); font-size: 11px; }
+  .machine-facts { display: flex; flex-wrap: wrap; gap: 2px 12px; font-family: var(--font-mono); font-size: 11.5px; }
+  .machine-fact-column { display: contents; }
+  /* The projects a machine, a template or a credential serves (`ForgeWeb.ProjectAssign`, UX pass
+     D5): one chip and one Assign, wherever it is drawn. */
+  .project-assign { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; font-size: 12.5px; }
+  .project-assign-chips { display: flex; min-width: 0; flex: 1 1 auto; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+  .project-assign-label { color: var(--ink-3); }
+  .project-chip { display: inline-flex; height: 32px; align-items: center; gap: 2px; padding-left: 10px; border: 1px solid var(--border-control); border-radius: var(--radius-pill); font-family: var(--font-mono); font-size: 12px; }
+  .project-chip-remove { margin: -7px -6px -7px 0; border: 0; background: none; color: var(--ink-3); cursor: pointer; }
+  .project-chip-remove:hover { color: var(--ink); }
+  /* The select takes the room and Assign keeps its own width: beside a chip the form wraps to a
+     line of its own rather than squeezing *add a project…* into 100px (UX re-check #15). */
+  .project-assign-form { display: flex; min-width: 0; flex: 1 1 16rem; align-items: center; gap: 8px; }
+  .project-assign-select { min-width: 0; flex: 1 1 auto; }
+  .project-assign-select:invalid { color: var(--ink-3); }
+  .machine-select { min-width: 0; padding: 0 8px; border: 1px solid var(--border-control); border-radius: var(--radius-md); background: var(--bg); color: var(--ink); font-size: 13px; }
+  .machine-offer { display: flex; max-width: 24rem; flex-direction: column; gap: 4px; padding: 12px; border-radius: var(--radius-card); background: var(--surface-1); }
+  .machine-kinds { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+  .machine-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .machine-destroy > .ui-btn { margin-left: auto; }
+
+  /* One machine, alone (12g): its identifiers, then its log as two-line entries. */
+  .machine-header { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; font-family: var(--font-mono); font-size: 12px; }
+  .machine-log-head { display: flex; align-items: baseline; justify-content: space-between; margin-top: 18px; padding-bottom: 6px; border-bottom: 1px solid var(--border-soft); }
+  .machine-log-zone { color: var(--ink-4); font-family: var(--font-mono); font-size: 11px; }
+  .machine-log-note { margin-top: 10px; color: var(--ink-3); font-size: 13px; line-height: 1.55; }
+  .machine-log { margin-top: 8px; }
+  .machine-log-entry { padding: 9px 0; border-bottom: 1px solid var(--border-soft); }
+  .machine-log-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; font-family: var(--font-mono); font-size: 11.5px; }
+  .machine-log-entry:not(.text-danger) .machine-log-top { color: var(--ink-3); }
+  .machine-log-day { opacity: .7; }
+  .machine-log-type { margin-left: auto; color: var(--ink); overflow-wrap: anywhere; }
+  .machine-log-entry.text-danger .machine-log-type { color: inherit; }
+  .machine-log-message { margin-top: 3px; font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
+  .machine-log-job { margin-left: 4px; font-family: var(--font-mono); font-size: 11.5px; }
+  a.machine-log-job { color: var(--link); }
+  span.machine-log-job { color: var(--ink-3); }
+
+  /* Wide (12o): the heads line up as a table, with its column names over them. */
+  @media (min-width: 1440px) {
+    .machines-columns,
+    .machine-head {
+      display: grid;
+      grid-template-columns: 14px minmax(110px, 150px) minmax(80px, 110px) minmax(0, 1fr) minmax(160px, 260px) minmax(70px, 110px) 14px;
+      grid-template-areas: "dot name status doing where version chevron";
+      column-gap: 16px;
+    }
+    .machines-columns { padding: 0 0 8px; border-bottom: 1px solid var(--border-soft); color: var(--ink-3); font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; }
+    .machine-head { padding: 14px 0; }
+    .machine-flag { display: none; }
+    .machine-status { text-align: left; }
+    .machine-version { display: block; grid-area: version; color: var(--ink-3); font-family: var(--font-mono); font-size: 12px; }
+    .machine-version.text-warning { color: var(--warning); }
+    .machine-more { padding-left: 30px; }
+  }
+
+  /* Templates and credentials (14a–14f). The list is the content; an open template or the new
+     one is the aside — beside it on a wide screen, and on its own below that, where the list
+     steps out of the way. */
+  .templates-intro { margin: 4px 0 12px; color: var(--ink-3); font-size: 13.5px; line-height: 1.55; }
+  .templates-error { margin: 8px 0; }
+  .templates-columns { display: none; }
+  /* An entry point to a form: an outline, full width on a phone, its own width from 768 (D11). */
+  .templates-dock { width: 100%; margin-top: 20px; }
+  @media (width >= 768px) { .templates-dock { width: auto; } }
+  /* The content column goes with the list, or it keeps its share of the height above the aside. */
+  @media (max-width: 1439px) {
+    .frame-columns:has(.templates-aside) > .frame-main { display: none; }
+  }
+
+  .template { border-bottom: 1px solid var(--border-soft); }
+  .template--disabled { box-shadow: inset 2px 0 0 var(--danger); padding-left: 10px; }
+  .template--open { background: var(--surface-selected); }
+  .template-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto 14px;
+    grid-template-areas:
+      "name     running chevron"
+      "makes    makes   chevron"
+      "ceiling  what    chevron"
+      "projects projects chevron";
+    align-items: start;
+    gap: 4px 12px;
+    padding: 14px 0;
+    color: inherit;
+    text-decoration: none;
+  }
+  .template-head:hover .template-name { text-decoration: underline; }
+  .template-name { grid-area: name; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 14px; font-weight: 500; }
+  /* A word in danger, not a filled badge: the row's red edge already says it is broken. */
+  .template-flag { color: var(--danger); font-family: var(--font-mono); font-size: 11px; }
+  .template-makes { grid-area: makes; display: flex; flex-direction: column; color: var(--ink-3); font-family: var(--font-mono); font-size: 11.5px; overflow-wrap: anywhere; }
+  .template-ceiling { grid-area: ceiling; display: flex; flex-direction: column; font-family: var(--font-mono); font-size: 12.5px; font-weight: 500; }
+  .template-quiet { color: var(--ink-3); font-family: var(--font-mono); font-size: 11.5px; font-weight: 400; }
+  .template-running { grid-area: running; }
+  .template-what { grid-area: what; color: var(--ink-3); font-family: var(--font-mono); font-size: 11.5px; text-align: right; }
+  .template-projects { grid-area: projects; color: var(--ink-2); font-size: 13px; }
+  .template-chevron { grid-area: chevron; align-self: center; color: var(--ink-4); }
+  .template-failure { margin: -6px 0 12px; color: var(--danger); font-size: 13px; line-height: 1.5; }
+  .template-failure .ui-btn { vertical-align: baseline; }
+
+  .template-slots { display: inline-flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 12px; }
+  .template-slot-row { display: inline-flex; gap: 3px; }
+  .template-slot { width: 12px; height: 4px; border-radius: 1px; background: var(--track); }
+  .template-slot--on { background: var(--info); }
+  .template-slots--full .template-slot--on { background: var(--warning); }
+  .template-slots--full .template-count { color: var(--warning); }
+
+  .templates-aside { display: flex; flex-direction: column; gap: 14px; }
+  /* A back link is mono ink-3, as on settings and the desktop title row (UX pass, D12). */
+  .templates-back { display: flex; min-height: 44px; align-items: center; color: var(--ink-3); font-family: var(--font-mono); font-size: 12px; }
+  .templates-aside-title { font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
+  /* A template's name is an identifier, so it alone is mono. */
+  .templates-aside-title--id { font-family: var(--font-mono); font-size: 15px; letter-spacing: 0; }
+  .template-dock { display: flex; gap: 10px; margin-top: 12px; }
+  .template-dock .ui-btn--fill { flex: 1 1 auto; }
+  .credential-form-title { margin-bottom: 8px; font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
+  .template-detail { display: flex; flex-direction: column; gap: 16px; }
+  .template-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .template-ceiling-card { display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; border-radius: var(--radius-card); background: var(--surface-1); }
+  .template-ceiling-figure { font-family: var(--font-mono); font-size: 26px; font-weight: 500; letter-spacing: -.02em; }
+  .template-ceiling-figure span { margin-left: 6px; color: var(--ink-3); font-size: 12px; font-weight: 400; letter-spacing: 0; }
+  .template-ceiling-none { color: var(--ink-3); font-size: 13px; }
+  .template-ceiling-slots { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 12px; }
+  .template-facts,
+  .template-projects-block { display: flex; flex-direction: column; gap: 8px; }
+
+  /* The form, in the provider's order (14c). */
+  .template-form { display: flex; flex-direction: column; gap: 4px; }
+  .template-step { display: flex; flex-direction: column; gap: 4px; padding: 12px 0; border-top: 1px solid var(--border-soft); }
+  .template-step--locked { opacity: .45; }
+  .template-step-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; font-size: 15px; font-weight: 500; }
+  .template-step-mark { display: inline-flex; width: 22px; height: 22px; flex-shrink: 0; align-items: center; justify-content: center; border: 1px solid var(--border-strong); border-radius: var(--radius-pill); font-family: var(--font-mono); font-size: 11px; }
+  .template-step-mark--done { border-color: var(--success); background: var(--success); color: var(--bg); }
+  .template-step-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 10px; }
+  .template-step-note { color: var(--ink-3); font-size: 12.5px; line-height: 1.5; }
+  .template-step-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; font-size: 14px; }
+  .template-step-ceiling { display: flex; align-items: baseline; gap: 8px; padding: 12px 14px; border-radius: var(--radius-md); background: var(--surface-2); color: var(--ink-2); font-size: 13px; }
+  .template-step-ceiling strong { color: var(--ink); font-family: var(--font-mono); font-size: 18px; font-weight: 500; }
+  .template-step-ceiling span { color: var(--ink-3); font-family: var(--font-mono); font-size: 11.5px; }
+  .template-kinds { display: flex; flex-direction: column; gap: 6px; }
+  /* A filled button in a column fills its width, not its height. */
+  .credential-form .ui-btn--fill { flex: none; width: 100%; }
+  .template-running { justify-self: end; }
+
+  /* None yet (14e): a reading measure, and the next step its own width (UX pass, D8). */
+  .templates-none { max-width: 36rem; }
+  .templates-none h2 { margin: 8px 0 6px; font-size: 20px; font-weight: 600; letter-spacing: -.02em; }
+  .templates-steps { margin: 10px 0 20px; }
+  .templates-step { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 4px 12px; padding: 12px 0; border-bottom: 1px solid var(--border-soft); }
+  .templates-step .template-step-mark { grid-row: span 2; }
+  .templates-step--done .template-step-mark { border-color: var(--success); background: var(--success); color: var(--bg); }
+  .templates-step-title { font-size: 15px; font-weight: 500; }
+  .templates-step-detail { color: var(--ink-3); font-size: 13px; }
+
+  /* Credentials (14d). */
+  .templates-credential-list { display: flex; flex-direction: column; }
+  .credential { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 12px 0; border-bottom: 1px solid var(--border-soft); }
+  .credential-head { display: flex; width: 100%; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .credential-name { font-size: 15px; font-weight: 500; }
+  .credential-provider { color: var(--ink-3); font-family: var(--font-mono); font-size: 12px; }
+  .credential-liable { color: var(--ink-3); font-family: var(--font-mono); font-size: 11.5px; }
+  .credential-form { display: flex; max-width: 30rem; flex-direction: column; gap: 4px; margin-top: 20px; }
+
+  /* A credential's image builds (ui.md § The workers page): the switch, Build now with what it
+     costs, and the last five builds. A provider's or builder's words are text, cut to a line with
+     the whole in the title and the log. */
+  .credential-builds { width: 100%; min-width: 0; padding-top: 8px; border-top: 1px solid var(--border-soft); font-size: 13.5px; }
+  .credential-builds-body { display: flex; min-width: 0; flex-direction: column; gap: 8px; }
+  .credential-builds-note { color: var(--ink-3); font-size: 12.5px; }
+  .credential-auto {
+    display: flex;
+    width: 100%;
+    min-height: var(--target-min);
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    background: transparent;
+    color: var(--ink);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .credential-switch {
+    position: relative;
+    width: 46px;
+    height: 28px;
+    flex-shrink: 0;
+    border-radius: 999px;
+    background: var(--border);
+    transition: background .15s;
+  }
+  .credential-switch::after {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 22px;
+    height: 22px;
+    border-radius: 999px;
+    background: var(--ink);
+    content: "";
+    transition: left .15s;
+  }
+  .credential-auto[aria-checked="true"] .credential-switch { background: var(--link); }
+  .credential-auto[aria-checked="true"] .credential-switch::after { left: 21px; }
+  .credential-build-now { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+  .credential-build-list { display: flex; min-width: 0; flex-direction: column; }
+  .credential-build { display: flex; min-width: 0; flex-direction: column; gap: 2px; padding: 6px 0; }
+  .credential-build-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; color: var(--ink-3); font-size: 12.5px; }
+  .credential-build-sha { color: var(--ink-2); font-family: var(--font-mono); }
+  .credential-build-standing { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .credential-build-standing--danger { color: var(--danger); }
+  .credential-build-standing--warning { color: var(--warning); }
+
+  /* The machines view's right column on a wide screen (12o): templates and credentials beside
+     the table. Only there: below 1440 the views already lead to both. */
+  .machines-aside { display: flex; flex-direction: column; gap: 22px; }
+  .machines-aside-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 4px; }
+  .machines-aside-head a { color: var(--link); font-size: 13px; }
+  .machines-aside-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; padding: 10px 0; border-bottom: 1px solid var(--border-soft); font-family: var(--font-mono); font-size: 12.5px; color: inherit; text-decoration: none; }
+  .machines-aside-row .template-quiet { grid-column: 1 / -1; }
+  @media (max-width: 1439px) {
+    .frame-aside:has(> .machines-aside) { display: none; }
+  }
+
+  @media (min-width: 1440px) {
+    .templates-columns,
+    .template-head {
+      display: grid;
+      grid-template-columns: minmax(120px, 170px) minmax(0, 1.3fr) minmax(110px, 150px) minmax(90px, 120px) minmax(0, 1fr) 14px;
+      grid-template-areas: "name makes ceiling running projects chevron";
+      column-gap: 16px;
+    }
+    .templates-columns { padding: 0 0 8px; border-bottom: 1px solid var(--border-soft); color: var(--ink-3); font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; }
+    .template-what { display: none; }
+    .template-running { justify-self: start; }
+    .template-running .template-slots { flex-direction: column; align-items: flex-start; gap: 4px; }
+  }
+}

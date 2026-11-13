@@ -183,8 +183,29 @@ declined.
 
 **A declined proposal is a recorded decision, not a deletion.** It has to be one: recording is by
 content (below), so a later job writing the same proposal again finds it already recorded and
-decided, and it does not come back. A job is not shown declined proposals — `tickets/index.md`
-lists only open ones — so one worded differently is a new proposal, and is decided again.
+decided, and it does not come back by itself. A job is not shown declined proposals —
+`tickets/index.md` lists only open ones — so one worded differently is a new proposal, and is
+decided again.
+
+**A person can reopen a declined proposal**, from the project's proposal history (`ui.md`
+§ Proposals), because the same idea comes back and the person who declined it may have been
+wrong. Reopening writes **a new version of the proposal with the same text**, authored by the
+person who reopened it, and logs `proposal.reopened` naming the declined version. Nothing is
+deleted: the decline stays on the version it decided, with its user, reason and time, and the
+new version has no decision — which is exactly the open-ness rule above, so a reopened proposal
+is open for the reason every proposal is, and no reader needs to learn a third state.
+
+- **Who may**: anyone who may decline it — a member of the proposal's project, through the same
+  guard (`Operator`'s, membership first, a proposal elsewhere answering as one that does not
+  exist).
+- **What it returns to**: open, as it was before the decline — on the project's Proposals in its
+  source's group, counted in the digest's *proposed*, and listed in `tickets/index.md` for the next
+  job to read. It is decided again from there, and its history shows it was declined, why, and
+  reopened.
+- **Only a declined one.** An accepted proposal became a ticket, which is where it goes on; a
+  proposal still open has nothing to reopen.
+- **Recording stays idempotent by content**: a job that reports the same text after a reopen finds
+  it as the latest version and writes nothing, as it would have before the decline.
 
 **Recording is idempotent by content**, which is what makes it safe to collect the same folder
 more than once for one job. `out/proposals/` accumulates: a conversation reports it every turn, so
@@ -275,8 +296,8 @@ things that were never in it.
   against.
 - **A ticket row in a pre-admission state.** Considered and rejected: `tickets.status` gaining
   `:proposed`, with `workflow`, `branch` and `state` nullable until admission. It gives a proposal
-  a number and a lane on the board, and it costs a second shape of ticket that the scheduler,
-  `Spend`, the queue and the board must each be taught to exclude — one place forgetting it is a
+  a number and a row among the project's tickets, and it costs a second shape of ticket that the
+  scheduler, `Spend`, the queue and every ticket list must each be taught to exclude — one place forgetting it is a
   proposal being scheduled. A document needs none of that, and admission stays the single door.
 
 ## Reading the backlog

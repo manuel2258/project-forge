@@ -21,12 +21,18 @@ defmodule ForgeWeb.Access do
   """
   @spec project_scope!(Scope.t(), Project.t()) :: Scope.t()
   def project_scope!(%Scope{} = scope, %Project{} = project) do
-    scope = Scope.for_project(scope, project)
-
-    if Forge.Access.can?(scope, :use),
-      do: scope,
+    if member?(scope, project),
+      do: Scope.for_project(scope, project),
       else: raise(Ecto.NoResultsError, queryable: Project)
   end
+
+  @doc """
+  Whether `project` is the user's to see: the one test `project_scope!/2` raises on, for a page
+  that must answer a miss without raising — the not-found page (`ForgeWeb.NotFound`).
+  """
+  @spec member?(Scope.t(), Project.t()) :: boolean()
+  def member?(%Scope{} = scope, %Project{} = project),
+    do: Forge.Access.can?(Scope.for_project(scope, project), :use)
 
   @doc "The project by name, raising the same way when it is absent or not the user's."
   @spec project_by_name!(Scope.t(), String.t()) :: {Project.t(), Scope.t()}

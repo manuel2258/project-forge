@@ -155,15 +155,17 @@ read by its owner (`identity.md` § Workers).
 
 ## The page
 
-`/workers/:id`, reached by a *Log* link on the machine's block on `/workers`. The machine's header
-line, then its log newest first — up to 200 lines, each with its time in UTC, where it came from,
-its type, and its message, and the first eight characters of the job a line is about — re-read on
-the same five-second timer as the workers page. **Only the
+`/workers/:id`, reached from the head of the machine's row on `/workers` (`ui.md` § Machines,
+`12g`). The machine's identifiers, then its log newest first — up to 200 lines, each with its date
+and time in UTC, where it came from and its type above its message, and the first eight characters
+of the job a line is about, linking to that job's page (or its chat's) only in a project the viewer
+is in — re-read on the same five-second timer as the workers page. **Only the
 owner's**: the id is off the wire and read scoped to the viewer, and somebody else's machine is
 *not here*, as on `/workers` (`identity.md` § Sequencing). A destroyed machine's log is still
 there.
 
-Error lines are in `error`; nothing is accent, for the reason nothing on `/workers` is.
+Error lines are in danger across the whole entry; nothing is amber, for the reason nothing on
+`/workers` is.
 
 ## Deliberately not here
 

@@ -1,8 +1,11 @@
 defmodule ForgeWeb.ChatLive do
   @moduledoc """
-  One conversation, as a work screen (`docs/design/ui.md` § The work screen): Talk, Changes, Docs
-  and Activity, a composer that never leaves the viewport, and its facts as the rail — or the
-  details sheet below `lg`.
+  One conversation (`docs/design/ui.md` § A chat, § Talk): Talk, Changes, Docs and Activity, a
+  dock that never leaves the viewport, and its details dropped from the title. On a wide screen
+  the branch and its merge are the right column (`15f`). **A workflow step's conversation draws
+  its ticket's frame** (§ The Accept area): the ticket's title, the step's Accept as its decision
+  row, and the ticket's strip, with Talk this conversation and the other views the ticket's.
+  The drawing is `ForgeWeb.ChatViews`.
 
   **The reply streams, and so does what the agent does.** This is the case `ui.md` § Motion and
   structure allows: the operator is looking at this one piece of work. It is subscribed per job,
@@ -14,14 +17,10 @@ defmodule ForgeWeb.ChatLive do
 
   use ForgeWeb, :live_view
 
-  import ForgeWeb.Indicators
-  import ForgeWeb.Operator.Components
-  import ForgeWeb.Operator.QuestionForm, only: [question_form: 1]
-
   alias Forge.{Artifacts, Conversations, Events, Git, Jobs, Merge, Operator, Projects, Tickets}
-  alias ForgeWeb.{Actions, Diff, Format, JobStream, Transcript, WorkScreen}
-  alias ForgeWeb.Components.StepAccept
-  alias ForgeWeb.Operator.StepAccept, as: StepEvents
+  alias Forge.Git.Url
+  alias ForgeWeb.{ChatViews, Diff, Format, JobStream, TicketViews, Transcript, WorkScreen}
+  alias ForgeWeb.Operator.Decision
 
   @tabs ~w(talk changes docs activity)
 
@@ -43,11 +42,13 @@ defmodule ForgeWeb.ChatLive do
        project: project,
        ticket: ticket,
        draft: "",
+       chat_error: nil,
+       refusal: nil,
        tab: "talk",
        page_title: title(project, ticket),
        forms: ForgeWeb.Operator.QuestionForm.init()
      )
-     |> StepEvents.init()
+     |> Decision.init()
      |> JobStream.init()
      |> ForgeWeb.Capacity.project(project)
      |> load()}
@@ -67,6 +68,11 @@ defmodule ForgeWeb.ChatLive do
         ref when is_binary(ref) and ref != "" -> assign(socket, draft: with_ref(socket, ref))
         _none -> socket
       end
+
+    # Moving to another view folds the decision's panel: its *two ways out* link leads to
+    # Changes, where they are drawn, and the panel would otherwise stay open over them.
+    socket =
+      if tab != socket.assigns.tab, do: assign(socket, decision_open: false), else: socket
 
     {:noreply, assign(socket, tab: tab)}
   end
@@ -92,19 +98,36 @@ defmodule ForgeWeb.ChatLive do
       base_branch: Conversations.base_branch(project, ticket),
       merged: Merge.merged_chat?(chat),
       waiting: Jobs.current_wait(chat),
-      conflict: nil,
-      step: step_view(chat, ticket)
+      step: step_view(chat, ticket),
+      # The mark of the state the step's ticket is in, for the subline the ticket's own page
+      # draws: read once a load, since it parses the pinned workflow.
+      step_mark: if(Jobs.Job.step?(chat) and ticket, do: mark(ticket)),
+      # The machine it holds, for its details: every member sees its shape, its owner a link.
+      machine: Conversations.machine(chat),
+      # Its model and effort, for its details: read here, since each is a query when the
+      # conversation names none and the details are drawn on every render.
+      model: Jobs.model_for(chat),
+      effort: Jobs.effort_for(chat)
     )
+    |> assign_strip()
     |> fold()
+    |> assign_decision()
+  end
+
+  # The one decision row a conversation has (`docs/design/ui.md` § The decision row): a step's
+  # Accept, or else merging its branch, which nobody is waiting on.
+  defp assign_decision(%{assigns: assigns} = socket) do
+    decision =
+      Decision.step(assigns.step, questions(assigns.messages)) ||
+        Decision.merge(assigns, assigns.chat)
+
+    Decision.put(socket, decision)
   end
 
   defp step_view(chat, %Forge.Tickets.Ticket{} = ticket),
     do: if(Jobs.Job.step?(chat), do: Forge.Steps.view(ticket, chat))
 
   defp step_view(_chat, nil), do: nil
-
-  defp step_over?(%{over: over}), do: over != nil
-  defp step_over?(nil), do: false
 
   # The projection, from the log the page holds. The fold is pure; what the transcript's references
   # mean is not, and costs no query when the messages hold none (`Transcript.resolve/3`) and a
@@ -154,6 +177,13 @@ defmodule ForgeWeb.ChatLive do
         "refs/heads/" <> project.default_branch,
         "refs/heads/" <> Jobs.chat_branch(chat)
       )
+
+  defp mark(ticket) do
+    case Tickets.parsed_workflow(ticket) do
+      {:ok, workflow} -> ForgeWeb.Topology.mark(ForgeWeb.Topology.of(workflow, ticket.state))
+      {:error, _errors} -> ForgeWeb.Topology.mark(:unknown)
+    end
+  end
 
   defp approvable(nil), do: MapSet.new()
 
@@ -237,16 +267,15 @@ defmodule ForgeWeb.ChatLive do
   def handle_event("draft", %{"text" => text}, socket),
     do: {:noreply, assign(socket, draft: text)}
 
-  def handle_event("step:" <> _ = event, params, socket),
-    do: StepEvents.handle_event(event, params, socket, &load/1)
+  def handle_event("decision:" <> _ = event, params, socket),
+    do: Decision.handle_event(event, params, socket, &load/1)
 
-  # Three controls, because they are three intentions and guessing between them from one gesture
-  # is how a chat client loses a message (`docs/design/conversations.md` § Turns). Send holds the
-  # message until the turn ends; force interrupts and sends now; stop ends the turn and sends
-  # nothing.
-  def handle_event("send", %{"text" => text}, socket), do: say(socket, text, force: false)
-
-  def handle_event("force", %{"text" => text}, socket), do: say(socket, text, force: true)
+  # Three intentions, because guessing between them from one gesture is how a chat client loses
+  # a message (`docs/design/conversations.md` § Turns). Send holds the message until the turn
+  # ends; Send while the agent responds is *Interrupt and send*, which the form says in a field
+  # drawn beside the button that names it (`15a`); stop ends the turn and sends nothing.
+  def handle_event("send", %{"text" => text} = params, socket),
+    do: say(socket, text, force: params["interrupt"] == "true")
 
   def handle_event("stop", _params, socket) do
     :ok = Operator.stop_chat(socket.assigns.chat, socket.assigns.current_scope.user)
@@ -258,46 +287,31 @@ defmodule ForgeWeb.ChatLive do
   def handle_event("close", _params, socket) do
     case Operator.close_chat(socket.assigns.chat, socket.assigns.current_scope.user) do
       :ok ->
-        {:noreply, socket}
+        {:noreply, assign(socket, chat_error: nil)}
 
       {:error, :not_live} ->
         {:noreply,
-         socket |> put_flash(:error, "This conversation has already stopped.") |> load()}
-    end
-  end
-
-  # The second route into the default branch. Both routes are the platform's own merge and both
-  # are guarded by the same `pre-receive` with FORGE_INTERNAL; what differs is what authorised
-  # it — an approved changeset version, or an operator pressing merge on a diff they can see.
-  # An operator's own default-branch token is a third route and not one of these two: it is a
-  # push, guarded by the same hook's fast-forward rule (`docs/design/git-hosting.md`).
-  def handle_event("merge", _params, socket) do
-    case Operator.merge_chat(socket.assigns.chat, socket.assigns.current_scope.user) do
-      {:ok, _result} ->
-        {:noreply, socket |> put_flash(:info, "Merged.") |> load()}
-
-      {:conflict, paths} ->
-        {:noreply, socket |> load() |> assign(conflict: paths)}
-
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Could not merge: #{inspect(reason)}")}
+         socket
+         |> assign(chat_error: {:details, "This conversation has already stopped."})
+         |> load()}
     end
   end
 
   def handle_event("reopen", _params, socket) do
     case Operator.reopen_chat(socket.assigns.chat, socket.assigns.current_scope.user) do
       {:ok, _chat} ->
-        {:noreply, load(socket)}
+        {:noreply, socket |> assign(chat_error: nil) |> load()}
 
       # Reopening a live one would take its worker away from under it. The page offers Reopen
       # only when it is not live; this is a stale page, or an event nobody drew a button for.
       {:error, :live} ->
-        {:noreply, socket |> put_flash(:error, "This conversation is still live.") |> load()}
+        {:noreply,
+         socket |> assign(chat_error: {:dock, "This conversation is still live."}) |> load()}
 
       # Remaking a deleted branch is a git write, and it can fail — a ticket branch that is gone
       # too. Said, rather than a crash that reads as the page breaking.
       {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Could not reopen: #{inspect(reason)}")}
+        {:noreply, assign(socket, chat_error: {:dock, "Could not reopen: #{inspect(reason)}"})}
     end
   end
 
@@ -320,6 +334,20 @@ defmodule ForgeWeb.ChatLive do
      socket
      |> assign(draft: with_ref(socket, ref))
      |> push_patch(to: ~p"/chats/#{socket.assigns.chat_id}?tab=talk")}
+  end
+
+  # *Ask it to rebase*, the first of a conflict's two ways out (`15c`): the request goes into the
+  # draft, where it can still be edited, and nothing is sent. The paths are read again here
+  # rather than taken off the wire: what is asked is what the branch conflicts in now.
+  def handle_event("rebase:ask", _params, socket) do
+    case socket.assigns.decision do
+      %{kind: :merge, conflict: [_ | _] = paths} ->
+        request = ChatViews.rebase_request(socket.assigns.project.default_branch, paths)
+        {:noreply, assign(socket, draft: request)}
+
+      _clean ->
+        {:noreply, socket}
+    end
   end
 
   def handle_event("more", params, socket), do: JobStream.handle_event("more", params, socket)
@@ -359,12 +387,12 @@ defmodule ForgeWeb.ChatLive do
   defp deliver(socket, text, opts) do
     case Operator.send_chat(socket.assigns.chat, socket.assigns.current_scope.user, text, opts) do
       {:ok, _event} ->
-        {:noreply, socket |> assign(draft: "") |> load()}
+        {:noreply, socket |> assign(draft: "", chat_error: nil) |> load()}
 
       {:error, :not_live} ->
         {:noreply,
          socket
-         |> put_flash(:error, "This conversation has stopped. Reopen it to say that.")
+         |> assign(chat_error: {:dock, "This conversation has stopped. Reopen it to say that."})
          |> load()}
     end
   end
@@ -405,337 +433,191 @@ defmodule ForgeWeb.ChatLive do
   # while `Conversations.send/3` disagreed would offer a send box that refuses.
   defp live?(chat), do: Conversations.live?(chat)
 
-  defp tabs(assigns) do
-    [
-      {"talk", "Talk", nil},
-      {"changes", "Changes", Diff.file_count(assigns.diff)},
-      {"docs", "Docs", length(assigns.docs)},
-      {"activity", "Activity", WorkScreen.activity_count(assigns.events)}
-    ]
-  end
-
   @impl true
   def render(assigns) do
+    messages = assigns.messages
+
     assigns =
       assign(assigns,
-        questions: questions(assigns.messages),
-        reply: reply(assigns.messages),
-        responding: responding?(assigns.chat, assigns.messages),
-        live: live?(assigns.chat)
+        questions: questions(messages),
+        reply: reply(messages),
+        responding: responding?(assigns.chat, messages),
+        live: live?(assigns.chat),
+        title: page_heading(assigns, messages),
+        viewer: assigns.current_scope.user,
+        fetch: fetch_command(assigns.project, assigns.chat),
+        conflict: conflict(assigns.decision),
+        merge: merge(assigns.decision),
+        step_doc: ChatViews.step_doc(assigns.step, assigns.docs)
+      )
+
+    assigns =
+      assign(assigns,
+        subline: subline(assigns),
+        tab: if(assigns.step, do: "talk", else: assigns.tab)
       )
 
     ~H"""
     <Layouts.app
+      section="Chats"
       flash={@flash}
       current_scope={@current_scope}
+      frame={@frame}
       capacity={@capacity}
-      active={:chats}
-      measure="74rem"
-      frame={:work}
+      title={@title}
+      subline={@subline}
+      context={context(@project, @ticket, @step)}
+      views={views(assigns)}
+      view={@tab}
+      measure="48rem"
+      fill
     >
-      <WorkScreen.frame
-        tabs={tabs(assigns)}
-        tab={@tab}
-        path={~p"/chats/#{@chat.id}"}
-        capacity={@capacity}
-      >
-        <%!-- On a phone the back affordance and the status share one line, and the title is
-              for assistive technology only: every line of header is a line the transcript
-              does not have. --%>
-        <:header>
-          <div class="flex items-center gap-3">
-            <.link
-              navigate={back(@project, @ticket)}
-              class="flex min-h-[46px] min-w-0 items-center font-mono text-[12.5px] opacity-60 hover:opacity-100 sm:min-h-0"
-            >
-              <span class="truncate">‹ {where(@project, @ticket)}</span>
-            </.link>
-            <span class="ml-auto shrink-0 sm:hidden"><.job_status status={@chat.status} /></span>
-          </div>
-          <div class="flex flex-wrap items-baseline gap-3">
-            <h1 class="sr-only text-2xl font-semibold -tracking-[.025em] sm:not-sr-only">
-              Conversation
-            </h1>
-            <span class="hidden sm:inline"><.job_status status={@chat.status} /></span>
-          </div>
-          <%!-- Which ticket and step this conversation is part of (`docs/design/ui.md` § The Accept
-                area). Names are the workflow author's and the ticket title the reporter's:
-                escaped by the template and cut to the line. --%>
-          <p :if={@step} id="step-banner" class="min-w-0 truncate text-sm opacity-70">
-            Step <span class="font-mono text-[12.5px]">{@step.state}</span>
-            of
-            <.link navigate={back(@project, @ticket)} class="underline">
-              #{@ticket.number} {@ticket.title}
-            </.link>
-            · visit {@step.visit}
-          </p>
-        </:header>
+      <:decision :if={@decision || @decision_error}>
+        <Decision.gone :if={is_nil(@decision)} error={@decision_error} />
+        <Decision.row
+          :if={@decision}
+          decision={@decision}
+          open={@decision_open}
+          note={@decision_note}
+          pick={@decision_pick}
+          error={@decision_error}
+          tab={@tab}
+        />
+      </:decision>
+      <:details>
+        <ChatViews.details {assigns} now={@at} />
+      </:details>
 
-        <:strip>
-          <%!-- Not on a phone: the id is for finding the branch, and the strip has one line, which
-                the harness and its model are worth more than an id of. --%>
-          <span class="hidden sm:inline">chat/{String.slice(@chat.id, 0, 8)}</span>
-          <span id="chat-harness">{Forge.Jobs.harness_line(@chat, @project)}</span>
-          <Diff.stat diff={@diff} />
-          <span>{@chat.turns} {if @chat.turns == 1, do: "turn", else: "turns"}</span>
-          <span>{Format.windows(@chat.usage) || "—"}</span>
-          <%!-- Only when memory was the trouble (`docs/design/capacity.md` § Memory, which a job
-                holds rather than spends). --%>
-          <span :if={@memory} id="chat-memory" class="text-warning">
-            ⚠ {Forge.Jobs.Memory.words(@memory)}
-          </span>
-          <%!-- What it was opened with, less what has gone since: the names, never a value. --%>
-          <span :if={@chat.secret_names -- @secrets_gone != []} id="chat-secrets">
-            holds {Enum.join(@chat.secret_names -- @secrets_gone, ", ")}
-          </span>
-          <span :for={name <- @secrets_gone} class="chat-secret-gone text-warning">
-            ⚠ {name} was deleted and this conversation no longer holds it
-          </span>
-        </:strip>
+      <:composer :if={@tab in ["talk", "changes"]}>
+        <ChatViews.dock {assigns} />
+      </:composer>
 
-        <.talk :if={@tab == "talk"} {assigns} />
+      <:aside :if={is_nil(@step)}>
+        <ChatViews.aside {assigns} error={@decision_error} />
+      </:aside>
+      <:aside :if={@step_doc}>
+        <ChatViews.step_aside doc={@step_doc} />
+      </:aside>
 
-        <WorkScreen.body :if={@tab == "changes"} id="changes">
-          <.changes {assigns} />
-        </WorkScreen.body>
+      <ChatViews.talk :if={@tab == "talk"} {assigns} />
 
-        <WorkScreen.body :if={@tab == "docs"} id="docs">
-          <WorkScreen.docs docs={@docs} unrecorded={@unrecorded} />
-        </WorkScreen.body>
+      <WorkScreen.body :if={@tab == "changes"} id="changes">
+        <ChatViews.changes {assigns} />
+      </WorkScreen.body>
 
-        <WorkScreen.body :if={@tab == "activity"} id="activity">
-          <WorkScreen.activity
-            events={@events}
-            shown={@shown}
-            notices={@notices}
-            heading={WorkScreen.stream_heading(@chat, @events)}
-          />
-        </WorkScreen.body>
+      <WorkScreen.body :if={@tab == "docs"} id="docs">
+        <WorkScreen.docs docs={@docs} unrecorded={@unrecorded} />
+      </WorkScreen.body>
 
-        <:footer :if={@tab == "talk"}>
-          <.footer {assigns} />
-        </:footer>
-
-        <:rail>
-          <.rail {assigns} />
-        </:rail>
-      </WorkScreen.frame>
+      <WorkScreen.body :if={@tab == "activity"} id="activity">
+        <WorkScreen.activity
+          events={@events}
+          shown={@shown}
+          notices={@notices}
+          heading={WorkScreen.stream_heading(@chat, @events)}
+          hrefs={WorkScreen.version_hrefs(@docs)}
+        />
+      </WorkScreen.body>
     </Layouts.app>
     """
   end
 
-  defp talk(assigns) do
-    ~H"""
-    <.scroll_pane id="messages-pane" height={nil} class="py-4">
-      <ol class="flex flex-col gap-4" id="messages" data-scroll-items>
-        <Transcript.transcript messages={@messages} live={@live} now={@at} refs={@refs} />
-      </ol>
-
-      <p :if={@messages == []} class="text-sm opacity-60">Nothing said yet.</p>
-
-      <%!-- A conversation that has not started yet says why, where the reply will appear: the
-            scheduler's sentence, the latest since it last started (docs/design/ui.md § A job
-            waiting for a machine). A chat sticks nothing, so this and — for a chat step — the
-            ticket's own page are the only surfaces that say a template is missing. --%>
-      <p :if={@waiting} id="chat-waiting" class="mt-4 text-sm/[1.55] opacity-70">
-        {Events.summary(@waiting)}
-      </p>
-    </.scroll_pane>
-    """
+  # A step's conversation is its ticket's work, and its page the ticket's frame: titled by the
+  # ticket. Any other is called what the person opened it with (`Conversations.title/3`).
+  defp page_heading(%{chat: chat, ticket: ticket, step: step}, messages) do
+    first = Enum.find_value(messages, fn m -> m.role == :user && m.text end)
+    Conversations.title(chat, step && ticket, first)
   end
 
-  # From the bottom up: the composer, the now line with the plan above it, and the last reply's
-  # question form — under the thumb (`docs/design/ui.md` § Talk).
-  defp footer(assigns) do
-    ~H"""
-    <div class="flex flex-col gap-2 border-t border-base-300 pt-2 pb-2">
-      <%!-- Gone when the conversation is, for the same reason the box is: the form's Send is a
-            send button, and one offered on a dead conversation takes a tap and loses it. What it
-            asked stays legible in the transcript. --%>
-      <section
-        :if={@questions != [] && @live}
-        id="answer-rows"
-        class="flex max-h-[45dvh] flex-col gap-2 overflow-y-auto"
-      >
-        <.question_form
-          id={"chat-#{@chat_id}-#{@reply}"}
-          questions={@questions}
-          forms={@forms}
-          submit="chat:questions:send"
-          hidden={[{"chat", @chat_id}, {"reply", @reply}]}
-        />
-      </section>
-
-      <details
-        :if={@responding && @plan != []}
-        id="plan"
-        class="font-mono text-[12.5px]"
-        phx-mounted={Actions.keep_open()}
-      >
-        <summary class="flex min-h-[46px] cursor-pointer items-center gap-2 text-info">
-          <span class="shrink-0 opacity-60">
-            {Enum.count(@plan, &(&1["status"] == "completed"))}/{length(@plan)}
-          </span>
-          <span class="min-w-0 truncate font-sans text-sm">
-            {(Actions.current_todo(@plan) && Actions.todo_text(Actions.current_todo(@plan))) ||
-              "done"}
-          </span>
-        </summary>
-        <div class="pb-2"><Actions.checklist todos={@plan} /></div>
-      </details>
-
-      <%!-- Static text: ui.md § Motion and structure says nothing pulses, and a conversation you
-            are waiting on is exactly where a decorative animation would be most tempting and
-            least honest. --%>
-      <div :if={@responding} id="now-line" class="flex flex-wrap items-center gap-2">
-        <span class="min-w-0 basis-full break-words font-mono text-[12.5px] text-info sm:basis-0 sm:flex-1">
-          {Actions.now_words(@now) || "…"}
-        </span>
-        <button
-          type="button"
-          phx-click="stop"
-          class="min-h-[46px] rounded-field border border-base-300 px-3 text-sm"
-        >
-          Stop
-        </button>
-        <%!-- Deliberate, and named for what it costs: the tokens already spent on the
-              interrupted turn are spent. --%>
-        <button
-          type="button"
-          phx-click="force"
-          phx-value-text={@draft}
-          class="min-h-[46px] rounded-field border border-base-300 px-3 text-sm"
-        >
-          Interrupt and send
-        </button>
-      </div>
-
-      <p :if={waiting?(@chat, @messages)} class="text-sm opacity-60">It is waiting on you.</p>
-
-      <StepAccept.accept_area
-        :if={@step}
-        step={@step}
-        pick={@step_pick}
-        confirming={@step_confirming}
-        error={@step_error}
-      />
-
-      <form :if={@live} id="say" phx-change="draft" phx-submit="send">
-        <ForgeWeb.Conversations.message_box id="draft" name="text" value={@draft} send />
-      </form>
-
-      <section :if={not @live and not step_over?(@step)}>
-        <p id="reopen-copy" class="text-sm/[1.55] opacity-70">
-          This conversation has stopped. Reopening starts a new process on a new machine: it is
-          given everything said here to read, and answers the next thing you say.
-          <%= if @branch_exists do %>
-            It works on its branch as it stands.
-          <% else %>
-            Its branch is gone — a merge deletes it, and so does ending — so it starts one again
-            from <span class="font-mono text-[12.5px]">{@base_branch}</span> as it stands now.
-          <% end %>
-        </p>
-        <button
-          type="button"
-          phx-click="reopen"
-          class="mt-2 min-h-[46px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
-        >
-          Reopen
-        </button>
-      </section>
-    </div>
-    """
+  # Under the title: a step's ticket, its state and visit, as the ticket's own page says it; a
+  # conversation's own state otherwise — responding and on which turn, waiting on you, idle,
+  # waiting for a machine, or stopped and when.
+  # The ticket's own subline — its number, the state's mark and name, and its status when it is
+  # not active — and the step's visit after it: built from less, it dropped the mark the ticket's
+  # page draws for the same ticket (UX pass, B28).
+  defp subline(%{step: %{} = step, ticket: ticket} = assigns) do
+    [
+      "##{ticket.number} · #{assigns.step_mark} #{ticket.state}",
+      ticket.status != :active && to_string(ticket.status),
+      "visit #{step.visit}"
+    ]
+    |> Enum.filter(& &1)
+    |> Enum.join(" · ")
   end
 
-  defp changes(assigns) do
-    ~H"""
-    <section>
-      <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">What it changed</h2>
-      <div class="mt-3">
-        <Diff.file_table :if={@diff} diff={@diff} ask="ask" />
-        <p :if={!@diff} class="text-sm/[1.55] opacity-70">
-          There is no branch to compare: a merge deletes it, and so does ending.
-        </p>
-      </div>
-    </section>
-
-    <WorkScreen.commits commits={@commits} now={@at} />
-
-    <section :if={@diff} class="mt-8">
-      <p :if={@conflict} class="text-sm/[1.55] text-error">
-        It does not merge cleanly: {Enum.join(@conflict, ", ")}. Ask it to rebase, or take the
-        change by hand.
-      </p>
-
-      <p :if={@merged} class="text-sm/[1.55] opacity-70">
-        Already on {@project.default_branch}.
-      </p>
-
-      <%!-- Above the merge control and read-only, as on a ticket's review page. The button is
-            drawn only where there is one: pressing merge without it is refused, and a page that
-            offered it would be offering something that fails (`conversations.md` § Commits). --%>
-      <div :if={not @merged and @diff[:files] not in [nil, []]} class="mt-4">
-        <WorkScreen.commit_message version={@commit_message} id="chat-commit-message" />
-      </div>
-
-      <button
-        :if={(not @merged and @commit_message) && @diff[:files] not in [nil, []]}
-        type="button"
-        phx-click="merge"
-        data-confirm="Merge this into the default branch?"
-        class="mt-4 min-h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
-      >
-        Merge into {@project.default_branch}
-      </button>
-    </section>
-    """
+  defp subline(%{chat: chat, live: live, responding: responding, messages: messages}) do
+    "chat · " <>
+      cond do
+        responding -> "▸ responding · turn #{chat.turns + 1}"
+        waiting?(chat, messages) -> "waiting on you"
+        chat.status == :pending -> "waiting for a machine"
+        live -> "idle"
+        true -> stopped(chat)
+      end
   end
 
-  defp rail(assigns) do
-    ~H"""
-    <%!-- The strip's gauge written out, where a phone reaches it: below `lg` this is the
-          details sheet, and the top bar that carries the gauge's title is not drawn. --%>
-    <Layouts.capacity_written
-      :if={@capacity not in [nil, %{}]}
-      capacity={@capacity}
-      prefix="details-capacity"
-      class="mb-6 border-b border-base-300 pb-3 lg:hidden"
-    />
-    <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">This chat</h2>
-    <p class="mt-2 text-sm/[1.55] opacity-60">{context_line(@ticket)}</p>
+  defp stopped(%{finished_at: %DateTime{} = at}), do: "stopped " <> Format.ago_phrase(at)
+  defp stopped(_chat), do: "stopped"
 
-    <dl class="mt-3 flex flex-col gap-2 text-[12.5px]">
-      <.fact label="project" value={@project.name} />
-      <.fact :if={@ticket} label="ticket" value={"##{@ticket.number} #{@ticket.title}"} />
-      <.fact label="harness" value={Forge.Harness.label(Jobs.harness(@chat))} />
-      <.fact label="model" value={Jobs.model_for(@chat) || "the platform's"} />
-      <.fact label="effort" value={Jobs.effort_for(@chat) || "the platform's"} />
-      <.fact label="turns" value={to_string(@chat.turns)} />
-      <.fact label="spent" value={Format.windows(@chat.usage) || "—"} />
-      <.fact label="branch" value={"chat/" <> @chat.id} />
-    </dl>
+  # A step's conversation carries its ticket's strip, with the ticket's counts
+  # (`TicketViews.strip_of/4`, the job page's too): Talk is this page, and every other view is the
+  # ticket's own (`docs/design/ui.md` § The Accept area). Built here, on load and when the ticket
+  # changes, and never in the template: a step's conversation renders on every streamed block,
+  # and the strip reads the ticket's jobs, its documents and a diff of its whole branch.
+  defp assign_strip(%{assigns: %{step: %{}} = assigns} = socket) do
+    %{project: project, ticket: ticket, chat: chat, events: events} = assigns
+    current = ticket.id |> Jobs.for_ticket() |> List.last()
 
-    <section :if={@live} class="mt-8">
-      <button
-        type="button"
-        phx-click="close"
-        data-confirm={ForgeWeb.Conversations.ending_confirm()}
-        class="min-h-[46px] text-sm text-primary hover:underline"
-      >
-        End it
-      </button>
-      <p id="ending-copy" class="mt-1 text-sm/[1.55] opacity-60">
-        It holds a worker until it ends or goes idle. If you end it, {ForgeWeb.Conversations.ending_rule()}; going idle does not.
-      </p>
-    </section>
-    """
+    strip =
+      for view <- TicketViews.strip_of(project, ticket, current, {chat.id, events}) do
+        # Talk is this page: patched, so its drafts and its scroll stay.
+        if view.key == "talk",
+          do: view |> Map.delete(:navigate) |> Map.put(:patch, ~p"/chats/#{chat.id}"),
+          else: view
+      end
+
+    assign(socket, strip: strip)
   end
+
+  defp assign_strip(socket), do: assign(socket, strip: nil)
+
+  # The views a strip draws: a step's, as loaded; any other conversation's its own.
+  defp views(%{strip: [_ | _] = strip}), do: strip
+
+  defp views(assigns) do
+    WorkScreen.views(
+      [
+        {"talk", "Talk", nil},
+        {"changes", "Changes", Diff.file_count(assigns.diff)},
+        {"docs", "Docs", length(assigns.docs)},
+        {"activity", "Activity", WorkScreen.activity_count(assigns.events)}
+      ],
+      ~p"/chats/#{assigns.chat_id}"
+    )
+  end
+
+  # The parent, at the top bar's right end: a step's and a project chat's project, a ticket
+  # chat's ticket.
+  defp context(project, _ticket, %{}), do: {project.name, ~p"/projects/#{project.name}"}
+  defp context(project, ticket, nil), do: {context_label(project, ticket), back(project, ticket)}
+
+  defp conflict(%{kind: :merge, conflict: [_ | _] = paths}), do: paths
+  defp conflict(_decision), do: nil
+
+  defp merge(%{kind: :merge} = decision), do: decision
+  defp merge(_decision), do: nil
+
+  # The second of a conflict's ways out: what a person types to take the branch by hand, against
+  # the project's clone URL (`docs/design/git-hosting.md`).
+  defp fetch_command(project, chat),
+    do: "git fetch #{Url.for(project)} #{Jobs.chat_branch(chat)}"
 
   defp back(project, nil), do: ~p"/projects/#{project.name}"
   defp back(project, ticket), do: ~p"/tickets/#{project.name}/#{ticket.number}"
 
-  defp where(project, nil), do: project.name
-  defp where(project, ticket), do: "#{project.name}##{ticket.number} · #{ticket.title}"
+  # The parent object, short enough for the top bar's right end.
+  defp context_label(project, nil), do: project.name
+  defp context_label(project, ticket), do: "#{project.name}##{ticket.number}"
 
   # The address of a version is its scope's (ui.md § Addressable artifact versions): the
   # conversation's own for what is scoped to it, the ticket's for a ticket chat's documents.
@@ -761,7 +643,4 @@ defmodule ForgeWeb.ChatLive do
 
   defp transcript_scope(%{project: project, ticket: ticket}),
     do: Forge.References.ticket_scope(project.name, ticket)
-
-  defp context_line(nil), do: "About the repository as a whole."
-  defp context_line(_ticket), do: "About this ticket, from its branch as it stood."
 end

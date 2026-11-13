@@ -147,24 +147,64 @@ defmodule Forge.Projects do
   end
 
   @doc """
-  The viewer's projects with what each has to run on: open tickets, assigned templates, permanent
-  machines assigned to it, and credentials in its pool that are not revoked (`docs/design/ui.md` § The projects page).
+  The viewer's projects with what waits on them and what runs, then what each has to run on:
+  `waiting` (the items of the viewer's queue in that project, counted as the queue counts them),
+  `running` (its jobs on a machine now), open tickets, assigned templates, permanent machines
+  assigned to it, credentials in its pool that are not revoked, and the latest thing that
+  happened — `latest`, its most recently changed open ticket, and `last_merge`, when a ticket of
+  it last merged (`docs/design/ui.md` § The projects page).
 
-  One query per figure over every project, never one per project: the page is a list, and a
-  list that queries per row grows its cost with the thing it lists.
+  **Projects that wait on the viewer come first**, by name within each group.
+
+  One read per figure over every project, never one per project: the page is a list, and a
+  list that queries per row grows its cost with the thing it lists. The waiting counts are one
+  read of the viewer's queue, which is scoped by membership as the queue page is.
   """
   @spec summaries(User.t()) :: [
           %{
             project: Project.t(),
+            waiting: non_neg_integer(),
+            first_waiting: Forge.Queue.item() | nil,
+            running: non_neg_integer(),
             open_tickets: non_neg_integer(),
             templates: non_neg_integer(),
             machines: non_neg_integer(),
-            credentials: non_neg_integer()
+            credentials: non_neg_integer(),
+            latest: Forge.Tickets.Ticket.t() | nil,
+            last_merge: DateTime.t() | nil
           }
         ]
   def summaries(%User{} = user) do
     projects = list(user)
     ids = Enum.map(projects, & &1.id)
+
+    # **Scoped twice, and the second is what holds.** The rows are `list(user)`'s and every figure
+    # is looked up by a row's project, so a count for a project not on the page has nowhere to be
+    # drawn: reading the node-wide `Queue.items/0` here, or dropping `in ^ids` from a query below,
+    # is an equivalent mutant on the page — the narrowing is about what is read, not what is shown.
+    by_project = user |> Forge.Queue.items() |> Enum.group_by(& &1.project.id)
+
+    waiting =
+      Map.new(by_project, fn {project_id, items} -> {project_id, Forge.Queue.tally(items)} end)
+
+    # What has waited longest, which a row with a count names in place of its latest line: the
+    # count says something waits, and this says what (`docs/design/ui.md` § The projects page).
+    first_waiting =
+      Map.new(by_project, fn {project_id, items} ->
+        {project_id,
+         items
+         |> Enum.filter(&Forge.Queue.waiting?/1)
+         |> Enum.min_by(& &1.since, DateTime, fn -> nil end)}
+      end)
+
+    running =
+      counts(
+        from(j in Forge.Jobs.Job,
+          where: j.project_id in ^ids and j.status == :running,
+          group_by: j.project_id,
+          select: {j.project_id, count(j.id)}
+        )
+      )
 
     tickets =
       counts(
@@ -208,27 +248,70 @@ defmodule Forge.Projects do
         )
       )
 
-    for project <- projects do
-      %{
-        project: project,
-        open_tickets: Map.get(tickets, project.id, 0),
-        templates: Map.get(templates, project.id, 0),
-        machines: Map.get(machines, project.id, 0),
-        credentials: Map.get(credentials, project.id, 0)
-      }
-    end
+    # Each project's most recently changed open ticket, in one read: `DISTINCT ON` keeps the
+    # first row per project in the order given.
+    latest =
+      Repo.all(
+        from(t in Forge.Tickets.Ticket,
+          where: t.project_id in ^ids and t.status in ^Forge.Tickets.Ticket.open_statuses(),
+          distinct: [asc: t.project_id],
+          order_by: [desc: t.updated_at, desc: t.number]
+        )
+      )
+      |> Map.new(&{&1.project_id, &1})
+
+    last_merge =
+      counts(
+        from(e in Forge.Events.Event,
+          where: e.project_id in ^ids and e.type == "ticket.merged",
+          group_by: e.project_id,
+          select: {e.project_id, max(e.inserted_at)}
+        )
+      )
+
+    rows =
+      for project <- projects do
+        %{
+          project: project,
+          waiting: Map.get(waiting, project.id, 0),
+          first_waiting: Map.get(first_waiting, project.id),
+          running: Map.get(running, project.id, 0),
+          open_tickets: Map.get(tickets, project.id, 0),
+          templates: Map.get(templates, project.id, 0),
+          machines: Map.get(machines, project.id, 0),
+          credentials: Map.get(credentials, project.id, 0),
+          latest: Map.get(latest, project.id),
+          last_merge: Map.get(last_merge, project.id)
+        }
+      end
+
+    # Stable, so each group keeps `list/1`'s order by name.
+    Enum.sort_by(rows, &(&1.waiting == 0))
   end
 
   defp counts(query), do: query |> Repo.all() |> Map.new()
 
   ## Membership
 
-  @doc "The role this user holds on this project, or nil for a non-member."
+  @doc """
+  The role this user holds on this project, or nil for a non-member — **and nil for an account
+  that may not act**, pending or suspended, whatever its rows say.
+
+  Read from the database at every call, the account's standing with the membership, because the
+  `%User{}` a caller holds is the one its page mounted with. Every guard on a project asks this —
+  `Forge.Operator`, membership here, assigning a machine, a template or a credential — so a
+  member suspended while a page was open is refused at the next act, not only at the next mount
+  (review fixes 7, H1). A suspended member keeps its row (§ Projects and members), which is why
+  the row alone is not the answer.
+  """
   @spec role(Project.t(), User.t()) :: Member.role() | nil
   def role(%Project{id: project_id}, %User{id: user_id}) do
     Repo.one(
       from m in Member,
+        join: u in User,
+        on: u.id == m.user_id,
         where: m.project_id == ^project_id and m.user_id == ^user_id,
+        where: not is_nil(u.approved_at) and is_nil(u.suspended_at),
         select: m.role
     )
   end
@@ -293,11 +376,6 @@ defmodule Forge.Projects do
       not User.active?(user) ->
         {:error, User.standing(user)}
 
-      # Demotion is removal by another name: a project whose last admin becomes a member has
-      # nobody who can make one again, and `remove_member/3` refuses exactly this.
-      role != :admin and last_admin?(project, user) ->
-        {:error, :last_admin}
-
       true ->
         set_member(project, user, role, by)
     end
@@ -308,6 +386,11 @@ defmodule Forge.Projects do
       Member.changeset(%Member{}, %{project_id: project.id, user_id: user.id, role: role})
 
     Multi.new()
+    # Demotion is removal by another name: a project whose last admin becomes a member has
+    # nobody who can make one again, and `remove_member/3` refuses exactly this.
+    |> Multi.run(:last_admin, fn _repo, _changes ->
+      if role == :admin, do: {:ok, nil}, else: not_last_admin(project, user)
+    end)
     |> Multi.insert(:member, changeset,
       on_conflict: {:replace, [:role, :updated_at]},
       conflict_target: [:project_id, :user_id]
@@ -331,31 +414,32 @@ defmodule Forge.Projects do
   """
   @spec remove_member(Project.t(), User.t(), User.t()) :: :ok | {:error, term()}
   def remove_member(%Project{} = project, %User{} = user, %User{} = by) do
-    cond do
-      manageable(project, by) != :ok ->
-        {:error, :forbidden}
+    if manageable(project, by) == :ok,
+      do: delete_member(project, user, by),
+      else: {:error, :forbidden}
+  end
 
-      last_admin?(project, user) ->
-        {:error, :last_admin}
-
-      true ->
-        Multi.new()
-        |> Multi.delete_all(
-          :member,
-          from(m in Member, where: m.project_id == ^project.id and m.user_id == ^user.id)
-        )
-        |> put_withdrawn(project, user)
-        |> Events.log(:event, "project.member_removed", {:user, by.id}, %{
-          project_id: project.id,
-          payload: %{"project_id" => project.id, "user_id" => user.id}
-        })
-        |> Repo.transaction()
-        |> case do
-          {:ok, _changes} -> :ok
-          {:error, _step, reason, _changes} -> {:error, reason}
-        end
+  defp delete_member(project, user, by) do
+    Multi.new()
+    |> Multi.run(:last_admin, fn _repo, _changes -> not_last_admin(project, user) end)
+    |> Multi.delete_all(
+      :member,
+      from(m in Member, where: m.project_id == ^project.id and m.user_id == ^user.id)
+    )
+    |> put_withdrawn(project, user)
+    |> Events.log(:event, "project.member_removed", {:user, by.id}, %{
+      project_id: project.id,
+      payload: %{"project_id" => project.id, "user_id" => user.id}
+    })
+    |> Repo.transaction()
+    |> case do
+      {:ok, _changes} -> :ok
+      {:error, _step, reason, _changes} -> {:error, reason}
     end
   end
+
+  defp not_last_admin(project, user),
+    do: if(last_admin?(project, user), do: {:error, :last_admin}, else: {:ok, nil})
 
   # **A person who leaves a project stops funding it**, in the transaction that removes them: the
   # templates, machines and credentials they assigned to it are unassigned with the membership
@@ -395,12 +479,24 @@ defmodule Forge.Projects do
     Forge.Access.ensure(scope, :manage)
   end
 
+  # Asked inside the transaction that demotes or removes, with the project's admin rows locked:
+  # two admins demoting each other at once each saw the other still there when this was asked
+  # before the write, both writes committed, and the project had none. Locked, the second waits
+  # for the first, and reads the rows as the first left them.
+  #
+  # The lock itself is an equivalent mutant under the test sandbox, which runs every process of a
+  # test on one connection in one transaction, so two writers never wait on each other there;
+  # the refusal it guards is what the tests can see.
   defp last_admin?(%Project{id: project_id}, %User{id: user_id}) do
-    role(%Project{id: project_id}, %User{id: user_id}) == :admin and
-      not Repo.exists?(
+    admins =
+      Repo.all(
         from m in Member,
-          where: m.project_id == ^project_id and m.role == :admin and m.user_id != ^user_id
+          where: m.project_id == ^project_id and m.role == :admin,
+          lock: "FOR UPDATE",
+          select: m.user_id
       )
+
+    admins == [user_id]
   end
 
   @doc "Changes a registered project. `mix forge.seed.publish` uses it to move the seed on."
@@ -470,7 +566,7 @@ defmodule Forge.Projects do
   `Operator.set_model/3` passes the person it already checked; `:system` is for the platform
   acting on its own, and a test setting a default up front. `actor/1` is total for those two
   shapes only, so anything else raises — and raises before the transaction opens, which is why
-  there is no separate guard on this head: one would be an equivalent mutant (see `set_dial/5`).
+  there is no separate guard on this head: one would be an equivalent mutant (see `set_defaults/3`).
 
   **The event is part of the write, not a side effect of it.** Both go in one transaction, so a
   rejected event is a rejected change rather than a setting that took effect with nothing in the
@@ -480,7 +576,7 @@ defmodule Forge.Projects do
   @spec set_model(Project.t(), String.t() | nil, User.t() | :system) ::
           {:ok, Project.t()} | {:error, term()}
   def set_model(%Project{} = project, model, by \\ :system) do
-    set_dial(project, :model, model, "project.model_set", by)
+    set_defaults(project, %{model: model}, by)
   end
 
   @doc """
@@ -495,7 +591,7 @@ defmodule Forge.Projects do
   @spec set_effort(Project.t(), String.t() | nil, User.t() | :system) ::
           {:ok, Project.t()} | {:error, term()}
   def set_effort(%Project{} = project, effort, by \\ :system) do
-    set_dial(project, :effort, effort, "project.effort_set", by)
+    set_defaults(project, %{effort: effort}, by)
   end
 
   @doc """
@@ -505,43 +601,117 @@ defmodule Forge.Projects do
   @spec set_harness(Project.t(), String.t(), User.t() | :system) ::
           {:ok, Project.t()} | {:error, term()}
   def set_harness(%Project{} = project, harness, by \\ :system),
-    do: set_dial(project, :harness, harness, "project.harness_set", by)
+    do: set_defaults(project, %{harness: harness}, by)
 
   @doc "Sets Codex's default model for the project, or clears it (Codex's own default then)."
   @spec set_codex_model(Project.t(), String.t() | nil, User.t() | :system) ::
           {:ok, Project.t()} | {:error, term()}
   def set_codex_model(%Project{} = project, model, by \\ :system),
-    do: set_dial(project, :codex_model, model, "project.codex_model_set", by)
+    do: set_defaults(project, %{codex_model: model}, by)
 
   @doc "Sets Codex's default effort for the project, or clears it."
   @spec set_codex_effort(Project.t(), String.t() | nil, User.t() | :system) ::
           {:ok, Project.t()} | {:error, term()}
   def set_codex_effort(%Project{} = project, effort, by \\ :system),
-    do: set_dial(project, :codex_effort, effort, "project.codex_effort_set", by)
+    do: set_defaults(project, %{codex_effort: effort}, by)
 
-  # One shape for both dials: update the column and log who did it, or do neither. The payload
-  # reads the *updated* row, so it says what the setting became rather than what was asked for —
-  # a blank value, which the changeset stores as nil, is logged as nil.
-  #
-  # **A `by` that is neither a user nor `:system` raises before anything is written**, because
-  # `actor(by)` is evaluated while this `Multi` is being built and the transaction has not opened
-  # yet. That is what makes a guard on the two public heads an equivalent mutant: adding one
-  # moves the same `FunctionClauseError` a few microseconds earlier and changes nothing a caller
-  # or the database can see. It was observable before this function was transactional, when
-  # `Repo.update()` had already committed by the time the actor was encoded.
-  defp set_dial(project, field, value, type, by) do
-    Multi.new()
-    |> Multi.update(:project, Project.changeset(project, %{field => value}))
-    |> Events.log(:event, type, actor(by), fn %{project: project} ->
-      %{
-        payload: %{"project" => project.name, Atom.to_string(field) => Map.fetch!(project, field)}
-      }
-    end)
+  @dials %{
+    model: "project.model_set",
+    effort: "project.effort_set",
+    harness: "project.harness_set",
+    codex_model: "project.codex_model_set",
+    codex_effort: "project.codex_effort_set"
+  }
+
+  @doc """
+  Sets the project's agent defaults together — what project settings' one Save sends
+  (`docs/design/ui.md` § Model and effort): the harness, Claude's model and effort and Codex's,
+  or whichever of them `attrs` names.
+
+  **Both columns and an event for each in one transaction, or nothing.** A refused effort leaves
+  the model as it was rather than saving half of what the person pressed Save on; a rejected
+  event rejects the change, because attribution is this function's whole point and a log that
+  can silently miss a row is one nobody can reason from. A key other than the five dials is
+  ignored, so nothing else about the project can be reached through here.
+
+  Each event carries the project's id as well as its name, so the events about one project are
+  one indexed read (`observed_model/1` reads the last model change that way).
+
+  **A `by` that is neither a user nor `:system` raises before anything is written**, because
+  `actor(by)` is evaluated while this `Multi` is being built and the transaction has not opened
+  yet. That is what makes a guard on the public heads an equivalent mutant: adding one moves the
+  same `FunctionClauseError` a few microseconds earlier and changes nothing a caller or the
+  database can see.
+  """
+  @spec set_defaults(Project.t(), map(), User.t() | :system) ::
+          {:ok, Project.t()} | {:error, term()}
+  def set_defaults(%Project{} = project, attrs, by \\ :system) when is_map(attrs) do
+    attrs = Map.take(attrs, Map.keys(@dials))
+    actor = actor(by)
+
+    attrs
+    |> Map.keys()
+    |> Enum.sort()
+    |> Enum.reduce(
+      Multi.update(Multi.new(), :project, Project.changeset(project, attrs)),
+      fn field, multi ->
+        # The payload reads the *updated* row, so it says what the setting became rather than what
+        # was asked for — a blank value, which the changeset stores as nil, is logged as nil.
+        Events.log(multi, {:event, field}, Map.fetch!(@dials, field), actor, fn %{project: p} ->
+          %{
+            project_id: p.id,
+            payload: %{"project" => p.name, Atom.to_string(field) => Map.fetch!(p, field)}
+          }
+        end)
+      end
+    )
     |> Repo.transaction()
     |> case do
       {:ok, %{project: project}} -> {:ok, project}
       {:error, _step, reason, _changes} -> {:error, reason}
     end
+  end
+
+  @doc """
+  What the project's work was last seen running on when nothing named a model — the value "the
+  machine's" stands for, as far as anything has shown it (`docs/design/ui.md` § Model and effort).
+
+  The model the harness reported starting with (`job.harness.started`) for the project's newest
+  job that named no model of its own — a workflow job whose state named none, a conversation
+  opened without one — and only since the project's default model last changed: before that, such
+  a job ran on the project's model, not the machine's. So while the project names a model, there
+  is nothing to observe. `nil` when no such job has started.
+
+  It is an observation and never a prediction: with no model set a worker passes no `--model`,
+  and the harness picks, which the platform cannot know in advance.
+  """
+  @spec observed_model(Project.t()) :: %{model: String.t(), at: DateTime.t()} | nil
+  def observed_model(%Project{model: model}) when is_binary(model), do: nil
+
+  def observed_model(%Project{id: project_id, name: name}) do
+    # Older events about the model carry the project's name and no id (`set_defaults/3`).
+    since =
+      Repo.one(
+        from e in Forge.Events.Event,
+          where: e.type == "project.model_set",
+          where:
+            e.project_id == ^project_id or
+              (is_nil(e.project_id) and fragment("?->>'project'", e.payload) == ^name),
+          select: max(e.seq)
+      ) || 0
+
+    Repo.one(
+      from e in Forge.Events.Event,
+        join: j in Forge.Jobs.Job,
+        on: j.id == e.job_id,
+        where: j.project_id == ^project_id and e.type == "job.harness.started",
+        where: e.seq > ^since,
+        where: is_nil(j.model) and is_nil(fragment("?->>'model'", j.spec)),
+        where: fragment("coalesce(?->>'model', '') <> ''", e.payload),
+        order_by: [desc: e.seq],
+        limit: 1,
+        select: %{model: fragment("?->>'model'", e.payload), at: e.inserted_at}
+    )
   end
 
   @doc "Every mirror this project pushes to, with what the hook last said about each."

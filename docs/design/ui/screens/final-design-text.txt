@@ -1,0 +1,5403 @@
+forge · final design
+Every agreed screen, in one place
+Collected from the exploration in
+Ticket View - Redesign
+. Screen ids are kept, so a card here matches its card there. Phone first, then desktop, per area.
+Home and navigation
+3
+Queue
+7
+Ticket
+14
+Changes and review
+8
+Job
+3
+Chat
+8
+Project
+12
+Proposals
+7
+Repository
+6
+Projects
+5
+Project settings
+10
+Machines, templates, credentials
+9
+Accounts and you
+2
+Usage
+2
+Signing in
+4
+App-wide states
+4
+Light theme
+2
+Home and navigation
+The queue is the only top level. Every top-level title opens the same menu from the top bar.
+19a
+Queue · the only top level, no strip
+Queue
+▾
+1 of 4
+· 5 decisions
+approval · review → merging
+waiting 1h
+Sound toggle in settings is ready to merge.
+game#39
+Sound toggle in settings
+The review agent's presentation: what changed, why, and how it was checked.
+Later
+Read the presentation
+›
+The queue is home, and the bottom strip of top-level pages is gone, which gives the item 56px back. The page title is the switch:
+Queue ▾
+. The top bar carries nothing else, so the item starts higher.
+19b
+Title tapped · the menu drops from the top bar
+Queue
+▴
+1 of 4
+Queue
+5 decisions
+›
+Projects
+4 · 4 waiting
+›
+Chats
+▸ 1 live · 14
+›
+Machines
+3 busy · 1 idle
+›
+yo
+you@example.com
+5h 42% · week 18%
+2 accounts ›
+approval · review → merging
+waiting 1h
+Sound toggle in settings is ready to merge.
+game#39
+Sound toggle in settings
+The review agent's presentation: what changed, why, and how it was checked.
+Later
+Read the presentation
+›
+The same move as Accept and Approve (
+16g
+,
+18c
+): tap the bar, and a panel drops from it over a dimmed page. Each destination carries its state (decisions waiting, live chats, busy machines), so the menu doubles as an overview. Your account, the capacity gauge and admin pages sit at its foot. A tap outside folds it.
+19c
+Another top-level page · same switch, queue on the left
+‹
+4
+Projects
+▾
+4 · 4 waiting
+game
+◆ 3
+›
+12 open · ▸ 3 running
+#41 is implementing · 4m
+forge
+◆ 1
+›
+7 open · ▸ 1 running
+#118 waits for review · 1h
+site
+›
+2 open
+last merge 3d
++ New project
+Projects, Chats and Machines keep the queue button on the left, as every inner page does. Their title is the same
+▾
+switch, so you can go sideways without passing through the queue. Inside a project or ticket the title is plain text, and the queue and project buttons are the way out.
+Queue
+One item per screen, with the ticket around each decision. Approvals link to the change and never approve here.
+18a
+Queue · approval: read first, decide on the change
+Queue
+▾
+1 of 4
+· 5 decisions
+All 4
+approval · review → merging
+waiting 1h
+Sound toggle in settings is ready to merge.
+game#39
+Sound toggle in settings
+feature
+triage
+shaping
+planning
+impl.
+review
+merging
+done
+review · visit 1
+3 jobs · 0.41 w
+admitted 2d ago
+changeset v1
++48
+−6
+· 3 files
+✓ check 21s
+lib/game/
+settings.ex
++21
+−3
+lib/game/
+audio.ex
++14
+−3
+test/game/
+settings_test.exs
++13
+−0
+Will commit
+Add a sound toggle to settings.
+Persists in the save file, defaults to on.
+Reviewer said
+“Matches the brief. The toggle is read once at boot, so changing it mid-game takes effect on the next sound.”
+Later
+Review the changeset
+›
+The queue no longer approves. It shows enough to know what you're walking into: the ticket and its track, the changeset's size, files and check, the commit message it will write, and what the review step's agent said. The way on is
+Review the changeset
+, an outline button because it navigates. The approval itself is on the changeset page (
+18b
+), where the diff is.
+13b
+Questions · context above, the card below
+Queue
+▾
+2 of 4
+· 5 decisions
+All 4
+2 blocking questions · brief.md v2
+waiting 12m
+game#42
+Shape the leaderboard screen
+feature
+triage
+shaping
+planning
+impl.
+review
+merging
+done
+shaping · chat
+4 turns · 0.18 w
+admitted 1d ago
+The agent, 12m ago
+Two things the brief leaves open before I can call it shaped.
+When you're outside the top 10, the pinned row could show your rank or just your score.
+Whole conversation ›
+○ rank
+○ empty
+1 of 2
+Outside the top 10, what does your row show?
+Your rank and score
+recommended
+Only your score
+Later
+Send 0 of 2
+›
+The same context card, then what the agent said when it stopped, with the passage that asked highlighted. The questions use the split pane from
+2a
+, sized to the card and up to your limit, so the context above can be read or dragged away. Sending the answers moves to the next item.
+13c
+Stuck · why, what was tried, the ways forward
+Queue
+▾
+3 of 4
+· 5 decisions
+All 4
+stuck
+waiting 25m
+Replace the font atlas is stuck: it ran out of turns.
+game#44
+Replace the font atlas with a single SDF texture
+triage
+shaping
+planning
+impl.
+review
+merging
+done
+implementing · visit 1
+2 attempts · 0.62 w of 1.0
+budget 30 turns
+Last attempt
+#1
+did_not_converge
+30 turns · 11m 40s
+3 tests failing in shader_test.exs
+sdf sampling at 8px is blurry
+agent: "Out of turns with the small sizes still blurry. More turns, or a smaller target such as 12px and up, would finish it."
+Ways forward
+Retry implementing
+A fresh attempt with the same budget.
+Move to shaping
+Back to the brief to narrow the target.
+Move to…
+Any state the workflow allows from here.
+Later
+Retry implementing
+›
+Stuck is the item that needs the most context and gets the least today. Here it says why, in words, beside the engine's outcome. It shows the last attempt's error excerpt and the agent's closing words, how much of the budget is gone, and the ways forward as choices with what each does.
+13d
+End of the pass · what is left to know
+Queue
+▾
+done
+· 0 decisions left
+All 4
+End of queue
+Nothing needs you. Work continues without you.
+3 decided · 1 left for later
+Chat: Why is the build so slow on CI?
+Back to it ›
+Under way
+3 tickets running on a worker, 1 not yet on one.
+game#41
+Persist the high score table
+implementing #2 · 4m
+game#45
+Score flickers on resize
+triage · 1m
+game#37
+Score on the end screen
+merging · 1/2
+Not waiting on you
+1 assumption was stated and work continued.
+game#41 assumed $FORGE_DATA_DIR/scores.db
+The pass ends somewhere definite, which today's list gives by its last section. It shows what was decided, what was left for later (with a way back), and then the two quiet groups, Under way and Not waiting on you, which count toward nothing.
+13e
+All items · the list as a sheet
+Queue
+▾
+2 of 4
+· 5 decisions
+All 4
+4 items · 5 decisions
+oldest first
+game#39 · Sound toggle in settings
+approval · review → merging
+✓
+game#42 · Shape the leaderboard screen
+2 questions · shaping
+12m
+game#44 · Replace the font atlas
+stuck · implementing · 2 attempts
+25m
+game · Why is the build so slow on CI?
+conversation · chat · 1 question
+3m
+Under way · 4
+Not waiting on you · 1
+All 4
+in the top bar opens the whole queue as a sheet, so you can still reach the end at a glance, as today's rules require. Decided items stay, dimmed with a tick, for the rest of the pass. Tapping a row jumps to it.
+13f
+Desktop, wide: the queue on the left, the item in the middle, its ticket on the right
+forge
+0.31.0
+Queue
+4
+Projects
+Chats
+Machines
+5h 42% · week 18%
+you@example.com
+Queue
+5 decisions
+Notify me
+approval · merges
+✓ approved
+Sound toggle in settings
+game#39
+review
+check passed · +48 −6 · 3 files
+2 questions
+12m
+Shape the leaderboard screen
+game#42
+shaping
+agent wrote brief.md v2
+stuck
+25m
+Replace the font atlas
+game#44
+implementing
+did_not_converge · 3 tests failing
+1 question
+3m
+Why is the build so slow on CI?
+game
+chat
+agent: the cache key includes the commit
+Under way · 4
+Not waiting on you · 1
+2 blocking questions · brief.md v2
+waiting 12m
+2 questions about brief.md v2
+The agent, 12m ago
+Two things the brief leaves open before I can call it shaped.
+When you're outside the top 10, the pinned row could show your rank or just your score.
+Rank needs a count over the whole table on every view. And the empty table needs a decision: show a placeholder row, or hide the screen until the first score.
+○ rank
+○ empty
+Outside the top 10, what does your row show?
+Your rank and score
+recommended
+One count over the table per view.
+Only your score
+add a note, or answer in your own words
+0 of 2 locked in
+Later
+Send answers
+game#42
+Shape the leaderboard screen
+feature
+triage
+shaping
+planning
+impl.
+review
+merging
+done
+shaping · chat
+4 turns · 0.18 w
+admitted 1d ago
+Since you last looked
+1d
+triage
+needs_shaping
+· 5 turns
+31m
+you: "We need a leaderboard players can actually see."
+24m
+agent wrote brief.md v1
+9m
+you: "Keep it to one screen."
+3m
+agent wrote brief.md v2
+Documents
+brief.md
+v2
+◇ unapproved
+Read ›
+Open game#42 ›
+Three columns. On the left is the whole queue, always visible so the end is in view. Each row shows the kind and age, the title, the ticket number with its workflow track and step, and the latest event, in the warning colour when something failed. In the middle is the item at reading width, and the ticket's context on the right, with its track, what happened in order, and the documents in play. Deciding moves the middle to the next item. This replaces
+12n
+.
+13g
+Desktop, portrait (1080 × 1500): the queue on the left, the ticket above the item
+forge
+0.31.0
+Queue
+4
+Projects
+Chats
+Machines
+5h 42% · week 18%
+you@example.com
+Queue
+5 decisions
+Notify me
+approval · merges
+✓ approved
+Sound toggle in settings
+game#39
+review
+check passed · +48 −6 · 3 files
+2 questions
+12m
+Shape the leaderboard screen
+game#42
+shaping
+agent wrote brief.md v2
+stuck
+25m
+Replace the font atlas
+game#44
+implementing
+did_not_converge · 3 tests failing
+1 question
+3m
+Why is the build so slow on CI?
+game
+chat
+agent: the cache key includes the commit
+Under way · 4
+Not waiting on you · 1
+game#42
+Shape the leaderboard screen
+feature
+triage
+shaping
+planning
+impl.
+review
+merging
+done
+shaping · chat
+4 turns · 0.18 w
+admitted 1d ago
+Since you last looked
+1d
+triage
+needs_shaping
+· 5 turns
+31m
+you: "We need a leaderboard players can actually see."
+24m
+agent wrote brief.md v1
+9m
+you: "Keep it to one screen."
+3m
+agent wrote brief.md v2
+Documents
+brief.md
+v2
+◇ unapproved
+Read ›
+Open game#42 ›
+2 blocking questions · brief.md v2
+waiting 12m
+2 questions about brief.md v2
+The agent, 12m ago
+Two things the brief leaves open before I can call it shaped.
+When you're outside the top 10, the pinned row could show your rank or just your score.
+Rank needs a count over the whole table on every view. And the empty table needs a decision: show a placeholder row, or hide the screen until the first score.
+○ rank
+○ empty
+Outside the top 10, what does your row show?
+Your rank and score
+recommended
+One count over the table per view.
+Only your score
+add a note, or answer in your own words
+0 of 2 locked in
+Later
+Send answers
+On a tall screen the ticket's context moves from a right column to a band above the item, the phone's order with room to spare. The queue keeps its column with the same rich rows. The item's decision keeps the bottom of the screen, where it sits on every other page.
+Ticket
+Fixed ends in the top bar, a strip of views at the bottom. Decisions live in the row pinned under the top bar.
+5j
+Fixed ends: queue on the left, project on the right
+4 waiting
+‹
+4
+Shape the leaderboard screen
+#42 ·
+●
+shaping
+· visit 1
+game ›
+none waiting
+‹
+0
+Shape the leaderboard screen
+#42 ·
+●
+shaping
+· visit 1
+game ›
+Both ends always mean the same thing. Left is the queue: the tray icon and the count, amber while anything waits and quiet at zero. Right is the ticket's project, by name. Moving to the next ticket goes through the queue. ⋯ moves into a long-press on the subline.
+16e
+D · before the first version: no header
+‹
+4
+Shape the leaderboard screen
+#42 ·
+●
+shaping
+game ›
+you · 1m
+We need a leaderboard players can actually see. Start from what #41 will store.
+agent · turn 1 · now
+▸
+reading lib/game/scores.ex
+Reply to the agent
+Talk
+Steps
+Docs
+1
+Activity
+23
+Until the agent writes the step's document for the first time there is nothing to accept, so no header and nothing amber. The screen is just the conversation.
+16f
+D · the document header, with Accept
+‹
+4
+Shape the leaderboard screen
+#42 ·
+●
+shaping
+game ›
+md
+brief.md
+v2
+◇
+written 3m ago · v1 24m ago
+Read
+◆
+Accept
+agent · turn 5 · 1m
+brief.md v2 is ready to accept. One thing it leaves open:
+Outside the top 10, the pinned row could show your rank or just your score.
+Outside the top 10, what does your row show?
+Your rank and score
+Only your score
+Send 1 answer
+Reply to the agent
+Talk
+Steps
+Docs
+1
+Activity
+23
+Once v1 exists, the top bar grows a second row pinned to it: the document, its version and age, Read, and an amber Accept, in one 60px row. The two rows share one surface and one shadow, with an amber edge on the document row. The row never scrolls away, stays on every tab, and updates to each new version. Accept is amber and sits at the top. Answering is white and sits at the bottom. The strip's right slot stays empty, because the bar holds the step's decision.
+16g
+D · Accept tapped: the band opens in place
+‹
+4
+Shape the leaderboard screen
+#42 ·
+●
+shaping
+game ›
+md
+brief.md
+v2
+◇
+written 3m ago · v1 24m ago
+Read
+◆
+Accept ▴
+Accept step shaping
+Ends the chat step, approves brief.md v2 and moves to planning.
+1 open question will stay unanswered
+“Outside the top 10, what does your row show?”
+Planning starts from brief.md v2 as written. Answer first if it should change.
+outcome
+shaped → planning
+Other outcome ▾
+Answer first
+Accept anyway
+agent · turn 5 · 1m
+brief.md v2 is ready to accept. One thing it leaves open:
+Outside the top 10, the pinned row could show your rank or just your score.
+Reply to the agent
+Talk
+Steps
+Docs
+1
+Activity
+23
+Tapping Accept drops the confirmation down from the bar, and the question pane folds away behind it, since answers no longer count once the step is accepted. Instead of letting you pick answers, it warns: how many questions stay open, which ones, and that planning starts from the document as written. The two ways out are
+Answer first
+, which closes this and reopens the pane, and
+Accept anyway
+. The outcome defaults to the forward one, and the other outcome is one tap away.
+2a
+Live: switch tabs, pick an option, drag the handle to set the limit
+2b
+Same limit, short question: the pane shrinks to fit
+2c
+Handle tapped: folded to tabs and Send
+5d
+Activity · job running, nothing waiting
+‹
+3
+Persist the high score table
+#41 ·
+▸
+implementing #2
+game ›
+✎ …/test/game/scores_test.exs  +8 −0
+14:00:58
+read 3 files · searched 2×
+14:01:22
+Running the failing test on its own first.
+14:01:40
+$ mix test test/game/scores_test.exs ✗
+14:01:52
+1) test top/1 orders ties by time
+left:  ["bo", "al"]
+right: ["al", "bo"]
+read 1 file
+14:02:05
+The tie comparison sorts by name, not by the time the score was set. Changing top/1 to order by {score desc, inserted_at asc}.
+14:02:18
+✎ …/lib/game/scores.ex  +14 −3
+14:02:30
+$ mix test test/game/scores_test.exs …
+14:02:41
+Steps
+2
+Docs
+2
+Activity
+34
+▸ 4m
+With nothing waiting, the right slot shows the job as a quiet info chip that opens the job page. A job takes no messages, so the composer is gone and the strip sits at the bottom edge. The queue button on the left still counts the other tickets waiting.
+5g
+Steps · done, nothing waiting
+‹
+4
+Show the score on the end screen
+#38 ·
+■ done
+· merged 2d ago
+game ›
+▸
+triage
+ready
+1 job
+›
+▸
+implementing
+implemented
+18 turns
+›
+●
+review
+approved
+changeset v1 ✓
+›
+▸
+merging
+merged
+a41c09e
+›
+■ done
+0.84 w total
+Talk
+3
+Steps
+Docs
+1
+Activity
+96
+With nothing waiting and no agent to talk to, the right slot and the composer go away and the four tabs take the whole strip. Talk only appears while the ticket has a conversation (shaping in
+5a
+) or kept one (3 messages here).
+6a
+Docs · every document on the ticket
+‹
+4
+Persist the high score table
+#41 ·
+▸
+planning
+approval
+game ›
+md
+plan.md
+v2
+◇
+38m ago · approve to start implementing
+◆
+Approve
+Waiting on you
+md
+plan.md
+v2
+agent · planning #1 · 38m ago
+◇ unapproved
+›
+v1 · superseded · 2h ago
+diff v1→v2 ›
+Inputs
+md
+brief.md
+v2
+you, in shaping · pinned at planning
+✓ approved
+›
+Job output
+log
+triage.md
+v1
+agent · triage #1 · yesterday
+read only
+›
+A document an agent writes appears here when its job declares it. Approving pins one version at one step.
+Ask about these docs
+Send
+Steps
+Docs
+3
+Changes
+Activity
+57
+Grouped by what each document asks of you: waiting first, then what the ticket was built from, then what jobs produced. Each row shows who wrote it and where it is pinned. Older versions fold under the current one, and the diff between versions is a tap away. Tapping a row opens the reader in
+5f
+.
+6d
+Details · sheet from tapping the subline
+‹
+4
+Persist the high score table
+▴
+#41 ·
+▸
+implementing #2
+game ›
+Steps
+2
+Docs
+2
+Changes
+6
+Activity
+34
+▸ 4m
+Persist the high score table
+game#41 · feature · admitted 3h ago
+1.4 windows
+of 4.0
+48 turns
+3 jobs
+2h 51m
+branch
+forge/game-41
+base
+9f3c1a0be27d
+workflow
+e41d07c2aa19
+worker
+hz-fsn1-3
+step
+implementing · visit 2
+Move to…
+Retry step
+■ Stop agent
+Cancel ticket
+Tapping the title drops the ticket's details from the top bar: its facts, what it pinned, and its lifecycle actions. It is the same panel pattern as the title menu (
+19b
+) and the decision dropdowns. Tapping the title again, the handle, or outside folds it up.
+2d
+Desktop, portrait monitor: the same split, stacked vertically. Live: switch tabs, pick an option, drag the thin bar
+Desktop density
+The phone's 52px rows and 44px handle stay on the phone. Here an option is a 34px row: a small radio, the label, and its detail on the same line. Question tabs sit in a 36px pane header next to the accent label. Send is a 30px button.
+The divider is a 10px bar, the way an editor splits panes.
+Fit-to-card and the user's limit work as on the phone. On a tall screen a short question leaves the reply most of the 1,260px, and the limit stops a long one from taking it.
+The split is vertical at every desktop width, so a landscape laptop gets the same stacking. The reply keeps a 760px measure either way. On the right, a 260px rail holds the visit (turns, time), the docs in play with their version and approval, the facts, and Stop agent.
+›
+collapses it to a 36px strip that keeps the counts and the stop button.
+16h
+Desktop, portrait (1080 × 1500): the same pinned row under the title
+forge
+0.31.0
+Queue
+4
+Projects
+Chats
+Machines
+5h 42% · week 18%
+you@example.com
+‹ game
+Shape the leaderboard screen
+#42 ·
+●
+shaping · visit 1
+Talk
+Steps
+Docs 1
+Activity 23
+md
+brief.md
+v2
+◇
+written 3m ago · v1 24m ago
+v1
+v2
+diff
+Read
+◆
+Accept
+you · 31m
+We need a leaderboard players can actually see. Start from what #41 will store.
+agent · turn 3 · 24m
+▸ 11 actions · wrote brief.md v1
+Wrote a first brief.md: an all-time tab and a weekly tab, each showing the top 25.
+you · 9m
+Keep it to one screen. Top 10, your own rank pinned at the bottom if you're not in it.
+agent · turn 4 · 3m
+▸ 3 actions · wrote brief.md v2
+Updated brief.md to v2: one screen, top 10, your row pinned under a divider.
+One thing it leaves open: outside the top 10, the pinned row could show your rank or just your score.
+◆
+Question
+○ rank
+Outside the top 10, what does your row show?
+Your rank and score
+recommended
+Only your score
+0 of 1 locked in
+Send answer
+Reply to the agent
+↵ send · ⇧↵ line
+Details
+›
+turns
+4
+time
+31m
+branch
+forge/game-42
+base
+9f3c1a0be27d
+workflow
+e41d07c2aa19
+worker
+hz-fsn1-2
+■ Stop agent
+The phone's rule holds at desk size. The document row is pinned under the title row, with its version switcher (v1, v2, diff) inline because there is room, and Accept on the right. Questions keep the split pane at the bottom with their own white Send. The composer's send is the icon in the field. Accept sits top right, answering bottom left, and the two never touch. This replaces
+3e
+'s Accept pane.
+16i
+Desktop, wide (1600 × 1000): conversation and document side by side, Accept open
+forge
+0.31.0
+Queue
+4
+Projects
+Chats
+Machines
+5h 42% · week 18%
+you@example.com
+‹ game
+Shape the leaderboard screen
+#42 ·
+●
+shaping · visit 1
+Talk
+Steps
+Docs 1
+Activity 23
+md
+brief.md
+v2
+◇
+written 3m ago · v1 24m ago
+v1
+v2
+diff
+Hide
+◆
+Accept ▴
+Accept step shaping
+Ends the chat step, approves brief.md v2 and moves to planning.
+◆ 1 open question will stay unanswered
+“Outside the top 10, what does your row show?”
+outcome
+shaped → planning
+Other outcome ▾
+Answer first
+Accept anyway
+you · 31m
+We need a leaderboard players can actually see. Start from what #41 will store.
+agent · turn 3 · 24m
+▸ 11 actions · wrote brief.md v1
+Wrote a first brief.md: an all-time tab and a weekly tab, each showing the top 25.
+you · 9m
+Keep it to one screen. Top 10, your own rank pinned at the bottom if you're not in it.
+agent · turn 4 · 3m
+▸ 3 actions · wrote brief.md v2
+Updated brief.md to v2: one screen, top 10, your row pinned under a divider.
+One thing it leaves open: outside the top 10, the pinned row could show your rank or just your score.
+◆
+Question
+○ rank
+Outside the top 10, what does your row show?
+Your rank and score
+recommended
+Only your score
+0 of 1 locked in
+Send answer
+Reply to the agent
+↵ send · ⇧↵ line
+brief.md v2
++12
+−19
+from v1
+Show changes
+Leaderboard screen
+One screen reached from the title menu and the end-of-game screen. It shows the top 10 scores from
+Game.Scores.top/1
+with name, score and date.
+Your row
+When you are outside the top 10, your best score is pinned under a divider at the bottom.
+What the row shows is open.
+Out of scope
+A weekly tab. It needs a date on every score, which #41 doesn't store yet. Follow-up: a ticket after #41 merges.
+Done when
+the screen opens from both places
+ties order by time set, as #41 decides
+an empty table shows one line saying so
+With width,
+Read
+opens the document beside the conversation instead of over it, so you read v2 while you talk about it. The passage behind the open question is highlighted there too. Accept drops its confirmation from the row, anchored to the button, with the same warning as the phone: the open question stays unanswered, and
+Answer first
+or
+Accept anyway
+. The details rail folds away while the document is open.
+Changes and review
+One screen. In review it opens on the presentation, with Files and Commits a switch away and Approve pinned above.
+19d
+Changes in review · the presentation is the default
+‹
+4
+Sound toggle in settings
+#39 ·
+●
+review · waiting on you
+game ›
+±
+changeset v1
++48
+−6
+✓ check 21s
+· review → merging
+◆
+Approve
+Presentation
+Files
+3
+Commits
+2
+md
+presentation.md · by the review agent · 1h
+A sound switch in settings, saved with the game
+Settings gains a
+sound
+field next to
+music
+, on by default, so old saves load with sound on.
+lib/game/
+settings.ex · lines 14–19
+Whole file ›
+15
+-
+music:
+true
+15
++
+music:
+true
+,
+16
++
+sound:
+true
+Every effect goes through
+Audio.play/1
+, so the switch is checked in one place.
+lib/game/
+audio.ex · lines 31–36
+Whole file ›
+31
+def
+play
+(name)
+do
+32
++
+if
+Settings
+.
+get
+(
+:sound
+)
+do
+33
+Mixer
+.
+play
+(name)
+How it was checked
+✓
+4 new tests · check --fast in 21s
+Steps
+Changes
+3
+Docs
+2
+Activity
+31
+The review page and Changes are one screen. While a ticket is in review and its agent has written a presentation, Changes opens on it. It's a short walkthrough of what changed and why, with the hunks that matter inline and how it was checked. Each excerpt has
+Whole file ›
+. The switch above holds the full Files and Commits for when you want everything. Approve stays pinned above, so you can approve after reading either view.
+19e
+Whole file · from an excerpt, and back
+‹
+4
+Sound toggle in settings
+#39 ·
+●
+review · waiting on you
+game ›
+±
+changeset v1
++48
+−6
+✓ check 21s
+· review → merging
+◆
+Approve
+Presentation
+Files
+3
+Commits
+2
+‹ Presentation
+lib/game/
+audio.ex
++14
+−3
+24
+alias
+Game.Settings
+25
+26
+-
+def
+init
+,
+do:
+Mixer
+.
+start
+()
+26
++
+def
+init
+do
+27
++
+Mixer
+.
+start
+()
+28
++
+Mixer
+.
+mute
+(!
+Settings
+.
+get
+(
+:sound
+))
+29
++
+end
+30
+31
+def
+play
+(name)
+do
+32
++
+if
+Settings
+.
+get
+(
+:sound
+)
+do
+33
+Mixer
+.
+play
+(name)
+34
++
+end
+35
+end
+▍
+The lines the presentation showed are marked.
+‹ settings.ex
+2 of 3
+settings_test.exs ›
+Steps
+Changes
+3
+Docs
+2
+Activity
+31
+Whole file ›
+switches to Files at that file, with the lines the excerpt showed marked in the margin.
+‹ Presentation
+returns to the same paragraph. Neighbouring files are one swipe away at the foot. Approve hasn't moved.
+19f
+No presentation · Files is the default
+‹
+4
+Sound toggle in settings
+#39 ·
+▸
+implementing #2
+game ›
+Presentation
+Files
+3
+Commits
+2
+lib/game/
+settings.ex
++21
+−3
+›
+lib/game/
+audio.ex
++14
+−3
+›
+test/game/
+settings_test.exs
++13
+−0
+›
+The presentation is written in review. Until then this is the work in progress on forge/game-41.
+Steps
+Changes
+3
+Docs
+2
+Activity
+31
+Before review, or for a workflow without a presentation, Changes opens on Files and the Presentation option is dimmed with the reason. There is no approval row, since nothing is waiting on you.
+18b
+Changes · the approval pinned under the top bar
+‹
+4
+Sound toggle in settings
+#39 ·
+●
+review · waiting on you
+game ›
+±
+changeset v1
++48
+−6
+✓ check 21s
+· review → merging
+◆
+Approve
+Will commit
+Add a sound toggle to settings.
+Persists in the save file, defaults to on.
+lib/game/
+settings.ex
++21
+−3
+lib/game/
+audio.ex
++14
+−3
+test/game/
+settings_test.exs
+new
++13
+−0
+lib/game/
+settings.ex
++21
+−3
+14
+defstruct
+difficulty:
+:normal
+,
+15
+-
+music:
+true
+15
++
+music:
+true
+,
+16
++
+sound:
+true
+17
+18
++
+def
+toggle_sound
+(%
+__MODULE__
+{} = s),
+19
++
+do:
+%{s |
+sound:
+!s.sound}
+Steps
+Changes
+3
+Docs
+2
+Activity
+31
+Approving gets the same pinned row as accepting a step (
+16f
+). It names what is approved (changeset v1, its size, the check) and where it leads, with an amber Approve on the right. The row stays put while you scroll the diff and stays on every tab, so you can read Docs or Activity and approve from there. The bottom strip only navigates, and its right slot is empty.
+18c
+Approve tapped · what it commits, and Reject
+‹
+4
+Sound toggle in settings
+#39 ·
+●
+review · waiting on you
+game ›
+±
+changeset v1
++48
+−6
+✓ check 21s
+· review → merging
+◆
+Approve ▴
+Approve changeset v1
+Moves #39 from review to merging. Merging rebases onto main and runs the full check.
+Will commit to main
+Add a sound toggle to settings.
+Persists in the save file, defaults to on.
+Note, optional
+Kept with the approval; required to reject
+Reject
+Approve v1
+Steps
+Changes
+3
+Docs
+2
+Activity
+31
+Tapping Approve drops the confirmation down from the row: where the ticket goes, the commit message it will write, and an optional note. Reject lives here too, as the outlined red button. A reject needs a note, so the field says so and Reject stays disabled until it has one. Nothing moves underneath, and a tap outside folds it up.
+18d
+Docs · approving a document, same row
+‹
+4
+Persist the high score table
+#41 ·
+●
+planning · waiting on you
+game ›
+md
+plan.md
+v3
+◇
+written 20m ago · approve to start implementing
+◆
+Approve
+v1
+v2
+v3
+diff v2
+Persist the high score table
+Scores live in a SQLite file under
+$FORGE_DATA_DIR
+, opened once at boot by
+Game.Scores
+.
+Steps
+Add the schema and a migration.
+Write
+record/2
+and
+top/1
+.
+Replace the in-memory list.
+Steps
+Changes
+3
+Docs
+2
+Activity
+31
+A document waiting for approval uses the same row: the document, its version, and what approving it starts. Approving it opens the same kind of dropdown, with Reject and a note. Once approved, the row disappears and the ◇ becomes ◆.
+19g
+Desktop, wide (1600 × 1000): presentation on the left, the code it points at on the right
+forge
+0.31.0
+Projects
+▾
+Queue
+4
+5h 42% · week 18%
+you@example.com
+‹ game
+Sound toggle in settings
+#39 ·
+●
+review · waiting on you
+Steps
+Changes 3
+Docs 2
+Activity 31
+±
+changeset v1
++48
+−6
+✓ check --fast 21s
+3 files · review → merging
+will commit
+Add a sound toggle to settings
+◆
+Approve
+Presentation
+Commits 2
+presentation.md · by the review agent · 1h
+A sound switch in settings, saved with the game
+Settings gains a
+sound
+field next to
+music
+, on by default, so old saves load with sound on.
+Every effect goes through
+Audio.play/1
+, so the switch is checked in one place. Starting the mixer muted covers music that is already playing.
+audio.ex 26–34 ›
+The settings screen gets a row under Music, wired to
+Settings.toggle_sound/1
+.
+settings_screen.ex ›
+How it was checked
+✓
+4 new tests in settings_test.exs · check --fast in 21s
+Worth a look
+The switch is read once at boot by the mixer, so it takes effect on the next sound, not mid-sound.
+settings.ex
+audio.ex
+settings_test.exs
+follows the paragraph in view
+24
+alias
+Game.Settings
+25
+26
+-
+def
+init
+,
+do:
+Mixer
+.
+start
+()
+26
++
+def
+init
+do
+27
++
+Mixer
+.
+start
+()
+28
++
+Mixer
+.
+mute
+(!
+Settings
+.
+get
+(
+:sound
+))
+29
++
+end
+30
+31
+def
+play
+(name)
+do
+32
++
+if
+Settings
+.
+get
+(
+:sound
+)
+do
+33
+Mixer
+.
+play
+(name)
+34
++
+end
+35
+end
+36
+37
+def
+stop
+,
+do:
+Mixer
+.
+stop
+()
+With width, the presentation and the code sit side by side. The presentation reads at 680px on the left, and its excerpts become links. The right pane shows the whole file that the paragraph in view points at, with those lines marked, and follows as you scroll. A file tab switches by hand. The presentation can end with
+Worth a look
+, the agent's own pointer to what deserves a human eye. In the top bar,
+Projects ▾
+is the same switch as the phone's title menu.
+18f
+Desktop, wide (1600 × 900): the approval row under the title, the diff below
+forge
+0.31.0
+Queue
+4
+Projects
+Chats
+Machines
+5h 42% · week 18%
+you@example.com
+‹ game
+Sound toggle in settings
+#39 ·
+●
+review · waiting on you
+Steps
+Changes 3
+Docs 2
+Activity 31
+±
+changeset v1
++48
+−6
+✓ check --fast 21s
+3 files · review → merging
+will commit
+Add a sound toggle to settings
+◆
+Approve
+Files · 3
+lib/game/
+settings.ex
++21
+−3
+lib/game/
+audio.ex
++14
+−3
+test/game/
+settings_test.exs
++13
+−0
+Reviewer said
+“Matches the brief. The toggle is read once at boot.”
+lib/game/
+settings.ex
++21
+−3
+14
+defstruct
+difficulty:
+:normal
+,
+15
+-
+music:
+true
+15
++
+music:
+true
+,
+16
++
+sound:
+true
+17
+18
++
+def
+toggle_sound
+(%
+__MODULE__
+{} = s),
+19
++
+do:
+%{s |
+sound:
+!s.sound}
+On desktop the row has room for the commit message inline, so what you approve, its check and what it will write are all in one line under the title, with Approve at the end. The file list moves to the left, with the diff beside it. Approve opens the same dropdown as
+18c
+, anchored to the button.
+Job
+6e
+Job page · a drill-in from Activity or Steps
+‹
+3
+Persist the high score table
+#41 ·
+▸
+implementing #2
+game ›
+‹ Activity
+implementing #1
+hz-fsn1-2
+did_not_converge
+30 turns · 0.62 w · 11m 40s
+The engine's outcome. The agent declared nothing.
+Stream
+212
+Manifest
+Wrote
+1
+▸ 24 earlier actions
+14:08:12
+$ mix test test/game/scores_test.exs ✗
+14:08:40
+1) test top/1 orders ties by time
+left:  ["bo", "al"]
+right: ["al", "bo"]
+Still failing on ties. Both rows come back in the same second, so inserted_at cannot separate them.
+14:08:58
+✎ …/lib/game/scores.ex  +3 −1
+14:09:20
+$ mix test test/game/scores_test.exs ✗
+14:09:31
+Out of turns before the tie order is settled.
+14:09:44
+finished · did_not_converge · 14:09:50
+First error ↑
+3 harness notices
+Steps
+2
+Docs
+2
+Changes
+6
+Activity
+34
+▸ 4m
+The job page is a drill-in with the back row from
+6c
+, so the ticket frame stays around it. The live chip on the right still points at the job running now (#2) while you read the one that failed (#1). The outcome stays the headline and the three figures shrink to one line. Stream, Manifest and Wrote switch with a small segmented control, because the strip's tabs already belong to the ticket.
+21a
+Job page, desktop wide (1600 × 900): what it did on the left, where it stands on the right
+forge
+0.31.0
+Projects
+▾
+Queue
+4
+5h 42% · week 18%
+you@example.com
+‹ game#41
+implementing #2
+▸ running · 7m
+Persist the high score table
+■ Stop
+Transcript
+Raw log
+Prompt
+follows the end · 61 entries
+14:02
+▸
+read lib/game/scores.ex
+14:02
+▸
+read test/game/scores_test.exs
+14:03
+The table lives in an Agent today. I'll add a SQLite repo under
+$FORGE_DATA_DIR
+and keep
+top/1
+'s signature.
+14:04
+▸
+wrote priv/repo/migrations/…_scores.exs
+14:05
+▸
+edited lib/game/scores.ex
++38 −12
+14:06
+▸
+$ mix test test/game/scores_test.exs
+2 failures · top/1 returns [] after restart
+14:07
+▸
+edited lib/game/scores.ex
++4 −1 · open the repo before the first read
+14:08
+▸
+$ mix test test/game/scores_test.exs
+9 tests, 0 failures
+14:08
+▸
+$ mix check --fast
+running · 12s
+Its plan
+✓
+Add the schema and a migration
+✓
+Write record/2 and top/1 against the repo
+✓
+Replace the in-memory list
+▸
+Run the full check
+○
+Write a summary for review
+This job
+state
+implementing
+attempt
+#2 of this visit
+started
+14:01 · 7m
+turns
+14 of 30
+usage
+0.22 windows
+model
+the project's · high
+worker
+hz-fsn1-3
+branch
+forge/game-41
+base
+main 9f3c1a0
+Attempts this visit
+#1
+did_not_converge
+30 turns
+Open ›
+#2
+running
+14 turns
+The phone's job page with room to spare. On the left is what the agent did, newest at the bottom: actions as one mono line each (failures in red, passes in green) and its words as bubbles. Raw log and Prompt are a switch above. On the right is where it stands: its own plan, the job's facts, and the earlier attempts this visit. Stop is in the title row, red-outlined, because ending a job is a decision with a cost.
+21b
+Job page, desktop portrait (1080 × 1500): where it stands on top, the transcript below
+forge
+0.31.0
+Projects
+▾
+Queue
+4
+5h 42% · week 18%
+you@example.com
+‹ game#41
+implementing #2
+▸ running · 7m
+Persist the high score table
+■ Stop
+Its plan
+✓
+Add the schema and a migration
+✓
+Write record/2 and top/1 against the repo
+✓
+Replace the in-memory list
+▸
+Run the full check
+○
+Write a summary for review
+This job
+state
+implementing
+attempt
+#2 of this visit
+started
+14:01 · 7m
+turns
+14 of 30
+usage
+0.22 windows
+model
+the project's · high
+worker
+hz-fsn1-3
+branch
+forge/game-41
+base
+main 9f3c1a0
+Transcript
+Raw log
+Prompt
+14:02
+▸
+read lib/game/scores.ex
+14:02
+▸
+read test/game/scores_test.exs
+14:03
+The table lives in an Agent today. I'll add a SQLite repo under
+$FORGE_DATA_DIR
+and keep
+top/1
+'s signature.
+14:04
+▸
+wrote priv/repo/migrations/…_scores.exs
+14:05
+▸
+edited lib/game/scores.ex
++38 −12
+14:06
+▸
+$ mix test test/game/scores_test.exs
+2 failures · top/1 returns [] after restart
+14:07
+▸
+edited lib/game/scores.ex
++4 −1 · open the repo before the first read
+14:08
+▸
+$ mix test test/game/scores_test.exs
+9 tests, 0 failures
+14:08
+▸
+$ mix check --fast
+running · 12s
+14:02
+▸
+read lib/game/scores.ex
+14:02
+▸
+read test/game/scores_test.exs
+14:03
+The table lives in an Agent today. I'll add a SQLite repo under
+$FORGE_DATA_DIR
+and keep
+top/1
+'s signature.
+14:04
+▸
+wrote priv/repo/migrations/…_scores.exs
+14:05
+▸
+edited lib/game/scores.ex
++38 −12
+14:06
+▸
+$ mix test test/game/scores_test.exs
+2 failures · top/1 returns [] after restart
+14:07
+▸
+edited lib/game/scores.ex
++4 −1 · open the repo before the first read
+14:08
+▸
+$ mix test test/game/scores_test.exs
+9 tests, 0 failures
+14:08
+▸
+$ mix check --fast
+running · 12s
+The same content in the phone's order. Plan and facts form a two-column band under the title, and the transcript takes the rest of the height, which on a tall screen is most of the run.
+Chat
+12c
+Chats · find one again
+Chats
+▾
+1 live · 14 in all
+A conversation that needs you is in the queue. This is for finding one again.
+Live · holding a machine
+Why is the build so slow on CI?
+▸ 3m
+game
+agent: The asset step rebuilds every texture because the cache key includes the commit hash.
+End
+Earlier
+Shape the leaderboard screen
+2h
+game
+· #42 shaping
+you: Keep it to one screen. Top 10, your own rank pinned at the bottom.
+Ideas for a two-player mode
+3d
+game
+you: Let's park split screen. What would online need?
+Audit the save format
+4d
+game
+agent: Proposed two tickets: version the save file, and migrate saves from 0.3.
+game ▾
+Start a chat
+Today's two sections in today's order: live chats first, since they hold a machine, then the rest by last use. Each row is the title, the project and the ticket step it belongs to, and its last line. A live row offers End, which keeps today's confirmation about the branch. The composer in the dock starts a chat in place. It is the only surface that has to ask which project, as today, so the project picker sits beside it.
+12d
+New chat · after the first message
+New chat
+in game
+‹ Chats
+Project
+game
+▾
+First thing to say
+Why is the build so slow on CI? It went from 4 to 11 minutes this month.
+Secrets it may hold
+SENTRY_DSN
+STEAM_UPLOAD_KEY
+✓ ASSET_CDN_TOKEN
+Picked here and held for the chat's lifetime.
+Machine · 8 GiB · 4 cores
+Change ▾
+Start the chat
+This is today's form: project, first message, and memory and cores. The machine size folds to one line because it is rarely changed. The secrets a chat may hold become chips, which today's settings page describes ("a conversation when the person opening it picks them"). Opened from a project or a ticket, the project is already set and its row is fixed.
+15a
+Talk · responding, with its plan and a way to stop
+‹
+3
+Why is the build so slow on CI?
+chat ·
+▸ responding · turn 2
+game ›
+you · 14m
+Why is the build so slow on CI? It went from 4 to 11 minutes this month.
+agent · turn 1 · 12m
+▸
+14 actions · read 9 files · ran the asset step twice
+The asset step is most of it. It keys its cache on
+$GITHUB_SHA
+, so every push rebuilds all 212 textures, about 6½ minutes.
+Keying each texture on a hash of its source and import settings would rebuild only what changed. Want me to try it on this branch?
+you · 9m
+Yes, try it.
+agent · turn 2 · now
+▸
+6 actions · edited mix/tasks/assets.ex · ran mix assets.build
+3/5
+Measuring a push that touches no texture
+▾
+$ mix assets.build --since HEAD~1
+Stop
+Also check the font atlas
+Interrupt
+and send
+Talk
+Changes
+3
+Docs
+1
+Activity
+41
+▸ 2m
+While it responds, a band above the composer shows the agent's own plan (today's checklist, folded to the current item and a progress track), then the now-line: what it is doing this second, as static text since nothing pulses. Stop sits on that line. With a draft typed, Send becomes
+Interrupt and send
+, named for what it costs, as today. The strip's right slot is the quiet running chip.
+18e
+Chat · merging its branch, the row in neutral
+‹
+4
+Why is the build so slow on CI?
+chat · idle
+game ›
+⑂
+chat/3f9a21c0
++71
+−18
+2 commits · merges cleanly into main
+Merge
+Will commit to main
+Rebuild only the textures that changed.
+Each is keyed on its source and import settings.
+mix/tasks/
+assets.ex
++52
+−14
+.github/workflows/
+ci.yml
++6
+−4
+test/mix/
+assets_test.exs
+new
++13
+−0
+Talk
+Changes
+3
+Docs
+1
+Activity
+41
+A chat's merge uses the same row, but nothing is waiting on you, so the edge and button are neutral instead of amber. The merge leaves the bottom strip, which replaces the Merge slot in
+15b
+. If the branch doesn't merge cleanly, the row's meta line says so in red and the button becomes
+Resolve
+, which opens
+15c
+'s two ways out.
+15c
+Changes · does not merge cleanly
+‹
+3
+Why is the build so slow on CI?
+chat ·
+idle · branch chat/3f9a21c0
+game ›
+Does not merge cleanly
+main moved since this branch started. These files changed on both sides:
+.github/workflows/ci.yml
+mix/tasks/assets.ex
+Ask it to rebase
+Puts the request in the composer, with the two paths.
+›
+Take the change by hand
+Copies
+git fetch … chat/3f9a21c0
+›
+The files and commits are below, unchanged.
+Rebase onto main, ci.yml and assets.ex conflict
+Send
+Talk
+Changes
+3
+Docs
+1
+Activity
+41
+Today's conflict line, with its two ways out as rows. Asking it to rebase fills the composer, so you can still edit what is sent. Taking it by hand copies the fetch command. The Merge slot leaves the strip until the branch merges cleanly again.
+15d
+Stopped · reopen, in today's words
+‹
+3
+Why is the build so slow on CI?
+chat ·
+stopped 2h ago
+game ›
+you · 14m
+Why is the build so slow on CI? It went from 4 to 11 minutes this month.
+agent · turn 1 · 12m
+▸
+14 actions · read 9 files · ran the asset step twice
+The asset step is most of it. It keys its cache on
+$GITHUB_SHA
+, so every push rebuilds all 212 textures, about 6½ minutes.
+Keying each texture on a hash of its source and import settings would rebuild only what changed. Want me to try it on this branch?
+you · 9m
+Yes, try it.
+agent · turn 2 · 2h
+Done. A push that touches no texture now skips the step in 14s. Merge when you are ready.
+This conversation has stopped. Reopening starts a new process on a new machine: it is given everything said here to read, and answers the next thing you say. Its branch is gone, since a merge deletes it, so it starts one again from
+main
+as it stands now.
+Reopen
+Talk
+Changes
+Docs
+1
+Activity
+63
+No composer on a dead conversation, as today: a Send offered there would take a tap and lose the message. The transcript dims slightly. The reopen copy keeps both of today's variants, branch kept or branch gone, and Reopen takes the dock.
+15e
+Details · this chat, and ending it
+‹
+3
+Why is the build so slow on CI?
+▴
+chat ·
+▸ responding · turn 2
+game ›
+Talk
+Changes
+3
+Docs
+1
+Activity
+41
+▸ 2m
+Why is the build so slow on CI?
+A conversation about game, not tied to a ticket.
+project
+game
+model
+the platform's
+effort
+the platform's
+turns
+2
+spent
+0.18 windows
+branch
+chat/3f9a21c0
+machine
+hz-fsn1-2 · 8 GiB · 4 cores
+5h 42%
+resets in 2h 10m
+week 18%
+resets in 4d 6h
+End it
+It holds a worker until it ends or goes idle. If you end it, its branch is deleted unless it would not merge cleanly; going idle does not.
+Tapping the title drops the chat's details from the top bar, like every other panel that belongs to a bar: its facts, the machine it holds, and the capacity gauge. End it keeps today's confirmation and the ending rule in its words. Tapping the title again, the handle, or outside folds it back up.
+15f
+Desktop, wide (1600 × 1000): talk in the middle, the branch and its merge on the right
+forge
+0.31.0
+Queue
+3
+Projects
+Chats
+Machines
+5h 42% · week 18%
+you@example.com
+‹ game
+Why is the build so slow on CI?
+▸ responding · turn 2
+Talk
+Docs 1
+Activity 41
+you · 14m
+Why is the build so slow on CI? It went from 4 to 11 minutes this month.
+agent · turn 1 · 12m
+▸
+14 actions · read 9 files · ran the asset step twice
+The asset step is most of it. It keys its cache on
+$GITHUB_SHA
+, so every push rebuilds all 212 textures, about 6½ minutes.
+Keying each texture on a hash of its source and import settings would rebuild only what changed. Want me to try it on this branch?
+you · 9m
+Yes, try it.
+agent · turn 2 · now
+▸
+6 actions · edited mix/tasks/assets.ex · ran mix assets.build
+3/5
+Measuring a push that touches no texture
+$ mix assets.build --since HEAD~1
+Stop
+Say something
+↵ send · ⇧↵ line
+What it changed
++71
+−18
+mix/tasks/
+assets.ex
++52
+−14
+.github/workflows/
+ci.yml
++6
+−4
+test/mix/
+assets_test.exs
++13
+−0
+2 commits on chat/3f9a21c0 · against main a41c09e
+Will commit to main
+Rebuild only the textures that changed
+Each texture is now keyed on its source and import settings.
+Merge into main
+model
+the platform's
+effort
+the platform's
+turns
+2
+spent
+0.18 w
+machine
+hz-fsn1-2
+End it
+It holds a worker until it ends or goes idle.
+With width, Changes stops being a tab: the branch, its commit message and Merge sit in the right column beside the conversation, so you can merge as soon as the agent says it is done. The plan and now-line take one dense bar above the composer. On a portrait screen this is
+2d
+, with this right column as its rail.
+Project
+Every open ticket and the history as a list, with the workflow at the bottom.
+7a
+Tickets · every open ticket, what it is doing
+‹
+4
+game
+12 open ·
+2 waiting
+· 2.8 w spent
++
+New
+Open
+9
+Waiting
+2
+Running
+3
+Done
+14
+Waiting on you
+#42
+Shape the leaderboard screen
+12m
+●
+shaping
+waiting 12m
+0.18 w
+Accept brief.md v2 to move it to planning.
+#39
+Sound toggle in settings
+1h
+●
+review
+waiting 1h
+0.41 w
+Approve changeset v1 · +48 −6 · check passed
+In progress
+#41
+Persist the high score table
+now
+▸
+implementing #2
+running 4m · 26 turns
+1.4 w
+agent ·
+Changing top/1 to order by score, then time set.
+#45
+Score flickers when the window resizes
+bug
+now
+▸
+triage
+running 1m
+0.02 w
+agent ·
+Reading the resize handler in hud.ex.
+#37
+Show the score on the end screen
+2m
+▸
+merging
+queued 1/2 · integrating
+0.84 w
+merge ·
+Rebased on main, running the check.
+#44
+Replace the font atlas with a single SDF texture
+25m
+▸
+implementing #1
+did_not_converge
+0.62 w
+agent ·
+Out of turns with 3 shader tests failing. Retry or move it.
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+2
+The board goes. Open tickets are one list, with what waits on you first and the rest by last change. Each row is three lines with 14px around it. First the number, the title and how long ago it changed. Then a small track of the workflow's steps, the state, what the ticket is doing and its usage so far. Last, the most recent thing that happened, in words: the agent's latest line, or the decision a waiting ticket needs, at full strength. Colour follows meaning only: amber waits on you, info is running, warning is a stalled job. Three more rows sit below the fold.
+7b
+Merge · the order approved tickets land in
+‹
+4
+game
+12 open ·
+2 waiting
+· 2.8 w spent
++
+New
+1
+#37
+Show the score on the end screen
+▸ integrating on main · 2m
+Take out
+2
+#36
+Fix the double jump on slopes
+approved 40m ago · waits for #37
+Take out
+Approving a ticket on review → merging adds it here. Taking one out withdraws its approval; an integration already running finishes but does not merge.
+Merged lately
+a41c09e
+#38
+Show the score on the end screen
+2d
+77d2b10
+#35
+Tilt controls
+4d
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+2
+The merge queue gets its own view instead of sitting under the board. Place is the headline, and the line under each ticket says what it is doing or waiting for. Take out keeps today's confirmation text. The recent merges below answer "did it land?" without opening each ticket.
+7c
+Chats · conversations about the project
+‹
+4
+game
+12 open ·
+2 waiting
+· 2.8 w spent
++
+New
+Why is the build so slow on CI?
+▸ running
+agent: The asset step rebuilds every texture because the cache key includes the commit hash.
+Ideas for a two-player mode
+2h
+you: Let's park split screen. What would online need from the server side?
+Audit the save format
+yesterday · 2 proposals
+agent: Proposed two tickets: version the save file, and migrate saves from 0.3.
+A chat is for the work that doesn't fit a ticket. A ticket's own chat steps live on the ticket.
+Start a chat about game
+Start
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+2
+Each chat shows its last line, so you can tell them apart without opening them. A chat's proposals are counted on its row. The composer starts a new chat in place, the same dock as everywhere else, instead of a separate New chat page.
+7d
+Workflow · what the next ticket will pin
+‹
+4
+game
+12 open ·
+2 waiting
+· 2.8 w spent
++
+New
+feature
+bug
+release
+From
+.forge/workflows/feature.yml
+. Edited by pushing, not here.
+▸
+triage
+initial
+triage.md → triage.md
+10 turns · 0.2 w
+→ shaping
+on needs_shaping
+→ planning
+on ready
+●
+shaping
+chat · brief.md
+→ planning
+on shaped
+· approves brief.md
+▸
+planning
+plan.md → plan.md
+30 turns · 1.0 w
+→ implementing
+on planned
+· approves plan.md
+▸
+implementing
+implement.md → changeset
+30 turns · 1.0 w
+→ review
+on implemented
+→ check, on exit 1 back
+●
+review
+no job
+→ merging
+on approved
+· queues
+▸
+merging
+integrate
+→ done
+■
+done
+no job
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+2
+Today's four-column table becomes a vertical flow on the same line-and-dot as Steps on a ticket, so the two read alike. Each state lists its job, budget and where it goes on which outcome, with approvals and queueing in the link colour. Types are a switch, and the release workflow is one of them.
+7e
+Proposals · the pane opened from the strip
+‹
+4
+game
+12 open ·
+2 waiting
+· 2.8 w spent
++
+New
+#41
+Persist the high score table
+now
+▸
+implementing #2
+running 4m · 26 turns
+1.4 w
+○ save-version
+○ migrate-0.3
+1 of 2
+from the chat “Audit the save format” · yesterday
+Version the save file
+Saves carry no version, so a format change silently drops old saves. Write a version field and refuse, with a message, a save newer than the game.
+Read the whole proposal ›
+Admit as
+feature
+bug
+comment (optional)
+Decline
+Admit as ticket
+›
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+2
+Proposals are the project's decisions, so they take the right slot and open in the same pane as a ticket's questions: one card per proposal behind tabs, where it came from, the type to admit it as, and Decline or Admit. Admitting deals the next card.
+7f
+Details · sheet from tapping the project name
+‹
+4
+game
+12 open ·
+2 waiting
+· 2.8 w spent
++
+New
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+2
+game
+git@forge.manu.software:game.git
+Copy
+default branch
+main
+mirror
+github (failing)
+worker seed
+5b1e09c3a4f7d2e8
+tickets
+27
+spent
+2.8 windows
+Repository ›
+Settings ›
+Release · admin
+Note (optional)
+Release
+Latest activity
+14:09
+job.finished #41
+13:58
+job.started #41
+13:21
+chat.message
+Everything today's right-hand column and header links hold, behind the project name, as on a ticket (
+6d
+). The clone URL copies in one tap, and a failing mirror says so. The Release block appears only for an admin, with its 52px button.
+12e
+New ticket · title, body, type
+New ticket
+admitted to game
+‹ game
+Type · picks the workflow
+feature
+bug
+release
+Title
+Pause menu keyboard navigation
+What it is about
+Arrow keys and Enter should work in the pause menu. Today only the mouse does, which breaks controller play too.
+Markdown. Triage reads this first.
+It will start in
+▸
+triage · 10 turns · 0.2 w
+feature.yml at main a41c09e
+Admit it
+Admitting a ticket is title, body and type. The type picks the workflow, so the form names the first step and its budget before you admit, which is where today's page leaves you guessing. Opened from a project the project is set. Opened elsewhere a project row is added on top. Field names and the budget line are inferred from the workflow map in
+7g
+, not read from
+ticket_new_live.ex
+.
+21c
++ New · ticket, chat, or the release
+‹
+4
+game
+12 open · ▸ 3 running
++
+New
+Score flickers when the window resizes
+#45 ·
+●
+triage
+Replace the font atlas
+#44 ·
+●
+implementing
+Shape the leaderboard screen
+#42 ·
+●
+shaping
+Persist the high score table
+#41 ·
+●
+implementing
+Tickets
+12
+Proposals
+12
+Chats
+3
+Workflow
+New in game
+New ticket
+Title, body, type. Admitted to its workflow.
+›
+New chat
+A conversation about game, on its own branch.
+›
+⇡
+Start the release
+release.yml · admins only
+Note for the release, optional
+What this release is for, or what to leave out
+Start the release
+›
+The release isn't a ticket type you pick, as today: only a project admin starts it, from the project page. It moves into the project's
++ New
+sheet as its own block under ticket and chat, with today's optional note. It shows only to admins. The button is an outline, because starting a release creates a ticket and doesn't approve anything. Success is the usual toast ("Release started as ticket #46"), and the page opens on that ticket.
+21d
+The release block · its other four states
+⇡
+A release is open
+Only one at a time. It is a ticket like any other.
+#46 Release 0.32 ›
+⇡
+Can't start
+The release,
+.forge/workflows/release.yml
+, cannot start: its first state names no prompt.
+The note you typed is kept here.
+⇡
+No release
+No workflow in the project sets
+release: true
+, so it has no release to start. Set it in the workflow file that should be the release, under .forge/workflows/.
+⇡
+Two releases
+release.yml and ship.yml both set release: true, so the project has no release; keep the flag on one.
+Today's five states, in today's words. Only
+ready
+(
+21c
+) has a button. The rest say why there isn't one and what to change. A note typed before the state changed is kept, as today ("Shown, not lost").
+21e
+A release ticket · same frame, its own badge
+‹
+4
+Release 0.32
+#46 ·
+▸
+changelog
+game ›
+⇡
+Release · started by you
+release.yml
+Your note
+Everything merged since 0.31. Leave the font atlas out, it's still in review.
+Since 0.31
+#39
+Sound toggle in settings
+#37
+Score on the end screen
+#36
+Pause menu keyboard navigation
+▸ writing CHANGELOG.md
+Steps
+Changes
+3
+Docs
+2
+Activity
+31
+Once started, a release is a ticket on its own workflow, so it uses the ticket frame unchanged. A slim band under the top bar marks it as the release. It isn't a decision row, so it has no button and no amber. The note and what has merged since the last release lead the Steps view. "Since 0.31" assumes the release can find its previous tag.
+7g
+Desktop, portrait: open tickets and history as a table, everything else stacked, details rail on the right
+forge
+0.31.0
+Queue
+4
+Board
+Projects
+Workers
+Chats
+5h 42% · week 18%
+you@example.com
+‹ Board
+game
+12 open
+2 waiting on you
++ New ticket
++ New chat
+Open tickets · 9
+All
+9
+Waiting
+2
+Running
+3
+feature
+7
+bug
+2
+#
+title · latest
+step
+doing
+usage
+changed
+#42
+Shape the leaderboard screen
+Accept brief.md v2 to move it to planning.
+●
+shaping
+waiting 12m
+0.18 w
+12m
+#39
+Sound toggle in settings
+Approve changeset v1 · +48 −6 · check passed
+●
+review
+waiting 1h
+0.41 w
+1h
+#41
+Persist the high score table
+Changing top/1 to order by score, then time set.
+▸
+implementing #2
+running 4m · 26 turns
+1.4 w
+now
+#45
+Score flickers when the window resizes
+bug
+Reading the resize handler in hud.ex.
+▸
+triage
+running 1m
+0.02 w
+now
+#37
+Show the score on the end screen
+Rebased on main, running the check.
+▸
+merging
+queued 1/2 · integrating
+0.84 w
+2m
+#44
+Replace the font atlas with a single SDF texture
+Out of turns with 3 shader tests failing. Retry or move it.
+▸
+implementing #1
+did_not_converge
+0.62 w
+25m
+#36
+Fix the double jump on slopes
+bug
+Waits for #37 to land.
+▸
+merging
+queued 2/2
+0.33 w
+40m
+#43
+Difficulty presets for new players
+All workers busy. Next free slot in about 10m.
+▸
+planning
+waiting for a worker
+0.00 w
+3h
+#46
+Pause menu keyboard navigation
+Queued for triage.
+▸
+triage
+admitted 20m ago
+—
+20m
+History · 14 done
+newest first
+#38
+Show the score on the end screen
+■ merged a41c09e
+18 turns · 3h 10m
+0.84 w
+2d
+#35
+Tilt controls
+■ merged 77d2b10
+61 turns · 1d 2h
+1.9 w
+4d
+#34
+Online leaderboard
+× cancelled in shaping
+by you · “needs a server first”
+0.22 w
+5d
+#33
+Crash on an empty player name
+■ merged 0c1d88e
+9 turns · 52m
+0.31 w
+6d
+10 more ↓
+Proposals · 2
+◆
+Version the save file
+Saves carry no version, so a format change silently drops old saves.
+feature ▾
+Decline
+Admit
+◆
+Migrate saves from 0.3
+Read the 0.3 layout once and write it back in the new one.
+feature ▾
+Decline
+Admit
+from the chat “Audit the save format” · yesterday
+Merge queue · 2
+1
+#37
+Show the score on the end screen
+▸ integrating on main · 2m
+Take out
+2
+#36
+Fix the double jump on slopes
+waits for #37
+Take out
+Conversations · 3
+Why is the build so slow on CI?
+The asset step rebuilds every texture because the cache key includes the commit hash.
+▸ running
+Ideas for a two-player mode
+Let's park split screen. What would online need from the server side?
+2h
+Audit the save format
+Proposed two tickets: version the save file, and migrate saves from 0.3.
+yesterday · 2 proposals
+Workflow · where the open tickets are
+feature
+bug
+release
+▸
+triage
+triage.md
+10 t · 0.2 w
+on ready →
+●
+shaping
+chat · brief.md
+no budget
+on shaped →
+▸
+planning
+plan.md
+30 t · 1.0 w
+on planned →
+▸
+implementing
+implement.md
+30 t · 1.0 w
+on implemented →
+●
+review
+changeset
+no budget
+on approved →
+▸
+merging
+integrate
+merge queue
+on merged →
+■ done
+14 merged
+terminal
+on ready, skips
+check exit 1, back
+◆
+approving pins that version
+waiting on you
+running
+stalled
+idle
+from .forge/workflows/feature.yml
+Details
+›
+Repository
+git@forge.manu.software:game.git
+Copy
+default branch
+main
+mirror
+github (failing)
+worker seed
+5b1e09c3a4f7
+tickets
+27
+spent
+2.8 w
+Latest activity
+14:09
+job.finished #41
+13:58
+job.started #41
+13:21
+chat.message
+12:40
+ticket.admitted #46
+Repository ›
+Settings ›
+Release…
+On a tall screen everything fits in one column without views. Open tickets come first as a table. Each 52px row has the same fields as the phone's three lines: the title with the latest line under it, the step and its track, then what it is doing, usage and age. The history follows, folded to its newest four. Then proposals, merge queue and conversations as dense 36–40px rows, and the workflow last, as a map. Each step is a box with its job and budget, the steps are joined left to right, and the skip and the failed-check loop are drawn as arcs. The dots are the open tickets in each step. Proposals decide in their row. The rail is the ticket's rail with project facts, and Release opens its note in place.
+7h
+Desktop, wide (1600 × 1000): workflow map on top, tickets left, decisions and facts right
+forge
+0.31.0
+Queue
+4
+Projects
+Workers
+Chats
+5h 42% · week 18%
+you@example.com
+‹ Projects
+game
+12 open
+2 waiting on you
++ New ticket
++ New chat
+Workflow · where the open tickets are
+feature
+bug
+release
+▸
+triage
+triage.md
+10 t · 0.2 w
+on ready →
+●
+shaping
+chat · brief.md
+no budget
+on shaped →
+▸
+planning
+plan.md
+30 t · 1.0 w
+on planned →
+▸
+implementing
+implement.md
+30 t · 1.0 w
+on implemented →
+●
+review
+changeset
+no budget
+on approved →
+▸
+merging
+integrate
+merge queue
+on merged →
+■ done
+14 merged
+terminal
+on ready, skips
+check exit 1, back
+◆
+approving pins that version
+waiting on you
+running
+stalled
+idle
+from .forge/workflows/feature.yml
+Open tickets · 9
+All
+9
+Waiting
+2
+Running
+3
+feature
+7
+bug
+2
+#
+title · latest
+step
+doing
+usage
+changed
+#42
+Shape the leaderboard screen
+Accept brief.md v2 to move it to planning.
+●
+shaping
+waiting 12m
+0.18 w
+12m
+#39
+Sound toggle in settings
+Approve changeset v1 · +48 −6 · check passed
+●
+review
+waiting 1h
+0.41 w
+1h
+#41
+Persist the high score table
+Changing top/1 to order by score, then time set.
+▸
+implementing #2
+running 4m · 26 turns
+1.4 w
+now
+#45
+Score flickers when the window resizes
+bug
+Reading the resize handler in hud.ex.
+▸
+triage
+running 1m
+0.02 w
+now
+#37
+Show the score on the end screen
+Rebased on main, running the check.
+▸
+merging
+queued 1/2 · integrating
+0.84 w
+2m
+#44
+Replace the font atlas with a single SDF texture
+Out of turns with 3 shader tests failing. Retry or move it.
+▸
+implementing #1
+did_not_converge
+0.62 w
+25m
+#36
+Fix the double jump on slopes
+bug
+Waits for #37 to land.
+▸
+merging
+queued 2/2
+0.33 w
+40m
+2 more ↓ · history 14 done ↓
+◆
+Proposals · 2
+Version the save file
+Saves carry no version, so a format change silently drops old saves.
+feature ▾
+Decline
+Admit
+Migrate saves from 0.3
+Read the 0.3 layout once and write it back in the new one.
+feature ▾
+Decline
+Admit
+Merge queue · 2
+1
+#37
+Score on the end screen
+▸ integrating · 2m
+2
+#36
+Double jump on slopes
+waits for #37
+Conversations · 3
+Why is the build so slow on CI?
+▸ running
+Ideas for a two-player mode
+2h
+Audit the save format
+yesterday
++ New chat
+Details
+clone
+git@forge.manu.software:game.git
+mirror
+github (failing)
+spent
+2.8 w · 27 tickets
+Repository ›
+Settings ›
+Release…
+With width to spare, the workflow moves to the top as the page's overview. It is the same map as
+7g
+with room for every label, and its dots are the open tickets, so it shows at a glance what the board used to. Clicking a step filters the table. The tickets table gets the full left side. The right column holds what needs a decision (proposals, admitted in place), what is landing (merge queue), the conversations, and the project's facts at its foot, so there is no separate rail.
+Proposals
+8a
+Proposals · grouped by where they came from
+‹
+4
+Proposals
+game ·
+12 open
+· 4 sources
+game ›
+Open
+12
+Admitted
+31
+Declined
+18
+◌
+Why is the build so slow on CI?
+3 · 20m
+Cache textures by content hash
+The asset step keys its cache on the commit, so every push rebuilds all 212 textures.
+Split the CI check into fast and full
+Run lint and unit tests on every push, the slow integration suite only before merge.
+Pin the Elixir image by digest
+bug
+The tag moved twice last week and broke two builds without a code change.
+▸
+ticket #44 · Replace the font atlas
+4 · 2h
+Generate the SDF atlas offline
+Build the signed distance field once at asset time, not on first launch.
+Swap the text shader to sample the SDF
+One shader for every size, replacing the four bitmap passes.
+2 more from #44 ↓
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+12
+Proposals arrive in batches: a chat that ends with three ideas, or a ticket split into four. So the list groups them by source, newest batch first, and each group names its source: a chat, or a ticket by number. Its proposals are indented under it on a rail, so a batch reads as belonging to its ticket. Long-pressing a group header selects the whole group (
+8f
+), and long-pressing a row selects that row (
+8c
+). Each row is the title and the first two lines of the body. Tapping a row opens it in
+8b
+. The strip's right slot becomes
+Review 12
+, which steps through them one at a time.
+8b
+Review · one proposal at a time
+‹
+4
+Proposals
+game ·
+12 open
+game ›
+‹ Proposals
+3 of 12
+◌
+Why is the build so slow on CI?
+· 20m · 1 of 3
+Cache textures by content hash
+The asset step keys its cache on the commit hash, so every push rebuilds all 212 textures and the step takes six to seven minutes.
+Keying each texture on a hash of its source file and its import settings rebuilds only what changed.
+Done when
+a push that touches no texture skips the step in under 20s
+changing one PNG rebuilds one texture
+Ask the chat about this
+Admit as
+feature
+bug
+Skip
+Decline
+Admit
+›
+The whole proposal at reading size, with where it came from above the title. Admit, Skip and Decline sit in the thumb zone, and each one moves to the next proposal. Swiping does the same. The dots track the pass: green admitted, grey still open. The composer sends a question to the source chat, so a vague proposal can be sharpened before it becomes a ticket.
+8c
+Select · several at once
+‹
+4
+Proposals
+game ·
+12 open
+game ›
+3 selected
+of 12
+Select group
+Done
+–
+▸
+ticket #44 · Replace the font atlas
+4 · 2h
+✓
+Generate the SDF atlas offline
+Build the signed distance field once at asset time, not on first launch.
+✓
+Swap the text shader to sample the SDF
+One shader for every size, replacing the four bitmap passes.
+✓
+Keep the bitmap font as a fallback
+Old GPUs without derivatives keep today's path.
+Benchmark text rendering before and after
+A fixed scene with 2,000 glyphs, frame time on three machines.
+◌
+Why is the build so slow on CI?
+3 · 20m
+Cache textures by content hash
+The asset step keys its cache on the commit, so every push rebuilds all 212 textures.
+Split the CI check into fast and full
+Run lint and unit tests on every push, the slow integration suite only before merge.
+Admit as
+feature
+bug
+3 tickets
+Decline 3
+Admit 3
+›
+Long-press a row to start selecting. Each group header gains a box that selects or clears the whole group, and shows a dash when only some are picked. The strip gives way to a bulk bar with the type and the two verbs. Here three of #44's four parts are going in and the fallback stays behind. Declining several asks for one shared reason.
+8f
+Long-press a group: all of its source selected
+‹
+4
+Proposals
+game ·
+12 open
+game ›
+4 selected
+all from ticket #44
+Clear
+Done
+✓
+▸
+ticket #44 · Replace the font atlas
+4 · 2h
+✓
+Generate the SDF atlas offline
+Build the signed distance field once at asset time, not on first launch.
+✓
+Swap the text shader to sample the SDF
+One shader for every size, replacing the four bitmap passes.
+✓
+Keep the bitmap font as a fallback
+Old GPUs without derivatives keep today's path.
+✓
+Benchmark text rendering before and after
+A fixed scene with 2,000 glyphs, frame time on three machines.
+◌
+Why is the build so slow on CI?
+3 · 20m
+Cache textures by content hash
+The asset step keys its cache on the commit, so every push rebuilds all 212 textures.
+Split the CI check into fast and full
+Run lint and unit tests on every push, the slow integration suite only before merge.
+Admit as
+feature
+bug
+4 tickets
+Decline 4
+Admit 4
+›
+Long-pressing a group header selects every proposal from that source in one go. Here all four from ticket #44 are selected, so Decline 4 closes the batch with one shared reason. Tapping the header box again clears them. The source is known: a proposal is an artifact, and an artifact belongs to exactly one ticket or one chat (
+artifact.ex
+).
+8d
+History · what became of them
+‹
+4
+Proposals
+game · 31 admitted · 18 declined
+game ›
+Open
+12
+Admitted
+31
+Declined
+18
+This week
+Persist the high score table
+3d
+→ #41
+▸ implementing
+from “Why do scores vanish?” · by you
+Shape the leaderboard screen
+3d
+→ #42
+● shaping
+from #41 split · by you
+Replace the font atlas with a single SDF texture
+4d
+→ #44
+▸ implementing
+from “Text looks blurry” · by you
+Fix the double jump on slopes
+5d
+→ #36
+▸ merging
+from triage #33 · by you, as bug
+Declined lately
+Online leaderboard
+5d
+× declined
+“needs a server first” · by you
+Rewrite the HUD in a UI library
+1w
+× declined
+“not worth the dependency” · by you
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+12
+Admitted proposals link to the ticket they became and show where it is now, so the list doubles as a way to follow ideas through. Declined ones keep their reason, which helps when the same idea comes back. Each one can be reopened from here.
+8e
+Desktop, wide (1600 × 1000): list and reader side by side
+forge
+0.31.0
+Queue
+4
+Projects
+Workers
+Chats
+5h 42% · week 18%
+you@example.com
+‹ game
+Proposals
+12 open
+from 4 sources
+Open
+12
+Admitted
+31
+Declined
+18
+group: source ▾
+◌
+Why is the build so slow on CI?
+3 · 20m
+Cache textures by content hash
+The asset step keys its cache on the commit, so every push rebuilds all 212 textures.
+Split the CI check into fast and full
+Run lint and unit tests on every push, the slow integration suite only before merge.
+Pin the Elixir image by digest
+bug
+The tag moved twice last week and broke two builds without a code change.
+–
+▸
+ticket #44 · Replace the font atlas
+4 · 2h
+✓
+Generate the SDF atlas offline
+Build the signed distance field once at asset time, not on first launch.
+✓
+Swap the text shader to sample the SDF
+One shader for every size, replacing the four bitmap passes.
+✓
+Keep the bitmap font as a fallback
+Old GPUs without derivatives keep today's path.
+Benchmark text rendering before and after
+A fixed scene with 2,000 glyphs, frame time on three machines.
+◌
+Audit the save format
+2 · yesterday
+Version the save file
+Saves carry no version, so a format change silently drops old saves.
+Migrate saves from 0.3
+Read the 0.3 layout once and write it back in the new one.
+◌
+Ideas for a two-player mode
+3 · 3d
+Local split-screen prototype
+Two viewports on one screen, shared world, no networking.
+Input mapping for two controllers
+Assign each pad to a player on first button press.
+Server sketch for online play
+What the game would need from a server: lobbies, state sync, cheating.
+3 selected
+from #44
+feature ▾
+Decline 3
+Admit 3
+◌
+Why is the build so slow on CI?
+· chat · 20m · 1 of 3
+Open chat ›
+Cache textures by content hash
+The asset step keys its cache on the commit hash, so every push rebuilds all 212 textures and the step takes six to seven minutes.
+Keying each texture on a hash of its source file and its import settings rebuilds only what changed. The import settings live in
+assets/import.toml
+, so a change there invalidates every texture it covers, which is correct.
+Done when
+a push that touches no texture skips the step in under 20s
+changing one PNG rebuilds one texture
+the cache survives a runner restart
+Out of scope
+Audio and level files, which are copied, not built.
+Related open tickets
+#37
+Show the score on the end screen
+also touches the asset step
+Admit as
+feature
+bug
+Ask the chat about this, or give a reason to decline
+Decline
+Admit
+The list keeps the sources. Each group header has a box that selects or clears everything from that source, and shows a dash when only some are picked. Checkboxes feed the bulk bar at its foot. The reader on the right shows the whole proposal with its source and any open tickets it touches, which catches duplicates before they are admitted. Admitting or declining moves on to the next proposal. On a portrait screen the reader stacks under the list (
+8g
+).
+8g
+Desktop, portrait (1080 × 1500): list on top, reader below a draggable divider
+forge
+0.31.0
+Queue
+4
+Projects
+Workers
+Chats
+5h 42% · week 18%
+you@example.com
+‹ game
+Proposals
+12 open
+from 4 sources
+Open
+12
+Admitted
+31
+Declined
+18
+◌
+Why is the build so slow on CI?
+3 · 20m
+Cache textures by content hash
+The asset step keys its cache on the commit, so every push rebuilds all 212 textures.
+Split the CI check into fast and full
+Run lint and unit tests on every push, the slow integration suite only before merge.
+Pin the Elixir image by digest
+bug
+The tag moved twice last week and broke two builds without a code change.
+–
+▸
+ticket #44 · Replace the font atlas
+4 · 2h
+✓
+Generate the SDF atlas offline
+Build the signed distance field once at asset time, not on first launch.
+✓
+Swap the text shader to sample the SDF
+One shader for every size, replacing the four bitmap passes.
+✓
+Keep the bitmap font as a fallback
+Old GPUs without derivatives keep today's path.
+Benchmark text rendering before and after
+A fixed scene with 2,000 glyphs, frame time on three machines.
+◌
+Audit the save format
+2 · yesterday
+Version the save file
+Saves carry no version, so a format change silently drops old saves.
+Migrate saves from 0.3
+Read the 0.3 layout once and write it back in the new one.
+◌
+Ideas for a two-player mode
+3 · 3d
+Local split-screen prototype
+Two viewports on one screen, shared world, no networking.
+Input mapping for two controllers
+Assign each pad to a player on first button press.
+Server sketch for online play
+What the game would need from a server: lobbies, state sync, cheating.
+3 selected
+from ticket #44
+feature ▾
+Decline 3
+Admit 3
+◌
+Why is the build so slow on CI?
+· chat · 20m · 1 of 3
+Open chat ›
+Cache textures by content hash
+The asset step keys its cache on the commit hash, so every push rebuilds all 212 textures and the step takes six to seven minutes.
+Keying each texture on a hash of its source file and its import settings rebuilds only what changed. The import settings live in
+assets/import.toml
+, so a change there invalidates every texture it covers, which is correct.
+Done when
+a push that touches no texture skips the step in under 20s
+changing one PNG rebuilds one texture
+the cache survives a runner restart
+Related
+#37
+Show the score on the end screen
+also touches the asset step
+Admit as
+feature
+bug
+Ask the chat about this, or give a reason to decline
+Decline
+Admit
+On a tall screen the reader sits under the list instead of beside it, split by the same 10px divider as the chat in
+2d
+. With the extra width, each row puts the body's first line next to the title. The bulk bar sits between the list and the divider, so it stays near the selection. Dragging the divider up gives a long proposal more room. Dragging it down shows more of the list.
+Repository
+Highlighted with the muted syntax palette.
+10a
+Commits · the default branch, newest first
+‹
+4
+Repository
+game · 9 branches
+game ›
+branch
+main
+a41c09e
+▾
+Commits
+Files
+Show the score on the end screen
+a41c09e · you · 2d
+›
+Tilt controls
+77d2b10 · you · 4d
+›
+Crash on an empty player name
+0c1d88e · ana · 6d
+›
+Bump the Elixir image to 1.17.3
+3f8e2c1 · jo · 1w
+›
+Particle pooling
+5e2a913 · you · 2w
+›
+Controller rebinding
+c03b7f4 · you · 3w
+›
+Move the asset pipeline into mix tasks
+e7b4410 · ana · 3w
+›
+First playable build
+91aa0d2 · you · 1mo
+›
+Initial commit
+2d0c6b7 · you · 1mo
+›
+‹ Newer
+1–30
+Older ›
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+12
+The branch picker and the Commits/Files switch share one 56px bar, and both keep today's behaviour: the branch lives in the address, and pages hold 30 commits. Each row is the subject, then the short sha, the author and the age, and opens the commit (
+10e
+). Newer and Older stay a fixed foot instead of sitting at the end of the list. Today's row shows no author, so that is new.
+10b
+Branch · grouped, ticket branches named
+‹
+4
+Repository
+game · 9 branches
+game ›
+branch
+main
+a41c09e
+▾
+Commits
+Files
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+12
+Find a branch
+Default
+main
+a41c09e · 2d
+Open tickets · 6
+forge/game-41
+▸
+#41 Persist the high score table · implementing
+forge/game-42
+●
+#42 Shape the leaderboard screen · shaping
+forge/game-44
+▸
+#44 Replace the font atlas · implementing
+forge/game-39
+●
+#39 Sound toggle in settings · review
+2 more
+Other · 2
+experiment/sdf
+1w
+Today's branch picker is a plain select of names. Here it is a sheet: the default branch first, then each open ticket's branch with the ticket's number, title and step, which the ticket already records. Other branches come last. With many branches, the search field matters more than the grouping.
+10c
+Files · the tree at the branch head
+‹
+4
+Repository
+game · 9 branches
+game ›
+branch
+main
+a41c09e
+▾
+Commits
+Files
+main at a41c09e
+▸
+.forge/
+▸
+assets/
+▸
+config/
+▸
+lib/
+▸
+game/
+application.ex
+hud.ex
+scores.ex
+2.1 KB ›
+world.ex
+▸
+game_web/
+▸
+priv/
+▸
+test/
+.formatter.exs
+README.md
+mix.exs
+mix.lock
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+12
+The tree stays as plain identifier text with no icons. A folder differs from a file only by its ▸ and a trailing slash, and folders sort first, as today. Expanded folders indent 18px per level. Today a file opens inline under its row. On a phone that pushes the rest of the tree away, so a file opens as its own screen (
+10d
+), and the tree keeps your place.
+10d
+A file · its own screen, lines wrap
+‹
+4
+Repository
+game · main at a41c09e
+game ›
+‹ Files
+lib/game/scores.ex
+2.1 KB · 74 lines
+1
+defmodule
+Game.Scores
+do
+2
+@moduledoc
+"The top 100, kept in SQLite."
+3
+4
+import
+Ecto.Query
+5
+alias
+Game.{
+Repo
+,
+Score
+}
+6
+7
+@keep
+100
+8
+9
+def
+top
+(n
+\\
+10
+)
+do
+10
+Repo
+.
+all
+(
+11
+from
+s
+in
+Score
+,
+12
+order_by:
+[
+desc:
+s.score,
+asc:
+s.inserted_at],
+13
+limit:
+^
+n
+14
+)
+15
+end
+16
+17
+def
+record
+(name, score)
+do
+18
+%
+Score
+{
+name:
+name,
+score:
+score}
+19
+|>
+Repo
+.insert!()
+20
+21
+trim_to
+(
+@keep
+)
+22
+end
+23
+24
+defp
+trim_to
+(keep)
+do
+25
+# Rows past the keep line, newest last.
+26
+cutoff =
+27
+from
+s
+in
+Score
+,
+28
+order_by:
+[
+desc:
+s.score,
+asc:
+s.inserted_at],
+History of this file
+Copy path
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+12
+One file at a time, as today: 512 KB at most, and a binary or larger file says so in today's words instead of showing content. Code is highlighted on the server in a muted palette (plan below), and anything over 100 KB or in an unknown language stays plain. Lines wrap rather than scrolling sideways, and line numbers take 28px. Ligatures stay off, as for every
+pre
+. History of this file is new and needs
+git log -- path
+. Copy path is local to the screen.
+10e
+A commit · what it changed
+‹
+4
+Repository
+game · main
+game ›
+‹ Commits
+a41c09e
+2d ago
+The commit
+Show the score on the end screen
+a41c09e
+you
+parent 77d2b10
++64
+−9
+4 files
+What it changed
+lib/game_web/live/
+end_live.ex
++38
+−6
+›
+lib/game/
+scores.ex
++9
+−3
+›
+test/game_web/
+end_live_test.exs
+new
++17
+−0
+›
+assets/fonts/
+score.png
+binary
++0
+−0
+›
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+12
+The commit page keeps today's header (subject, short sha, age) and adds the size of the change and its parent. The diff opens as the same file list as a ticket's Changes (
+6b
+), and tapping a file opens the wrapped diff from
+6c
+under a back row. A binary file is listed without content, as today. A root commit is shown against the empty tree.
+10f
+Desktop, wide (1600 × 1000): tree, file and history side by side
+forge
+0.31.0
+Queue
+4
+Projects
+Workers
+Chats
+5h 42% · week 18%
+you@example.com
+‹ game
+Repository
+branch
+main
+a41c09e
+▾
+9 branches · 6 for open tickets
+https://forge.manu.software/git/game.git
+Copy
+Files
+▸
+.forge/
+▸
+assets/
+▸
+config/
+▸
+lib/
+▸
+game/
+application.ex
+hud.ex
+scores.ex
+world.ex
+▸
+game_web/
+▸
+priv/
+▸
+test/
+.formatter.exs
+README.md
+mix.exs
+mix.lock
+lib/game/
+scores.ex
+2.1 KB · 74 lines
+History of this file
+1
+defmodule
+Game.Scores
+do
+2
+@moduledoc
+"The top 100, kept in SQLite."
+3
+4
+import
+Ecto.Query
+5
+alias
+Game.{
+Repo
+,
+Score
+}
+6
+7
+@keep
+100
+8
+9
+def
+top
+(n
+\\
+10
+)
+do
+10
+Repo
+.
+all
+(
+11
+from
+s
+in
+Score
+,
+12
+order_by:
+[
+desc:
+s.score,
+asc:
+s.inserted_at],
+13
+limit:
+^
+n
+14
+)
+15
+end
+16
+17
+def
+record
+(name, score)
+do
+18
+%
+Score
+{
+name:
+name,
+score:
+score}
+19
+|>
+Repo
+.insert!()
+20
+21
+trim_to
+(
+@keep
+)
+22
+end
+23
+24
+defp
+trim_to
+(keep)
+do
+25
+# Rows past the keep line, newest last.
+26
+cutoff =
+27
+from
+s
+in
+Score
+,
+28
+order_by:
+[
+desc:
+s.score,
+asc:
+s.inserted_at],
+29
+|>
+offset
+(
+^
+keep)
+30
+|>
+select
+([s], s.id)
+31
+32
+Repo
+.
+delete_all
+(
+from
+s
+in
+Score
+,
+where:
+s.id
+in
+subquery
+(cutoff))
+33
+end
+34
+end
+Commits on main
+1–30
+Show the score on the end screen
+a41c09e · you · 2d
+Tilt controls
+77d2b10 · you · 4d
+Crash on an empty player name
+0c1d88e · ana · 6d
+Bump the Elixir image to 1.17.3
+3f8e2c1 · jo · 1w
+Particle pooling
+5e2a913 · you · 2w
+Controller rebinding
+c03b7f4 · you · 3w
+Move the asset pipeline into mix tasks
+e7b4410 · ana · 3w
+First playable build
+91aa0d2 · you · 1mo
+Initial commit
+2d0c6b7 · you · 1mo
+‹ Newer
+Older ›
+With width to spare, the Commits/Files switch goes away: tree on the left, the open file in the middle with 40px line numbers, and the branch's history on the right. The branch picker and clone URL sit in the title row. Clicking a commit opens the commit page with the ticket diff layout. On a portrait screen the history moves under the file.
+Projects
+11a
+Projects · what needs you, and what can run
+‹
+4
+Projects
+4 projects ·
+4 waiting on you
++
+New
+game
+◆
+3
+›
+12 open
+▸ 3 running
+2 templates · 1 credential
+#41 is implementing · 4m
+forge
+◆
+1
+›
+7 open
+▸ 1 running
+1 template · 1 machine · 1 credential
+#118 waits for review · 1h
+site
+›
+2 open
+1 template · 1 credential
+nothing running · last merge 3d
+api
+›
+0 open
+0 templates · 0 machines · 1 credential
+no template or machine, so nothing runs
+Today's row is the name, the figures and a red line when nothing can run. These keep all three and lead with what the rest of this redesign revolves around. That is how many items wait on you in each project (the amber pill and edge, matching the queue) and how many jobs run, with the latest thing that happened underneath. A project that can't run anything keeps today's words in red in place of that line. Projects that wait on you sort first.
+11b
+Projects · none yet
+‹
+4
+Projects
+no projects
+You are in no project yet.
+Make one, or ask someone in one to add you. They add you from the project's settings, by the address you signed in with.
+your address
+sam@example.com
+New project
+Today's empty text, with the one fact someone needs in order to be added: their own address. The address is what the settings page asks for (
+9f
+). Creating a project moves from the top bar to the dock, since it is the only thing to do here.
+11c
+New project · two fields
+‹
+4
+New project
+the platform hosts the repository
+‹ Projects
+The repository is created empty. Work reaches its default branch by being merged there, or, for a repository that already exists, by an import pushed with a credential made for that branch.
+Name
+leaderboard-api
+Lowercase, digits and hyphens. It is the repository's name and the project's address.
+Default branch
+main
+You will get
+https://forge.manu.software/git/leaderboard-api.git
+You become its first administrator.
+Create it
+The same two fields as today, with the error under the field it belongs to. A preview shows the clone URL the name will make, which catches a typo before it becomes the repository's name. The naming rule shown under the field is a guess at what the changeset enforces.
+11d
+Created · the one thing to do next
+‹
+4
+leaderboard-api
+registered · no workflow yet
+leaderboard-api ›
+leaderboard-api is registered
+It has no workflow yet, so it cannot take a ticket. A workflow is
+.forge/workflow.yml
+in the repository, with the prompts it names under
+.forge/
+.
+Set it up in a chat
+›
+It sees the empty repository, asks what the project is, and writes the workflow on its own branch. You read the diff and merge it.
+Or work in it yourself
+https://forge.manu.software/git/leaderboard-api.git
+Copy
+Cloning needs a token.
+Issue one in settings ›
+An admin token also writes
+main
+, fast-forward only, for importing a repository that already exists.
+Admit the first ticket
+›
+Today's second state, with the same three routes and their order: set up in a chat (the primary 64px button), work in it yourself with the clone URL and a link to issue a token, and admit the first ticket. The top bar already points at the new project, and the old "Back to the board" link goes, since the board is gone.
+11e
+Desktop, wide (1600 × 720): one table, with New project opening beside it
+forge
+0.31.0
+Queue
+4
+Projects
+Workers
+Chats
+5h 42% · week 18%
+you@example.com
+Projects
+4
+4 waiting on you
+project
+waiting
+running
+open
+runs on
+latest
+game
+◆
+3
+▸ 3
+12
+2 templates · 1 credential
+#41 is implementing · 4m
+›
+forge
+◆
+1
+▸ 1
+7
+1 template · 1 machine · 1 credential
+#118 waits for review · 1h
+›
+site
+0
+0
+2
+1 template · 1 credential
+nothing running · last merge 3d
+›
+api
+0
+0
+0
+nothing runs
+no template or machine
+›
+New project
+×
+The repository is created empty. Work reaches its default branch by being merged there, or by an import pushed with a credential made for that branch.
+Name
+leaderboard-api
+Default branch
+main
+You will get
+https://forge.manu.software/git/leaderboard-api.git
+Create it
+One row per project with the same fields as the phone, as columns.
+Runs on
+holds today's figures, so a project that can't run anything turns red in that column. New project opens in a right-hand column, as forms do in settings. After Create it, that column shows
+11d
+'s next steps. The page is short, so the frame is drawn 720px tall.
+Project settings
+9a
+Settings · one row per section
+‹
+4
+Settings
+game · you are an admin
+game ›
+Access
+Tokens
+3 live · 1 expires in 2 days
+›
+People
+4 people · 2 admins
+›
+Agent
+Model and effort
+model: the machine's · effort: high
+›
+Secrets
+5 set · 1 that nothing receives
+›
+Repository
+Branch and mirrors
+main · github mirror failing
+›
+Clone URL
+https://forge.manu.software/git/game.git
+Copy
+The username is ignored; a token is the password.
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+12
+Today's page is seven sections in one 48rem column, each with its own form. Here it becomes an index of five rows, grouped by what they govern. Each row carries a one-line state, and the warning colour marks something to look at: a token about to lapse, a secret nothing receives, a failing mirror. A member who isn't an admin sees only Secrets and Repository, as today.
+9b
+Tokens · what each may do, in a sentence
+‹
+4
+Settings
+game · you are an admin
+game ›
+‹ Settings
+Tokens
+3 live
+ci-dashboard
+in 2 days
+Git: read · API: read
+used 3m ago via api
+you
+Revoke
+laptop
+in 21 days
+Git: push any open ticket's branch · API: write
+used 1h ago via git
+you
+Revoke
+implementing-41
+in 4h
+Git: writes refs/heads/forge/game-41
+used now via git
+a job
+held by a job · revoked when it ends
+Show expired and revoked · 4
++ Issue a token
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+12
+Today's table reflows into rows. Here each token reads top to bottom: name and expiry, then what it may do, then when and how it was last used and who issued it. A token held by a job says so instead of offering Revoke, because the engine revokes it when the job ends. Revoke keeps today's confirmation. Expired and revoked tokens stay folded.
+9c
+Issue a token · choices as rows, nothing that writes preselected
+‹
+4
+Settings
+game · you are an admin
+game ›
+‹ Tokens
+Issue a token
+Name
+release-script
+Git: it may
+not use git
+read every branch
+write one ticket's branch
+push any open ticket's branch
+push those, and main
+Fast-forward only. Every credential a job holds is refused it.
+API: it may
+none
+read
+read and write
+Days it lasts
+−
+7
++
+Issue it
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+12
+The three dropdowns become visible choices, since each one decides what the token can touch. Git gets five 52px rows, and the admin row carries today's warning inline. API is a three-way switch, and days is a stepper. The defaults stay as they are today: git reads, the API is off, seven days. Picking
+write one ticket's branch
+adds a ticket picker under it.
+9d
+Issued · shown once
+‹
+4
+Settings
+game · you are an admin
+game ›
+‹ Tokens
+release-script
+Copy it now. It is not shown again.
+Only its hash is kept. Git: read · API: none, until 14 Nov.
+Token
+fgt_7Hq2xKp9VdL4mN8sRw3tYb6cZ1aE5fJ0
+Copy
+Clone URL, token included
+https://x:fgt_7Hq2xKp9VdL4mN8sRw3tYb6cZ1aE5fJ0@forge.manu.software/git/game.git
+Copy
+Leaving this page drops it from the screen. If you lose it, revoke it and issue another.
+I have copied it
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+12
+The one moment the secret exists on screen. It is never in a flash or the URL, as today. The warning band is amber because the user has to act on it. Each value gets a 36px Copy button, and the curl line appears only when the token may use the API. The dock's button is the only way out of this screen, and its label says what you are confirming.
+9e
+Secrets · who receives each, never its value
+‹
+4
+Settings
+game · you are an admin
+game ›
+‹ Settings
+Secrets
+5
+Handed to a job when its state or command names them, and to a chat when you pick them. Jobs do not receive them yet.
+STEAM_UPLOAD_KEY
+v3 · 2d ago
+release
+last held 2d ago
+you
+SENTRY_DSN
+v1 · 1w ago
+implementing, review
+held by 1 live conversation
+last held 3h ago
+ana@example.com
+STRIPE_TEST_KEY
+v2 · 3w ago
+no state or command names it
+no run has held it
+you
+ASSET_CDN_TOKEN
+v1 · 1mo ago
+merging
+last held 1d ago
+an account since removed
++ Set a secret
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+12
+Each secret reads as its name, version and age, then who receives it in words, which is the access list read backwards. A name that nothing receives is in the warning colour, because it may be a misspelling. Set reuses the sheet pattern: name, a write-only value, and today's note that setting an existing name replaces its value. Delete sits inside each row's detail, with today's confirmation.
+9f
+People · role in place, add at the foot
+‹
+4
+Settings
+game · you are an admin
+game ›
+‹ Settings
+People
+4
+Everyone here can run the work. Administrators can also change these settings and this list.
+you@example.com
+· you
+admin ▾
+×
+ana@example.com
+admin ▾
+×
+jo@example.com
+member ▾
+×
+ci-bot@example.com
+member ▾
+×
+Add someone
+sam@example.com
+member ▾
+No approved account for that address.
+Add
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+12
+The role becomes a menu on the row, so changing it no longer means removing and re-adding someone. Removing is a 40px × with a confirmation. The last administrator's menu and × are disabled, with today's words as the reason. Adding sits at the foot, and its error stays next to the field. There are no invitations, so an address needs an approved account.
+9g
+Model and effort · one page, two dials
+‹
+4
+Settings
+game · you are an admin
+game ›
+‹ Settings
+Model and effort
+What this project's work runs on when a workflow state does not name its own. Left on
+the machine's
+, it follows the platform-wide setting.
+Model · offered by 3 connected workers
+the machine's
+currently claude-sonnet-4-5
+▾
+The full list of offered models opens in the system picker.
+Effort
+machine's
+low
+medium
+high
+A workflow state that names its own model or effort keeps it. Saved changes apply to jobs that start after them.
+Discard
+Save
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+12
+Today's two sections, each with its own Save, become one page with one Save. The model stays a dropdown, because workers offer many models, and the list is the connected workers' offer as today. When no worker is connected it falls back to a text field.
+The machine's
+row names what it currently resolves to, so leaving it empty isn't a guess. The model names are placeholders.
+9h
+Branch and mirrors · what the last push said
+‹
+4
+Settings
+game · you are an admin
+game ›
+‹ Settings
+Branch and mirrors
+default branch
+main
+Mirrors · 2
+Every push to
+main
+is pushed on to each of these.
+https://
+carries a token safely;
+http://
+sends it in clear.
+github
+✗ failed
+https://github.com/manu/game.git
+3h ago
+remote: Permission to manu/game.git denied (403)
+last ok 4 days ago
+Remove
+backup
+✓ ok
+https://git.example.net/game.git
+3h ago
+Remove
++ Add a mirror
+Tickets
+12
+Merge
+2
+Chats
+3
+Workflow
+Proposals
+12
+Mirrors come first among the repository facts because this is the only place they are set or removed. A failing mirror leads with its status, the remote's own error, and when it last succeeded. Add opens a form with today's five fields, and the token field stays write-only. Each error message keeps today's wording.
+9i
+Desktop, wide (1600 × 1000): sections on the left, the section in the middle, its form on the right
+portrait:
+21h
+forge
+0.31.0
+Queue
+4
+Projects
+Workers
+Chats
+5h 42% · week 18%
+you@example.com
+‹ game
+Settings
+you are an admin
+https://forge.manu.software/git/game.git
+Copy
+Access
+Tokens
+3 live · 1 expiring
+People
+4 · 2 admins
+Agent
+Model and effort
+machine's · high
+Secrets
+5 · 1 unused
+Repository
+Branch and mirrors
+github failing
+Tokens
+3 live
+Show expired and revoked · 4
+A token lets an outside program read this project's tickets and documents, push to git, or both. It is shown once when issued; after that a row says what it may do and when it was last used, never what it is.
+token
+it may
+expires
+last used
+ci-dashboard
+issued by you
+Git: read · API: read
+in 2 days
+3m ago via api
+Revoke
+laptop
+issued by you
+Git: push any open ticket's branch · API: write
+in 21 days
+1h ago via git
+Revoke
+implementing-41
+issued by a job
+Git: writes refs/heads/forge/game-41
+in 4h
+now via git
+held by a job
+Issue a token
+Name
+release-script
+Git: it may
+not use git
+read every branch
+write one ticket's branch
+push any open ticket's branch
+push those, and main
+API: it may
+none
+read
+read and write
+Days it lasts
+−
+7
++
+Issue it
+The phone's index becomes a 240px section list with the same one-line states. The middle shows the selected section as a dense table, and its form sits in a right-hand column instead of above the list as today. Issuing puts the shown-once panel in that column. Each section follows the same pattern: Secrets has
+Set a secret
+on the right, People has
+Add someone
+, and mirrors have
+Add a mirror
+. The clone URL sits in the title row, where it is always one click away. On a portrait screen the form moves under the table.
+21h
+Settings, desktop portrait (1080 × 1500): the form moves under the table
+forge
+0.31.0
+Projects
+▾
+Queue
+4
+5h 42% · week 18%
+you@example.com
+‹ game
+Settings
+you are an admin
+Access
+Tokens
+3 live · 1 expiring
+People
+4 · 2 admins
+Agent
+Model and effort
+machine's · high
+Secrets
+5 · 1 unused
+Repository
+Branch and mirrors
+github failing
+Tokens
+3 live
+Show expired and revoked · 4
+token
+it may
+expires
+ci-dashboard
+Git: read · API: read
+in 2 days
+Revoke
+laptop
+Git: push any open ticket's branch · API: write
+in 21 days
+Revoke
+implementing-41
+Git: writes refs/heads/forge/game-41
+in 4h
+a job's
+Issue a token
+Name
+release-script
+Git: it may
+not use git
+read every branch
+write one ticket's branch
+push any open ticket's branch
+push those, and main
+API: it may
+none
+read
+read and write
+Days it lasts
+−
+7
++
+Issue it
+9i
+on a tall screen. The section list stays on the left, and the form moves under the table and spreads into two columns, so the whole section is one top-to-bottom read. Every other section follows the same layout.
+Machines, templates, credentials
+Every template leads with its ceiling in money.
+12f
+Machines · what each is doing
+Machines
+▾
+3 busy
+· 1 idle · 1 template at its limit
+Machines
+Templates
+Credentials
+4 of 6 machines
+across 2 templates + 1 permanent
+hz-fsn1-3
+▸ busy
+›
+implementing #2 · game#41 · 4m
+hetzner-cx32 · game
+hz-fsn1-2
+▸ busy
+›
+chat · Why is the build so slow on CI? · 3m
+hetzner-cx32 · game
+hz-fsn1-5
+old build
+idle
+›
+destroyed in 12m unless work arrives
+hetzner-cx32 · forge
+mac-studio
+▸ busy
+›
+merging · game#37 · 2m
+permanent · game, site
+hz-nbg1-1
+gone
+›
+destroyed 2h ago · lost connection
+hetzner-cx22 · site
+Workers and templates (
+workers_live.ex
+,
+templates_live.ex
+) become one place with three views. Each machine row leads with its connection dot and what it is doing, in words: the job and ticket, the chat, or how long until idle destroys it. An outdated build is flagged in the warning colour. Destroyed machines stay, dimmed, because their log is read after they go. "Machines" replaces "Workers" in the nav, since that is the word the pages already use.
+12g
+A machine · its log, newest first
+hz-nbg1-1
+destroyed 2h ago · hetzner-cx22 · site
+‹ Machines
+Log
+UTC
+What the platform saw happen to this machine, and what the machine said about itself. What an agent did inside a job is on that job's page.
+14:02:11
+platform
+worker.destroyed
+Destroyed after 5 minutes without a heartbeat.
+13:57:09
+platform
+worker.disconnected
+Socket closed: timeout.
+13:56:40
+machine
+job.harness_exit
+Harness exited with status 137 (out of memory).
+job 7f3a91c2
+13:41:02
+machine
+job.started
+Started implementing #1.
+job 7f3a91c2
+13:40:58
+platform
+worker.assigned
+Assigned to site#12.
+13:38:15
+machine
+worker.ready
+Build 0.31.0 ready, 4 cores, 8 GiB.
+13:36:02
+platform
+worker.created
+Created from hetzner-cx22.
+Today's four-column log becomes a two-line entry on a phone: time, source and type above, then the message. Errors keep the error colour across the whole entry, and a job id links to its job page. It refreshes on today's timer. The answer to "why did it go away?" reads top down: destroyed, then disconnected, then out of memory.
+14a
+Templates · each one's ceiling, in money
+Machines
+▾
+yours only · 3 templates · up to €0.162/h
+Machines
+Templates
+Credentials
+A template is how a machine gets made. Its values are copied at creation, so editing one never changes a machine that exists.
+hetzner-cx32
+2 of 4
+hetzner · cx32 · latest · now snap-412
+up to
+€0.044/h
+€0.011/h each · 8 GiB · 4 cores · any kind
+for game, forge
+hetzner-cx22
+2 of 2
+hetzner · cx22 · snap-398
+up to
+€0.012/h
+€0.006/h each · 4 GiB · 2 cores · chat
+for site
+gpu-bench
+disabled
+0 of 1
+hetzner · ccx33 · snap-377
+up to
+€0.106/h
+€0.106/h each · 32 GiB · 8 cores · workflow
+3 failed attempts — it is out of service until you enable it: worker refused at join, protocol 6
++ New template
+Today's moduledoc says the maximum machine count is the only ceiling on machine spend, so it belongs beside the price. Each row therefore leads with its ceiling in money (up to €0.044/h), then how many of the maximum it runs now as slots, amber when full. Below that are the identifiers, what each machine is, and who may use it. A disabled template carries today's flag and its failure in red. A template with no project says it is never used. The subline adds up every ceiling.
+14b
+A template · ceiling, image, projects, failures
+Machines
+▾
+template
+‹ Templates
+hetzner-cx22
+Edit
+Ceiling
+€0.012/h
+2 × €0.006/h
+2 of 2 running · new work waits
+idle machines are destroyed after 10 minutes
+Machine
+provider
+hetzner · hz-main
+size
+cx22 · 4 GiB · 2 cores
+image
+snap-398
+carries
+build 0.30.2 · one release behind
+takes
+chat
+Projects
+site
+×
+game
+▾
+Assign
+Remove template
+Opening a template shows its ceiling large: the maximum count times the price per machine, with the slots and what happens when they are full. Then come the machine it makes, with its image's build compared to this platform's and the outdated case in the warning colour, and the projects that may use it. Assign and unassign keep today's behaviour. Remove keeps today's confirmation ("Machines already made from it keep running").
+14c
+New template · steps in the order the provider needs
+Machines
+new template
+‹ Templates
+New template
+✓
+Account
+hetzner
+hz-main
+Sizes and images are read from this account, which pays for every machine.
+✓
+Machine
+Size
+cx32
+8 GiB · 4 cores · €0.011/h
+▾
+Image
+latest
+now snap-412 · build 0.31.0 · carries latest
+▾
+3
+Limits
+Max machines
+−
+4
++
+Idle minutes
+−
+15
++
+Up to
+€0.044/h
+4 × €0.011/h
+4
+Takes
+any kind
+workflow
+chat
+Create it
+Today's form already asks for nothing until an account is named. These steps make that order visible: account, then machine, then limits, then what it takes. Size and image stay dropdowns, filled from the provider's catalogue with price and build in each option, as today. Picking a size fills memory and cores, which can still be edited under it. The limits step shows the ceiling as it changes, the same figure the list leads with. Before an account exists, steps 2–4 are locked with today's sentence.
+14d
+Credentials · yours, write-only
+Machines
+▾
+yours only · 1 credential
+Machines
+Templates
+Credentials
+Yours, and nobody else's. A machine made from a template is billed to the account behind the credential that template names.
+hz-main
+hetzner
+named by 3 templates · up to €0.162/h
+Remove
+Add a credential
+Provider
+hetzner
+Name
+hz-personal
+API token
+••••••••
+Never shown again, and never kept by this page.
+Add it
+Today's first section, as its own view. Each credential says how many templates name it and the ceiling it is liable for, so removing one has a visible cost. Remove keeps today's confirmation ("Templates that name it stop being able to create"). The secret fields come from the provider's driver, as today, and stay write-only.
+14e
+None yet · why nothing runs
+Machines
+▾
+no templates
+Machines
+Templates
+Credentials
+None yet, so nothing runs.
+A project makes machines from the templates assigned to it, and there is no fallback to the node's own settings.
+✓
+Add a credential
+hz-main · hetzner
+2
+Make a template
+What a machine is made from, and how many there may be.
+3
+Assign it to a project
+game and 3 others have nothing to run on.
+Make a template
+Today's empty sentence is the most important thing on the page, so it gets the screen. It lays out the three things that make a project able to run, with what is already done ticked. The dock offers the next step.
+12o
+Desktop, wide: machines as a table, templates and credentials beside
+forge
+0.31.0
+Queue
+4
+Projects
+Chats
+Machines
+5h 42% · week 18%
+you@example.com
+Machines
+3 busy
+1 idle · 4 of 6
+machine
+status
+doing
+template · projects
+build
+hz-fsn1-3
+▸ busy
+implementing #2 · game#41 · 4m
+hetzner-cx32 · game
+0.31.0
+›
+hz-fsn1-2
+▸ busy
+chat · Why is the build so slow on CI? · 3m
+hetzner-cx32 · game
+0.31.0
+›
+hz-fsn1-5
+idle
+destroyed in 12m unless work arrives
+hetzner-cx32 · forge
+0.30.2
+›
+mac-studio
+▸ busy
+merging · game#37 · 2m
+permanent · game, site
+0.31.0
+›
+hz-nbg1-1
+gone
+destroyed 2h ago · lost connection
+hetzner-cx22 · site
+0.31.0
+›
+Templates
++ New
+hetzner-cx32
+2 of 4
+cx32 · up to 4 · idle 15m
+hetzner-cx22
+2 of 2
+cx22 · up to 2 · idle 10m
+Credentials
++ Add
+hz-main
+hetzner · 2 templates
+The same three views, side by side: machines as the main table, with templates and credentials in the right column, where their forms open. A row opens the machine's log.
+14f
+Desktop, wide (1600 × 900): the table, and the template's form beside it
+forge
+0.31.0
+Queue
+4
+Projects
+Chats
+Machines
+5h 42% · week 18%
+you@example.com
+Machines
+Machines
+Templates
+Credentials
+yours only · up to €0.162/h across 3 templates
++ New template
+template
+makes · carries
+ceiling
+running
+projects
+hetzner-cx32
+hetzner · cx32 · latest · now snap-412
+build 0.31.0 · protocol 7
+up to €0.044/h
+4 × €0.011/h
+2 of 4
+game, forge
+›
+hetzner-cx22
+hetzner · cx22 · snap-398
+build 0.30.2 · one release behind
+up to €0.012/h
+2 × €0.006/h
+2 of 2
+site
+›
+gpu-bench
+disabled
+hetzner · ccx33 · snap-377
+build 0.29.0 · protocol 6
+up to €0.106/h
+1 × €0.106/h
+0 of 1
+never used
+›
+gpu-bench: 3 failed attempts — it is out of service until you enable it: worker refused at join, protocol 6.
+Enable
+hetzner-cx22
+Remove
+Up to
+€0.012/h
+2 of 2 · new work waits
+Name
+hetzner-cx22
+Provider · credential
+hetzner · hz-main
+Size
+cx22 — 4 GiB, 2 cores, €0.006/h
+▾
+Image
+snap-398 · build 0.30.2 one release behind
+▾
+Memory
+4GiB
+Cores
+2
+Max
+2
+Idle min
+10
+Takes
+any kind
+workflow
+chat
+Projects
+site
+×
++ Assign ▾
+Cancel
+Save it
+One row per template: what it makes and what its image carries, its ceiling in money beside the count that sets it, what runs now, and the projects that may use it. Selecting a row opens its form on the right, the pattern settings uses. Only one form is open at a time, as today, because both forms read one catalogue. A disabled template's failure sits under the table with Enable. The project chips replace today's inline select.
+Accounts and you
+12i
+Accounts · who may sign in
+Accounts
+▾
+2 waiting
+· 6 accounts
+Waiting
+sam@example.com
+github · 20m
+Approve
+Refuse
+Delete
+lee@contractor.dev
+google · 2d
+Approve
+Refuse
+Delete
+Accounts
+you@example.com
+admin · you
+ana@example.com
+github
+Suspend
+jo@example.com
+github
+Suspend
+old@example.com
+suspended 3w
+Reinstate
+Today's two lists. Waiting comes first, with today's three verbs: Approve as the primary, Refuse, and Delete, which frees the address and keeps its confirmation. Waiting accounts also count toward the queue badge, since an account waiting on an admin is a decision. Each row shows how the person signed in, because identity is the issuer and subject, never the address alone. Only an admin reaches this page, from the
+you
+menu.
+12j
+You · your account and this device
+You
+▾
+you@example.com · admin
+This browser
+Notify me of blocking questions
+Push notifications, this browser only
+Theme
+system
+dark
+light
+Account
+Signed in with
+github · manu
+API tokens
+2 live ›
+Accounts
+2 waiting ›
+Capacity
+5h 42% · week 18% ›
+Sign out
+The
+you
+slot opens this. It holds what is about this browser (notifications, today's bell on the queue, and the theme switch from the top bar), then what is about the account. Admin-only pages hang off it as rows. The capacity gauge that sits in today's top bar gets a row here on the phone, where the top bar has no room for it. Not read from
+user_live/settings.ex
+in detail, so check the account rows.
+Usage
+Two lines frame every top bar: 5h above, week below. Details live on their own page.
+23a
+Usage · its own top-level page (drawn tall)
+‹
+4
+Usage
+▾
+5-hour window
+91%
+↻ resets 14:00 · in 1h 12m
+full in ~25m at this rate
+09:00
+10:15
+11:30
+now
+14:00
+Week
+63%
+↻ resets Mon 09:00 · in 4d 18h
+on pace
+Mon
+Tue
+Wed
+Thu
+Fri
+Sat
+Sun
+What spent this 5h window
+By item
+By project
+By model
+▸ game#41 · implementing #2
+Persist the high score table
+22%
+▸ chat · game
+Why is the build so slow on CI?
+11%
+▸ forge#118 · review
+Retry backoff for the worker socket
+9%
+game#44 · implementing #1
+Replace the font atlas · did_not_converge
+19%
+game#42 · shaping
+Shape the leaderboard screen
+14%
+12 earlier jobs and chats
+16%
+share of the 5h window · ▸ running now
+When a window is spent
+New jobs and chat turns wait until it resets. Running jobs finish the turn they are on. Nothing is lost; the queue shows what is waiting.
+The detail behind the two lines. Each window gets a card: its percentage large, a bar, the reset time, and the pace. The 5-hour card shows spend in 15-minute steps up to now, and the hatched part is the time left before it resets. The week card shows spend per day. Below, a list says what spent the 5-hour window, with the running items marked and switches for By project and By model. It's reached from the title menu (a
+Usage
+row beside the account), from
+Details ›
+in the panel that opens from the lines (
+22e
+), and on desktop by clicking the digits beside the account. It's drawn 1180px tall to show the whole page.
+23b
+Usage, desktop wide (1600 × 900): both windows side by side, what spent it below
+forge
+0.31.0
+Usage
+▾
+Queue
+4
+91%
+5h ·
+63%
+wk
+you@example.com
+5-hour window
+91%
+↻ resets 14:00 · in 1h 12m
+full in ~25m at this rate
+09:00
+10:15
+11:30
+now
+14:00
+Week
+63%
+↻ resets Mon 09:00 · in 4d 18h
+on pace
+Mon
+Tue
+Wed
+Thu
+Fri
+Sat
+Sun
+What spent this 5h window
+By item
+By project
+By model
+▸ game#41 · implementing #2
+Persist the high score table
+22%
+▸ chat · game
+Why is the build so slow on CI?
+11%
+▸ forge#118 · review
+Retry backoff for the worker socket
+9%
+game#44 · implementing #1
+Replace the font atlas · did_not_converge
+19%
+game#42 · shaping
+Shape the leaderboard screen
+14%
+12 earlier jobs and chats
+16%
+share of the 5h window · ▸ running now
+When a window is spent
+New jobs and chat turns wait until it resets. Running jobs finish the turn they are on. Nothing is lost; the queue shows what is waiting.
+By project, this week
+game
+41%
+forge
+16%
+site
+6%
+The same page with width: the two window cards side by side, then what spent the 5-hour window, with the week's split by project beside it. The highlighted digits in the header are the way in from every page.
+Signing in
+With a provider configured: one button. Without: the other-ways screen.
+21o
+Sign in · provider configured: the provider, nothing else
+forge
+Sign in to answer what your agents are waiting on.
+ms
+Continue with manu.software
+auth.manu.software
+›
+Other ways to sign in ▾
+A new account waits for an administrator to approve it.
+By default the page has the logo and one button: the configured provider. The email link is not offered unless asked for.
+Other ways to sign in
+opens
+21p
+, for bootstrapping a node or a broken provider account. A node with no provider configured shows 21p as its sign-in page instead. The logo is the app's own favicon, drawn at 72px.
+21p
+Sign in · no provider configured, or “Other ways”
+‹ manu.software
+forge
+Password
+Email link
+Email
+sam@example.com
+Password
+••••••••
+Sign in
+A new account waits for an administrator to approve it.
+One screen for every way in that isn't the provider. Without a provider configured, this is the sign-in page itself, without the back link. With one, it's what
+Other ways to sign in
+in
+21o
+opens, as its own page with
+‹ manu.software
+to go back. Password and Email link are a switch, and Email link swaps the password field for
+Email me a link
+and then the “Check your inbox” screen (
+21g
+).
+21n
+Coming back · provider errors in plain words
+Signing you in with manu.software
+Back from auth.manu.software. Checking who you are…
+forge
+Sign in to answer what your agents are waiting on.
+manu.software didn't sign you in
+It said: access_denied. You cancelled, or your account there isn't allowed to use forge.
+ms
+Continue with manu.software
+manu.software · auth.manu.software
+›
+Other ways to sign in ▾
+The round trip gets two states. While the callback is checked there is a short holding screen that names where you came back from. If the provider refuses, the error sits above the button in the provider's own code with a plain reading, and the button is still there to try again. A new identity lands on the pending page (
+12k
+, right), keyed by issuer and subject.
+21g
+Link sent · and the link opened
+✓ sent
+Check sam@example.com.
+The link signs you in on the device you open it on, and works once.
+Use another address
+Welcome, sam@example.com
+Is this your own device?
+Yes, keep me signed in
+No, just this once
+If you prefer passwords, you can turn them on in your settings.
+Today's confirmation asks its question with two primary buttons labelled by mechanism ("Confirm and stay logged in"). Here it asks the question it means, whether this is your device, and makes only the common answer filled. The first sign-in confirms the address, and later ones only sign in. Both get the same two answers, as today. An expired link goes back to Sign in with a red line under the field.
+App-wide states
+Nothing transient takes a decision's place.
+20a
+Connection lost · the top bar changes, nothing moves
+‹
+4
+Not connected
+retrying in 4s
+· last heard 12s ago · #39
+game ›
+±
+changeset v1
++48
+−6
+✓ check 21s
+· review → merging
+◆ Approve
+Will commit
+Add a sound toggle to settings.
+Persists in the save file.
+lib/game/
+settings.ex
++21
+−3
+lib/game/
+audio.ex
++14
+−3
+test/game/
+settings_test.exs
++13
+−0
+Steps
+Changes
+3
+Docs
+2
+Activity
+31
+Losing the connection adds no row and no button. The top bar itself changes: a red hatched ground, a 2px red rule, and its first line becomes
+Not connected
+with a crossed-out signal. The second line counts down to the automatic retry and says when the page last heard anything, so there is nothing to press. The bar keeps its 52px, and everything that would send something greys out in place, keeping its size and position. When the connection returns, the bar goes back to the ticket's title and nothing has moved.
+20b
+A message after an action · a floating pill, no buttons
+‹
+4
+Sound toggle in settings
+#39 ·
+▸
+merging #1
+game ›
+merging #1 · now
+▸ git rebase main
+▸ mix check
+✓
+Approved changeset v1
+merging started
+Steps
+Changes
+3
+Docs
+2
+Activity
+31
+A confirmation looks nothing like a decision. It's a round, raised pill floating over the content above the bottom bar, with an icon and two lines. It has no button and doesn't take taps (they pass through to the page), so it can vanish under a finger without harm. It never pushes anything, and it goes after four seconds. The approval row it confirms has already gone, because the decision was made.
+20d
+An action that fails · the error stays where you acted
+‹
+4
+Sound toggle in settings
+#39 ·
+●
+review · waiting on you
+game ›
+±
+changeset v1
++48
+−6
+✓ check 21s
+· review → merging
+◆
+Approve ▴
+Approve changeset v1
+Moves #39 from review to merging.
+Not approved
+changeset v2 was pinned 10s ago. Read it, then approve that one.
+Close
+Show v2
+Will commit
+Add a sound toggle to settings.
+Persists in the save file.
+lib/game/
+settings.ex
++21
+−3
+lib/game/
+audio.ex
++14
+−3
+test/game/
+settings_test.exs
++13
+−0
+Steps
+Changes
+3
+Docs
+2
+Activity
+31
+A failure is never a toast, because it needs a response and a toast can't hold one safely. The error appears inside the dropdown you acted from, in red, in the server's words, with the next step as a button in that same panel. It stays until you close it. Errors with no panel (a failed send in a chat) show under the message they belong to.
+20c
+Not found · say what was asked for, and where to go
+‹
+4
+Not found
+game#99
+game ›
+404
+game has no ticket #99.
+It may have been declined before it was admitted, or the link is from another project. game's tickets run up to #45.
+Open game
+›
+Back to the queue
+›
+The frame stays, so the queue button still works. The message names what was asked for in the app's own terms, gives the likeliest reasons, and offers the two places worth going. Not allowed reads the same way ("You aren't in game"), and offers who to ask instead of Open game.
+Light theme
+Cool neutrals, accents retuned for a light ground.
+21i
+Light · the queue item
+Queue
+▾
+1 of 4
+All 4
+stuck
+waiting 25m
+Replace the font atlas is stuck: it ran out of turns.
+game#44
+Replace the font atlas
+triage
+shaping
+planning
+impl.
+review
+merging
+done
+2 attempts · 0.62 w of 1.0
+3 tests failing in shader_test.exs
+Retry implementing
+Move to shaping
+Later
+Retry implementing
+The light theme isn't the dark one inverted. Its neutrals are cool, a faint blue-grey around hue 250, so the warm accents stand apart from the page instead of muddying it. Every accent gets a light-specific value. The amber fill is brighter and yellower, so it reads as a highlight on white. As text it turns a deep orange, as in
+1 of 4
+and the current step. Red, green, blue and violet are deeper and more saturated, and the filled button is a blue-black ink.
+21j
+Light · the approval row, and a toast
+‹
+4
+Sound toggle in settings
+#39 ·
+●
+review · waiting on you
+game ›
+±
+changeset v1
++48
+−6
+✓ check 21s
+· review → merging
+◆
+Approve
+Will commit
+Add a sound toggle to settings.
+Persists in the save file.
+lib/game/
+settings.ex
++21
+−3
+lib/game/
+audio.ex
++14
+−3
+−
+music: true
++
+music: true,
++
+sound:
+true
+✓
+Approved changeset v1
+merging started
+Steps
+Changes
+3
+Docs
+2
+Activity
+31
+The approval row keeps its amber fill and edge, and its shadow softens. The toast stays dark on light, so it still reads as something floating and passing rather than part of the page. Syntax colours use the light set from
+10g
+, about 45% lightness at the same hues.

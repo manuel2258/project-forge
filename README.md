@@ -36,7 +36,7 @@ and root; `bin/measure selftest` exercises it without any of them.
 ## Driving a ticket
 
 Run the node with `mix phx.server`; it serves the pages at `http://localhost:4000` (queue at
-`/`, board at `/board`, tickets at `/tickets/<project>/<n>`, chats at `/chats`) and schedules
+`/`, projects at `/projects`, tickets at `/tickets/<project>/<n>`, chats at `/chats`) and schedules
 pending jobs. Log in with a user created from the command line; browser registration is off.
 
 **Nothing runs without a worker.** A job goes to a connected worker that can take it, or to a

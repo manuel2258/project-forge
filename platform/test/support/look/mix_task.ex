@@ -2,9 +2,10 @@ defmodule Mix.Tasks.Forge.Look do
   @shortdoc "Open the platform in headless Chromium and run steps (use bin/look)"
 
   @moduledoc """
-  `bin/look --setup NAME --as USER [--timeout S] < steps`: build the setup into a throwaway
+  `bin/look --setup NAME [--as USER] [--timeout S] < steps`: build the setup into a throwaway
   database, start the app on a port of its own, and run the steps from standard input in a
-  browser (`docs/design/look.md`). Use `bin/look`, which first puts the run in a network
+  browser (`docs/design/look.md`), logged in as `USER` or, without `--as`, logged out — the
+  sign-in screens. Use `bin/look`, which first puts the run in a network
   namespace and starts a postgres of its own; this task is the part inside.
 
   Exit 0 when every step passed, 1 when a step failed or the invocation was wrong, 2 when the
@@ -54,7 +55,10 @@ defmodule Mix.Tasks.Forge.Look do
   end
 
   defp run_as(steps, built, token, opts) do
-    case Map.fetch(built.users, opts[:as] || "") do
+    case opts[:as] && Map.fetch(built.users, opts[:as]) do
+      nil ->
+        drive(steps, built, nil, token, opts)
+
       {:ok, user} ->
         drive(steps, built, user, token, opts)
 
@@ -98,7 +102,7 @@ defmodule Mix.Tasks.Forge.Look do
   end
 
   defp drive(steps, built, user, token, opts) do
-    {login_token, _} = Forge.AccountsFixtures.generate_user_magic_link_token(user)
+    login_token = user && elem(Forge.AccountsFixtures.generate_user_magic_link_token(user), 0)
     {:ok, {_ip, port}} = ForgeWeb.Endpoint.server_info(:http)
 
     case Look.run(steps,

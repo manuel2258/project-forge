@@ -2,7 +2,7 @@ defmodule Forge.Look.Steps do
   @moduledoc """
   The step list `bin/look` reads: one step a line, `#` comments, quoted arguments.
 
-      width phone|desktop
+      width phone|portrait|wide|desktop
       visit /tickets/game/1            visit :ticket
       click "button.save"              click text "Save"
       fill "input[name=title]" "Hi"
@@ -16,25 +16,34 @@ defmodule Forge.Look.Steps do
   the origin check in `Forge.Look` are the others, since a page can navigate by itself.
   """
 
-  @phone {390, 844}
-  @desktop {1280, 800}
+  # The sizes the handoff drew each layout at (`docs/design/look.md` § The redesign's widths);
+  # `desktop` is the one `.forge/agents/implement.md` names.
+  @sizes %{
+    phone: {412, 915},
+    portrait: {1080, 1500},
+    wide: {1600, 1000},
+    desktop: {1280, 800}
+  }
+  @widths Map.keys(@sizes) |> Enum.map(&Atom.to_string/1)
 
+  @type width :: :phone | :portrait | :wide | :desktop
   @type target :: {:css, String.t()} | {:text, String.t()}
   @type op ::
-          {:width, :phone | :desktop}
+          {:width, width}
           | {:visit, {:path, String.t()} | {:named, String.t()}}
           | {:click, target}
           | {:fill, String.t(), String.t()}
           | {:wait, target}
           | {:text, String.t()}
           | {:shot, :page | {:css, String.t()}, String.t()}
+          # the gate's browser test only; never parsed
+          | {:call, (Wallaby.Session.t() -> term)}
   @type step :: %{n: pos_integer, text: String.t(), op: op}
   @type error :: %{n: pos_integer, text: String.t(), reason: String.t()}
 
   @doc "The viewport, width by height, a `width` step names."
-  @spec size(:phone | :desktop) :: {pos_integer, pos_integer}
-  def size(:phone), do: @phone
-  def size(:desktop), do: @desktop
+  @spec size(width) :: {pos_integer, pos_integer}
+  def size(width), do: Map.fetch!(@sizes, width)
 
   @doc "Parse a whole list; the first bad line is the error, with its number."
   @spec parse(String.t()) :: {:ok, [step]} | {:error, error}
@@ -72,9 +81,10 @@ defmodule Forge.Look.Steps do
       else: :error
   end
 
-  defp op(["width", "phone"]), do: {:ok, {:width, :phone}}
-  defp op(["width", "desktop"]), do: {:ok, {:width, :desktop}}
-  defp op(["width" | _]), do: {:error, "width is phone or desktop"}
+  defp op(["width", width]) when width in @widths,
+    do: {:ok, {:width, String.to_existing_atom(width)}}
+
+  defp op(["width" | _]), do: {:error, "width is phone, portrait, wide or desktop"}
   defp op(["visit", ":" <> name]) when name != "", do: {:ok, {:visit, {:named, name}}}
   defp op(["visit", path]), do: with(:ok <- check_path(path), do: {:ok, {:visit, {:path, path}}})
   defp op(["visit" | _]), do: {:error, "visit takes one path"}

@@ -61,6 +61,16 @@ defmodule ForgeWeb.SecretsSurfacesTest do
     %{project: project, secret: secret}
   end
 
+  defp text_of(html),
+    do: html |> Floki.parse_fragment!() |> Floki.text() |> String.replace(~r/\s+/, " ")
+
+  defp codes(html),
+    do:
+      html
+      |> Floki.parse_fragment!()
+      |> Floki.find("code.settings-code")
+      |> Enum.map(&Floki.text/1)
+
   describe "opening a conversation" do
     test "offers the project's secrets unticked, and holds the ones ticked", %{
       conn: conn,
@@ -71,7 +81,8 @@ defmodule ForgeWeb.SecretsSurfacesTest do
 
       assert has_element?(view, ~s(#chat-secrets input[value="STRIPE_TEST_KEY"]))
       assert has_element?(view, ~s(#chat-secrets input[value="UNNAMED_KEY"]))
-      refute html =~ ~s(checked)
+      # None picked: the secrets' boxes start unticked (the harness switch has its own pick).
+      refute html =~ ~r/name="chat\[secrets\]\[\]"[^>]*checked/
 
       view
       |> form("#chat-form", chat: %{text: "hi", secrets: ["STRIPE_TEST_KEY"]})
@@ -202,10 +213,13 @@ defmodule ForgeWeb.SecretsSurfacesTest do
         set: [status: :finished]
       )
 
-      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=secrets")
 
       row = view |> element("#secret-rows tr", "STRIPE_TEST_KEY") |> render()
-      assert row =~ "command `publish`, state `refining`"
+      # The names in mono, and no backtick drawn (`9e`).
+      assert text_of(row) =~ "command publish, state refining"
+      assert codes(row) == ["publish", "refining"]
+      refute row =~ "`"
       assert row =~ "held by 1 live conversation"
       refute row =~ "live conversations"
       assert row =~ "last held"
@@ -237,7 +251,7 @@ defmodule ForgeWeb.SecretsSurfacesTest do
           )
 
         {:ok, _} = Operator.set_secret(project, user, "STRIPE_TEST_KEY", @value)
-        {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+        {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=secrets")
 
         assert view |> element("#secret-rows tr", "STRIPE_TEST_KEY") |> render() =~ text
       end
@@ -266,11 +280,13 @@ defmodule ForgeWeb.SecretsSurfacesTest do
         )
 
       {:ok, _} = Operator.set_secret(project, user, "STRIPE_TEST_KEY", @value)
-      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=secrets")
 
       row = view |> element("#secret-rows tr", "STRIPE_TEST_KEY") |> render()
-      assert row =~ "command `publish` of `feature`, state `refining` of `feature`"
-      assert row =~ "not read: the workflow of `bug`, which is not valid"
+      assert text_of(row) =~ "command publish of feature, state refining of feature"
+      assert text_of(row) =~ "not read: the workflow of bug, which is not valid"
+      assert codes(row) == ["publish", "feature", "refining", "feature", "bug"]
+      refute row =~ "`"
     end
   end
 

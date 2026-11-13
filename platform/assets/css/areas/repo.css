@@ -1,0 +1,242 @@
+/* The repo area's styles (docs/design/ui.md). Edited only by the slice that builds that area. */
+
+/* A project's repository (docs/design/ui.md § The project's repository, `10a`–`10f`): the 56px
+   bar with the branch and the Commits · Files switch, the history with its fixed foot, the tree,
+   a file as its own screen, the branch sheet, and the commit page. Below 1440 the page shows one
+   of history, tree and file (`data-shown`); from 1440 all three sit side by side (`10f`). */
+@layer components {
+  .repo { display: flex; min-width: 0; flex-direction: column; gap: 12px; }
+
+  .repo-empty { color: var(--ink-2); font-size: 13.5px; line-height: 1.55; }
+  .repo-link {
+    display: inline-flex;
+    min-height: var(--target-min);
+    align-items: center;
+    color: var(--link);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    text-decoration: none;
+  }
+  .repo-link:hover { text-decoration: underline; }
+  .repo-copy {
+    display: inline-flex;
+    min-height: 34px;
+    flex-shrink: 0;
+    align-items: center;
+    padding: 0 10px;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--ink);
+    font-size: 12.5px;
+    cursor: pointer;
+  }
+  .repo-copy:hover { border-color: var(--border-strong); }
+
+  /* -- what the wide title row would carry: branches and the clone URL (`10f`) ----------- */
+
+  .repo-about { display: none; }
+
+  /* -- the bar: the branch and the switch, one 56px row ---------------------------------- */
+
+  .repo-bar { display: flex; min-height: 56px; align-items: center; gap: 10px; }
+  .repo-branch {
+    display: flex;
+    min-width: 0;
+    min-height: var(--target-min);
+    flex: 1 1 auto;
+    align-items: baseline;
+    gap: 8px;
+    padding: 0 10px;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    line-height: 44px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .repo-branch-label {
+    color: var(--ink-3);
+    font-size: 10.5px;
+    letter-spacing: var(--tracking-eyebrow);
+    text-transform: uppercase;
+  }
+  /* The name gives way last: on a phone the sha is cut before the branch is. */
+  .repo-branch-name { min-width: 4ch; overflow: hidden; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+  .repo-branch-sha { min-width: 0; flex-shrink: 100; overflow: hidden; color: var(--ink-3); white-space: nowrap; }
+  .repo-branch-caret { margin-left: auto; color: var(--ink-3); }
+
+  /* `segmented/1`'s look as links (components.css): a view is an address. */
+  .repo-switch { width: 150px; flex-shrink: 0; }
+
+  /* -- the history (`10a`): rows, and Newer · Older as a fixed foot ---------------------- */
+
+  .repo-commits { display: flex; min-width: 0; flex-direction: column; }
+  .repo-commits-head { display: flex; min-height: 32px; align-items: center; justify-content: space-between; gap: 10px; }
+  .repo-commits-list { display: flex; flex-direction: column; }
+  .repo-commit { border-bottom: 1px solid var(--border-soft); }
+  .repo-foot {
+    position: sticky;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 8px;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .repo-foot-off { display: inline-flex; min-height: var(--target-min); align-items: center; color: var(--ink-4); }
+  .repo-foot-at { color: var(--ink-3); }
+
+  /* -- the tree (`10c`): identifier text, ▸ and a trailing slash, 18px a level ----------- */
+
+  .repo-tree { display: flex; min-width: 0; flex-direction: column; gap: 6px; }
+  .repo-tree-list { display: flex; flex-direction: column; font-family: var(--font-mono); font-size: 12.5px; }
+  .repo-tree-nest { padding-left: 18px; }
+  .repo-tree-row {
+    display: flex;
+    min-height: 40px;
+    align-items: center;
+    gap: 8px;
+    color: var(--ink);
+    text-decoration: none;
+    cursor: pointer;
+    list-style: none;
+  }
+  .repo-tree-row::-webkit-details-marker { display: none; }
+  .repo-tree-row:hover .repo-tree-name { text-decoration: underline; }
+  .repo-tree-row[aria-current="true"] { margin: 0 -8px; padding: 0 8px; border-radius: var(--radius-sm); background: var(--surface-selected); }
+  .repo-tree-mark { width: 10px; flex-shrink: 0; color: var(--ink-3); transition: transform var(--dur-fast); }
+  .repo-tree-mark--file { visibility: hidden; }
+  details[open] > .repo-tree-row > .repo-tree-mark { transform: rotate(90deg); }
+  .repo-tree-name { min-width: 0; overflow-wrap: anywhere; }
+
+  /* -- a file (`10d`): its own screen, lines wrapping ------------------------------------ */
+
+  .repo-file { min-width: 0; }
+  .repo-file-body { display: flex; min-width: 0; flex-direction: column; gap: 10px; }
+  .repo-file-head { display: flex; flex-direction: column; gap: 2px; }
+  .repo-back {
+    display: inline-flex;
+    min-height: var(--target-min);
+    align-items: center;
+    color: var(--link);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    text-decoration: none;
+  }
+  .repo-file-title { display: flex; align-items: center; gap: 10px; }
+  .repo-file-path { min-width: 0; flex: 1; font-family: var(--font-mono); font-size: 14px; overflow-wrap: anywhere; }
+  .repo-file-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px 12px;
+    color: var(--ink-3);
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+  .repo-code { padding: 8px 0; border-top: 1px solid var(--border-soft); }
+
+  /* -- one of three below 1440 ----------------------------------------------------------- */
+
+  .repo[data-shown="commits"] :is(.repo-tree, .repo-file) { display: none; }
+  .repo[data-shown="tree"] :is(.repo-commits, .repo-file) { display: none; }
+  .repo[data-shown="file"] :is(.repo-commits, .repo-tree, .repo-bar) { display: none; }
+  .repo-file-none { display: none; }
+
+  /* -- the branch sheet (`10b`) ---------------------------------------------------------- */
+
+  .repo-search { padding: 4px 0 8px; }
+  .repo-search-input {
+    width: 100%;
+    min-height: var(--target-min);
+    box-sizing: border-box;
+    padding: 0 12px;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--ink);
+    font-size: 14px;
+  }
+  .repo-groups { display: flex; max-height: 60dvh; flex-direction: column; gap: 14px; overflow-y: auto; }
+  .repo-group { display: flex; flex-direction: column; }
+  .repo-branch-row {
+    display: flex;
+    min-height: var(--target-min);
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+    padding: 6px 10px;
+    border-radius: var(--radius-sm);
+    color: var(--ink);
+    text-decoration: none;
+  }
+  .repo-branch-row:hover { background: var(--surface-2); }
+  .repo-branch-row[aria-current="true"] { background: var(--surface-selected); }
+  .repo-branch-row-name { font-family: var(--font-mono); font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+  .repo-branch-row-meta { color: var(--ink-3); font-family: var(--font-mono); font-size: 11.5px; overflow-wrap: anywhere; }
+  .repo-branch-row-title { color: var(--ink-2); font-family: var(--font-sans); font-size: 12.5px; }
+
+  /* -- a commit (`10e`) ------------------------------------------------------------------ */
+
+  .repo-commit-page { display: flex; min-width: 0; flex-direction: column; gap: 16px; }
+  .repo-commit-head { display: flex; flex-direction: column; gap: 6px; }
+  .repo-commit-subject { font-size: 21px; font-weight: 600; letter-spacing: var(--tracking-title); line-height: var(--leading-title); }
+  .repo-commit-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0 12px;
+    color: var(--ink-3);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .repo-commit-sha { color: var(--ink-2); }
+  .repo-commit-size { display: flex; align-items: center; gap: 12px; color: var(--ink-3); font-family: var(--font-mono); font-size: 12.5px; }
+  .repo-commit-diff { display: flex; flex-direction: column; gap: 8px; }
+
+  /* -- wide (`10f`): tree · file · history ------------------------------------------------ */
+
+  @media (min-width: 1440px) {
+    .repo {
+      display: grid;
+      grid-template-columns: minmax(260px, 320px) minmax(0, 1fr) minmax(320px, 380px);
+      grid-template-areas:
+        "bar  about   about"
+        "tree file    commits";
+      gap: 16px 28px;
+      align-items: start;
+    }
+    .repo-about {
+      display: flex;
+      min-width: 0;
+      min-height: 56px;
+      grid-area: about;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 12px;
+      color: var(--ink-3);
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+    .repo-about-url { min-width: 0; color: var(--ink-2); overflow-wrap: anywhere; }
+    .repo-bar { grid-area: bar; }
+    .repo-switch { display: none; }
+    .repo-tree { grid-area: tree; }
+    .repo-file { grid-area: file; }
+    .repo-commits { grid-area: commits; }
+    .repo[data-shown] :is(.repo-tree, .repo-commits, .repo-bar) { display: flex; }
+    .repo[data-shown] .repo-file { display: block; }
+    .repo-file-none { display: block; }
+    .repo-file .repo-back { display: none; }
+    .repo-code { --code-gutter: 40px; }
+  }
+}

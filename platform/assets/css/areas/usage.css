@@ -1,0 +1,178 @@
+/* The usage area's styles (docs/design/ui.md). Edited only by the slice that builds that area:
+   the usage panel (22e) and /usage (23a, 23b). */
+
+@layer components {
+  /* -- Tones: a figure takes its line's colour, never the accent (capacity.md § Two objects) -- */
+  .usage-tone--quiet { color: color-mix(in oklch, var(--ink) 70%, transparent); }
+  .usage-tone--warning { color: var(--warning); }
+  .usage-tone--danger { color: var(--danger); }
+
+  /* -- The reset and the pace, one line --------------------------------------------------------- */
+  .usage-reset {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 2px 12px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+  }
+  .usage-reset-at { opacity: .65; }
+  .usage-pace { color: var(--ink-3); }
+  .usage-pace--full { color: var(--warning); }
+
+  /* -- A line of what spent a window: what, a bar against the largest, the share ----------------- */
+  .usage-line {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 60px 36px;
+    align-items: center;
+    gap: 4px 10px;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .usage-line-what { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+  .usage-line-ref {
+    overflow: hidden;
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    opacity: .75;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  a.usage-line-ref:hover { text-decoration: underline; }
+  .usage-line--running .usage-line-ref { color: var(--info); opacity: 1; }
+  .usage-line-sub {
+    overflow: hidden;
+    font-size: 13px;
+    opacity: .7;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .usage-line-bar { height: 5px; overflow: hidden; border-radius: 2px; background: var(--track); }
+  .usage-line-bar > span {
+    display: block;
+    height: 100%;
+    background: color-mix(in oklch, var(--ink) 45%, transparent);
+  }
+  .usage-line--running .usage-line-bar > span { background: var(--info); }
+  .usage-line-share { font-family: var(--font-mono); font-size: 12px; text-align: right; }
+
+  /* -- The panel (22e): below the windows, the credentials and what is spending now ------------- */
+  .frame-usage-figure.usage-tone--quiet { color: var(--ink); }
+  .usage-panel-section { display: flex; flex-direction: column; gap: 4px; }
+  .usage-panel-section > .ui-eyebrow { margin-bottom: 2px; }
+  .usage-cred {
+    display: flex;
+    min-height: 32px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border-bottom: 1px solid var(--border-soft);
+    font-size: 13.5px;
+  }
+  .usage-cred-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .usage-cred-figures { flex-shrink: 0; font-family: var(--font-mono); font-size: 12px; opacity: .7; }
+  .usage-panel-details {
+    display: flex;
+    min-height: 44px;
+    align-items: center;
+    justify-content: flex-end;
+    color: var(--link);
+    font-size: 14px;
+    font-weight: 500;
+  }
+
+  /* -- /usage (23a, 23b) ------------------------------------------------------------------------ */
+  .usage-page { display: flex; flex-direction: column; gap: 14px; }
+  .usage-cards { display: flex; flex-direction: column; gap: 14px; }
+  .usage-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 16px;
+    border-radius: var(--radius-card);
+    background: var(--surface-1);
+  }
+  .usage-card-head { display: flex; align-items: baseline; gap: 10px; }
+  .usage-card-label { flex: 1; font-size: 15px; font-weight: 600; }
+  .usage-card-figure { font-family: var(--font-mono); font-size: 26px; letter-spacing: -.02em; }
+  .usage-card-bar { height: 8px; overflow: hidden; border-radius: 3px; background: var(--track); }
+  .usage-card-bar > span { display: block; height: 100%; }
+  .usage-card-bar > .usage-tone--quiet { background: color-mix(in oklch, var(--ink) 70%, transparent); }
+  .usage-card-bar > .usage-tone--warning { background: var(--warning); }
+  .usage-card-bar > .usage-tone--danger { background: var(--danger); }
+
+  /* Spend over time: a bar per step, the step holding now in the window's colour, the time left
+     before the reset hatched. */
+  .usage-chart { display: flex; flex-direction: column; gap: 4px; }
+  .usage-bars { display: flex; height: 56px; align-items: flex-end; gap: 2px; }
+  .usage-card--seven_day .usage-bars { gap: 6px; }
+  .usage-bar { flex: 1; border-radius: 1px; background: color-mix(in oklch, var(--ink) 45%, transparent); }
+  .usage-card--seven_day .usage-bar { border-radius: 2px; background: color-mix(in oklch, var(--ink) 40%, transparent); }
+  .usage-bar--now.usage-tone--quiet,
+  .usage-card--seven_day .usage-bar--now { background: color-mix(in oklch, var(--ink) 70%, transparent); }
+  .usage-bar--now.usage-tone--warning { background: var(--warning); }
+  .usage-bar--now.usage-tone--danger { background: var(--danger); }
+  .usage-bar--future,
+  .usage-card--seven_day .usage-bar--future {
+    height: 100%;
+    background: repeating-linear-gradient(0deg, var(--track) 0 2px, transparent 2px 4px);
+  }
+
+  .usage-axis { position: relative; height: 14px; font-family: var(--font-mono); font-size: 10.5px; opacity: .5; }
+  .usage-axis > span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+  .usage-axis > .usage-axis--start { transform: none; }
+  .usage-axis > .usage-axis--end { transform: translateX(-100%); }
+  .usage-days { display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 10.5px; }
+  .usage-days > span { flex: 1; opacity: .5; text-align: center; }
+  .usage-days > .usage-day--now { font-weight: 600; opacity: 1; }
+
+  .usage-below { display: flex; flex-direction: column; gap: 14px; }
+  .usage-spent { display: flex; flex-direction: column; gap: 6px; }
+  .usage-spent-head { display: flex; flex-direction: column; gap: 8px; }
+  .usage-legend,
+  .usage-empty { font-family: var(--font-mono); font-size: 11px; opacity: .5; }
+
+  .usage-side { display: flex; flex-direction: column; gap: 14px; }
+  .usage-note {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 12px 14px;
+    border-radius: var(--radius-card);
+    background: var(--surface-1);
+  }
+  .usage-note > p { font-size: 13.5px; line-height: 1.55; opacity: .85; }
+
+  /* The week by project is the wide layout's (23b); narrower, By project above says it. */
+  .usage-week { display: none; flex-direction: column; gap: 6px; }
+  .usage-week-row {
+    display: grid;
+    grid-template-columns: 80px 1fr 96px;
+    align-items: center;
+    gap: 10px;
+    padding: 5px 0;
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+  .usage-week-row .usage-line-bar > span { background: color-mix(in oklch, var(--ink) 50%, transparent); }
+  .usage-week-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .usage-week-figure { text-align: right; white-space: nowrap; }
+
+  @media (min-width: 768px) {
+    /* As wide as the frame's measure, so the title row lines up with it (UX re-check #16). */
+    .usage-page { gap: 22px; }
+  }
+
+  @media (min-width: 1440px) {
+    .usage-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .usage-below {
+      display: grid;
+      grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+      align-items: start;
+      gap: 28px;
+    }
+    .usage-line { grid-template-columns: minmax(0, 1fr) 160px 44px; }
+    .usage-week { display: flex; }
+  }
+}

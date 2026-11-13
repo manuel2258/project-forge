@@ -234,6 +234,45 @@ defmodule Forge.Proposals do
     )
   end
 
+  @doc """
+  How many proposals each of `job_ids` wrote, decided or not: what a conversation's row counts
+  (`docs/design/ui.md` § Chats on the project page). One grouped query; a job that wrote none is
+  absent.
+  """
+  @spec counts_by_job([String.t()]) :: %{String.t() => pos_integer()}
+  def counts_by_job([]), do: %{}
+
+  def counts_by_job(job_ids) do
+    Repo.all(
+      from a in Artifact,
+        where: a.job_id in ^job_ids and like(a.name, ^(proposal_prefix() <> "%")),
+        group_by: a.job_id,
+        select: {a.job_id, count(a.id)}
+    )
+    |> Map.new()
+  end
+
+  @doc """
+  What each conversation among `job_ids` was opened with — its first message — for naming a
+  batch of proposals by the chat that wrote it (`docs/design/ui.md` § Proposals). One query,
+  Postgres's `DISTINCT ON`; a job with no message is absent.
+  """
+  @spec openings([String.t()]) :: %{String.t() => String.t()}
+  def openings([]), do: %{}
+
+  def openings(job_ids) do
+    Repo.all(
+      from e in Forge.Events.Event,
+        where: e.job_id in ^job_ids and e.type == "chat.message",
+        distinct: e.job_id,
+        order_by: [asc: e.job_id, asc: e.seq],
+        select: {e.job_id, fragment("? ->> 'text'", e.payload)}
+    )
+    |> Map.new(fn {id, text} ->
+      {id, text |> to_string() |> String.split("\n", trim: true) |> List.first("")}
+    end)
+  end
+
   @doc "Open proposals made by the jobs of one ticket, which is where its page shows them."
   @spec open_for_ticket(String.t()) :: [%{artifact: Artifact.t(), version: Version.t()}]
   def open_for_ticket(ticket_id) do
@@ -390,6 +429,156 @@ defmodule Forge.Proposals do
     end
   end
 
+  @doc """
+  Declines several proposals with one shared reason, **all or none** (`docs/design/ui.md`
+  § Proposals, `8c`): every decision and its event in one transaction, so one that someone has
+  decided meanwhile rolls back the rest — the unique index on `artifact_version_id` is the guard,
+  as it is for one. The caller has already checked who may (`Forge.Operator.decline_proposals/3`).
+  """
+  @spec decline_all([String.t()], String.t(), String.t() | nil) ::
+          {:ok, [Decision.t()]} | {:error, term()}
+  def decline_all(version_ids, user_id, comment \\ nil) do
+    with {:ok, found} <- fetch_all_open(version_ids) do
+      found
+      |> Enum.with_index()
+      |> Enum.reduce(Multi.new(), fn {one, i}, multi ->
+        Multi.append(multi, put_decision(Multi.new(), one, user_id, :declined, comment, i))
+      end)
+      |> Repo.transaction()
+      |> case do
+        {:ok, changes} ->
+          {:ok, for({{:decision, _i}, row} <- changes, do: row)}
+
+        {:error, {:decision, _i}, %Ecto.Changeset{errors: errors}, _changes} ->
+          decision_error(errors)
+
+        {:error, _step, reason, _changes} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp fetch_all_open(version_ids) do
+    Enum.reduce_while(version_ids, {:ok, []}, fn id, {:ok, acc} ->
+      case fetch_open(id) do
+        {:ok, found} -> {:cont, {:ok, [found | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, found} -> {:ok, Enum.reverse(found)}
+      error -> error
+    end
+  end
+
+  @doc """
+  Reopens a declined proposal (`docs/design/ticket-proposals.md` § Deciding): a new version with
+  the same text, authored by the person reopening it, and `proposal.reopened` naming the declined
+  version, in one transaction. The decline stays on the version it decided; the new version has
+  no decision, which is what open means.
+
+  **Only a declined one**, and only while the declined version is still the proposal's latest:
+  an accepted proposal became a ticket, an open one has nothing to reopen, and a declined version
+  something newer has followed — reopened already, or rewritten by its job — is not what the
+  proposal says now. Each answers `{:error, :not_declined}`. The caller has already checked who
+  may (`Forge.Operator.reopen_proposal/2`).
+  """
+  @spec reopen(String.t(), String.t()) :: {:ok, Version.t()} | {:error, term()}
+  def reopen(version_id, user_id) do
+    with {:ok, found} <- fetch_declined(version_id) do
+      actor = Forge.Actor.of(user_id)
+
+      Multi.new()
+      |> Artifacts.put_version(
+        :reopen,
+        {:job, found.job.id},
+        found.artifact.name,
+        :document,
+        actor,
+        %{content: found.version.content, parse: false}
+      )
+      |> Events.log(:event, "proposal.reopened", actor, fn changes ->
+        %{
+          ticket_id: found.job.ticket_id,
+          job_id: found.job.id,
+          payload: %{
+            "artifact" => found.artifact.name,
+            "declined_version_id" => version_id,
+            "version_id" => changes[{:reopen, :version}].id
+          }
+        }
+      end)
+      |> Repo.transaction()
+      |> case do
+        {:ok, changes} -> {:ok, changes[{:reopen, :version}]}
+        {:error, _step, reason, _changes} -> {:error, reason}
+      end
+    end
+  end
+
+  defp fetch_declined(version_id) do
+    case get(version_id) do
+      nil -> {:error, :not_found}
+      found -> if declined_latest?(found), do: {:ok, found}, else: {:error, :not_declined}
+    end
+  end
+
+  defp declined_latest?(found) do
+    match?(%Decision{decision: :declined}, decision(found.version.id)) and latest?(found.version)
+  end
+
+  defp latest?(%Version{artifact_id: artifact_id, version: version}) do
+    Repo.one(from v in Version, where: v.artifact_id == ^artifact_id, select: max(v.version)) ==
+      version
+  end
+
+  @typedoc "A decided proposal, as the project's History draws it."
+  @type decided :: %{
+          decision: Decision.t(),
+          version: Version.t(),
+          artifact: Artifact.t(),
+          job: Job.t(),
+          ticket: Forge.Tickets.Ticket.t() | nil,
+          latest: boolean()
+        }
+
+  @doc """
+  Every decision on a project's proposals, newest first: the decided version, the job that wrote
+  it, the ticket an acceptance made, and whether the decided version is still the proposal's
+  latest — a declined one that is not has been reopened or rewritten since.
+  """
+  @spec decided(String.t()) :: [decided()]
+  def decided(project_id) do
+    latest =
+      from v in Version,
+        group_by: v.artifact_id,
+        select: %{artifact_id: v.artifact_id, version: max(v.version)}
+
+    Repo.all(
+      from d in Decision,
+        join: v in Version,
+        on: v.id == d.artifact_version_id,
+        join: a in Artifact,
+        on: a.id == v.artifact_id,
+        join: j in Job,
+        on: j.id == a.job_id,
+        join: l in subquery(latest),
+        on: l.artifact_id == v.artifact_id,
+        left_join: t in Forge.Tickets.Ticket,
+        on: t.id == d.ticket_id,
+        where: j.project_id == ^project_id,
+        order_by: [desc: d.inserted_at, desc: d.id],
+        select: %{
+          decision: d,
+          version: v,
+          artifact: a,
+          job: j,
+          ticket: t,
+          latest: l.version == v.version
+        }
+    )
+  end
+
   defp fetch_open(version_id) do
     case get(version_id) do
       nil -> {:error, :not_found}
@@ -415,11 +604,14 @@ defmodule Forge.Proposals do
 
   # The decision and its event, as steps. `ticket` is read from the multi's own changes when
   # there is one, so an acceptance can name the ticket the same transaction is creating.
-  defp put_decision(multi, found, who, decision, comment) do
+  defp put_decision(multi, found, who, decision, comment, index \\ nil) do
     actor = Forge.Actor.of(who)
 
+    {decision_step, event_step} =
+      if index, do: {{:decision, index}, {:event, index}}, else: {:decision, :event}
+
     multi
-    |> Multi.insert(:decision, fn changes ->
+    |> Multi.insert(decision_step, fn changes ->
       ticket = changes[:ticket]
 
       Decision.changeset(
@@ -432,7 +624,7 @@ defmodule Forge.Proposals do
         })
       )
     end)
-    |> Events.log(:event, "proposal.#{decision}", actor, fn changes ->
+    |> Events.log(event_step, "proposal.#{decision}", actor, fn changes ->
       ticket = changes[:ticket]
 
       %{

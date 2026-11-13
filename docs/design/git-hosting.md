@@ -596,8 +596,8 @@ checked with the same `merge-tree` (`Forge.Merge.Watch`), each against the new h
 latest changeset now conflicts is checked once more against the head the merge was made on top
 of, its first parent: clean there, and the merge is what caused it; conflicting there too, and it
 conflicted already. `ticket.conflict_found` records the paths, the head, the commit checked and
-the merge that caused it, or none, and the ticket's page says so (`docs/design/ui.md` § Decide and
-Timeline). It is recorded once per commit, so a ticket that conflicts after every merge
+the merge that caused it, or none, and the ticket's page says so (`docs/design/ui.md` § The
+details). It is recorded once per commit, so a ticket that conflicts after every merge
 of a busy day is told once until it changes. Nothing is started: what to do about it is a person's
 call (`workflow-grammar-v1.md` § Merging). The checks run in a task of their own beside the request,
 under the platform's task supervisor, so a project with many open tickets does not make pressing
@@ -733,7 +733,7 @@ it, and one minted for it can, fast-forward only*. What keeps the change bounded
   token cannot rewrite history the merge could not.
 - **The same TTL and the same audit as every other token.** It expires, it is revocable from the
   page that minted it, and the row records what it could do and when it was last used.
-- **Minting it is a deliberate choice.** The settings page offers it as git access *admin*, in a dropdown that names the branch; the mix task's `--default` and `Forge.Release` still mint the older default-branch-only shape.
+- **Minting it is a deliberate choice.** The settings page offers it as git access *admin*, the last of five choice rows, named after the branch and carrying its warning when picked; the mix task's `--default` and `Forge.Release` still mint the older default-branch-only shape.
 
 What it does not defend against is an operator's own token, taken while live, fast-forwarding the
 default branch — which is the same authority the operator has by pressing merge, bounded by the

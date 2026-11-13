@@ -1,0 +1,296 @@
+/* The ticket area's styles (docs/design/ui.md). Edited only by the slice that builds that area. */
+
+/* The ticket (docs/design/ui.md § The ticket) and what a ticket, a conversation and a job share:
+   the Docs rows and the Activity stream (`ForgeWeb.WorkScreen`). */
+@layer components {
+  /* -- Steps (`5g`) ----------------------------------------------------------------------- */
+
+  .ticket-steps { display: flex; flex-direction: column; }
+  .ticket-step { position: relative; border-bottom: 1px solid var(--border-soft); }
+  .ticket-step > details > summary { list-style: none; cursor: pointer; }
+  .ticket-step > details > summary::-webkit-details-marker { display: none; }
+  .ticket-step-row {
+    display: flex;
+    min-height: 54px;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+  }
+  /* The line-and-dot: a quiet dot per step, the current one in what it is doing — amber only
+     while the ticket waits on a person (ui.md § Colour), info while something runs, muted once it
+     has ended, ink otherwise. */
+  .ticket-step-dot {
+    width: 9px;
+    height: 9px;
+    flex-shrink: 0;
+    border-radius: 999px;
+    background: var(--ink-4);
+  }
+  /* The line joining the dots, so the steps read as one path (UX pass, B8): from under a step's
+     dot to just above the next one's, through whatever the step holds open. */
+  .ticket-step:not(:last-child)::before {
+    position: absolute;
+    top: 35px;
+    bottom: -19px;
+    left: 4px;
+    width: 1px;
+    background: var(--border);
+    content: "";
+  }
+  .ticket-step-dot { position: relative; }
+  .ticket-step--current .ticket-step-dot { background: var(--ink); }
+  .ticket-step--waiting .ticket-step-dot { background: var(--accent); box-shadow: 0 0 0 4px var(--accent-wash); }
+  .ticket-step--running .ticket-step-dot { background: var(--info); }
+  .ticket-step--ended .ticket-step-dot { background: var(--ink-3); }
+  .ticket-step-detail {
+    min-width: 0;
+    margin-left: auto;
+    overflow: hidden;
+    color: var(--ink-3);
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ticket-step-row::after { content: "›"; color: var(--ink-3); }
+  .ticket-step > details[open] > .ticket-step-row::after { content: "⌄"; }
+  .ticket-step-body { display: flex; flex-direction: column; gap: 12px; padding: 0 0 16px 19px; }
+
+  .ticket-jobs { display: flex; flex-direction: column; }
+  .ticket-job {
+    display: flex;
+    min-height: 46px;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border-soft);
+    font-size: 12.5px;
+  }
+  .ticket-job:hover { background: var(--surface-1); }
+  /* A job's outcome and its ceiling as one unbroken phrase; the row wraps its figures under it
+     instead when the phrase and the figures do not fit beside each other. */
+  .ticket-job:has(> .ticket-job-main) { flex-wrap: wrap; }
+  .ticket-job-main { min-width: min-content; flex: 1 1 0%; }
+  .ticket-job-figures { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+  .ticket-job-outcome { white-space: nowrap; }
+  @media (width <= 420px) { .ticket-step-spent { display: none; } }
+  /* What a job spent, at the row's end on one line: `0.08 / windows` wrapped made the row 52px
+     (UX pass, B9). Nothing is drawn for a job that has spent nothing. */
+  .ticket-job-spent { flex-shrink: 0; color: var(--ink-2); font-family: var(--font-mono); text-align: right; white-space: nowrap; }
+  .ticket-job-harness { display: block; color: var(--ink-3); font-family: var(--font-mono); font-size: 11.5px; overflow-wrap: anywhere; }
+  .ticket-tail {
+    max-height: 18rem;
+    overflow: auto;
+    padding: 8px 12px;
+    border-left: 2px solid var(--danger-line);
+    background: var(--surface-1);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .ticket-chip {
+    display: inline-flex;
+    min-height: 46px;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    border: 1px solid var(--border-control);
+    border-radius: 6px;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .ticket-chip--dashed { border-style: dashed; }
+
+  /* What waits on the step the ticket is in. */
+  .ticket-current { display: flex; flex-direction: column; gap: 16px; padding-top: 4px; }
+
+  .ticket-section { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border-soft); }
+  /* The last step's own rule already closes the steps: a second, 28px under it, read as a gap in
+     the page (UX pass, B28). */
+  .ticket-steps + .ticket-section { padding-top: 0; border-top: 0; }
+
+  /* The way forward's button, under the choices it commits from 768; the dock's on a phone. */
+  .ticket-forward-inline { display: none; }
+  @media (min-width: 768px) {
+    .ticket-forward-inline { display: flex; }
+    .ticket-dock.ticket-dock--forward { display: none; }
+  }
+
+  /* -- the release (`21e`) ----------------------------------------------------------------- */
+
+  .ticket-release {
+    display: flex;
+    min-height: 44px;
+    align-items: center;
+    gap: 10px;
+    padding: 0 var(--gutter-phone);
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-1);
+    font-size: 13.5px;
+  }
+  .ticket-release-file { color: var(--ink-3); font-family: var(--font-mono); font-size: 12px; }
+  /* On the title row's edge, not the phone's (UX pass, B28). */
+  @media (min-width: 768px) {
+    .ticket-release { padding: 0 var(--gutter-desk); }
+  }
+  .ticket-since-row {
+    display: flex;
+    min-height: 44px;
+    align-items: center;
+    gap: 10px;
+    border-bottom: 1px solid var(--border-soft);
+    font-size: 14px;
+  }
+
+  /* -- the dock: questions, the way forward, the job's chip -------------------------------- */
+
+  /* Bounded, so the view above keeps most of the screen; it scrolls inside itself. */
+  .ticket-questions {
+    max-height: 48dvh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 12px 0;
+    border-top: 1px solid var(--border);
+  }
+  .ticket-dock { display: flex; padding: 10px 0; }
+  .ticket-dock--chip { justify-content: flex-end; padding: 6px 0; }
+  .ticket-job-chip {
+    display: inline-flex;
+    min-height: 40px;
+    align-items: center;
+    padding: 0 12px;
+    border: 1px solid var(--border-control);
+    border-radius: 8px;
+    color: var(--info);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+
+  /* -- the details (`6d`) ------------------------------------------------------------------ */
+
+  .ticket-details { display: flex; flex-direction: column; gap: 18px; }
+  .ticket-details-title { font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
+  .ticket-details-sub { margin-top: 4px; color: var(--ink-2); font-family: var(--font-mono); font-size: 12px; }
+  .ticket-usage-track { display: block; height: 4px; margin-top: 8px; background: var(--track); }
+  .ticket-notice { font-size: 12.5px; }
+
+  /* -- the approval's panel: what the merge is built from (UX pass, B12) ------------------- */
+
+  /* The label on one line and the versions under each other, each a link, never cut short. */
+  #decision-built-from .ui-fact { align-items: flex-start; padding: 4px 0; }
+  #decision-built-from .ui-fact-key { flex-shrink: 0; min-width: 6rem; padding-top: 6px; white-space: nowrap; }
+  #decision-built-from .ui-fact-value { overflow: visible; white-space: normal; }
+  /* A plain value (answered, spent) on its key's line: the key is padded down to a 32px link's
+     text, and a value with no link sat 6px above it (UX re-check #19). */
+  #decision-built-from .ui-fact-value:not(:has(.decision-built-from-doc)) { padding-top: 6px; }
+  .decision-built-from-doc { display: flex; min-height: 32px; align-items: center; justify-content: flex-end; color: var(--link); overflow-wrap: anywhere; }
+
+  /* -- the wide screen's document (`16i`) -------------------------------------------------- */
+
+  .ticket-aside-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+    color: var(--ink-3);
+    font-size: 12px;
+  }
+  /* Beside the view only where there is room for it: below 1440 the document is a tap away. */
+  @media (max-width: 1439.98px) {
+    .frame-aside:has(> .ticket-aside) { display: none; }
+  }
+
+  /* -- Docs (`6a`), shared with a conversation --------------------------------------------- */
+
+  .work-docs + .work-docs { margin-top: 20px; }
+  .work-docs-head { padding: 4px 0 8px; }
+  .work-doc { position: relative; min-width: 0; border-bottom: 1px solid var(--border-soft); }
+  .work-doc > details > summary { list-style: none; cursor: pointer; }
+  .work-doc > details > summary::-webkit-details-marker { display: none; }
+  .work-doc-row { display: flex; min-height: 58px; align-items: center; gap: 12px; padding: 8px 64px 8px 0; }
+  a.work-doc-row { padding-right: 0; }
+  .work-doc-text { display: flex; min-width: 0; flex: 1 1 0%; flex-direction: column; gap: 2px; }
+  .work-doc-name { display: flex; flex-wrap: wrap; gap: 8px; font-family: var(--font-mono); font-size: 14px; }
+  .work-doc-meta { color: var(--ink-2); font-size: 12.5px; }
+  .work-doc-mark { flex-shrink: 0; font-family: var(--font-mono); font-size: 12px; }
+  .work-doc-version,
+  .work-doc-version-inline {
+    display: flex;
+    min-height: 46px;
+    align-items: center;
+    gap: 6px;
+    color: var(--ink-3);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .work-doc-version { position: absolute; top: 6px; right: 0; padding-left: 12px; }
+  .work-doc-version:hover { color: var(--ink); }
+  .work-doc-body { margin-bottom: 12px; padding: 12px 16px; border-radius: 10px; background: var(--surface-1); }
+  .work-doc-earlier {
+    display: flex;
+    min-height: 44px;
+    align-items: center;
+    justify-content: space-between;
+    padding-left: 38px;
+    border-top: 1px solid var(--border-soft);
+    color: var(--ink-3);
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+  .work-doc-earlier:hover { color: var(--ink); }
+  .work-doc-earlier-count {
+    display: flex;
+    min-height: 44px;
+    align-items: center;
+    padding-left: 38px;
+    color: var(--ink-3);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    cursor: pointer;
+    list-style: none;
+  }
+  .work-doc-earlier-count::-webkit-details-marker { display: none; }
+  .work-doc-earlier-count::before { content: "▸"; margin-right: 6px; }
+  .work-doc-earlier-fold[open] > .work-doc-earlier-count::before { content: "▾"; }
+
+  /* -- Activity (`5d`), shared with a conversation and a job ------------------------------ */
+
+  .work-act-head { padding-bottom: 6px; }
+  .work-acts { display: flex; flex-direction: column; }
+  .work-act {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border-soft);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .work-act--new { box-shadow: inset 2px 0 0 var(--link); padding-left: 8px; }
+  .work-act-main { display: flex; min-width: 0; flex: 1 1 0%; flex-direction: column; gap: 2px; }
+  .work-act-type { color: var(--ink-2); }
+  .work-act-detail { min-width: 0; overflow-wrap: anywhere; color: var(--ink-2); }
+  .work-act-time { flex-shrink: 0; padding-top: 2px; color: var(--ink-3); font-size: 11px; }
+  /* A row said in words (UX pass, B10): who or what, then the words, on one line as far as they
+     fit — `you: Yes, try it.`, `wrote commit-message v1 ›`. */
+  .work-act-said { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+  .work-act-who { color: var(--ink-3); }
+  .work-act-words { min-width: 0; color: var(--ink); font-family: var(--font-sans); font-size: 13.5px; overflow-wrap: anywhere; }
+  .work-act-version { color: var(--ink-2); }
+  a.work-act-version { display: inline-flex; min-height: 32px; align-items: center; color: var(--link); }
+  /* A turn's end: a thin divider between exchanges, not a row of its own. */
+  .work-act--turn { justify-content: center; padding: 6px 0; border-bottom: 0; }
+  .work-act-turn {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: 10px;
+    color: var(--ink-3);
+    font-size: 11px;
+  }
+  .work-act-turn::before,
+  .work-act-turn::after { height: 1px; flex: 1 1 0%; background: var(--border-soft); content: ""; }
+}

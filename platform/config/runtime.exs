@@ -154,6 +154,11 @@ if config_env() != :test do
   config :forge, Forge.Storage,
     dir: System.get_env("FORGE_STORE_DIR") || Path.join(data_dir, "store")
 
+  # Where Lumis keeps the parsers it has compiled from WebAssembly (`ForgeWeb.Highlight`). Its
+  # default is its own `priv`, which in a release is the Nix store and read-only: it would skip
+  # the cache and compile each parser again on its first use after every boot.
+  config :lumis, data_dir: Path.join(data_dir, "lumis")
+
   # Where machines come from, and what shape they are. The image and the UEFI firmware are
   # paths on this host — `nix build .#worker-image` makes the first, and the devshell exports
   # the other two — so nothing here can guess them.

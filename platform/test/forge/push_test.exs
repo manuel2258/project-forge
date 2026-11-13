@@ -150,11 +150,10 @@ defmodule Forge.PushTest do
       %{ticket: ticket_fixture() |> join_ticket!(user)}
     end
 
-    # Every kind the queue says is waiting pushes, and each links to the work screen on the tab
-    # that holds it: Decide for a ticket.
-    test "pushes every waiting kind, linked to Decide", %{ticket: ticket} do
-      decide = "?tab=decide"
-
+    # Every kind the queue says is waiting pushes, and each links to the ticket itself, which
+    # opens on the view holding what waits (`docs/design/ui.md` § The ticket): a link naming a
+    # view would hold it there after what waits had moved.
+    test "pushes every waiting kind, linked to the ticket", %{ticket: ticket} do
       # Each tagged per thing waiting, so a later push about the same thing replaces this one
       # on the phone and one about another thing does not.
       for {item, title, body, tag} <- [
@@ -175,7 +174,7 @@ defmodule Forge.PushTest do
         assert payload["title"] =~ title
         assert payload["body"] == body
         assert payload["tag"] == tag
-        assert payload["url"] == "/tickets/#{item.project.name}/#{ticket.number}" <> decide
+        assert payload["url"] == "/tickets/#{item.project.name}/#{ticket.number}"
       end
     end
 

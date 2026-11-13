@@ -1,0 +1,174 @@
+/* The chat area's styles (docs/design/ui.md). Edited only by the slice that builds that area. */
+
+/* A chat (docs/design/ui.md § A chat, § Talk; 15a–15f): the transcript's bubbles, the dock under
+   it — plan band, now line, composer, or the reopen sentence — the details, Changes' two ways
+   out of a conflict, and the wide screen's right column. Then the list (12c) and a new chat (12d). */
+@layer components {
+  /* -- the transcript ------------------------------------------------------------------------ */
+  .chat-messages { display: flex; flex-direction: column; gap: 16px; }
+  .chat-messages--stopped { opacity: .72; }
+  .chat-messages [data-said] { max-width: 760px; padding: 12px 16px; border-radius: 10px; }
+  .chat-messages [data-said="you"] { border: 0; background: var(--surface-2); }
+  /* Both sides are full width; on a phone the person's is set in from the left as well as told
+     apart by its ground, so a glance down the column says who spoke (UX pass, B6). */
+  @media (max-width: 767.98px) {
+    .chat-messages [data-said="you"] { margin-left: 24px; }
+  }
+  /* The agent's words are read, not tapped: no border (ui.md § The affordance rule). */
+  .chat-messages [data-said="agent"] { border: 0; background: var(--surface-1); }
+
+  /* -- the dock ------------------------------------------------------------------------------ */
+  .chat-dock { display: flex; flex-flow: row wrap; align-items: center; column-gap: 14px; }
+  .chat-dock > * { flex: 1 1 100%; }
+  .chat-dock > * + * { border-top: 1px solid var(--border); }
+  /* The plan and the now line are one row at every width (UX pass, B16): `3/5 ▾ · running mix
+     assets.build [Stop]`. The band opens to the checklist in place, and the now line goes under
+     it while it is open. Below a wide screen the band gives its current item's words to the now
+     line, which says what is running. */
+  .chat-dock > .chat-plan { max-width: 50%; flex: 0 1 auto; }
+  .chat-dock > .chat-plan[open] { max-width: none; flex-basis: 100%; }
+  .chat-dock > .chat-plan + .chat-now { min-width: 0; flex: 1 1 0%; }
+  .chat-dock > .chat-plan:not([open]) + .chat-now { border-top: 0; }
+  @media (max-width: 1439.98px) {
+    .chat-dock > .chat-plan:not([open]):has(+ .chat-now) .chat-plan-now { display: none; }
+  }
+  .chat-dock .ui-composer { padding-right: 0; padding-left: 0; border-top: 0; }
+
+  .chat-plan { padding: 8px 0 6px; }
+  .chat-plan-summary { display: flex; min-height: 32px; align-items: center; gap: 10px; cursor: pointer; list-style: none; }
+  .chat-plan-summary::-webkit-details-marker { display: none; }
+  .chat-plan-count { flex-shrink: 0; color: var(--ink-2); font-family: var(--font-mono); font-size: 12.5px; }
+  .chat-plan-now { overflow: hidden; min-width: 0; flex: 1 1 0%; color: var(--info); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+  .chat-plan-fold { flex-shrink: 0; color: var(--ink-3); font-size: 11px; }
+  .chat-plan[open] .chat-plan-fold { transform: rotate(180deg); }
+  .chat-plan-track { display: flex; gap: 4px; margin-top: 6px; }
+  .chat-plan-track > span { height: 3px; flex: 1 1 0%; border-radius: 2px; background: var(--track); }
+  .chat-plan-track > span[data-status="completed"] { background: var(--info); }
+  .chat-plan-track > span[data-status="in_progress"] { background: color-mix(in srgb, var(--info) 55%, transparent); }
+  .chat-plan-list { padding-top: 8px; font-family: var(--font-mono); font-size: 12.5px; }
+
+  .chat-now { display: flex; min-height: 52px; align-items: center; gap: 12px; padding: 6px 0; }
+  .chat-now-words { overflow: hidden; min-width: 0; flex: 1 1 0%; color: var(--info); font-family: var(--font-mono); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
+
+  .chat-say { margin: 0; }
+  .chat-hint { margin: -4px 0 6px; color: var(--ink-4); font-family: var(--font-mono); font-size: 11px; }
+  .chat-dock #step-status { padding: 10px 0; }
+  .chat-reopen { display: flex; flex-direction: column; gap: 12px; padding: 12px 0; }
+
+  /* -- the details --------------------------------------------------------------------------- */
+  .chat-details { display: flex; flex-direction: column; gap: 16px; }
+  .chat-details-title { font-size: 17px; font-weight: 600; letter-spacing: -.01em; line-height: 1.3; }
+  .chat-details-sub { margin-top: 4px; color: var(--ink-2); font-size: 13.5px; line-height: 1.5; }
+
+  /* -- Changes: the two ways out (15c) ------------------------------------------------------- */
+  .chat-conflict { display: flex; flex-direction: column; gap: 10px; }
+  .chat-way {
+    display: flex;
+    width: 100%;
+    min-height: 56px;
+    box-sizing: border-box;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius-card);
+    background: none;
+    color: var(--ink);
+    cursor: pointer;
+    text-align: left;
+  }
+  .chat-way:hover { border-color: var(--border-strong); }
+  .chat-way--static { border-color: transparent; background: var(--surface-1); cursor: default; }
+  .chat-way-text { display: flex; min-width: 0; flex: 1 1 0%; flex-direction: column; gap: 4px; }
+  .chat-way-title { font-size: 14px; font-weight: 500; }
+  .chat-way-detail { color: var(--ink-2); font-size: 12.5px; }
+  .chat-way > [aria-hidden] { color: var(--ink-3); }
+
+  /* -- the wide screen's right column (15f, 16i) --------------------------------------------- */
+  .chat-aside { display: flex; flex-direction: column; gap: 20px; }
+
+  /* -- the list (12c) ------------------------------------------------------------------------ */
+  .chat-rows { display: flex; flex-direction: column; margin-top: 12px; }
+  .chat-row {
+    display: grid;
+    align-items: start;
+    gap: 8px 10px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .chat-row-link { grid-column: 1; grid-row: 1; }
+  .chat-row-link { display: flex; min-width: 0; flex-direction: column; gap: 6px; }
+  .chat-row-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .chat-row-title { overflow: hidden; min-width: 0; font-size: 15px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+  .chat-row-at { flex-shrink: 0; color: var(--ink-3); font-family: var(--font-mono); font-size: 12px; }
+  .chat-row-at--live { color: var(--info); }
+  .chat-row-where { display: flex; flex-wrap: wrap; gap: 6px; color: var(--ink-3); font-family: var(--font-mono); font-size: 11.5px; }
+  .chat-row-said { display: -webkit-box; overflow: hidden; color: var(--ink-2); font-size: 13.5px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+  .chat-row-figures { color: var(--ink-4); font-family: var(--font-mono); font-size: 11px; }
+  /* End: a quiet word in danger ink at the row's top right (UX pass, B17). Asked, its sentence
+     and its two buttons take the row's whole width under it. */
+  .chat-row-end { grid-column: 2; grid-row: 1; margin-top: -10px; }
+  .chat-row-end .ui-confirm-quiet { min-height: 36px; padding: 0 4px; color: var(--danger); font-size: 13px; }
+  .chat-row-end:has(> .ui-confirm-panel:not([style*="none"])) { grid-column: 1 / -1; grid-row: 2; margin-top: 0; }
+
+  .chat-start { margin: 0; }
+  .chat-start-row { display: flex; align-items: center; gap: 8px; }
+  .chat-start-row .ui-composer { min-width: 0; flex: 1 1 0%; padding-right: 0; padding-left: 0; border-top: 0; }
+  .chat-start-project select {
+    height: 48px;
+    max-width: 9rem;
+    padding: 0 10px;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius-md);
+    background: var(--surface-1);
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .chat-start-error { padding-top: 8px; }
+  .frame-composer:has(.chat-start) { border-top: 1px solid var(--border); }
+
+  /* -- a new chat (12d) ---------------------------------------------------------------------- */
+  .chat-new { display: flex; flex-direction: column; gap: 18px; margin-top: 20px; }
+  .chat-new-secrets { display: flex; flex-direction: column; }
+  .chat-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .chat-chip {
+    position: relative;
+    display: inline-flex;
+    min-height: var(--target-min);
+    box-sizing: border-box;
+    align-items: center;
+    gap: 6px;
+    padding: 0 12px;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius-pill);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+  .chat-chip input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  .chat-chip-tick { display: none; }
+  .chat-chip:has(input:checked) { border-color: var(--link); background: color-mix(in srgb, var(--link) 12%, transparent); }
+  .chat-chip:has(input:checked) .chat-chip-tick { display: inline; }
+  .chat-chip:has(input:focus-visible) { outline: 2px solid var(--link); outline-offset: 2px; }
+  .chat-new-harness { display: flex; flex-direction: column; gap: 8px; }
+  .chat-new-machine { padding-top: 12px; border-top: 1px solid var(--border-soft); }
+  .chat-new-machine > summary { display: flex; min-height: var(--target-min); align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; font-size: 14px; list-style: none; }
+  .chat-new-machine > summary::-webkit-details-marker { display: none; }
+  .chat-new-machine-fields { display: flex; flex-direction: column; gap: 14px; padding-top: 10px; }
+  .chat-new-dock { padding: 8px 0; }
+
+  /* Below a wide screen there is no right column: Changes is a view there, and the step's
+     document is on Docs. */
+  @media (max-width: 1439.98px) {
+    .frame-aside:has(> .chat-aside) { display: none; }
+  }
+
+  /* From 1440 the branch and its merge are the right column (15f): Changes stops being a view,
+     and the merge row's place is that column. */
+  @media (min-width: 1440px) {
+    .frame:has(#chat-aside-branch) .ui-tabs a[href$="?tab=changes"] { display: none; }
+    .frame:has(#chat-aside-branch) .frame-decision { display: none; }
+  }
+}

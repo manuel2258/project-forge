@@ -1,7 +1,7 @@
 defmodule ForgeWeb.Layouts do
   @moduledoc """
-  This module holds layouts and related functionality
-  used by your application.
+  The frame every signed-in page is drawn in (`app/1`), the sign-in screens' own (`sign_in/1`),
+  and the root template (`docs/design/ui.md` § The frame).
   """
   use ForgeWeb, :html
 
@@ -11,96 +11,265 @@ defmodule ForgeWeb.Layouts do
   # and other static content.
   embed_templates "layouts/*"
 
-  @doc """
-  The operator shell: a hairline-ruled top row on a laptop, a fixed bottom bar on a phone.
+  alias ForgeWeb.{Capacity, TitleMenu, UsagePanel}
 
-  There is no global page padding and no global measure — each route sets its own `measure`,
-  because the queue deliberately does not widen and the board deliberately does not cap.
+  @doc """
+  The frame every signed-in page is drawn in (`docs/design/ui.md` § The frame): the usage lines,
+  the top bar on a phone and the header and title row on a desktop, the object's decision row,
+  the content — the page's only scroller — the composer, and the strip of the object's views.
+  `ForgeWeb.Frame` reads what it draws; a page passes `frame={@frame}` and `capacity={@capacity}`
+  and says what it is.
+
+  **One frame, two arrangements, one order.** Below 768px the top bar and the strip; from 768 the
+  56px header and the title row, whose tabs are the same `views` the strip draws. Wide screens add
+  the `list` and `aside` columns either side of the content and never move a block above another.
+
+  **The title is a control.** On a top-level page (`top_level`) it is the switch that drops the
+  title menu; on a page with `details` it drops those; elsewhere it is plain text. Each drop
+  panel is the frame's: open state is `@frame.open`, and `frame:*` events change it.
+
+  `fill` is for a page whose content holds a scroller of its own — a conversation's transcript,
+  a ticket's tab body — which then gets the content's whole height rather than its own.
 
   ## Examples
 
-      <Layouts.app flash={@flash} active={:queue} measure="34rem">
-        <h1>Content</h1>
+      <Layouts.app flash={@flash} current_scope={@current_scope} frame={@frame}
+        capacity={@capacity} title="Projects" top_level={:projects}
+        context={{"+ New", ~p"/projects/new"}}>
+        …
       </Layouts.app>
-
   """
   attr :flash, :map, required: true, doc: "the map of flash messages"
+  attr :current_scope, :map, required: true
+  attr :frame, :map, required: true, doc: "`ForgeWeb.Frame`'s assign"
+  attr :capacity, :map, default: %{}, doc: "`ForgeWeb.Capacity`'s assign: the usage lines"
 
-  attr :current_scope, :map,
+  attr :title, :string, required: true
+
+  attr :subline, :string,
     default: nil,
-    doc: "the current [scope](https://phoenix.hexdocs.pm/scopes.html)"
+    doc: "mono, under the title: the object's number and state"
+
+  attr :context, :any,
+    default: nil,
+    doc: """
+    `{label, path}`: the parent object, the right end of the top bar — or `{label, %JS{}}`, an
+    action there that opens in place (the queue's *All N*), drawn on the phone only
+    """
+
+  attr :back, :any,
+    default: nil,
+    doc: "`{label, path}`: the title row's back link on a desktop; the context's when not given"
+
+  attr :section, :string,
+    default: nil,
+    doc: """
+    the place the page belongs to, the desktop switch's label: a chat is under Chats, a machine
+    under Machines; a top-level page's own title, and Projects, when not given
+    """
+
+  attr :top_level, :atom,
+    default: nil,
+    values: [nil, :queue, :projects, :chats, :machines, :usage],
+    doc: "which top-level page this is: its title is then the switch that drops the title menu"
+
+  attr :views, :list,
+    default: [],
+    doc: "the object's views, `%{key, label, count, patch | navigate}`: the strip and the tabs"
+
+  attr :view, :string, default: nil, doc: "the key of the view on screen"
 
   attr :measure, :any,
     default: "34rem",
-    doc: "max width of the content column, or nil for the full viewport. See docs/design/ui.md."
+    doc: "max width of the content column, or nil for all of it. See docs/design/ui.md."
 
-  attr :active, :atom, default: nil, doc: "which nav item is the current page"
+  attr :fill, :boolean,
+    default: false,
+    doc: "the content is one scroller of the page's own, given the whole height"
 
-  attr :nav, :boolean,
-    default: true,
-    doc: "false for a page a pending account may see, whose nav leads nowhere it may go"
-
-  attr :queue_count, :integer, default: nil, doc: "decisions waiting, shown as the queue badge"
-
-  attr :capacity, :map,
-    default: nil,
-    doc: "the top bar's window gauge, from `ForgeWeb.Capacity`; nil on a page that has none"
-
-  attr :frame, :atom,
-    default: :page,
-    values: [:page, :work],
-    doc: """
-    `:work` for a work screen (`docs/design/ui.md` § The work screen): the viewport exactly, the
-    body its only scroller, and no bottom bar on a phone — its back affordance and its composer
-    take the bar's place.
-    """
-
+  slot :details, doc: "the object's details, dropped from its title"
+  slot :decision, doc: "the decision row, pinned under the top bar"
+  slot :composer, doc: "what sits under the content: a conversation's composer"
+  slot :list, doc: "the list column, on the left on a wide screen"
+  slot :aside, doc: "the context column, on the right on a wide screen"
   slot :inner_block, required: true
 
   def app(assigns) do
+    assigns =
+      assign(assigns,
+        back: assigns.back || (assigns.top_level == nil && assigns.context),
+        open: assigns.frame.open,
+        on_title: title_event(assigns.top_level, assigns.details)
+      )
+
     ~H"""
-    <.top_bar
-      :if={@frame == :page}
-      nav={@nav}
-      active={@active}
-      queue_count={@queue_count}
-      capacity={@capacity}
-      current_scope={@current_scope}
-    />
+    <div id="frame" phx-hook=".ViewportFrame" class={["frame", @fill && "frame--fill"]}>
+      <%!-- The connection's state is drawn on the bars themselves (`docs/design/ui.md`
+            § Connection state): LiveView runs these bindings after its own half-second grace,
+            and the `Connection` hook (`assets/js/connection.js`) does the rest. --%>
+      <div
+        id="frame-top"
+        class="frame-top"
+        phx-hook="Connection"
+        phx-disconnected={JS.dispatch("forge:connection-lost")}
+        phx-connected={JS.dispatch("forge:connection-back")}
+      >
+        <.usage_line
+          id="usage-5h"
+          window="5h"
+          percent={Capacity.percent(@capacity["five_hour"])}
+          on_click="frame:usage"
+        />
+        <.top_bar
+          id="top-bar"
+          framed
+          title={@title}
+          queue={@top_level != :queue}
+          queue_count={@frame.count}
+          context={@context && elem(@context, 0)}
+          context_path={@context && is_binary(elem(@context, 1)) && elem(@context, 1)}
+          context_click={@context && match?(%JS{}, elem(@context, 1)) && elem(@context, 1)}
+          menu={@on_title != nil}
+          menu_open={@open in [:menu, :details]}
+          on_title={@on_title}
+        >
+          <:subline :if={@subline}>{@subline}</:subline>
+        </.top_bar>
+        <.desktop_header
+          frame={@frame}
+          capacity={@capacity}
+          switch={@section || if(@top_level, do: @title, else: "Projects")}
+          user={@current_scope.user}
+        />
+        <.usage_line
+          id="usage-week"
+          window="week"
+          percent={Capacity.percent(@capacity["seven_day"])}
+          on_click="frame:usage"
+        />
+        <%!-- With no column either side, the title starts where the content does: the row is
+              capped and centred by the same measure as the body (UX re-check #16). --%>
+        <div
+          id="title-row"
+          class={["frame-title-row", (@list == [] and @aside == []) && "frame-title-row--measured"]}
+          style={(@list == [] and @aside == [] and @measure) && "--frame-measure: #{@measure}"}
+        >
+          <div class="frame-heading">
+            <.link :if={@back} navigate={elem(@back, 1)} class="frame-back">
+              ‹ {elem(@back, 0)}
+            </.link>
+            <div class="frame-heading-line">
+              <h1 class="frame-h1">
+                <button :if={@details != []} type="button" phx-click="frame:details">
+                  {@title}<span class="frame-h1-menu" aria-hidden="true">{if @open == :details,
+                    do: "▴",
+                    else: "▾"}</span>
+                </button>
+                <span :if={@details == []}>{@title}</span>
+              </h1>
+              <span :if={@subline} class="frame-subline">{@subline}</span>
+            </div>
+          </div>
+          <%!-- A top-level page's context is an action, `+ New`, and has no back link to be: on
+                a desktop it is the title row's, on the right. --%>
+          <.link
+            :if={@top_level && @context && is_binary(elem(@context, 1))}
+            navigate={elem(@context, 1)}
+            class="frame-context"
+          >
+            {elem(@context, 0)}
+          </.link>
+          <.view_tabs :if={@views != []} active={active_label(@views, @view)} aria-label="Views">
+            <:tab
+              :for={view <- @views}
+              label={view.label}
+              count={view[:count]}
+              patch={view[:patch]}
+              navigate={view[:navigate]}
+            />
+          </.view_tabs>
+        </div>
 
-    <main
-      :if={@frame == :page}
-      class={[
-        "px-5 sm:px-6 lg:px-[30px] pt-6 sm:pt-8",
-        "pb-[calc(4rem+56px+env(safe-area-inset-bottom))] sm:pb-16"
-      ]}
-    >
-      <div class={@measure && "mx-auto"} style={@measure && "max-width: #{@measure}"}>
-        {render_slot(@inner_block)}
+        <div
+          :if={@open == :menu}
+          class="frame-drop frame-drop--menu"
+          phx-window-keydown="frame:close"
+          phx-key="Escape"
+        >
+          <.drop_panel id="title-menu" on_close="frame:close">
+            <TitleMenu.menu
+              menu={@frame.menu}
+              count={@frame.count}
+              capacity={@capacity}
+              current={@top_level}
+              user={@current_scope.user}
+            />
+            <.handle />
+          </.drop_panel>
+        </div>
+
+        <%!-- Drawn whether open or not, hidden while folded: the details are part of the page,
+              and a form in them keeps what was typed when it folds. --%>
+        <div
+          :if={@details != []}
+          class="frame-drop frame-drop--details"
+          hidden={@open != :details}
+          phx-window-keydown={@open == :details && "frame:close"}
+          phx-key="Escape"
+        >
+          <.drop_panel id="frame-details" on_close="frame:close">
+            {render_slot(@details)}
+            <.handle />
+          </.drop_panel>
+        </div>
+
+        <div
+          :if={@open == :usage}
+          class="frame-drop frame-drop--usage"
+          phx-window-keydown="frame:close"
+          phx-key="Escape"
+        >
+          <.drop_panel on_close="frame:close">
+            <UsagePanel.panel capacity={@capacity} viewer={@current_scope.user} />
+            <.handle />
+          </.drop_panel>
+        </div>
       </div>
-    </main>
 
-    <div
-      :if={@frame == :work}
-      id="work-frame"
-      phx-hook=".ViewportFrame"
-      class="fixed inset-x-0 top-0 flex h-dvh flex-col"
-    >
-      <.top_bar
-        nav={@nav}
-        active={@active}
-        queue_count={@queue_count}
-        capacity={@capacity}
-        current_scope={@current_scope}
-      />
-      <main class="flex min-h-0 flex-1 flex-col px-5 pt-3 pb-[env(safe-area-inset-bottom)] sm:px-6 sm:pt-5 lg:px-[30px]">
-        <div class="mx-auto flex min-h-0 w-full flex-1 flex-col" style={"max-width: #{@measure}"}>
-          {render_slot(@inner_block)}
+      <div :if={@decision != []} class="frame-decision">{render_slot(@decision)}</div>
+
+      <main id="frame-content" class="frame-content" data-scroller>
+        <div class="frame-columns">
+          <aside :if={@list != []} class="frame-list">{render_slot(@list)}</aside>
+          <%!-- The content and what sits under it share one column: from 768px the composer,
+                the question card and a dock are as wide as the content and centred with it,
+                and on a wide screen they stop where the columns either side begin
+                (`docs/design/ui.md` § Three layouts). --%>
+          <div class="frame-main" style={@measure && "--frame-measure: #{@measure}"}>
+            <div class="frame-body">
+              {render_slot(@inner_block)}
+            </div>
+            <div :if={@composer != []} class="frame-composer">{render_slot(@composer)}</div>
+          </div>
+          <aside :if={@aside != []} class="frame-aside">{render_slot(@aside)}</aside>
         </div>
       </main>
+
+      <div :if={@views != []} class="frame-strip">
+        <.bottom_strip active={active_label(@views, @view)} aria-label="Views">
+          <:tab
+            :for={view <- @views}
+            id={"tab-#{view.key}"}
+            label={view.label}
+            count={view[:count]}
+            patch={view[:patch]}
+            navigate={view[:navigate]}
+          />
+        </.bottom_strip>
+      </div>
     </div>
 
-    <%!-- The viewport a work screen fills. Where the browser honours the viewport's
+    <%!-- The viewport the frame fills. Where the browser honours the viewport's
           `interactive-widget=resizes-content`, the layout viewport shrinks with the on-screen
           keyboard and `100dvh` is already right. Where it does not — Safari — the keyboard
           covers the bottom of a layout viewport that stays the same height, and what is left
@@ -131,152 +300,106 @@ defmodule ForgeWeb.Layouts do
       }
     </script>
 
-    <%!-- The phone's shell: the three places that matter most one tap away, and More for the
-          rest of what a laptop reaches from its top row (docs/design/ui.md § The phone). --%>
-    <nav
-      :if={@nav and @frame == :page}
-      class={[
-        "sm:hidden fixed inset-x-0 bottom-0 z-20 grid auto-cols-fr grid-flow-col",
-        "border-t border-base-300 bg-base-100 pb-[env(safe-area-inset-bottom)]"
-      ]}
-    >
-      <.bar_link navigate={~p"/"} active={@active == :queue} count={@queue_count}>Queue</.bar_link>
-      <.bar_link navigate={~p"/board"} active={@active == :board}>Board</.bar_link>
-      <.bar_link navigate={~p"/chats"} active={@active == :chats}>Chats</.bar_link>
-      <button
-        :if={@current_scope}
-        type="button"
-        id="more-button"
-        phx-click={ForgeWeb.Sheet.open("more")}
-        class="flex h-14 items-center justify-center gap-2 text-sm opacity-60"
-      >
-        More
-      </button>
-    </nav>
-
-    <ForgeWeb.Sheet.sheet :if={@nav and @frame == :page and @current_scope} id="more" label="More">
-      <.more capacity={@capacity} current_scope={@current_scope} />
-    </ForgeWeb.Sheet.sheet>
-
-    <.flash_group flash={@flash} />
+    <.toasts flash={@flash} />
     """
   end
 
-  attr :nav, :boolean, required: true
-  attr :active, :atom, required: true
-  attr :queue_count, :integer, required: true
-  attr :capacity, :map, required: true
-  attr :current_scope, :map, required: true
+  defp title_event(top_level, _details) when top_level != nil, do: "frame:menu"
+  defp title_event(nil, []), do: nil
+  defp title_event(nil, _details), do: "frame:details"
 
-  # The laptop's top row. Hidden below `sm`, where the bottom bar is the shell.
-  defp top_bar(assigns) do
+  defp active_label(views, key) do
+    Enum.find_value(views, fn view -> view.key == key && view.label end)
+  end
+
+  # The handle at a drop panel's foot: one of the three ways to fold it.
+  defp handle(assigns) do
     ~H"""
-    <header class="hidden sm:flex shrink-0 items-center gap-6 border-b border-base-300 px-6 lg:px-[30px] h-14">
-      <div class="flex items-baseline gap-2">
-        <.link navigate={~p"/"} class="font-semibold -tracking-[.02em]">forge</.link>
-        <%!-- The release this node runs, to report and to see a deploy took (docs/design/ui.md
-              § Navigation). Read, never clicked, so it is outside the wordmark's link; and only
-              for an account, so the log-in page tells nobody which release is running. --%>
-        <span :if={@current_scope} id="forge-version" class="font-mono text-[12.5px] opacity-60">
-          {version()}
-        </span>
+    <button type="button" class="frame-handle" phx-click="frame:close" aria-label="Fold">
+      <span aria-hidden="true" />
+    </button>
+    """
+  end
+
+  attr :frame, :map, required: true
+  attr :capacity, :map, required: true
+  attr :switch, :string, required: true
+  attr :user, :map, required: true
+
+  # The desktop header, 56px: the wordmark and the release, the title menu's switch, the queue
+  # with its count, the usage digits and the account. Hidden below 768px, where the top bar is.
+  defp desktop_header(assigns) do
+    ~H"""
+    <header id="desktop-header" class="frame-header">
+      <div class="frame-brand">
+        <.link navigate={~p"/"} class="frame-wordmark">forge</.link>
+        <%!-- The release this node runs, to report and to see a deploy took. Read, never
+              clicked, so it is outside the wordmark's link. --%>
+        <span id="forge-version" class="frame-version">{version()}</span>
       </div>
-      <nav :if={@nav} class="flex items-center gap-5 text-sm">
-        <.nav_link navigate={~p"/"} active={@active == :queue} count={@queue_count}>Queue</.nav_link>
-        <.nav_link navigate={~p"/board"} active={@active == :board}>Board</.nav_link>
-        <.nav_link navigate={~p"/projects"} active={@active == :projects}>Projects</.nav_link>
-        <%!-- Nothing on it waits on a human, which is why nothing on it is accent. On a phone it
-              is a row in the More sheet: a phone reaches everything a laptop does
-              (docs/design/ui.md § The phone). --%>
-        <.nav_link navigate={~p"/workers"} active={@active == :workers}>Workers</.nav_link>
-        <%!-- A destination on both: a conversation that needs you is already in the queue, and
-              this is for finding one again — on a phone, how you get back to the work you were
-              doing. --%>
-        <.nav_link navigate={~p"/chats"} active={@active == :chats}>Chats</.nav_link>
-      </nav>
-      <div class="ml-auto flex items-center gap-4">
-        <%!-- Nothing reported anywhere in the set draws nothing, not an empty gauge. --%>
-        <.capacity_gauge :if={@capacity not in [nil, %{}]} capacity={@capacity} />
-        <%!-- An action, not a destination, so it sits beside the theme toggle rather than among
-              the nav items. A project is made rarely and from nowhere in particular; a ticket is
-              always made for a project and lives on that project's page. See docs/design/ui.md
-              § Creating things. --%>
-        <.link
-          :if={@current_scope && @nav}
-          navigate={~p"/projects/new"}
-          class="flex min-h-[46px] items-center rounded-field border border-base-300 px-3 text-sm hover:border-base-content/30"
-        >
-          New project
-        </.link>
-        <.theme_toggle />
-        <%!-- Account governance, and the only thing `node_admin` unlocks. Beside the address
-              rather than in the nav: it is not a place work happens, and most accounts never
-              see it at all. Without it the perimeter's only surface is a URL you have to know,
-              and nobody can discover that someone is waiting. --%>
-        <.link
-          :if={@current_scope && @current_scope.user.node_admin}
-          navigate={~p"/accounts"}
-          class="link link-hover text-sm opacity-70"
-        >
-          Accounts
-        </.link>
-        <div :if={@current_scope} class="flex items-center gap-3 text-sm">
-          <.link navigate={~p"/users/settings"} class="link link-hover opacity-70">
-            {@current_scope.user.email}
-          </.link>
-          <.link href={~p"/users/log-out"} method="delete" class="link link-hover opacity-70">
-            Log out
-          </.link>
-        </div>
-        <.link :if={!@current_scope} navigate={~p"/users/log-in"} class="link link-hover text-sm">
-          Log in
-        </.link>
-      </div>
+      <%!-- Shown only while the connection is lost, in the header's own height. --%>
+      <span class="frame-offline" role="status">
+        <.offline_mark /> <span class="frame-offline-title">Not connected</span>
+        <span class="frame-offline-line" data-connection-line></span>
+      </span>
+      <button
+        type="button"
+        class="frame-switch"
+        phx-click="frame:menu"
+        aria-expanded={to_string(@frame.open == :menu)}
+      >
+        {@switch}<span aria-hidden="true">{if @frame.open == :menu, do: "▴", else: "▾"}</span>
+      </button>
+      <.link navigate={~p"/"} class="frame-queue">
+        Queue
+        <.count_bubble value={@frame.count} tone={if @frame.count > 0, do: "accent", else: "neutral"} />
+      </.link>
+      <span class="frame-header-gap" />
+      <.link
+        :if={@capacity["five_hour"] || @capacity["seven_day"]}
+        id="usage-digits"
+        navigate={~p"/usage"}
+        class="frame-digits"
+      >
+        <.digit window={@capacity["five_hour"]} /> 5h · <.digit window={@capacity["seven_day"]} /> wk
+      </.link>
+      <%!-- The address's local part: the whole of it in mono was the widest thing in the header.
+            The full address is its title. --%>
+      <.link navigate={~p"/users/settings"} class="frame-account" title={@user.email}>
+        {@user.email |> String.split("@") |> hd()}
+      </.link>
     </header>
     """
   end
 
-  attr :capacity, :map, required: true
-  attr :current_scope, :map, required: true
+  attr :window, :map, default: nil
 
-  # What the More sheet holds, in the order `docs/design/ui.md` § The phone gives: the gauge with
-  # its detail written out, the places, then the account. Every row a 46px target.
-  defp more(assigns) do
+  # A digit takes its line's colour: quiet, then warning from 80, danger from 95.
+  defp digit(assigns) do
+    assigns = assign(assigns, :percent, Capacity.percent(assigns.window))
+
     ~H"""
-    <.capacity_written
-      :if={@capacity not in [nil, %{}]}
-      capacity={@capacity}
-      prefix="more-capacity"
-      class="border-b border-base-300 pb-3"
-    />
+    <span class={@percent && "frame-digit--#{usage_tone(@percent)}"}>{Capacity.shown(@window)}</span>
+    """
+  end
 
-    <nav class="flex flex-col" aria-label="More">
-      <.more_row navigate={~p"/projects"}>Projects</.more_row>
-      <.more_row navigate={~p"/workers"}>Workers</.more_row>
-      <.more_row navigate={~p"/templates"}>Templates</.more_row>
-      <.more_row navigate={~p"/projects/new"}>New project</.more_row>
-      <.more_row :if={@current_scope.user.node_admin} navigate={~p"/accounts"}>Accounts</.more_row>
-    </nav>
+  @doc """
+  The frame of the sign-in screens — logging in, a link opened, an account waiting for approval
+  (`docs/design/ui.md` § Signing in): the wordmark and the page, and no usage lines, no queue and
+  no version, because nobody signed in yet is told anything about the node.
+  """
+  attr :flash, :map, required: true, doc: "the map of flash messages"
+  slot :inner_block, required: true
 
-    <div class="mt-2 flex flex-col border-t border-base-300 pt-2">
-      <.more_row navigate={~p"/users/settings"}>
-        <span class="font-mono text-[12.5px]">{@current_scope.user.email}</span>
-      </.more_row>
-      <div class="flex min-h-[46px] items-center justify-between gap-3">
-        <span class="text-sm opacity-70">Theme</span>
-        <.theme_toggle />
+  def sign_in(assigns) do
+    ~H"""
+    <main id="sign-in" class="sign-in">
+      <div class="sign-in-body">
+        <p class="sign-in-wordmark">forge</p>
+        {render_slot(@inner_block)}
       </div>
-      <.link
-        href={~p"/users/log-out"}
-        method="delete"
-        class="flex min-h-[46px] items-center text-sm opacity-70"
-      >
-        Log out
-      </.link>
-      <p id="more-version" class="flex min-h-[46px] items-center font-mono text-[12.5px] opacity-60">
-        forge {version()}
-      </p>
-    </div>
+    </main>
+    <.toasts flash={@flash} />
     """
   end
 
@@ -284,248 +407,66 @@ defmodule ForgeWeb.Layouts do
   @spec version() :: String.t()
   def version, do: Forge.Changelog.running()
 
-  attr :capacity, :map, required: true
-  attr :prefix, :string, required: true
-  attr :class, :any, default: nil
-
   @doc """
-  The gauge with its title written out as a line under each window: a phone has no hover, and what
-  a tooltip alone carries is carried nowhere there (`docs/design/ui.md` § The capacity gauge in the
-  top bar). The More sheet draws it, and so does a work screen's details sheet, whose strip
-  carries the gauge in its compact form.
+  The toast (`docs/design/ui.md` § Toasts): the `:info` flash, drawn as one `feedback/Toast`
+  above the strip, title and detail split on the first newline (`ForgeWeb.Toast`). **One at a
+  time**: there is one `:info` flash, so the newest replaces the last.
 
-  The sentence states the percentage, so the gauge above it is drawn without its own number:
-  `figure={false}`. The same digits twice, two lines apart, is what writing the title out is for.
-  """
-  def capacity_written(assigns) do
-    ~H"""
-    <div id={@prefix} class={@class}>
-      <.capacity_gauge capacity={@capacity} prefix={@prefix} figure={false} />
-      <p
-        :for={{type, label} <- windows()}
-        :if={@capacity[type]}
-        class="mt-1 text-[12.5px]/[1.5] opacity-70"
-      >
-        {gauge_title(label, @capacity[type])}
-      </p>
-    </div>
-    """
-  end
-
-  # The two windows a gauge draws, five-hour then weekly, and what each is called on it.
-  defp windows, do: [{"five_hour", "5h"}, {"seven_day", "week"}]
-
-  attr :navigate, :string, required: true
-  slot :inner_block, required: true
-
-  defp more_row(assigns) do
-    ~H"""
-    <.link
-      navigate={@navigate}
-      class="flex min-h-[46px] items-center justify-between gap-3 border-b border-base-300/60 text-sm"
-    >
-      {render_slot(@inner_block)}
-      <span aria-hidden="true" class="opacity-40">›</span>
-    </.link>
-    """
-  end
-
-  attr :capacity, :map, required: true
-  attr :prefix, :string, default: "capacity", doc: "the ids' prefix: one gauge per prefix"
-
-  attr :figure, :boolean,
-    default: true,
-    doc: "draw the percentage as a number; false where a sentence beneath says it in words"
-
-  @doc """
-  Per window, five-hour then weekly: the mean utilization as a percentage and as ten ticks when
-  any credential reported one, and a countdown to the soonest reset whenever a window is known.
-  Neutral, never accent — time resolves it, not a person (`docs/design/capacity.md` § Two
-  objects). What it averages over is in the title, because a mean over the credentials that
-  happened to report is a different claim from one over all of them.
-
-  The number, the ticks' `aria-label` and the title's figure are one `percent/1` call, so no two
-  of them can disagree. A screen reader does hear the percentage twice — once as the number's
-  text, once as that label — which is the same figure said twice rather than a contradiction.
-
-  The top bar draws it, and so does a work screen's context strip, in the same compact form.
-  Where the title is written out beneath it instead, `figure={false}` drops the number, because
-  the sentence is about to give it (`capacity_written/1`).
-  """
-  def capacity_gauge(assigns) do
-    ~H"""
-    <div id={"#{@prefix}-gauge"} class="flex items-center gap-4 font-mono text-[11.5px] opacity-70">
-      <span
-        :for={{type, label} <- windows()}
-        :if={@capacity[type]}
-        id={"#{@prefix}-#{type}"}
-        title={gauge_title(label, @capacity[type])}
-        class="flex items-center gap-1.5"
-      >
-        <span>{label}</span>
-        <%!-- The figure as a number, beside the ticks and not nested in them: the ticks span is
-        addressed as the gauge's one `[aria-label]`, and a child of it would read as an
-        eleventh tick. --%>
-        <span :if={@figure && @capacity[type].mean}>{percent(@capacity[type])}</span>
-        <span
-          :if={@capacity[type].mean}
-          class="flex gap-px"
-          aria-label={percent(@capacity[type])}
-        >
-          <span
-            :for={tick <- 1..10}
-            class={[
-              "h-2.5 w-[3px] rounded-[1px]",
-              if(tick <= round(@capacity[type].mean * 10),
-                do: "bg-base-content",
-                else: "bg-base-content/20"
-              )
-            ]}
-          />
-        </span>
-        <span>{ForgeWeb.Format.until(@capacity[type].soonest)}</span>
-      </span>
-    </div>
-    """
-  end
-
-  # The mean as the one percentage every surface reads: the visible number, the ticks'
-  # `aria-label` and this sentence are all this call, so criterion 2's "the two can never
-  # disagree" is structural rather than a habit. The ticks' own fill is `mean * 10` and stays its
-  # own expression — it is a count of tenths, not a percentage.
-  defp percent(%{mean: mean}), do: "#{round(mean * 100)}%"
-
-  defp gauge_title(label, window) do
-    figure = if window.mean, do: "#{percent(window)} used on average, ", else: ""
-
-    "#{label} window: #{figure}#{window.reporting} of #{window.known} credentials reporting, " <>
-      "soonest reset #{Calendar.strftime(window.soonest, "%a %H:%M")} UTC"
-  end
-
-  attr :navigate, :string, required: true
-  attr :active, :boolean, default: false
-  attr :count, :integer, default: nil
-  slot :inner_block, required: true
-
-  defp nav_link(assigns) do
-    ~H"""
-    <.link
-      navigate={@navigate}
-      class={["flex items-center gap-2", @active || "opacity-60 hover:opacity-100"]}
-      aria-current={@active && "page"}
-    >
-      {render_slot(@inner_block)}
-      <span :if={@count && @count > 0} class="badge badge-accent badge-sm font-mono">{@count}</span>
-    </.link>
-    """
-  end
-
-  # 56px plus the safe-area inset, each item a full-height tap target: answering is a thumb action.
-  attr :navigate, :string, required: true
-  attr :active, :boolean, default: false
-  attr :count, :integer, default: nil
-  slot :inner_block, required: true
-
-  defp bar_link(assigns) do
-    ~H"""
-    <.link
-      navigate={@navigate}
-      class={[
-        "flex h-14 items-center justify-center gap-2 text-sm",
-        @active || "opacity-60"
-      ]}
-      aria-current={@active && "page"}
-    >
-      {render_slot(@inner_block)}
-      <span :if={@count && @count > 0} class="badge badge-accent badge-sm font-mono">{@count}</span>
-    </.link>
-    """
-  end
-
-  @doc """
-  Shows the flash group with standard titles and content.
-
-  ## Examples
-
-      <.flash_group flash={@flash} />
+  It clears itself after `--toast-life`: the `.Toast` hook fades it and pushes
+  `lv:clear-flash`, so the flash goes on the server too and a reconnect does not draw it again.
+  No failure is ever drawn here, nor anywhere in the frame: each is drawn where it was made
+  (§ Errors stay where you acted).
   """
   attr :flash, :map, required: true, doc: "the map of flash messages"
-  attr :id, :string, default: "flash-group", doc: "the optional id of flash container"
 
-  def flash_group(assigns) do
+  def toasts(assigns) do
+    message = Phoenix.Flash.get(assigns.flash, :info)
+    {title, detail} = if message, do: ForgeWeb.Toast.split(message), else: {nil, nil}
+    assigns = assign(assigns, message: message, title: title, detail: detail)
+
     ~H"""
-    <div id={@id} aria-live="polite">
-      <.flash kind={:info} flash={@flash} />
-      <.flash kind={:error} flash={@flash} />
-
-      <.flash
-        id="client-error"
-        kind={:error}
-        title={gettext("We can't find the internet")}
-        phx-disconnected={
-          show(".phx-client-error #client-error")
-          |> JS.remove_attribute("hidden", to: ".phx-client-error #client-error")
-        }
-        phx-connected={hide("#client-error") |> JS.set_attribute({"hidden", ""})}
-        hidden
-      >
-        {gettext("Attempting to reconnect")}
-        <.icon name="hero-arrow-path" class="ml-1 size-3 motion-safe:animate-spin" />
-      </.flash>
-
-      <.flash
-        id="server-error"
-        kind={:error}
-        title={gettext("Something went wrong!")}
-        phx-disconnected={
-          show(".phx-server-error #server-error")
-          |> JS.remove_attribute("hidden", to: ".phx-server-error #server-error")
-        }
-        phx-connected={hide("#server-error") |> JS.set_attribute({"hidden", ""})}
-        hidden
-      >
-        {gettext("Attempting to reconnect")}
-        <.icon name="hero-arrow-path" class="ml-1 size-3 motion-safe:animate-spin" />
-      </.flash>
+    <div id="toasts" aria-live="polite">
+      <div :if={@message} id="toast" phx-hook=".Toast" data-message={@message}>
+        <.toast title={@title} detail={@detail} />
+      </div>
     </div>
-    """
-  end
 
-  @doc """
-  Provides dark vs light theme toggle based on themes defined in app.css. Each button is a 46px
-  target: the floor has no phone exception (`docs/design/ui.md` § The phone).
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".Toast">
+      // The toast's life is the token's (`--toast-life`), read here so there is one number. It
+      // fades out over its last 200 ms, then the flash is cleared on the server. A toast whose
+      // message changes while it shows is the newest one, and starts its life again.
+      const seconds = (value) => {
+        const n = parseFloat(value)
+        if (!Number.isFinite(n)) return 4000
+        return value.trim().endsWith("ms") ? n : n * 1000
+      }
 
-  See <head> in root.html.heex which applies the theme before page load.
-  """
-  def theme_toggle(assigns) do
-    ~H"""
-    <div class="relative flex flex-row items-center rounded-full border border-base-300">
-      <div class="absolute w-1/3 h-full rounded-full bg-base-200 left-0 [[data-theme=light]_&]:left-1/3 [[data-theme=dark]_&]:left-2/3 [[data-theme-source=system]_&]:!left-0 transition-[left] motion-reduce:transition-none" />
+      export default {
+        mounted() { this.arm() },
 
-      <button
-        class="flex min-h-[46px] min-w-[46px] cursor-pointer items-center justify-center w-1/3"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="system"
-      >
-        <.icon name="hero-computer-desktop-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
+        updated() {
+          if (this.el.dataset.message !== this.message) this.arm()
+        },
 
-      <button
-        class="flex min-h-[46px] min-w-[46px] cursor-pointer items-center justify-center w-1/3"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="light"
-      >
-        <.icon name="hero-sun-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
+        destroyed() { this.disarm() },
 
-      <button
-        class="flex min-h-[46px] min-w-[46px] cursor-pointer items-center justify-center w-1/3"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="dark"
-      >
-        <.icon name="hero-moon-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
-    </div>
+        arm() {
+          this.disarm()
+          this.message = this.el.dataset.message
+          this.el.classList.remove("toast--leaving")
+          const life = seconds(getComputedStyle(document.documentElement).getPropertyValue("--toast-life"))
+          this.fade = setTimeout(() => this.el.classList.add("toast--leaving"), Math.max(life - 200, 0))
+          this.timer = setTimeout(() => {
+            try { this.pushEvent("lv:clear-flash", {key: "info"}) } catch (_) { this.el.hidden = true }
+          }, life)
+        },
+
+        disarm() {
+          clearTimeout(this.fade)
+          clearTimeout(this.timer)
+        }
+      }
+    </script>
     """
   end
 end

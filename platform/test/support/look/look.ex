@@ -312,11 +312,22 @@ defmodule Forge.Look do
     state
   end
 
+  # The page's height is the document's plus what its own scroller holds below the fold: a page
+  # drawn in the frame fills the viewport exactly and scrolls inside `[data-scroller]`, so the
+  # document alone is never taller than the window (`docs/design/ui.md` § The frame). What is
+  # resized is the *window*, which is taller than the viewport by the browser's own bars even
+  # headless, so that difference is added or the foot of the page is cut off by it.
+  @page_height """
+  const scroller = document.querySelector("[data-scroller]")
+  const hidden = scroller ? scroller.scrollHeight - scroller.clientHeight : 0
+  const chrome = Math.max(window.outerHeight - window.innerHeight, 0)
+  return document.documentElement.scrollHeight + hidden + chrome
+  """
+
   defp apply_step({:shot, :page, file}, session, state, _io) do
     {w, h} = Steps.size(state.width)
 
-    height =
-      session |> js("return document.documentElement.scrollHeight") |> min(@max_height) |> max(h)
+    height = session |> js(@page_height) |> min(@max_height) |> max(h)
 
     Browser.resize_window(session, w, height)
 
@@ -326,6 +337,14 @@ defmodule Forge.Look do
       Browser.resize_window(session, w, h)
     end
 
+    state
+  end
+
+  # Not a step a list can name — `Forge.Look.Steps` never makes it — but one the gate's browser
+  # test runs between the others, for what only a script can do to a page: drop its socket, move
+  # a button. It raises to fail.
+  defp apply_step({:call, fun}, session, state, _io) do
+    fun.(session)
     state
   end
 
@@ -424,6 +443,10 @@ defmodule Forge.Look do
   @doc false
   @spec overflow?(number, number) :: boolean
   def overflow?(scroll_width, client_width), do: scroll_width > client_width
+
+  @doc false
+  @spec script(Wallaby.Session.t(), String.t()) :: term
+  def script(session, source), do: js(session, source)
 
   defp js(session, script) do
     ref = make_ref()

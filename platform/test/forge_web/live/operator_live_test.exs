@@ -48,11 +48,30 @@ defmodule ForgeWeb.OperatorLiveTest do
   # in exactly the same way. See Forge.FakeWorker.
   defp scenario(name, doc), do: Process.put(:scenario, {name, doc})
 
+  # The queue page hears a change through the frame (`ForgeWeb.Frame.follow/3`), which counts the
+  # first change in a second at once and the rest at the second's end, and a job's changes are
+  # announced from processes of their own: so the page is waited on, up to three seconds, until
+  # it draws `selector`.
+  defp heard(view, selector, attempts \\ 150) do
+    cond do
+      has_element?(view, selector) -> :ok
+      attempts == 0 -> flunk("the queue page never drew #{selector}")
+      true -> Process.sleep(20) && heard(view, selector, attempts - 1)
+    end
+  end
+
   defp run_pending(ticket_id) do
     [job] = Enum.filter(Jobs.for_ticket(ticket_id), &(&1.status == :pending))
     {name, doc} = Process.get(:scenario, {"success", "plan.md"})
     {:ok, job} = Forge.FakeWorker.run(job, Process.get(:worker), name, doc: doc)
     job
+  end
+
+  # The row's button drops the panel, which holds the decision's form.
+  defp open!(view) do
+    view |> element("#decision-row button[phx-click='decision:open']") |> render_click()
+    assert has_element?(view, "#decision-panel")
+    view
   end
 
   test "a queue item's link stops before the thing that commits", %{
@@ -69,68 +88,18 @@ defmodule ForgeWeb.OperatorLiveTest do
     # docs/design/ui.md § The affordance rule: a navigating region never encloses a control that
     # commits, or "read this" and "approve this" become the same gesture. A regression that
     # wrapped the answer affordance inside the link is the precise failure this pins.
+    row = view |> element(~s(#queue-decisions a[href^="/?item=questions-"])) |> render()
+    assert row =~ "question"
+    refute row =~ "<form"
+    refute row =~ "phx-submit"
+
     link =
       view
-      |> element(~s(article > a[href="/tickets/#{project.name}/#{ticket.number}"]))
+      |> element(~s(#queue-item a[href="/tickets/#{project.name}/#{ticket.number}"]))
       |> render()
 
-    assert link =~ "QUESTION" or link =~ "question"
     refute link =~ "<form"
-    refute link =~ "phx-submit"
-  end
-
-  test "a job page shows what it declared and what it wrote", %{
-    conn: conn,
-    user: user,
-    project: project
-  } do
-    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
-    # `refining` declares refinement.md; the file's default scenario writes plan.md.
-    scenario("success", "refinement.md")
-    job = run_pending(ticket.id)
-
-    {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
-
-    assert html =~ "Declares"
-    assert html =~ "Wrote"
-
-    # A running job's page reloads on its events; the prompt a reader opened stays open.
-    assert [mounted] =
-             html
-             |> Floki.parse_document!()
-             |> Floki.find("details#state-prompt")
-             |> Floki.attribute("phx-mounted")
-
-    assert mounted =~ "ignore_attrs"
-    # What the run actually produced, linked to its exact version.
-    assert html =~ "refinement.md"
-    assert html =~ ~s(/artifacts/refinement.md/1)
-    refute html =~ "not written"
-
-    # Each row of what it wrote says what kind of file it is (`ui.md` § Artifact types).
-    assert html
-           |> Floki.parse_document!()
-           |> Floki.find(~s(a[href$="/artifacts/refinement.md/1"] [data-file-type="markdown"]))
-           |> length() == 1
-
-    # Wider than the review page it is laid out like, for the stream's lines
-    # (`docs/design/ui.md` § Space, measure and targets).
-    assert html =~ "max-width: 96rem"
-  end
-
-  test "a job that did not write what it declared says so", %{
-    conn: conn,
-    user: user,
-    project: project
-  } do
-    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
-    # The default scenario writes plan.md, which `refining` does not declare, so the
-    # refinement.md it *did* declare is missing — the case the two lists exist to tell apart.
-    job = run_pending(ticket.id)
-
-    {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
-
-    assert html =~ "not written"
+    assert has_element?(view, ~s(#queue-pane form[phx-submit="questions:send"]))
   end
 
   # The rail names what this ticket's jobs proposed and sends the decision to the project page,
@@ -152,13 +121,13 @@ defmodule ForgeWeb.OperatorLiveTest do
 
     # Named, not decided: the affordance that commits lives on the project page.
     refute html =~ "Accept as a ticket"
-    assert html =~ ~s(href="/projects/#{project.name}")
+    # To the view that decides them, not the project's Tickets.
+    assert html =~ ~s(href="/projects/#{project.name}?view=proposals")
   end
 
-  # `docs/design/ui.md` § The queue item: an approval shows what it approves. The pinned version
-  # is rendered between the sentence naming it and Approve, under a link to its source, wherever
-  # the card is drawn — the queue and the ticket's Decide.
-  test "an approval card renders the document it pins, before Approve", %{
+  # `docs/design/ui.md` § The decision row: the queue never decides, it links to the ticket, where
+  # the row is beside what it approves; the panel names the version and links to it.
+  test "an approval is decided on its ticket, with a link to what it pins", %{
     conn: conn,
     user: user,
     project: project
@@ -167,38 +136,35 @@ defmodule ForgeWeb.OperatorLiveTest do
     scenario("success", "refinement.md")
     run_pending(ticket.id)
 
-    for path <- [~p"/", ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide"] do
-      {:ok, view, _html} = live(conn, path)
+    {:ok, queue, _html} = live(conn, ~p"/")
+    # Nothing in the queue decides: no form posts a decision, and the item is a link.
+    refute has_element?(queue, "form[phx-submit*=decide]")
+    refute has_element?(queue, ~s(button[value="approved"]))
 
-      pinned = view |> element(~s([id="approving-#{ticket.id}-refinement.md"])) |> render()
-      assert pinned =~ "<h1>Plan</h1>"
-      assert pinned =~ "Do the thing."
+    assert has_element?(
+             queue,
+             ~s(#review-#{ticket.id}[href="/tickets/#{project.name}/#{ticket.number}?tab=docs"]),
+             "Review refinement.md v1"
+           )
 
-      assert pinned =~
-               ~s(href="/tickets/#{project.name}/#{ticket.number}/artifacts/refinement.md/1")
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=docs")
+    assert has_element?(view, "#decision-row", "refinement.md v1")
+    assert has_element?(view, "#decision-row", "refining → planning")
+    open!(view)
 
-      # And nothing about a commit message: this approval does not merge, so the card draws no
-      # box for what a merge would say (`docs/design/ui.md` § Changes).
-      refute has_element?(view, ~s([id="#{commit_message_id(ticket)}"]))
+    assert has_element?(
+             view,
+             ~s(#decision-pins a[href="/tickets/#{project.name}/#{ticket.number}/artifacts/refinement.md/1"])
+           )
 
-      # Read, then approve: the document is between the sentence naming it and the button that
-      # pins it, in a box that scrolls inside itself.
-      card = view |> element("#approval-#{ticket.id}") |> render()
-      [before, _after] = String.split(card, ~s(value="approved"), parts: 2)
-      [sentence, document] = String.split(before, "<h1>Plan</h1>", parts: 2)
-      assert sentence =~ "Approving pins"
-      refute document =~ "Approving pins"
-      assert pinned =~ "max-h-[50vh]"
-      assert pinned =~ "overflow-y-auto"
-    end
+    # This approval does not merge, so the panel draws no box for what a merge would say.
+    refute has_element?(view, ~s([id="#{commit_message_id(ticket)}"]))
+    assert has_element?(view, ~s(#decision-form button[value="approved"]), "Approve v1")
   end
 
-  # `docs/design/ui.md` § The affordance rule: Enter never commits a decision. As a one-line input
-  # the comment submitted on Enter with the form's first button, which is Approve. A key press is
-  # a browser event ExUnit cannot drive, so what is pinned is the box: a
-  # textarea, which Enter cannot submit, on the composer's hook with the query every pointer
-  # matches, and no hint saying Enter sends.
-  test "Enter in an approval's comment is a new line", %{
+  # `docs/design/ui.md` § The affordance rule: Enter never commits a decision. The note is a box
+  # Enter breaks a line in, not a one-line input whose Enter submits the form with its first button.
+  test "Enter in an approval's note is a new line", %{
     conn: conn,
     user: user,
     project: project
@@ -207,68 +173,11 @@ defmodule ForgeWeb.OperatorLiveTest do
     scenario("success", "refinement.md")
     run_pending(ticket.id)
 
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+    open!(view)
 
-    box = view |> element("#approval-#{ticket.id} textarea[name=comment]") |> render()
-    assert box =~ ~s(data-newline-on="all")
-    refute has_element?(view, "#approval-#{ticket.id} input[type=text]")
-    refute has_element?(view, "#approval-#{ticket.id} [data-hint]")
-  end
-
-  # A blob is never laid out: an approval pinning one names it and links to its bytes, and draws
-  # no document box. The changeset, a blob too, is not drawn at all (ticket_work_screen_test).
-  test "an approval card draws a blob as its link alone" do
-    version = %Forge.Artifacts.Version{version: 3, content: nil, blob_uri: "file:build.tar"}
-    pin = ForgeWeb.Operator.Components.pinned("game", %{number: 7}, "build.tar", version)
-
-    assert pin.href == "/tickets/game/7/artifacts/build.tar/3"
-    assert pin.body == nil
-
-    html =
-      render_component(&ForgeWeb.Operator.Components.approval_card/1,
-        ticket: %Forge.Tickets.Ticket{id: "t1", workflow: %{}},
-        pending: %{"to" => "shipping"},
-        approve: [pin],
-        drafts: %{}
-      )
-
-    assert html =~ ~s(href="/tickets/game/7/artifacts/build.tar/3")
-    refute html =~ ~s(class="doc")
-    refute html =~ "tabindex"
-
-    # Its link row carries its type, as every artifact row does (`ui.md` § Artifact types).
-    assert html
-           |> Floki.parse_fragment!()
-           |> Floki.find(~s(a[href$="/build.tar/3"] [data-file-type="archive"]))
-           |> length() == 1
-  end
-
-  # `docs/design/ui.md` § Documents: what an approval pins is drawn as its name says it is, so a
-  # log is read line by line rather than joined into one paragraph by Markdown.
-  test "an approval card draws a text document as it was written" do
-    version = %Forge.Artifacts.Version{version: 2, content: "# step 1\nok\n"}
-
-    pin =
-      ForgeWeb.Operator.Components.pinned(
-        "game",
-        %{id: "t1", project_id: "p1", number: 7},
-        "check.log",
-        version
-      )
-
-    html =
-      render_component(&ForgeWeb.Operator.Components.approval_card/1,
-        ticket: %Forge.Tickets.Ticket{id: "t1", workflow: %{}},
-        pending: %{"to" => "shipping"},
-        approve: [pin],
-        drafts: %{}
-      )
-
-    assert [pre] =
-             html |> Floki.parse_fragment!() |> Floki.find(~s([id="approving-t1-check.log"] pre))
-
-    assert Floki.text(pre) == "# step 1\nok\n"
-    refute html =~ "<h1>"
+    assert has_element?(view, "#decision-form textarea[name=note]")
+    refute has_element?(view, "#decision-form input[type=text]")
   end
 
   test "pages require login", %{project: _project} do
@@ -289,20 +198,35 @@ defmodule ForgeWeb.OperatorLiveTest do
     scenario("success", "refinement.md")
     run_pending(ticket.id)
     # the page refreshes on its own when the job finishes
+    heard(view, "#queue-item[data-key^='approval-']")
     assert render(view) =~ "approval"
     assert render(view) =~ "refining"
-    # The card names the exact version it pins, from what the pending transition awaits.
-    assert view |> element("#approval-#{ticket.id}") |> render() =~ "refinement.md v1"
+    # The item names the exact version it pins, from what the pending transition awaits, and
+    # leads to its ticket, where it is decided.
+    assert has_element?(view, "#review-#{ticket.id}", "refinement.md v1")
 
-    view
-    |> form("#approval-#{ticket.id} form", %{"comment" => "fine"})
+    {:ok, page, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+    open!(page)
+
+    page
+    |> form("#decision-form", %{"note" => "fine"})
     |> render_submit(%{"decision" => "approved"})
 
-    assert render(view) =~ "approved; now in planning"
+    assert has_element?(page, "#toast", "Approved refinement.md v1")
+    assert has_element?(page, "#toast", "planning started")
     assert Tickets.get!(ticket.id).state == "planning"
+
+    assert [%{comment: "fine"}] =
+             Forge.Artifacts.approvals(Forge.Artifacts.latest(ticket.id, "refinement.md").id)
 
     scenario("blocking", "plan.md")
     run_pending(ticket.id)
+    heard(view, "#queue-gone")
+
+    # Decided on its ticket while on screen here: it stays, saying so, until the person moves on
+    # — and the question that arrived meanwhile is next.
+    assert has_element?(view, "#queue-gone")
+    view |> element("#queue-later") |> render_click()
     html = render(view)
     assert html =~ "blocking question"
     assert html =~ "Which backend?"
@@ -315,13 +239,19 @@ defmodule ForgeWeb.OperatorLiveTest do
 
     assert render(view) =~ "Which backend?"
 
+    # The version on screen stopped waiting; the new one is next in the pass.
+    heard(view, "#queue-gone")
+    view |> element("#queue-later") |> render_click()
+
     # Choosing only locks it in; Send is what answers, and the page's form is for the new version.
     view
     |> element("form[phx-submit='questions:send']")
     |> render_submit(%{"answers" => %{"backend" => %{"choice" => "b", "text" => ""}}})
 
     assert render(view) =~ "Sent 1 answer"
-    refute render(view) =~ "blocking question"
+    # Answered, the pass is over: the item stays only as a decided row.
+    refute has_element?(view, "#queue-item")
+    assert has_element?(view, "#queue-decisions [data-decided]", "blocking question")
 
     assert [%{status: :pending}] =
              Enum.filter(Jobs.for_ticket(ticket.id), &(&1.state == "planning"))
@@ -351,7 +281,7 @@ defmodule ForgeWeb.OperatorLiveTest do
     assert Forge.Push.subscriptions() == []
   end
 
-  test "the ticket page shows jobs, artifacts and the timeline, and renders documents", %{
+  test "the ticket page shows jobs, artifacts and its steps, and renders documents", %{
     conn: conn,
     user: user,
     project: project
@@ -362,14 +292,14 @@ defmodule ForgeWeb.OperatorLiveTest do
     scenario("success", "refinement.md")
     run_pending(ticket.id)
 
-    # Waiting on an approval, so it opens on Decide; the rest is a tab away.
+    # Waiting on a document's approval, so it opens on Docs; the rest is a tab away.
     {:ok, view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
     assert html =~ "Persist scores"
-    assert html =~ "Last four events"
-    assert has_element?(view, "#hoisted-decision")
+    assert has_element?(view, ~s(#tab-docs[aria-current="page"]))
+    assert has_element?(view, "#decision-row", "refinement.md v1")
 
-    {:ok, _timeline, html} =
-      live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=timeline")
+    {:ok, _steps, html} =
+      live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=steps")
 
     assert html =~ "They vanish."
     assert html =~ "refining"
@@ -380,11 +310,17 @@ defmodule ForgeWeb.OperatorLiveTest do
     {:ok, _docs, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=docs")
     assert html =~ "<h1>Plan</h1>"
 
-    view |> form("#approval-#{ticket.id} form") |> render_submit(%{"decision" => "rejected"})
-    assert render(view) =~ "rejected; now in refining"
+    open!(view)
+
+    view
+    |> form("#decision-form", %{"note" => "Say where the scores live."})
+    |> render_submit(%{"decision" => "rejected"})
+
+    assert has_element?(view, "#toast", "Rejected refinement.md v1")
+    assert Tickets.get!(ticket.id).state == "refining"
   end
 
-  # Why a pending job has not gone out, under its own row on the timeline — and on a page that
+  # Why a pending job has not gone out, under its own row under Steps — and on a page that
   # was already open when the reason changed, because that is how an operator waiting on a
   # machine is looking at it (`docs/design/ui.md` § A job waiting for a machine).
   test "a pending job says why it is waiting, and an open page hears when that changes", %{
@@ -464,15 +400,18 @@ defmodule ForgeWeb.OperatorLiveTest do
     run_pending(ticket.id)
 
     {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
-    assert view |> element("#approval-#{ticket.id}") |> render() =~ "refinement.md v1"
+    assert has_element?(view, "#decision-row", "refinement.md v1")
+    open!(view)
 
-    view |> form("#approval-#{ticket.id} form") |> render_submit(%{"decision" => "rejected"})
+    view
+    |> form("#decision-form", %{"note" => "Not yet."})
+    |> render_submit(%{"decision" => "rejected"})
 
-    refute has_element?(view, "#approval-#{ticket.id}")
+    refute has_element?(view, "#decision-row")
 
     # And what replaces it is the thing the design says rejection hands over: the transitions
-    # out of the state the ticket stayed in.
-    assert has_element?(view, "#hoisted-decision [phx-value-to='planning']")
+    # out of the state the ticket stayed in, as its ways forward.
+    assert has_element?(view, ~s(#ways-forward input[value="to:planning"]))
     assert Tickets.get!(ticket.id).status == :stuck
   end
 
@@ -491,34 +430,19 @@ defmodule ForgeWeb.OperatorLiveTest do
     assert Tickets.get!(ticket.id).status == :stuck
 
     {:ok, queue, _html} = live(conn, ~p"/")
-    assert has_element?(queue, "#retry-#{ticket.id}", "Run refining again")
-    refute has_element?(queue, "[phx-value-to='planning']")
+    assert has_element?(queue, "label[for='way-#{ticket.id}-retry']", "Retry refining")
+    refute has_element?(queue, "input[value='to:planning']")
 
     {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
-    refute has_element?(view, "#hoisted-decision [phx-value-to='planning']")
+    refute has_element?(view, ~s(#ways-forward input[value="to:planning"]))
 
-    assert view |> element("#retry-#{ticket.id}") |> render_click() =~ "Running refining again"
+    assert view |> form("#ways-forward", %{"way" => "again"}) |> render_submit() =~
+             "Running refining again"
 
     assert Tickets.get!(ticket.id).status == :active
 
     assert [%{attempt: 2, status: :pending}] =
              Enum.filter(Jobs.for_ticket(ticket.id), &(&1.status == :pending))
-  end
-
-  # A document that did not parse is not kept, so the job page is where why is said.
-  test "a job page says why a document was refused", %{conn: conn, user: user, project: project} do
-    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
-    scenario("invalid_document", "refinement.md")
-    run_pending(ticket.id)
-    [job] = Jobs.for_ticket(ticket.id)
-
-    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
-
-    assert view |> element("#refused-refinement\\.md") |> render() =~
-             Jobs.refusals(job)["refinement.md"]
-
-    assert Jobs.refusals(job)["refinement.md"] =~ "front_matter: is not closed"
-    refute render(view) =~ "not written"
   end
 
   # Offered after a success as well, on the ticket page — redoing a refinement before approving
@@ -532,11 +456,13 @@ defmodule ForgeWeb.OperatorLiveTest do
     scenario("success", "refinement.md")
     run_pending(ticket.id)
 
-    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
-    assert has_element?(view, "#retry-#{ticket.id}")
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=steps")
+    assert has_element?(view, "#ways-forward #way-again")
+    assert has_element?(view, "#ways-forward", "Run refining again")
 
     {:ok, queue, _html} = live(conn, ~p"/")
     refute has_element?(queue, "#retry-#{ticket.id}")
+    refute has_element?(queue, "#way-#{ticket.id}-retry")
   end
 
   # Stuck while its job is still pending — the scheduler could not place it — the state cannot
@@ -550,8 +476,8 @@ defmodule ForgeWeb.OperatorLiveTest do
     {:ok, _stuck} = Forge.Engine.stick(ticket, "no machine", :placement)
 
     {:ok, queue, _html} = live(conn, ~p"/")
-    assert has_element?(queue, "#transitions-#{ticket.id}")
-    refute has_element?(queue, "#retry-#{ticket.id}")
+    assert has_element?(queue, "#queue-item[data-key='stuck-#{ticket.id}']")
+    refute has_element?(queue, "#way-#{ticket.id}-retry")
   end
 
   # A fix on the default branch never reaches a ticket already pinned before it; the rail says what
@@ -632,8 +558,9 @@ defmodule ForgeWeb.OperatorLiveTest do
     assert Tickets.get!(ticket.id).state == "integrating"
     refute has_element?(view, "#merge-conflict")
 
-    # And the rail's last events say what the conflict was, beside its type.
-    assert render(view) =~ "README.md conflicted on the way into merged"
+    # And Activity says what the conflict was, beside its type.
+    {:ok, activity, _html} = live(conn, path <> "?tab=activity")
+    assert has_element?(activity, "#ticket-events", "README.md conflicted on the way into merged")
   end
 
   # The other things the notice says: a conversation's merge, a conflict no merge caused, and a
@@ -672,7 +599,7 @@ defmodule ForgeWeb.OperatorLiveTest do
     notice = view |> element("#merge-conflict") |> render()
     assert notice =~ "since a conversation merged"
 
-    assert view |> element("#integrate-ticket") |> render() =~
+    assert view |> element("#integrate-ticket-confirm") |> render() =~
              "Send this ticket to integrating? It waits there for a person."
 
     record.("the ticket's, again")
@@ -727,11 +654,15 @@ defmodule ForgeWeb.OperatorLiveTest do
     |> Forge.Repo.update!()
 
     {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+    open!(view)
+    view |> form("#decision-form") |> render_submit(%{"decision" => "approved"})
 
-    assert view
-           |> form("#approval-#{ticket.id} form")
-           |> render_submit(%{"decision" => "approved"}) =~
+    # Refused inside the panel, which stays open (`ui.md` § Errors stay where you acted).
+    assert has_element?(
+             view,
+             "#decision-panel #decision-error",
              "it conflicts with the default branch in README.md"
+           )
 
     assert Tickets.get!(ticket.id).state == "review_ready"
 
@@ -763,8 +694,11 @@ defmodule ForgeWeb.OperatorLiveTest do
     assert html =~ "Stuck: transition to implementing already fired 2 times. Waiting for you"
     refute html =~ "an older reason. Waiting"
 
-    # The rail says each stick's reason beside its event, the older one included.
-    assert html =~ "an older reason"
+    # Activity says each stick's reason beside its event, the older one included.
+    {:ok, activity, _html} =
+      live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=activity")
+
+    assert has_element?(activity, "#ticket-events", "an older reason")
   end
 
   # A stale page can still send a transition the surfaces no longer offer; the refusal says
@@ -784,7 +718,7 @@ defmodule ForgeWeb.OperatorLiveTest do
              "refinement.md has no version to approve"
   end
 
-  test "a ticket is cancelled from its page, leaves the board, and is restored there", %{
+  test "a ticket is cancelled from its page, leaves the open tickets, and is restored there", %{
     conn: conn,
     user: user,
     project: project
@@ -792,15 +726,18 @@ defmodule ForgeWeb.OperatorLiveTest do
     {:ok, ticket} = Tickets.admit(project, %{title: "Never mind"}, {:user, user.id})
 
     {:ok, board, _html} = live(conn, ~p"/projects/#{project.name}")
-    assert render(board) =~ "Never mind"
+    assert has_element?(board, "#tickets-rest-#{ticket.number}", "Never mind")
 
     {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
     refute has_element?(view, "#restore-ticket")
     assert view |> element("#cancel-ticket") |> render_click() =~ "Ticket cancelled"
     assert Tickets.get!(ticket.id).status == :cancelled
 
+    # Out of the open tickets, and into the history, where a cancelled ticket is drawn so.
     {:ok, board, _html} = live(conn, ~p"/projects/#{project.name}")
-    refute render(board) =~ "Never mind"
+    refute has_element?(board, "#tickets-rest-#{ticket.number}")
+    assert has_element?(board, "#history-#{ticket.number} .ui-state", "refining")
+    assert has_element?(board, "#history-#{ticket.number} .ui-status", "cancelled")
 
     {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
     refute has_element?(view, "#cancel-ticket")
@@ -832,13 +769,27 @@ defmodule ForgeWeb.OperatorLiveTest do
     assert render_hook(view, "restore-ticket", %{"ticket" => ticket.id}) =~
              "only a cancelled ticket can be restored"
 
-    {:ok, _ticket} = Forge.Engine.cancel(ticket, user.id)
+    assert has_element?(view, "#details-refusal")
+
+    # The next thing done replaces it: a cancel that goes through leaves no refusal behind.
+    render_hook(view, "cancel-ticket", %{"ticket" => ticket.id})
+    assert Tickets.get!(ticket.id).status == :cancelled
+    refute has_element?(view, "#details-refusal")
 
     assert render_hook(view, "cancel-ticket", %{"ticket" => ticket.id}) =~
              "a cancelled ticket cannot be cancelled"
 
     assert render_hook(view, "transition", %{"ticket" => ticket.id, "to" => "planning"}) =~
              "the ticket is cancelled; restore it first"
+
+    # Each where it was sent from: the details' own buttons in the details, a way forward under
+    # the ways forward — and the last refusal only, never a pile.
+    assert has_element?(view, "#forward-refusal[role=alert]", "restore it first")
+    refute has_element?(view, "#details-refusal")
+
+    render_hook(view, "cancel-ticket", %{"ticket" => ticket.id})
+    assert has_element?(view, "#ticket-details #details-refusal", "cannot be cancelled")
+    refute has_element?(view, "#forward-refusal")
   end
 
   # **A job's turns were drawn against a ceiling they are not measured against.** `job.turns` is
@@ -883,7 +834,7 @@ defmodule ForgeWeb.OperatorLiveTest do
            |> Floki.parse_document!()
            |> Floki.find("#job-turns")
            |> Floki.text()
-           |> String.trim() == "33"
+           |> String.trim() == "33 turns"
   end
 
   # **`budget_exhausted` says a job ran out; only this says out of what** (`capacity.md` § Four
@@ -914,12 +865,12 @@ defmodule ForgeWeb.OperatorLiveTest do
       assert length(Jobs.for_ticket(ticket.id)) == 2
 
       # Every row that draws a job's outcome, by the address a person reaches it at: the job
-      # page's header badge, the ticket timeline's row, and the activity tab's earlier jobs.
+      # page's header badge, the ticket Steps's row, and the activity tab's earlier jobs.
       # All three read only `outcome` before, so a turn-exhausted and a cost-exhausted job were
       # one word.
       for page <- [
             ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}",
-            ~p"/tickets/#{project.name}/#{ticket.number}?tab=timeline",
+            ~p"/tickets/#{project.name}/#{ticket.number}?tab=steps",
             ~p"/tickets/#{project.name}/#{ticket.number}?tab=activity"
           ] do
         {:ok, _view, html} = live(conn, page)
@@ -985,7 +936,8 @@ defmodule ForgeWeb.OperatorLiveTest do
     assert Jobs.get!(job.id).usage == 3150
 
     {:ok, view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
-    assert html =~ ~r/0\.003\d windows/
+    # Below a hundredth of a window the figure says so; the exact count is in its title.
+    assert html =~ "&lt;0.01 windows"
     assert view |> element("#job-usage") |> render() =~ "3,150 weighted tokens"
     refute html =~ "converted from dollars"
 
@@ -1079,64 +1031,6 @@ defmodule ForgeWeb.OperatorLiveTest do
     assert length(Regex.scan(~r/converted from dollars/, runs)) == 1
   end
 
-  test "the job page shows the pinned manifest and harness events", %{
-    conn: conn,
-    user: user,
-    project: project
-  } do
-    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
-    scenario("success", "refinement.md")
-    job = run_pending(ticket.id)
-
-    {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
-    assert html =~ "Pinned manifest"
-    assert html =~ "Inputs, at their exact version"
-    assert html =~ "ticket"
-    assert html =~ "refinement.md"
-    # Consumption reads as capacity, never money: see docs/design/capacity.md.
-    assert html =~ "20 turns"
-    assert html =~ "windows"
-    refute html =~ "$0.5"
-    assert html =~ "Refine the ticket into a crisp problem statement."
-    assert html =~ "fake-model · session sess-42"
-    assert html =~ "Reading the plan."
-  end
-
-  # Claude Code turns every `system` message into a `notice`, and `thinking_tokens` alone
-  # outnumbered everything else in the stream on the dev node — the page became a telemetry feed
-  # with the work buried in it, which is the "streaming log … nothing that invites watching agents
-  # work" `docs/design/ui.md` rules out. They are still recorded: the event log is the record, and
-  # the toggle is for the one time someone is debugging the harness itself.
-  test "the job stream hides the harness's own telemetry until asked", %{
-    conn: conn,
-    user: user,
-    project: project
-  } do
-    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
-    scenario("success", "refinement.md")
-    job = run_pending(ticket.id)
-
-    # Recorded through the path the channel uses, with the type the wire actually carries:
-    # `ForgeWorker.Job.Runner` prefixes the driver's bare `notice` with `job.harness.`.
-    :ok =
-      Forge.Jobs.record_harness_event(job.id, %{
-        type: "job.harness.notice",
-        payload: %{"subtype" => "thinking_tokens", "raw" => %{"tokens" => 128}}
-      })
-
-    {:ok, view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
-
-    refute html =~ "thinking_tokens"
-    assert html =~ "Show 1 harness notices"
-    # The work itself is still there — this hides telemetry, not the stream.
-    assert html =~ "Reading the plan."
-
-    shown = render_click(view, "notices")
-
-    assert shown =~ "thinking_tokens"
-    assert shown =~ "Hide 1 harness notices"
-  end
-
   test "the board groups tickets by state in workflow order", %{
     conn: conn,
     user: user,
@@ -1145,8 +1039,7 @@ defmodule ForgeWeb.OperatorLiveTest do
     {:ok, _} = Tickets.admit(project, %{title: "first"}, {:user, user.id})
     {:ok, _} = Tickets.admit(project, %{title: "second"}, {:user, user.id})
 
-    {:ok, _view, html} = live(conn, ~p"/board")
-    assert html =~ project.name
+    {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}")
     assert html =~ "refining"
     assert html =~ "merged"
     assert :binary.match(html, "refining") < :binary.match(html, "merged")
@@ -1189,7 +1082,8 @@ defmodule ForgeWeb.OperatorLiveTest do
 
       pending!(ticket, "merged", ["refinement.md"])
 
-      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide")
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+      open!(view)
 
       assert view |> element(~s([id="#{commit_message_id(ticket)}"])) |> render() =~
                "nothing to merge yet"
@@ -1201,7 +1095,8 @@ defmodule ForgeWeb.OperatorLiveTest do
           content: "Persist the scores\n"
         })
 
-      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide")
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+      open!(view)
 
       assert view |> element(~s([id="#{commit_message_id(ticket)}"])) |> render() =~
                "Persist the scores"
@@ -1218,7 +1113,8 @@ defmodule ForgeWeb.OperatorLiveTest do
       changeset!(ticket, sha)
       pending!(ticket, "verifying", ["changeset"])
 
-      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide")
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+      open!(view)
 
       refute has_element?(view, ~s([id="#{commit_message_id(ticket)}"]))
       assert has_element?(view, ~s(button[value="approved"]))

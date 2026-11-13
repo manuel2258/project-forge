@@ -176,7 +176,7 @@ defmodule Forge.Git do
 
   What `show/3` would return the length of, asked first: a caller that draws a bounded slice of a
   file has to be able to refuse the file before it is in memory, and `show/3` captures all of it
-  (`ForgeWeb.ReviewLive`). `:not_found` where git can read no object there — a missing path, an
+  (`ForgeWeb.Presentation`). `:not_found` where git can read no object there — a missing path, an
   unknown sha.
 
   **And `:not_found` for a path that is not a blob**, because the size and the content would then
@@ -508,12 +508,16 @@ defmodule Forge.Git do
          do: {:ok, String.trim(out)}
   end
 
-  # Sha, committer time and subject, unit-separated: a subject may hold anything but a newline,
-  # so the separator cannot be one of the characters it may hold.
-  @log_format "--format=%H%x1f%ct%x1f%s"
+  # Sha, committer time, author name and subject, unit-separated: a subject may hold anything
+  # but a newline, so the separator cannot be one of the characters it may hold. The subject is
+  # last and the split stops before it, so a subject holding the separator is still one subject;
+  # and a line with a field fewer than this asks for is not a commit, rather than a commit whose
+  # author is its subject (`log_line/1`).
+  @log_format "--format=%H%x1f%ct%x1f%an%x1f%s"
 
   @doc """
-  The commits on `head` since `base`, newest first: sha, subject, and when each was committed.
+  The commits on `head` since `base`, newest first: sha, subject, author, and when each was
+  committed.
   The same range as `commits_since/3`, with what a list of commits shows a person.
   """
   @spec log(repo(), String.t(), String.t(), keyword()) ::
@@ -530,26 +534,33 @@ defmodule Forge.Git do
     end
   end
 
-  @typedoc "A commit as a list of them shows it."
-  @type commit :: %{sha: sha(), subject: String.t(), at: DateTime.t()}
+  @typedoc "A commit as a list of them shows it: the author is the name git recorded, as written."
+  @type commit :: %{sha: sha(), subject: String.t(), author: String.t(), at: DateTime.t()}
 
   @doc """
   One page of `ref`'s own history, newest first: `limit` commits from `skip`, and whether there
-  are more behind them.
+  are more behind them — or, with `path`, only the commits that changed that path.
 
   A single ref rather than a range — this is the whole branch, not what one branch added — and
   one row more than `limit` is asked of git so that `more` is known without a second counting
   pass over every commit in the repository. The extra row is trimmed before it is returned.
+
+  `path` is git's own: a path in the ref's tree, after `--`, so it is never read as a revision.
+  It is still marked `{:data, …}`, which refuses one beginning with a dash; a file whose name
+  does has no history here, which is the price of the rule having no exceptions.
   """
-  @spec history(repo(), String.t(), non_neg_integer(), pos_integer()) ::
+  @spec history(repo(), String.t(), non_neg_integer(), pos_integer(), String.t() | nil) ::
           {:ok, %{commits: [commit()], more: boolean()}} | {:error, term()}
-  def history(repo, ref, skip, limit)
+  def history(repo, ref, skip, limit, path \\ nil)
       when is_integer(skip) and skip >= 0 and is_integer(limit) and limit > 0 do
     # `skip` and `limit` are the caller's too, and they are interpolated into flags rather than
     # marked `{:data, …}` — a flag's own value is not a position git reads an option in. The
     # guard is what makes that safe rather than lucky: a binary here would put whatever it held
     # inside `--skip=`, and the mark cannot be used on something that is not a whole argument.
-    args = ["log", @log_format, "--skip=#{skip}", "--max-count=#{limit + 1}", {:data, ref}]
+    only = if path, do: ["--", {:data, path}], else: []
+
+    args =
+      ["log", @log_format, "--skip=#{skip}", "--max-count=#{limit + 1}", {:data, ref}] ++ only
 
     with {:ok, out} <- run(repo, args, stderr: :separate) do
       commits = commits(out)
@@ -576,10 +587,10 @@ defmodule Forge.Git do
   # A line that is not one of ours is skipped rather than raised on: the list is for reading,
   # and a page that shows it should not be the thing a surprise from git takes down.
   defp log_line(line) do
-    with [sha, time, subject] <- String.split(line, "\x1f", parts: 3),
+    with [sha, time, author, subject] <- String.split(line, "\x1f", parts: 4),
          {seconds, ""} <- Integer.parse(time),
          {:ok, at} <- DateTime.from_unix(seconds) do
-      [%{sha: sha, subject: subject, at: at}]
+      [%{sha: sha, subject: subject, author: author, at: at}]
     else
       _other -> []
     end

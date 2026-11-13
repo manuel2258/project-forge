@@ -46,11 +46,11 @@ defmodule ForgeWeb.ApprovalGateTest do
     test "reaches the holding page itself", %{conn: conn, user: user} do
       {:ok, view, html} = conn |> log_in_user(user) |> live(~p"/users/pending")
 
-      # Not `html =~ user.email`: the layout header renders the address on every authenticated
-      # page, so that assertion passes against an empty body. Assert the page's own heading and
-      # that the nav is off, which is what this page is.
+      # Not `html =~ user.email` alone: the frame's header renders the address on every
+      # signed-in page, so that assertion passes against an empty body. Assert the page's own
+      # heading and that the frame is off, which is what this page is.
       assert has_element?(view, "h1", "Waiting for approval")
-      refute has_element?(view, "nav a[href='/board']")
+      refute has_element?(view, "#top-bar")
       assert html =~ user.email
     end
 
@@ -74,9 +74,9 @@ defmodule ForgeWeb.ApprovalGateTest do
     test "reaches the queue", %{conn: conn, user: user} do
       {:ok, view, _html} = conn |> log_in_user(user) |> live(~p"/")
 
-      # The nav is the thing a pending account does not get, and the layout header's copy of the
+      # The frame is the thing a pending account does not get, and the header's copy of the
       # address is not evidence of reaching anything.
-      assert has_element?(view, "nav a[href='/board']")
+      assert has_element?(view, "#top-bar")
       assert user
     end
 
@@ -87,7 +87,16 @@ defmodule ForgeWeb.ApprovalGateTest do
       # Approved is not node admin. The mutation this catches is dropping the node_admin check
       # in on_mount(:require_node_admin), which would hand account governance to everyone who
       # got past the door.
-      assert {:error, {:redirect, %{to: "/"}}} = conn |> log_in_user(user) |> live(~p"/accounts")
+      #
+      # Refused in words, in the frame: the one page whose existence is no secret
+      # (`ui.md` § Not found), so it says whose it is instead of sending the person away.
+      conn = log_in_user(conn, user)
+      assert_raise ForgeWeb.NotAllowed, fn -> live(conn, ~p"/accounts") end
+
+      {403, _headers, body} = assert_error_sent(403, fn -> get(conn, ~p"/accounts") end)
+      assert body =~ "Accounts are for node admins."
+      assert body =~ ~s(id="frame")
+      refute body =~ "Waiting"
     end
   end
 
@@ -166,10 +175,14 @@ defmodule ForgeWeb.ApprovalGateTest do
       admin = node_admin_fixture()
       plain = user_fixture()
 
+      # From the title menu's foot (`docs/design/ui.md` § Accounts), which is read when it opens.
       {:ok, view, _html} = conn |> log_in_user(admin) |> live(~p"/")
-      assert has_element?(view, "a[href='/accounts']")
+      view |> element("#top-bar .ui-top-title") |> render_click()
+      assert has_element?(view, "#title-menu a[href='/accounts']")
 
       {:ok, plain_view, _html} = conn |> log_in_user(plain) |> live(~p"/")
+      plain_view |> element("#top-bar .ui-top-title") |> render_click()
+      assert has_element?(plain_view, "#title-menu")
       refute has_element?(plain_view, "a[href='/accounts']")
     end
 

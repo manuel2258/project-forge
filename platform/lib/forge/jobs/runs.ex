@@ -120,11 +120,20 @@ defmodule Forge.Jobs.Runs do
   The latest run rather than the open one, because a turn is re-sent until it is acked and can
   arrive after its conversation ended and closed the run it belongs to. Its usage still belongs to
   that run; nothing opens another between a turn and its conversation's end.
+
+  **It records when it wrote**, in `updated_at`, which `update_all` would otherwise leave at the
+  run's insert: an open run's spend is drawn at the moment it was last costed
+  (`docs/design/capacity.md` § Usage history, `Forge.Usage`).
   """
   @spec record(Multi.t(), String.t(), figure()) :: Multi.t()
   def record(multi, job_id, %{usage: usage} = figure) do
     Multi.update_all(multi, :run_usage, from(r in Run, where: r.id in subquery(latest(job_id))),
-      set: [usage: usage, tokens: figure[:tokens], claude_cost_usd: figure[:claude_cost_usd]]
+      set: [
+        usage: usage,
+        tokens: figure[:tokens],
+        claude_cost_usd: figure[:claude_cost_usd],
+        updated_at: DateTime.utc_now(:second)
+      ]
     )
   end
 

@@ -5,7 +5,8 @@ defmodule ForgeWeb.RepoCommitLiveTest do
   Three things are worth a test: a commit is drawn against its own parent and not against
   something else, the repository's *first* commit opens at all — it has no parent, which is the
   case a naive `sha^` fails on — and a sha the repository does not hold is a miss rather than
-  an exception of some other shape.
+  an exception of some other shape. And what the header says of it (`10e`): its author, the
+  parent it is read against, and the size of the change.
   """
 
   use ForgeWeb.ConnCase, async: false
@@ -56,14 +57,60 @@ defmodule ForgeWeb.RepoCommitLiveTest do
   } do
     head = commit_to(repo, "main", %{"score.txt" => "high\n"}, "keep the high score")
 
-    {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/repo/commits/#{head}")
+    {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/repo/commits/#{head}")
 
     assert html =~ "keep the high score"
-    assert html =~ "score.txt"
-    # The patch itself, which is only there if the base was the parent: against the empty tree
-    # every seeded file would be added too.
-    assert html =~ "+high"
-    refute html =~ "README.md"
+    # The same file list a ticket's Changes draws, its row opening the patch in place — which
+    # is only this one line if the base was the parent: against the empty tree every seeded
+    # file would be added too.
+    assert has_element?(view, ~s|#commit-files li[data-path="score.txt"] .diff-line--add|, "high")
+    refute has_element?(view, ~s|#commit-files li[data-path="README.md"]|)
+  end
+
+  # A commit is the project's repository read closer (`ui.md` § The bottom strip: a project, its
+  # repository and its settings), so it carries the project's strip, from the project's builder.
+  test "the strip is the project's views", %{conn: conn, project: project, repo: repo} do
+    {:ok, head} = Git.resolve(repo, "refs/heads/main")
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo/commits/#{head}")
+
+    for key <- ~w(tickets merge chats workflow proposals) do
+      assert has_element?(view, ~s|#tab-#{key}[href="/projects/#{project.name}?view=#{key}"]|)
+    end
+  end
+
+  test "the header names the author, the parent and the size of the change", %{
+    conn: conn,
+    project: project,
+    repo: repo
+  } do
+    {:ok, parent} = Git.resolve(repo, "refs/heads/main")
+    head = commit_to(repo, "main", %{"a.txt" => "1\n2\n", "b.txt" => "3\n"}, "two files")
+
+    {:ok, view, _html} =
+      live(conn, ~p"/projects/#{project.name}/repo/commits/#{head}?branch=main&page=2")
+
+    assert has_element?(view, "#commit-author", "t")
+    assert has_element?(view, "#commit-size", "2 files")
+    assert has_element?(view, "#commit-size .ui-diffstat", "+3")
+
+    # The parent is a link to its own page, carrying the same origin so its back row still
+    # returns to the page the reader started from.
+    href =
+      view
+      |> element("#commit-parent", String.slice(parent, 0, 12))
+      |> render()
+      |> Floki.parse_fragment!()
+      |> Floki.attribute("href")
+      |> hd()
+      |> URI.parse()
+
+    assert href.path == ~p"/projects/#{project.name}/repo/commits/#{parent}"
+
+    assert URI.decode_query(href.query) == %{
+             "branch" => "main",
+             "tab" => "commits",
+             "page" => "2"
+           }
   end
 
   # No parent to diff against, which is the case `sha^` cannot resolve. The empty tree stands
@@ -76,11 +123,13 @@ defmodule ForgeWeb.RepoCommitLiveTest do
     {:ok, root} = Git.resolve(repo, "refs/heads/main")
     assert {:error, :no_parent} = Git.parent(repo, root)
 
-    {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/repo/commits/#{root}")
+    {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/repo/commits/#{root}")
 
     assert html =~ "seed"
-    assert html =~ "README.md"
-    assert html =~ ".forge/workflow.yml"
+    assert has_element?(view, ~s|#commit-files li[data-path="README.md"]|)
+    assert has_element?(view, ~s|#commit-files li[data-path=".forge/workflow.yml"]|)
+    # No parent to name, and no link to one.
+    assert has_element?(view, "span#commit-parent", "root commit")
   end
 
   test "a sha the repository does not hold is a miss", %{conn: conn, project: project} do
@@ -156,6 +205,22 @@ defmodule ForgeWeb.RepoCommitLiveTest do
       ~p"/projects/#{project.name}/repo?#{[branch: "ticket/7", tab: "commits", page: 3]}"
 
     assert has_element?(view, ~s|a[href="#{came_from}"]|)
+
+    # A file's history comes back to that history.
+    {:ok, from_history, _html} =
+      live(conn, ~p"/projects/#{project.name}/repo/commits/#{head}?branch=ticket/7&path=a.txt")
+
+    history =
+      ~p"/projects/#{project.name}/repo?#{[branch: "ticket/7", tab: "commits", path: "a.txt"]}"
+
+    assert has_element?(from_history, ~s|#commit-back[href="#{history}"]|)
+
+    # A wide screen's open file, and the view it was open on, come back too (r2 L3).
+    {:ok, beside_file, _html} =
+      live(conn, ~p"/projects/#{project.name}/repo/commits/#{head}?tab=files&file=a.txt")
+
+    open = ~p"/projects/#{project.name}/repo?#{[tab: "files", file: "a.txt"]}"
+    assert has_element?(beside_file, ~s|#commit-back[href="#{open}"]|)
 
     # And nothing invented when there was nowhere in particular to go back to.
     {:ok, plain, _html} = live(conn, ~p"/projects/#{project.name}/repo/commits/#{head}")

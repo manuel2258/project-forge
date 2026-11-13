@@ -134,7 +134,7 @@ defmodule ForgeWeb.ActionsTest do
 
       assert Floki.text(edit) =~ "− old"
       assert Floki.text(edit) =~ "+ new"
-      assert "text-error" in (edit |> Floki.attribute("class") |> hd() |> String.split())
+      assert "text-danger" in (edit |> Floki.attribute("class") |> hd() |> String.split())
       assert doc |> Floki.find("[data-failure]") |> Floki.text() =~ "String not found"
 
       [ok] =
@@ -143,7 +143,7 @@ defmodule ForgeWeb.ActionsTest do
         |> Floki.parse_fragment!()
         |> Floki.find("details[data-action=edit]")
 
-      refute "text-error" in (ok |> Floki.attribute("class") |> hd() |> String.split())
+      refute "text-danger" in (ok |> Floki.attribute("class") |> hd() |> String.split())
     end
 
     # A glance, not the change: the Changes tab has the rest.

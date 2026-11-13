@@ -25,7 +25,7 @@ defmodule ForgeWeb.Actions do
   **An opened line stays open while the list it is in is patched.** Every `<details>` here is
   marked with `keep_open/0`: the server never renders `open`, so each patch of a live transcript
   or a running job's stream used to close whatever the reader had opened — the same reason
-  `ForgeWeb.Sheet` ignores `open` on its dialog.
+  `ForgeWeb.UI.Feedback.sheet/1` ignores `open` on its dialog.
   """
 
   use Phoenix.Component
@@ -232,10 +232,10 @@ defmodule ForgeWeb.Actions do
     >
       <summary class="flex min-h-[46px] cursor-pointer items-center gap-2">
         <span class="min-w-0 break-words">{looks_summary(@actions)}</span>
-        <span :if={errors(@actions) != []} class="text-error">✗</span>
+        <span :if={errors(@actions) != []} class="text-danger">✗</span>
       </summary>
       <ul class="flex flex-col gap-1 pb-2 pl-4 opacity-80">
-        <li :for={action <- @actions} class={["break-all", error?(action) && "text-error"]}>
+        <li :for={action <- @actions} class={["break-all", error?(action) && "text-danger"]}>
           {action.name} {target(action)}
         </li>
       </ul>
@@ -270,7 +270,7 @@ defmodule ForgeWeb.Actions do
 
     ~H"""
     <details
-      class={["font-mono text-[12.5px]", (@error && "text-error") || "text-info"]}
+      class={["font-mono text-[12.5px]", (@error && "text-danger") || "text-info"]}
       data-action="edit"
       phx-mounted={keep_open()}
     >
@@ -279,7 +279,7 @@ defmodule ForgeWeb.Actions do
         <span class="min-w-0 break-all">{short_path(path(@action))}</span>
         <span class="shrink-0 opacity-70">+{elem(@counts, 0)} −{elem(@counts, 1)}</span>
       </summary>
-      <pre class="mb-2 overflow-x-auto rounded-field border border-base-300 p-2 text-base-content"><code>{edit_diff(@action)}</code></pre>
+      <pre class="mb-2 overflow-x-auto rounded-md border border-border p-2 text-ink"><code>{edit_diff(@action)}</code></pre>
     </details>
     <.failure :if={@error} action={@action} />
     """
@@ -288,7 +288,7 @@ defmodule ForgeWeb.Actions do
   defp draw(%{kind: :bash} = assigns) do
     ~H"""
     <div
-      class={["py-1 font-mono text-[12.5px]", (@error && "text-error") || "text-info"]}
+      class={["py-1 font-mono text-[12.5px]", (@error && "text-danger") || "text-info"]}
       data-action="bash"
     >
       <.clip text={"$ " <> command(@action)} class="break-all">
@@ -304,7 +304,7 @@ defmodule ForgeWeb.Actions do
   defp draw(%{kind: :task, action: %{children: []}} = assigns) do
     ~H"""
     <div
-      class={["py-1 font-mono text-[12.5px]", (@error && "text-error") || "text-info"]}
+      class={["py-1 font-mono text-[12.5px]", (@error && "text-danger") || "text-info"]}
       data-action="task"
     >
       <span aria-hidden="true">⤷</span> <span class="break-words">{task_description(@action)}</span>
@@ -316,7 +316,7 @@ defmodule ForgeWeb.Actions do
   defp draw(%{kind: :task} = assigns) do
     ~H"""
     <details
-      class={["font-mono text-[12.5px]", (@error && "text-error") || "text-info"]}
+      class={["font-mono text-[12.5px]", (@error && "text-danger") || "text-info"]}
       data-action="task"
       phx-mounted={keep_open()}
     >
@@ -338,7 +338,7 @@ defmodule ForgeWeb.Actions do
   defp draw(assigns) do
     ~H"""
     <div
-      class={["py-1 font-mono text-[12.5px]", (@error && "text-error") || "text-info"]}
+      class={["py-1 font-mono text-[12.5px]", (@error && "text-danger") || "text-info"]}
       data-action={@kind}
     >
       <.clip text={plain(@kind, @action)} class="break-all" />
@@ -357,7 +357,7 @@ defmodule ForgeWeb.Actions do
     ~H"""
     <pre
       :if={@shown != ""}
-      class="mb-1 overflow-x-auto whitespace-pre-wrap break-all pl-4 font-mono text-[12px] text-error opacity-90"
+      class="mb-1 overflow-x-auto whitespace-pre-wrap break-all pl-4 font-mono text-[12px] text-danger opacity-90"
       data-failure
     >{@shown}</pre>
     """
@@ -393,7 +393,7 @@ defmodule ForgeWeb.Actions do
           <span class={["whitespace-pre-wrap", @class]} phx-no-format>{String.slice(@text, 0, @most)}…</span>
           {render_slot(@inner_block)}
         </span>
-        <span class="text-primary">
+        <span class="text-link">
           <span class="group-open:hidden">show all {String.length(@text)} characters</span>
           <span class="hidden group-open:inline">show less</span>
         </span>
@@ -406,7 +406,7 @@ defmodule ForgeWeb.Actions do
 
   @doc """
   What every `<details>` that LiveView patches carries: `open` is the reader's, not the server's,
-  so a patch leaves it as the reader left it (`ForgeWeb.Sheet` does the same for its dialog).
+  so a patch leaves it as the reader left it (`ForgeWeb.UI.Feedback.sheet/1` does the same for its dialog).
   """
   @spec keep_open() :: JS.t()
   def keep_open, do: JS.ignore_attributes(["open"])

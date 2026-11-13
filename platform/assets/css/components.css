@@ -1,0 +1,850 @@
+/* The primitives' styles (docs/design/ui.md § Components). */
+
+/* The tile an artifact's type glyph sits in (docs/design/ui.md § Artifact types): the glyph in
+   the type's hue and the ground the same hue at 16 %, so the tile reads on either theme. Text, a
+   log, the changeset and any other file are neutral and told apart by their glyph. */
+.file-icon {
+  --file: var(--file-plain);
+  color: var(--file);
+  background-color: color-mix(in oklch, var(--file) 16%, transparent);
+}
+.file-icon[data-file-type="markdown"] { --file: var(--file-markdown); }
+.file-icon[data-file-type="code"] { --file: var(--file-code); }
+.file-icon[data-file-type="image"] { --file: var(--file-image); }
+.file-icon[data-file-type="archive"] { --file: var(--file-archive); }
+.file-icon[data-file-type="apk"] { --file: var(--file-apk); }
+
+/* ---------------------------------------------------------------------------------------------
+   The 24 primitives (docs/design/ui/design_system/components/, ported in ForgeWeb.UI.* and
+   CoreComponents.button/input). Every value is the handoff's; colour only through the tokens.
+   In the components layer, so a caller's utility (`w-full`, `mt-4`) still wins over these.
+   --------------------------------------------------------------------------------------------- */
+@layer components {
+  /* actions/Button. Filled ink = the next step, amber = a decision that waits on you, an
+     outline navigates, red outline destroys. Disabled keeps its size and place. */
+  /* Every size has a fixed height (`--ui-btn-h`), so nothing a button sits in may shrink it. */
+  .ui-btn {
+    --ui-btn-h: 52px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    box-sizing: border-box;
+    height: var(--ui-btn-h);
+    flex-shrink: 0;
+    padding: 0 14px;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .ui-btn--xl { --ui-btn-h: 52px; font-size: 14px; }
+  .ui-btn--lg { --ui-btn-h: 48px; font-size: 14px; }
+  .ui-btn--md { --ui-btn-h: 42px; }
+  .ui-btn--sm { --ui-btn-h: 36px; }
+  .ui-btn--desk { --ui-btn-h: 34px; padding: 0 12px; border-radius: var(--radius-sm); }
+  .ui-btn--chevron { justify-content: space-between; padding: 0 16px; }
+  /* Fills the row it is in. In a column a basis of 0 would take the button's height away (it
+     squashed *Admit it* to a 16px sliver), so its height is held at its size whichever way the
+     parent runs; `Reopen` and the shown-once block's button fill the width instead. */
+  .ui-btn--fill { flex: 1 1 0%; min-height: var(--ui-btn-h); max-height: var(--ui-btn-h); }
+  .shown-once > .ui-btn--fill,
+  .chat-reopen > .ui-btn--fill { flex: 0 0 auto; width: 100%; }
+
+  .ui-btn--primary { background: var(--ink); color: var(--bg); }
+  .ui-btn--decision { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+  .ui-btn--decision-open { border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+  .ui-btn--outline { border-color: var(--ink); }
+  .ui-btn--secondary { border-color: var(--border-control); }
+  .ui-btn--neutral { border-color: var(--ink-3); }
+  .ui-btn--danger { border-color: var(--danger-line); color: var(--danger); }
+  .ui-btn--quiet { color: var(--ink-2); padding: 0 12px; }
+  .ui-btn--link { color: var(--link); padding: 0 8px; max-height: 44px; }
+
+  .ui-btn:disabled,
+  .ui-btn[aria-disabled="true"] { opacity: .45; cursor: default; }
+  /* A filled button disabled is not a grey slab nor a washed, pressed-looking amber: it is the
+     page's quietest fill with its quietest ink, at the same size and place (ui.md § Components). */
+  .ui-btn--primary:disabled,
+  .ui-btn--primary[aria-disabled="true"],
+  .ui-btn--decision:disabled,
+  .ui-btn--decision[aria-disabled="true"] { background: var(--surface-3); color: var(--ink-4); opacity: 1; }
+  .ui-btn-diamond { font-size: 9px; }
+
+  @media (hover: hover) {
+    .ui-btn--outline:not(:disabled):hover,
+    .ui-btn--secondary:not(:disabled):hover,
+    .ui-btn--neutral:not(:disabled):hover,
+    .ui-btn--quiet:not(:disabled):hover { background: var(--surface-2); }
+  }
+
+  /* navigation/UsageLine: 3px above the top bar, 2px below it. Quiet ink under 80 %, warning
+     from 80, danger from 95; never the accent. No figure: the band keeps its height, bare. */
+  .ui-usage { flex-shrink: 0; height: var(--usage-5h); background: var(--track); }
+  .ui-usage--week { height: var(--usage-week); }
+  .ui-usage--empty { background: transparent; }
+  .ui-usage[phx-click] { position: relative; cursor: pointer; }
+  /* 3px and 2px are no target: with a fine pointer each line reaches 6px further into the page,
+     and on touch they only show — the title menu's Usage row opens the panel (UX pass, A3). */
+  @media (pointer: fine) {
+    .ui-usage[phx-click]::after { position: absolute; inset: 0 0 -6px; content: ""; }
+  }
+  @media (pointer: coarse) {
+    .ui-usage[phx-click] { pointer-events: none; }
+  }
+  .ui-usage-fill { display: block; height: 100%; background: color-mix(in oklch, var(--ink) 60%, transparent); }
+  .ui-usage--week .ui-usage-fill--quiet { background: color-mix(in oklch, var(--ink) 45%, transparent); }
+  .ui-usage-fill--warning { background: var(--warning); }
+  .ui-usage-fill--danger { background: var(--danger); }
+
+  /* navigation/QueueButton */
+  .ui-queue-btn {
+    display: flex;
+    height: 46px;
+    align-items: center;
+    padding: 0 6px 0 2px;
+    color: var(--ink);
+  }
+  .ui-queue-pill {
+    display: flex;
+    height: 34px;
+    align-items: center;
+    gap: 6px;
+    box-sizing: border-box;
+    padding: 0 10px 0 6px;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius-pill);
+    font-weight: 600;
+  }
+  .ui-queue-btn--waiting .ui-queue-pill { background: var(--accent); color: var(--on-accent); border: 0; }
+  .ui-queue-back { font-size: 18px; line-height: 1; margin-top: -2px; }
+  .ui-queue-count { font-family: var(--font-mono); font-size: 12.5px; }
+
+  /* navigation/TopBar */
+  .ui-top { position: relative; z-index: var(--z-row); display: flex; flex-shrink: 0; flex-direction: column; }
+  .ui-top-bar {
+    display: flex;
+    height: var(--bar-top);
+    box-sizing: border-box;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 2px;
+    padding: 0 4px;
+    background: var(--bg);
+  }
+  .ui-top--disconnected .ui-top-bar {
+    background: repeating-linear-gradient(135deg, var(--danger-wash) 0 8px, transparent 8px 16px), var(--bg);
+    border-top: 2px solid var(--danger);
+  }
+  .ui-top-title {
+    display: flex;
+    min-width: 0;
+    flex: 1 1 0%;
+    flex-direction: column;
+    gap: 1px;
+    padding: 0 0 0 4px;
+    border: 0;
+    background: none;
+    color: inherit;
+    text-align: left;
+    line-height: 1.3;
+  }
+  button.ui-top-title { cursor: pointer; }
+  .ui-top-name { overflow: hidden; font-size: 14px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+  .ui-top-menu { margin-left: 6px; font-size: 11px; font-weight: 400; opacity: .6; }
+  .ui-top-sub { overflow: hidden; font-family: var(--font-mono); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+  .ui-top--disconnected .ui-top-name,
+  .ui-top--disconnected .ui-top-sub { color: var(--danger); }
+  .ui-top-rule { height: 1px; background: var(--border); }
+  .ui-top-offline { display: none; }
+  .ui-offline-mark { display: inline-block; margin-right: 6px; vertical-align: -2px; }
+  .ui-top-context { display: flex; height: 46px; align-items: center; padding: 0 2px; }
+  button.ui-top-context { border: 0; background: none; color: inherit; cursor: pointer; font: inherit; }
+  /* With no queue button before it (the queue's own bar), the title starts at the content's
+     gutter, so the page has one left edge (UX pass, A19). */
+  .ui-top-bar > .ui-top-title:first-child { padding-left: 16px; }
+  /* A long project name gives way to the title and its subline, which say what the page is. */
+  .ui-top-context > span {
+    display: block;
+    overflow: hidden;
+    max-width: 32vw;
+    height: 34px;
+    box-sizing: border-box;
+    padding: 0 10px;
+    line-height: 32px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius);
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+
+  /* navigation/BottomStrip: views of the object on screen. Navigation only, never amber. */
+  .ui-strip {
+    display: flex;
+    height: var(--bar-strip);
+    box-sizing: border-box;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 4px;
+    padding: 0 8px;
+    border-top: 1px solid var(--border);
+    background: var(--surface-strip);
+  }
+  .ui-strip-tab {
+    display: flex;
+    min-width: 0;
+    flex: 1 1 auto;
+    height: var(--control-tab);
+    box-sizing: border-box;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 0 6px;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    color: var(--ink);
+    font-size: 13px;
+    white-space: nowrap;
+    opacity: .6;
+  }
+  .ui-strip-tab[aria-current] { border-color: var(--border); background: var(--bg); font-weight: 500; opacity: 1; }
+
+  /* The strip's desktop form, the view tabs in the title row. */
+  .ui-tabs { display: flex; gap: 2px; font-size: 13.5px; }
+  .ui-tab {
+    display: flex;
+    height: 32px;
+    align-items: center;
+    gap: 5px;
+    padding: 0 10px;
+    border-radius: var(--radius-sm);
+    color: var(--ink);
+    white-space: nowrap;
+    opacity: .6;
+  }
+  .ui-tab[aria-current] { background: var(--surface-2); font-weight: 500; opacity: 1; }
+  .ui-tab-zero { opacity: .45; }
+
+  /* decisions/DecisionRow: pinned under the top bar, a 2px inset edge in the button's colour. */
+  .ui-decision { position: relative; z-index: var(--z-row); flex-shrink: 0; }
+  .ui-decision-bar {
+    --edge: var(--accent);
+    display: flex;
+    height: var(--bar-decision);
+    box-sizing: border-box;
+    align-items: center;
+    gap: 12px;
+    padding: 0 10px 0 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    box-shadow: inset 2px 0 0 var(--edge), var(--shadow-row);
+  }
+  .ui-decision--neutral .ui-decision-bar { --edge: color-mix(in oklch, var(--ink) 50%, transparent); }
+  .ui-decision-text { display: flex; min-width: 0; flex: 1 1 0%; flex-direction: column; gap: 2px; line-height: 1.3; }
+  .ui-decision-title,
+  .ui-decision-meta { overflow: hidden; font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+  .ui-decision-title { font-size: 14px; font-weight: 500; }
+  .ui-decision-meta { font-size: 11px; opacity: .65; }
+
+  /* The confirm (ui.md § The confirm): the trigger at the row's end, and under it, opened in
+     place, the sentence and *Keep it* · *<Verb> it*. Danger on the red wash with a red edge. */
+  /* A list row's acts (UX re-check #13): one slot, right-aligned, the destructive act last — on a
+     footer line on a phone and on the row's first line from 768px, where the row lays it out. An
+     inline confirm's panel opens across the slot under its buttons (`.ui-confirm--inline`). */
+  .ui-row-acts { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+  .ui-confirm { display: flex; min-width: 0; flex-direction: column; align-items: flex-end; gap: 8px; }
+  .ui-confirm--fill { align-items: stretch; }
+  /* Among a row of buttons (an account's): the trigger keeps its place in the row and the panel
+     opens on a line of its own under it; the row wraps. */
+  .ui-confirm--inline { display: contents; }
+  .ui-confirm--inline > .ui-confirm-panel { flex: 1 0 100%; order: 99; }
+  .ui-confirm-panel {
+    display: flex;
+    align-self: stretch;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 14px 12px 16px;
+    border-radius: 0 var(--radius) var(--radius) 0;
+    background: var(--danger-wash);
+    box-shadow: inset 2px 0 0 var(--danger);
+    text-align: left;
+    white-space: normal;
+  }
+  .ui-confirm--neutral .ui-confirm-panel { background: var(--surface-1); box-shadow: inset 2px 0 0 var(--ink-3); }
+  .ui-confirm-sentence { margin: 0; font-size: 13.5px; line-height: 1.5; overflow-wrap: anywhere; }
+  .ui-confirm-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+  /* A list's × at rest is ink-3, and only its pressed or hovered state is red (UX pass, D4). */
+  .ui-confirm-quiet { min-width: var(--target-min); color: var(--ink-3); font-size: 16px; }
+  .ui-confirm-quiet:active { color: var(--danger); }
+  @media (hover: hover) { .ui-confirm-quiet:not(:disabled):hover { color: var(--danger); } }
+
+  /* decisions/DropPanel: drops from the bar it belongs to, over a scrim; nothing below moves. */
+  .ui-drop-scrim { position: absolute; top: 100%; right: 0; left: 0; height: 2000px; background: var(--overlay-soft); }
+  .ui-drop {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    left: 0;
+    z-index: var(--z-panel);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px var(--gutter-phone);
+    border-bottom: 1px solid var(--border);
+    border-radius: 0 0 var(--radius-panel) var(--radius-panel);
+    background: var(--surface-1);
+    box-shadow: var(--shadow-panel);
+  }
+  /* A state, an outcome or a document's name sits in these sentences: it wraps rather than widens
+     the panel. */
+  .ui-drop-head { display: flex; flex-direction: column; gap: 3px; overflow-wrap: anywhere; }
+  .ui-drop-title { font-size: 16px; font-weight: 600; line-height: 1.3; }
+  .ui-drop-body { font-size: 13px; line-height: 1.5; opacity: .7; }
+  .ui-drop-actions { display: flex; gap: 8px; }
+
+  /* forms/Field: label above, hint or error below, the error in the server's words. */
+  .ui-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+  .ui-field-label { font-size: 13px; opacity: .7; }
+  .ui-field-input {
+    width: 100%;
+    min-height: 48px;
+    box-sizing: border-box;
+    padding: 0 12px;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    outline: none;
+    resize: vertical;
+  }
+  .ui-field-input::placeholder { color: var(--ink-4); }
+  /* A select draws no native arrow and no browser colour: a small caret in --ink-3, drawn from two
+     gradients so it follows the theme. */
+  select.ui-field-input:not([multiple]),
+  .chat-start-project select,
+  .machine-select {
+    appearance: none;
+    padding-right: 32px;
+    background-image:
+      linear-gradient(45deg, transparent 50%, var(--ink-3) 50%),
+      linear-gradient(135deg, var(--ink-3) 50%, transparent 50%);
+    background-position: calc(100% - 17px) 50%, calc(100% - 12px) 50%;
+    background-size: 5px 5px;
+    background-repeat: no-repeat;
+  }
+  select.ui-field-input option { background: var(--surface-1); color: var(--ink); }
+  textarea.ui-field-input { padding: 12px; }
+  .ui-field-input[aria-invalid="true"] { border-color: var(--danger); }
+  .ui-field--mono .ui-field-input { font-family: var(--font-mono); }
+  .ui-field--desk .ui-field-label { font-size: 12.5px; }
+  .ui-field--desk .ui-field-input { min-height: 34px; padding: 0 10px; border-radius: var(--radius-sm); font-size: 13px; }
+  .ui-field--desk textarea.ui-field-input { padding: 12px; }
+  .ui-field-hint { font-size: 12.5px; line-height: 1.45; opacity: .6; }
+  .ui-field-error { font-size: 13px; color: var(--danger); }
+
+  /* forms/Segmented: 2–4 equal options, never wraps. */
+  .ui-seg {
+    display: flex;
+    height: 44px;
+    box-sizing: border-box;
+    gap: 3px;
+    padding: 3px;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius);
+    font-size: 13px;
+  }
+  .ui-seg--md { height: 40px; font-size: 12.5px; }
+  .ui-seg--sm { height: 32px; font-size: 12.5px; }
+  .ui-seg--xs { height: 28px; font-size: 12.5px; }
+  .ui-seg-opt {
+    display: flex;
+    flex: 1 1 0%;
+    align-items: center;
+    justify-content: center;
+    padding: 0 10px;
+    border: 0;
+    border-radius: var(--radius-xs);
+    background: transparent;
+    color: var(--ink-2);
+    font: inherit;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  /* Selected is told apart by more than its weight: a raised fill and a ring (ui.md § Components). */
+  .ui-seg-opt[aria-checked="true"],
+  .ui-seg-opt:has(input:checked) { background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--ink-4); color: var(--ink); font-weight: 500; }
+  .ui-seg-opt:has(input:focus-visible) { outline: 2px solid var(--link); outline-offset: 1px; }
+  /* The same switch as links, where each option is an address (Changes' sub-views, the
+     repository's Commits · Files): the one on screen is `aria-current="page"`. */
+  a.ui-seg-opt { gap: 6px; text-decoration: none; }
+  /* A count is the grey bubble beside its label, never run into it (UX pass, C9). */
+  .ui-seg-opt > .ui-count { margin-left: 6px; }
+  .ui-seg-opt[aria-current="page"] { background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--ink-4); color: var(--ink); font-weight: 500; }
+
+  /* forms/ChoiceRow: a radio, or a checkbox with `multi`, as a full-width row. It selects; it
+     never commits. Drawn from the input's own :checked, so it answers before the server does. */
+  .ui-choice {
+    display: flex;
+    width: 100%;
+    min-height: 46px;
+    box-sizing: border-box;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 14px;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--ink);
+    font-family: var(--font-sans);
+    text-align: left;
+    cursor: pointer;
+  }
+  .ui-choice--detail { min-height: 52px; }
+  .ui-choice:has(input:checked) { border-color: var(--link); background: var(--surface-2); }
+  .ui-choice:has(input:focus-visible) { outline: 2px solid var(--link); outline-offset: 2px; }
+  .ui-choice:has(input:disabled) { opacity: .45; cursor: default; }
+  .ui-choice-mark {
+    display: flex;
+    width: 16px;
+    height: 16px;
+    box-sizing: border-box;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-pill);
+  }
+  .ui-choice:has(input:checked) .ui-choice-mark { border: 5px solid var(--link); }
+  .ui-choice--multi .ui-choice-mark { border: 1.5px solid var(--border-strong); border-radius: var(--radius-xs); color: var(--bg); font-size: 11px; font-weight: 700; }
+  .ui-choice--multi:has(input:checked) .ui-choice-mark { border: 0; background: var(--link); }
+  .ui-choice--multi:has(input:checked) .ui-choice-mark::after { content: "✓"; }
+  .ui-choice-text { display: flex; flex: 1 1 0%; flex-direction: column; gap: 2px; }
+  .ui-choice-label { font-size: 14px; font-weight: 500; line-height: 1.3; }
+  .ui-choice-detail { font-size: 12.5px; line-height: 1.45; opacity: .65; }
+  .ui-choice--desk { min-height: 32px; gap: 10px; padding: 0 10px; border-radius: var(--radius-sm); }
+  .ui-choice--desk .ui-choice-label { font-size: 13px; }
+  .ui-choice--desk:not(.ui-choice--multi) .ui-choice-mark { width: 12px; height: 12px; }
+  .ui-choice--desk:not(.ui-choice--multi):has(input:checked) .ui-choice-mark { border-width: 4px; }
+  /* `recommended`, `optional`: identifiers, so plain mono — a border would say "tap me". */
+  .ui-badge {
+    color: var(--ink-3);
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+
+  /* forms/Stepper: a small integer. */
+  .ui-stepper {
+    display: inline-flex;
+    height: 44px;
+    box-sizing: border-box;
+    align-items: center;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius);
+  }
+  .ui-stepper-btn { width: 44px; height: 100%; border: 0; background: none; color: var(--ink); font-size: 18px; opacity: .7; cursor: pointer; }
+  .ui-stepper-value {
+    width: 40px;
+    border: 0;
+    background: none;
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 14px;
+    text-align: center;
+    outline: none;
+    appearance: textfield;
+    -moz-appearance: textfield;
+  }
+  .ui-stepper-value::-webkit-inner-spin-button,
+  .ui-stepper-value::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  .ui-stepper--desk { height: 32px; border-radius: var(--radius-sm); }
+  .ui-stepper--desk .ui-stepper-btn { width: 30px; font-size: 14px; }
+  .ui-stepper--desk .ui-stepper-value { width: 30px; font-size: 13px; }
+
+  /* forms/Composer: 64px; send is an icon inside the field, never a filled button. */
+  .ui-composer {
+    display: flex;
+    min-height: var(--bar-composer);
+    box-sizing: border-box;
+    flex-shrink: 0;
+    align-items: center;
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+  }
+  .ui-composer-field {
+    display: flex;
+    min-height: 48px;
+    box-sizing: border-box;
+    flex: 1 1 0%;
+    align-items: flex-end;
+    gap: 8px;
+    padding: 3px 4px 3px 16px;
+    border: 1px solid var(--border-control);
+    border-radius: 24px;
+  }
+  .ui-composer-input {
+    min-width: 0;
+    flex: 1 1 0%;
+    align-self: center;
+    padding: 8px 0;
+    border: 0;
+    background: none;
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.6;
+    outline: none;
+    resize: none;
+  }
+  .ui-composer-input::placeholder { color: var(--ink-4); }
+  .ui-composer-send {
+    display: flex;
+    width: 40px;
+    height: 40px;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius-pill);
+    background: none;
+    color: var(--ink);
+    opacity: .7;
+    cursor: pointer;
+  }
+  .ui-composer-send--words { width: auto; padding: 0 12px; border-radius: 20px; font-size: 12.5px; opacity: 1; }
+  .ui-composer-send:disabled { opacity: .45; cursor: default; }
+
+  /* data/ContextCard. Borderless on --surface-1 when it only says; with `navigate` it is the
+     ticket's link, and then it wears the control border and a trailing ›. */
+  .ui-context {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px;
+    border-radius: var(--radius-card);
+    background: var(--surface-card);
+  }
+  .ui-context--link { border: 1px solid var(--border-control); color: inherit; }
+  .ui-context-go { align-self: center; color: var(--ink-3); }
+  @media (hover: hover) { .ui-context--link:hover { background: var(--surface-2); } }
+  .ui-context-head { display: flex; align-items: baseline; gap: 8px; }
+  .ui-context-id { font-family: var(--font-mono); font-size: 12px; opacity: .6; }
+  .ui-context-title { overflow: hidden; min-width: 0; flex: 1 1 0%; font-size: 15px; font-weight: 600; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+  /* A ticket's type is an identifier: plain mono, no box (ui.md § The affordance rule). */
+  .ui-type-badge { color: var(--ink-3); font-family: var(--font-mono); font-size: 11px; }
+  .ui-context-facts { display: flex; flex-wrap: wrap; gap: 4px 14px; font-family: var(--font-mono); font-size: 11.5px; opacity: .7; }
+
+  /* data/ListRow: every row says what happened last, in words. */
+  .ui-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 13px 12px 13px 10px;
+    border-bottom: 1px solid var(--border-soft);
+    color: var(--ink);
+  }
+  a.ui-row { cursor: pointer; }
+  .ui-row--accent { box-shadow: inset 2px 0 0 var(--accent); }
+  .ui-row--selected { background: var(--surface-selected); }
+  .ui-row-body { display: flex; min-width: 0; flex: 1 1 0%; flex-direction: column; gap: 4px; }
+  .ui-row-kicker { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; opacity: .7; }
+  .ui-row-kicker--aged { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .ui-row-kicker-text { overflow: hidden; min-width: 0; text-overflow: ellipsis; white-space: nowrap; }
+  .ui-row-age { flex-shrink: 0; letter-spacing: 0; text-transform: none; }
+  .ui-row-title { overflow: hidden; font-size: 14.5px; font-weight: 500; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+  .ui-row-meta { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 11.5px; }
+  .ui-row-latest { overflow: hidden; font-size: 13px; line-height: 1.45; opacity: .65; text-overflow: ellipsis; white-space: nowrap; }
+  .ui-row-latest--warning { color: var(--warning); opacity: 1; }
+  /* Stuck waits on you, so its line is amber, with no △: amber is the wait (UX re-check #4). */
+  .ui-row-latest--accent { color: var(--accent-text); opacity: 1; }
+  /* Every warning-coloured word leads with △ in its colour, so it is never told from amber by hue
+     alone (ui.md § Colour) — at 12px mono in the dark theme the two are close. One list, so a
+     new warning class is added here rather than drawn without it. A figure on a gauge (a usage
+     percentage, the header's digits) is a scale, not a sentence, and carries none. */
+  .ui-row-latest--warning::before,
+  .text-warning::before,
+  .settings-warning::before,
+  .usage-pace--full::before,
+  .job-memory::before,
+  .queue-attempt-outcome::before,
+  .credential-build-standing--warning::before,
+  .ui-choice:has(#token-git-admin) .ui-choice-detail::before,
+  .ui-notice--warning .ui-notice-title::before { content: "△"; margin-right: .35em; }
+  .ui-row-latest--danger { color: var(--danger); opacity: 1; }
+  .ui-row-chevron { align-self: center; opacity: .4; }
+
+  /* data/WorkflowTrack: done 50 % ink, current full ink — amber only on a ticket that waits on a
+     person (`--waiting`) — next 30 %, the rest 12 %. Labels from 768px in the content column only. */
+  .ui-track { display: flex; font-family: var(--font-mono); font-size: 10.5px; }
+  .ui-track-step { display: flex; min-width: 0; flex: 1 1 0%; flex-direction: column; gap: 5px; }
+  .ui-track-bar { height: 3px; margin-right: 2px; border-radius: 1px; background: color-mix(in oklch, var(--ink) 12%, transparent); }
+  /* The label stops where its bar does, and short of the next: names never run together. */
+  .ui-track-label { overflow: hidden; margin-right: 6px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; opacity: .4; }
+  .ui-track-step--done .ui-track-bar { background: color-mix(in oklch, var(--ink) 50%, transparent); }
+  .ui-track-step--current .ui-track-bar { background: var(--ink); }
+  .ui-track-step--current .ui-track-label { opacity: 1; }
+  .ui-track--waiting .ui-track-step--current .ui-track-bar { background: var(--accent); }
+  .ui-track--waiting .ui-track-step--current .ui-track-label { color: var(--accent-text); }
+  .ui-track-label { display: none; }
+  @media (min-width: 768px) {
+    .ui-track-label { display: block; }
+    .frame-aside .ui-track-label { display: none; }
+  }
+  .ui-track-step--next .ui-track-bar { background: color-mix(in oklch, var(--ink) 30%, transparent); }
+  .ui-track-step--next .ui-track-label { opacity: .75; }
+  .ui-track--compact { display: inline-flex; gap: 2px; }
+  .ui-track--compact .ui-track-tick { width: 8px; height: 3px; border-radius: 1px; background: color-mix(in oklch, var(--ink) 14%, transparent); }
+  .ui-track--compact .ui-track-tick--done { background: color-mix(in oklch, var(--ink) 50%, transparent); }
+  .ui-track--compact .ui-track-tick--current { background: var(--ink); }
+  .ui-track--compact.ui-track--waiting .ui-track-tick--current { background: var(--accent); }
+
+  /* data/StateLabel: the mark carries the state; the word is mono. */
+  .ui-state { font-family: var(--font-mono); font-size: 11.5px; white-space: nowrap; }
+  .ui-status { color: var(--ink-3); font-family: var(--font-mono); font-size: 11.5px; white-space: nowrap; }
+  .ui-status--stuck { color: var(--accent-text); }
+  .ui-state--running .ui-state-mark { color: var(--info); }
+  .ui-state--waiting .ui-state-mark { color: var(--accent-text); }
+  .ui-state--step .ui-state-mark { color: var(--link); }
+  .ui-state--stuck .ui-state-mark { color: var(--accent-text); }
+  .ui-state--idle .ui-state-mark { color: var(--ink-3); }
+
+  /* data/DiffStat */
+  .ui-diffstat { display: inline-flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 12.5px; }
+  .ui-diffstat-add { color: var(--success); }
+  .ui-diffstat-del { color: var(--danger); }
+  .ui-diffstat-bar { display: flex; width: 80px; height: 6px; overflow: hidden; border-radius: var(--radius-pill); background: var(--border); }
+  .ui-diffstat-bar > .ui-diffstat-add { background: var(--success); }
+  .ui-diffstat-bar > .ui-diffstat-del { background: var(--danger); }
+  .ui-diffstat-files { opacity: .55; }
+
+  /* data/TypeIcon: a 26px tile in the kind's hue at 16 %. */
+  .ui-kind {
+    --kind: var(--doc);
+    display: inline-flex;
+    width: 26px;
+    height: 26px;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius);
+    background: color-mix(in oklch, var(--kind) 16%, transparent);
+    color: var(--kind);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1;
+  }
+  .ui-kind--word { font-size: 9.5px; }
+  .ui-kind--changeset, .ui-kind--release { --kind: var(--success); }
+  .ui-kind--branch { --kind: var(--info); }
+
+  /* data/CountBubble: grey, amber only for what waits on the reader. */
+  .ui-count {
+    display: inline-block;
+    min-width: 18px;
+    height: 18px;
+    box-sizing: border-box;
+    padding: 0 5px;
+    border-radius: var(--radius-pill);
+    background: var(--chip);
+    color: var(--ink);
+    /* Sans with tabular figures: JetBrains Mono's dotted zero read as an 8 at this size (B26). */
+    font-family: var(--font-sans);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 500;
+    line-height: 18px;
+    text-align: center;
+  }
+  .ui-count--accent { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+  .ui-count--muted { opacity: .45; }
+
+  /* data/Eyebrow */
+  .ui-eyebrow { font-family: var(--font-mono); font-size: var(--text-eyebrow); letter-spacing: var(--tracking-eyebrow); text-transform: uppercase; opacity: .55; }
+  .ui-eyebrow--accent { color: var(--accent-text); opacity: 1; }
+  .ui-eyebrow--success { color: var(--success); opacity: 1; }
+  /* An identifier inside an eyebrow is drawn as the system named it — a branch `Fix/HUD`, a sha —
+     never upper-cased (ui.md § Type; UX pass, C11). */
+  .ui-eyebrow .ui-id { letter-spacing: normal; text-transform: none; }
+
+  /* data/FactList */
+  .ui-facts { display: flex; flex-direction: column; margin: 0; }
+  .ui-fact {
+    display: flex;
+    min-height: 30px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border-bottom: 1px solid var(--border-soft);
+    font-size: 13px;
+  }
+  .ui-fact-key { opacity: .55; }
+  .ui-fact-value { min-width: 0; margin: 0; overflow: hidden; font-family: var(--font-mono); font-size: 12.5px; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+  .ui-facts--dense .ui-fact { min-height: 26px; font-size: 12px; }
+  .ui-facts--dense .ui-fact-value { font-size: 11.5px; }
+  .ui-fact-value--danger { color: var(--danger); }
+
+  /* WorkScreen.commit_message: the subject, a blank line, the body — as git keeps it. */
+  .commit-message { display: flex; flex-direction: column; gap: 10px; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55; }
+  .commit-message-subject { margin: 0; font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+  .commit-message-body { margin: 0; color: var(--ink-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+  /* A part of a copyable value between its break points (`Operator.Components.breakable/1`): moved
+     to the next line whole rather than broken after a hyphen, and wrapped inside itself only when
+     it is longer than the line, as a token is. */
+  .ui-unbroken { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
+
+  /* feedback/Notice: stays where it is, inside what it concerns. Attention is a 2px inset left
+     edge on its wash, never a coloured border on a rounded card (ui.md § Space). */
+  .ui-notice {
+    --edge: var(--accent);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 12px 14px 12px 16px;
+    border-radius: 0 var(--radius) var(--radius) 0;
+    background: var(--accent-wash);
+    box-shadow: inset 2px 0 0 var(--edge);
+  }
+  .ui-notice--danger { --edge: var(--danger); background: var(--danger-wash); }
+  .ui-notice--neutral { --edge: var(--ink-3); background: var(--surface-1); }
+  .ui-notice--warning { --edge: var(--warning); background: var(--surface-2); }
+  .ui-notice-head { display: flex; align-items: center; gap: 8px; }
+  .ui-notice-diamond { width: 8px; height: 8px; flex-shrink: 0; background: var(--accent); transform: rotate(45deg); }
+  .ui-notice-title { font-size: 14px; font-weight: 500; line-height: 1.3; color: var(--accent-text); }
+  .ui-notice--danger .ui-notice-title { color: var(--danger); }
+  .ui-notice--neutral .ui-notice-title { color: var(--ink); }
+  .ui-notice--warning .ui-notice-title { color: var(--warning); }
+  /* Operator.Components.shown_once: a secret shown the one time it can be. */
+  .shown-once { display: flex; flex-direction: column; gap: 14px; }
+  .shown-once-copies { display: flex; flex-direction: column; gap: 14px; }
+  .shown-once-note { font-size: var(--text-small); line-height: 1.55; color: var(--ink-2); }
+  .ui-error-note { margin: 0; min-width: 0; font-size: 13.5px; line-height: 1.5; color: var(--danger); overflow-wrap: anywhere; }
+  .ui-notice-body { font-size: 13px; line-height: 1.5; opacity: .85; }
+
+  /* feedback/Toast: floats above the strip, cannot be tapped, has no buttons. Always dark. */
+  .ui-toast {
+    position: fixed;
+    left: 50%;
+    z-index: var(--z-toast);
+    display: flex;
+    width: 372px;
+    max-width: calc(100% - 40px);
+    box-sizing: border-box;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 18px 12px 14px;
+    border-radius: var(--radius-pill);
+    background: var(--toast-bg);
+    color: var(--toast-ink);
+    box-shadow: var(--shadow-toast);
+    pointer-events: none;
+    transform: translateX(-50%);
+  }
+  .ui-toast-mark {
+    --mark: var(--toast-success);
+    display: flex;
+    width: 22px;
+    height: 22px;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-pill);
+    background: var(--mark);
+    color: var(--toast-bg);
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .ui-toast-text { display: flex; min-width: 0; flex-direction: column; gap: 1px; line-height: 1.35; }
+  .ui-toast-title { font-size: 13.5px; font-weight: 500; }
+  .ui-toast-detail { font-family: var(--font-mono); font-size: 11px; opacity: .7; }
+  /* It comes in over 160ms and goes over its last 200ms (`Layouts.toasts/1`'s hook); neither
+     moves anything else. */
+  .ui-toast { animation: ui-toast-in 160ms ease-out; transition: opacity 200ms ease-in; }
+  .toast--leaving .ui-toast { opacity: 0; }
+  @keyframes ui-toast-in { from { opacity: 0; } }
+
+  /* feedback/Sheet: from the bottom, only for what was opened from the bottom. */
+  .ui-sheet {
+    position: relative;
+    z-index: 10;
+    display: flex;
+    max-height: 85dvh;
+    width: 100%;
+    box-sizing: border-box;
+    flex-direction: column;
+    gap: 12px;
+    overflow-y: auto;
+    padding: 8px 20px calc(16px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    border-radius: var(--radius-panel) var(--radius-panel) 0 0;
+    background: var(--bg);
+    box-shadow: var(--shadow-panel);
+  }
+  .ui-sheet:focus { outline: none; }
+  .ui-sheet-handle { width: 40px; height: 4px; flex-shrink: 0; margin: 0 auto 2px; border-radius: var(--radius-pill); background: var(--border); }
+  .ui-sheet-title { font-size: 16px; font-weight: 600; line-height: 1.3; }
+
+  /* A link that stands alone in a line of text is still a phone target of 44px (ui.md § Space,
+     sizes and targets): it grows to the height, its text where it was (UX pass, A8). */
+  @media (max-width: 767.98px) {
+    .queue-link,
+    .project-link,
+    .usage-panel-details,
+    .signin-back,
+    .signin-other {
+      display: inline-flex;
+      min-height: var(--target-min);
+      align-items: center;
+    }
+  }
+
+  /* The question card (docs/design/ui.md § The question card): a tab per question, the shown one,
+     and the foot with what is left and Send. Only the body scrolls, so the tabs and Send stay. */
+  .qcard { display: flex; min-height: 0; flex-direction: column; }
+  .qcard-tabs { display: flex; gap: 6px; overflow-x: auto; padding: 0 0 10px; }
+  .qcard-tab {
+    display: inline-flex;
+    height: var(--control-tab);
+    flex-shrink: 0;
+    align-items: center;
+    gap: 6px;
+    padding: 0 10px;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius-pill);
+    background: none;
+    color: var(--ink-2);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+  .qcard-tab--on { border-color: var(--ink); color: var(--ink); }
+  .qcard-body { min-height: 0; max-height: var(--split-limit, 45dvh); overflow-y: auto; overscroll-behavior: contain; }
+  .qcard-question { display: flex; flex-direction: column; gap: 10px; padding-bottom: 4px; }
+  .qcard-position { font-family: var(--font-mono); font-size: 11px; opacity: .6; }
+  .qcard-anchor { padding: 4px 0 4px 10px; border-left: 2px solid var(--border-strong); background: var(--surface-2); font-size: 13.5px; line-height: 1.5; opacity: .85; }
+  .qcard-text { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 15px; font-weight: 500; line-height: 1.35; }
+  .qcard-assumed { font-size: 12.5px; line-height: 1.5; opacity: .7; }
+  .qcard-options { display: flex; flex-direction: column; gap: 6px; }
+  .qcard-clear { display: flex; min-height: var(--target-min); align-items: center; align-self: flex-start; color: var(--link); cursor: pointer; font-size: 13px; }
+  .qcard-foot { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; }
+  .qcard-left { font-size: 13px; opacity: .7; }
+  .qcard-dock { display: flex; gap: 8px; }
+
+  /* The split pane it sits in: a 16px handle above the card; tapping it folds the card to its tabs
+     and Send, dragging it sets the card's limit (`--split-limit`, kept per device). */
+  .qpane { display: flex; flex-direction: column; padding-bottom: 10px; border-top: 1px solid var(--border); background: var(--bg); }
+  .qpane-handle { display: flex; height: 16px; flex-shrink: 0; align-items: center; justify-content: center; border: 0; background: none; cursor: ns-resize; touch-action: none; }
+  .qpane-handle > span { width: 36px; height: 4px; border-radius: 2px; background: var(--border-strong); }
+  .qpane[data-folded] .qcard-body,
+  .qpane[data-folded] .qcard-left { display: none; }
+}

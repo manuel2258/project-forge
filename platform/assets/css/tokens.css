@@ -1,0 +1,289 @@
+/* The design tokens: docs/design/ui/design_system/tokens/*.css, near verbatim (docs/design/ui.md
+   § Tokens). Dark on :root, light under [data-theme="light"], every colour in OKLCH. A colour is
+   never hard-coded in a template: it is one of these, through the @theme map at the end. */
+
+/* Self-hosted faces. Instrument Sans for language, JetBrains Mono for identifiers. Both are OFL
+   variable fonts, latin subset, served from priv/static/fonts so the product builds and runs
+   without egress. No webfont CDN, ever. */
+@font-face {
+  font-family: "Instrument Sans";
+  src: url("/fonts/instrument-sans-var.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/jetbrains-mono-var.woff2") format("woff2");
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Colour carries meaning, never decoration (ui.md § Colour). */
+:root {
+  color-scheme: dark;
+
+  /* neutrals */
+  --bg: oklch(15.5% 0.008 300);
+  --surface-1: oklch(17.5% 0.008 300);
+  --surface-2: oklch(19.5% 0.009 300);
+  --surface-3: oklch(22% 0.010 300);
+  --border: oklch(24.5% 0.008 300);
+  --border-soft: oklch(24.5% 0.008 300 / .6);
+  --border-strong: oklch(40% 0.010 300);
+  /* What can be tapped (ui.md § Colour): --border is for rules between rows, ~1.2:1 on --bg and
+     invisible as a control's only edge. Read through --border-strong, so it follows the theme. */
+  --border-control: var(--border-strong);
+  --chip: oklch(30% 0.012 300);
+  --ink: oklch(94% 0.004 300);
+  --ink-2: oklch(94% 0.004 300 / .75);
+  --ink-3: oklch(94% 0.004 300 / .55);
+  --ink-4: oklch(94% 0.004 300 / .40);
+  --track: oklch(94% 0.004 300 / .10);
+
+  /* meaning */
+  --accent: oklch(76% 0.130 62);          /* waits on you */
+  --on-accent: oklch(18% 0.040 62);
+  --accent-text: oklch(76% 0.130 62);
+  --accent-wash: oklch(76% 0.130 62 / .08);
+  --accent-line: oklch(76% 0.130 62 / .5);
+  --accent-highlight: oklch(24% 0.035 62);
+  --info: oklch(72% 0.100 240);           /* running, agent actions */
+  --success: oklch(72% 0.120 150);        /* passed, added, connected */
+  --warning: oklch(89% 0.130 100);        /* outdated, expiring, near a limit: yellow, never amber */
+  --danger: oklch(72% 0.170 22);          /* failed, removed, destructive */
+  --danger-line: oklch(72% 0.170 22 / .5);
+  --danger-wash: oklch(72% 0.170 22 / .06);
+  --link: oklch(72% 0.130 290);           /* links, selected options */
+  --doc: oklch(74% 0.100 210);            /* document icons */
+
+  /* File types (ui.md § Artifact types): an artifact's tile, and nothing else. At least 25°
+     from every hue above, and none more saturated than the accent. Markdown is --doc. */
+  --file-markdown: var(--doc);
+  --file-code: oklch(74% 0.100 175);
+  --file-image: oklch(74% 0.120 340);
+  --file-archive: oklch(78% 0.090 315);
+  --file-apk: oklch(78% 0.120 125);
+  --file-plain: oklch(78% 0.010 300);
+
+  /* diff */
+  --diff-add: oklch(72% 0.120 150 / .16);
+  --diff-del: oklch(72% 0.170 22 / .16);
+
+  /* overlays */
+  --overlay: oklch(8% 0.005 300 / .7);
+  --overlay-soft: oklch(8% 0.005 300 / .6);
+  --toast-bg: oklch(26% 0.012 300);
+  --toast-ink: oklch(96% 0.004 300);
+  /* The toast's marks are the dark theme's meanings in both themes, because the toast stays dark
+     (feedback/Toast draws them as literals); [data-theme="light"] leaves these alone. */
+  --toast-success: oklch(72% 0.120 150);
+  --toast-danger: oklch(72% 0.170 22);
+  --toast-info: oklch(72% 0.100 240);
+
+  /* syntax (chroma <= .08 so code never reads as status) */
+  --syntax-keyword: oklch(76% 0.08 320);
+  --syntax-module: oklch(84% 0.05 200);
+  --syntax-function: oklch(88% 0.04 260);
+  --syntax-string: oklch(82% 0.06 110);
+  --syntax-atom: oklch(80% 0.06 175);
+  --syntax-number: oklch(78% 0.07 345);
+  --syntax-comment: oklch(94% 0.004 300 / .45);
+
+  /* semantic aliases. The handoff's `--text-body: var(--ink)` is left out: typography's
+     `--text-body` (14.5px, the @theme below) has the same name and wins in the handoff too. */
+  --surface-page: var(--bg);
+  --surface-card: var(--surface-1);
+  --surface-selected: var(--surface-2);
+  --surface-strip: var(--surface-2);
+  --text-muted: var(--ink-3);
+  --rule: var(--border);
+}
+
+/* Not the dark theme inverted: cool neutrals around hue 245–255, and a light-specific value for
+   every accent (ui.md § Colour → The light theme). The toast stays dark. */
+[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: oklch(99.2% 0.004 240);
+  --surface-1: oklch(97.5% 0.005 245);
+  --surface-2: oklch(95% 0.007 245);
+  --surface-3: oklch(92% 0.009 248);
+  --border: oklch(89% 0.012 250);
+  --border-soft: oklch(89% 0.012 250 / .8);
+  --border-strong: oklch(75% 0.012 250);
+  --chip: oklch(90% 0.010 250);
+  --ink: oklch(22% 0.025 255);
+  --ink-2: oklch(22% 0.025 255 / .75);
+  --ink-3: oklch(22% 0.025 255 / .58);
+  --ink-4: oklch(22% 0.025 255 / .42);
+  --track: oklch(22% 0.025 255 / .10);
+  --accent: oklch(80% 0.155 72);
+  --on-accent: oklch(24% 0.060 60);
+  --accent-text: oklch(56% 0.160 52);
+  --accent-wash: oklch(80% 0.155 72 / .14);
+  --accent-line: oklch(70% 0.155 62 / .6);
+  --accent-highlight: oklch(93% 0.060 80);
+  --info: oklch(52% 0.150 248);
+  --success: oklch(52% 0.140 162);
+  --warning: oklch(52% 0.110 100);
+  --danger: oklch(55% 0.200 25);
+  --danger-line: oklch(55% 0.200 25 / .45);
+  --danger-wash: oklch(55% 0.200 25 / .06);
+  --link: oklch(50% 0.190 278);
+  --doc: oklch(50% 0.100 215);
+  --file-code: oklch(48% 0.090 175);
+  --file-image: oklch(50% 0.120 340);
+  --file-archive: oklch(50% 0.080 315);
+  --file-apk: oklch(52% 0.120 125);
+  --file-plain: oklch(45% 0.012 300);
+  --diff-add: oklch(60% 0.130 162 / .12);
+  --diff-del: oklch(60% 0.190 25 / .10);
+  --overlay: oklch(30% 0.020 255 / .35);
+  --overlay-soft: oklch(30% 0.020 255 / .25);
+  --toast-bg: oklch(23% 0.020 255);
+  --toast-ink: oklch(97% 0.004 250);
+  --syntax-keyword: oklch(45% 0.10 320);
+  --syntax-module: oklch(45% 0.07 200);
+  --syntax-function: oklch(40% 0.06 260);
+  --syntax-string: oklch(45% 0.09 110);
+  --syntax-atom: oklch(45% 0.08 175);
+  --syntax-number: oklch(45% 0.10 345);
+  --syntax-comment: oklch(22% 0.025 255 / .45);
+}
+
+/* Elevation: shadows only on what floats or pins (ui.md § Space, sizes and targets). */
+:root {
+  --shadow-row: 0 8px 14px -10px oklch(6% 0.005 300 / .9);   /* decision row, pinned to the bar */
+  --shadow-panel: 0 16px 30px oklch(6% 0.005 300 / .8);      /* drop panels, sheets */
+  --shadow-toast: 0 10px 30px oklch(6% 0.005 300 / .6);
+  --z-row: 3; --z-panel: 4; --z-toast: 5;
+  --dur-fast: 120ms; --dur: 180ms; --dur-panel: 220ms;
+  --ease-out: cubic-bezier(.2, .7, .2, 1);
+  --toast-life: 4s;
+  --moved-guard: 500ms; /* a button that moved ignores taps this long */
+}
+[data-theme="light"] {
+  --shadow-row: 0 8px 14px -10px oklch(40% 0.02 255 / .25);
+  --shadow-panel: 0 16px 30px oklch(40% 0.02 255 / .18);
+  --shadow-toast: 0 10px 30px oklch(30% 0.02 255 / .35);
+}
+
+/* Frame, controls and spacing, in px as the handoff draws them. */
+:root {
+  /* frame (phone) */
+  --bar-top: 52px;          /* top bar */
+  --bar-decision: 60px;     /* decision row pinned under the top bar */
+  --bar-strip: 56px;        /* bottom strip of views */
+  --bar-composer: 64px;     /* reply composer */
+  --usage-5h: 3px;          /* usage line above the top bar */
+  --usage-week: 2px;        /* usage line below the top bar */
+  /* frame (desktop) */
+  --bar-header-desk: 56px;
+  --bar-decision-desk: 56px;
+  --column-list: 360px;
+  --column-context: 400px;
+  --measure: 680px;
+  --measure-wide: 820px;
+
+  /* hit targets and controls */
+  --target-min: 44px;
+  --control-xl: 52px;       /* primary action, choice rows */
+  --control-lg: 48px;       /* fields, secondary actions */
+  --control-md: 42px;       /* decision-row button */
+  --control-tab: 40px;      /* strip tabs */
+  --control-sm: 36px;       /* row actions, copy */
+  --control-desk: 34px;     /* desktop buttons and fields */
+
+  /* spacing */
+  --space-1: 2px; --space-2: 4px; --space-3: 6px; --space-4: 8px; --space-5: 10px;
+  --space-6: 12px; --space-7: 14px; --space-8: 16px; --space-9: 20px; --space-10: 24px;
+  --space-11: 30px; --space-12: 40px;
+  --gutter-phone: 20px;
+  --gutter-desk: 30px;
+
+  /* radii (also in the @theme below, as `rounded-*`) */
+  --radius: 6px;      /* buttons, fields, rows */
+
+  /* type */
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+}
+
+/* The tokens as Tailwind utilities: `bg-surface-2`, `text-ink-3`, `border-border`,
+   `text-danger`, `rounded-card`, `text-meta`, `tracking-eyebrow`, `wide:`. `inline`, so a
+   utility reads the token where it is used and follows [data-theme] wherever that is set. */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border: var(--border);
+  --color-border-soft: var(--border-soft);
+  --color-border-strong: var(--border-strong);
+  --color-border-control: var(--border-control);
+  --color-chip: var(--chip);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-ink-4: var(--ink-4);
+  --color-track: var(--track);
+  --color-accent: var(--accent);
+  --color-on-accent: var(--on-accent);
+  --color-accent-text: var(--accent-text);
+  --color-accent-wash: var(--accent-wash);
+  --color-accent-line: var(--accent-line);
+  --color-accent-highlight: var(--accent-highlight);
+  --color-info: var(--info);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-danger-line: var(--danger-line);
+  --color-danger-wash: var(--danger-wash);
+  --color-link: var(--link);
+  --color-doc: var(--doc);
+  --color-diff-add: var(--diff-add);
+  --color-diff-del: var(--diff-del);
+  --color-overlay: var(--overlay);
+  --color-overlay-soft: var(--overlay-soft);
+  --color-toast-bg: var(--toast-bg);
+  --color-toast-ink: var(--toast-ink);
+
+  /* Wide desktop adds columns (ui.md § Three layouts). Below it is portrait, below md a phone. */
+  --breakpoint-wide: 90rem;
+}
+
+/* Faces, type scale and radii are the same in both themes, so they are theme values themselves.
+   `static`: emitted on :root whether or not a utility uses them, for components.css to read. */
+@theme static {
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  --text-eyebrow: 10.5px;   /* mono, uppercase, +.14em */
+  --text-meta: 11.5px;      /* mono sublines, ids, ages */
+  --text-small: 12.5px;     /* hints, captions */
+  --text-ui: 13.5px;        /* buttons, rows, tabs (13px in the strip) */
+  --text-tab: 13px;
+  --text-body: 14.5px;      /* reading text */
+  --text-title: 15px;       /* top-bar titles, item titles */
+  --text-panel: 16px;       /* drop-panel titles */
+  --text-sentence: 19px;    /* the queue's one-line ask */
+  --text-h1: 22px;          /* desktop page titles */
+
+  --leading-body: 1.6;
+  --leading-ui: 1.45;
+  --leading-title: 1.3;
+  --tracking-eyebrow: .14em;
+  --tracking-title: -.02em;
+
+  --radius-xs: 4px;   /* badges, inner segmented thumb */
+  --radius-sm: 5px;   /* desktop buttons */
+  --radius-md: 6px;   /* buttons, fields, rows */
+  --radius-card: 8px; /* cards, notices */
+  --radius-panel: 14px; /* sheets and drop panels (outer corners only) */
+  --radius-device: 18px;
+  --radius-pill: 999px;
+}

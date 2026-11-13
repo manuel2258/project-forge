@@ -111,28 +111,38 @@ defmodule ForgeWeb.ReconnectTest do
       user: user,
       project: project
     } do
-      awaiting_approval(project, user)
+      approving = awaiting_approval(project, user)
 
       {:ok, asking} = Tickets.admit(project, %{title: "Ask me"}, {:user, user.id})
       run_pending(asking.id, "blocking", "refinement.md")
 
-      {:ok, _view, html} = live(conn, ~p"/")
-      assert html =~ "Approving pins"
-      assert_recoverable(html, "the queue")
+      # One item per screen: each is drawn on its own, by the pass's own way to it.
+      [%{question: question}] = Enum.filter(Forge.Queue.items(user), &(&1.kind == :question))
+
+      {:ok, _view, html} = live(conn, ~p"/?item=approval-#{approving.id}")
+      # An approval draws no box here: it links to its ticket's decision row.
+      assert html =~ "Review refinement.md v1"
+
+      {:ok, _view, html} = live(conn, ~p"/?item=questions-#{question.artifact_version_id}")
+      assert html =~ ~s(id="form-#{question.artifact_version_id}")
+      assert_recoverable(html, "the queue's questions")
     end
 
-    test "holds on a ticket's Decide", %{conn: conn, user: user, project: project} do
+    # The note a reject needs is typed into the decision's panel, which drops from its row.
+    test "holds on a ticket's decision panel", %{conn: conn, user: user, project: project} do
       ticket = awaiting_approval(project, user)
 
-      {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide")
-      assert html =~ "Approving pins"
-      assert_recoverable(html, "a ticket's Decide")
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=steps")
+      view |> element("#decision-row button[phx-click='decision:open']") |> render_click()
+      html = render(view)
+      assert html =~ "Approve refinement.md v1"
+      assert_recoverable(html, "a ticket's decision panel")
     end
 
     # The ticket's own two surfaces, both drawn by `ForgeWeb.Operator.QuestionForm`: a question
-    # waiting on a document is answered on the page that holds the document, not from the queue,
-    # which links to it (`docs/design/ui.md` § Answering questions).
-    test "holds on a ticket's Decide with a question open", %{
+    # waiting on a document is answered on the page that holds the document, in its question
+    # pane (`docs/design/ui.md` § The question card).
+    test "holds on a ticket's question pane with a question open", %{
       conn: conn,
       user: user,
       project: project
@@ -140,7 +150,7 @@ defmodule ForgeWeb.ReconnectTest do
       {:ok, ticket} = Tickets.admit(project, %{title: "Ask me"}, {:user, user.id})
       run_pending(ticket.id, "blocking", "refinement.md")
 
-      {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide")
+      {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=steps")
       assert html =~ "Which backend?"
       assert_recoverable(html, "a ticket's question")
     end
@@ -201,16 +211,23 @@ defmodule ForgeWeb.ReconnectTest do
   describe "the handler a rejoin's replay lands in" do
     # This is the event the client re-pushes on a rejoin, against a view that has just mounted
     # and holds nothing — which is the whole of what a rejoin is on the server's side.
-    test "puts an approval's comment back", %{conn: conn, user: user, project: project} do
+    test "puts an approval's note back, with its panel open", %{
+      conn: conn,
+      user: user,
+      project: project
+    } do
       ticket = awaiting_approval(project, user)
-      {:ok, view, _html} = live(conn, ~p"/")
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+      refute has_element?(view, "#decision-panel")
 
-      view
-      |> form("#approve-#{ticket.id}", %{"comment" => "pinned at the wrong one"})
-      |> render_change()
+      # The panel's form exists only while it is open, so its replay opens it again.
+      render_hook(view, "decision:change", %{"note" => "pinned at the wrong one"})
 
-      assert view |> element("#approval-#{ticket.id} textarea[name=comment]") |> render() =~
+      assert view |> element("#decision-form textarea[name=note]") |> render() =~
                "pinned at the wrong one"
+
+      # And the Reject the note enables is enabled again with it.
+      refute has_element?(view, ~s(#decision-form button[value="rejected"][disabled]))
     end
 
     # The list can change while a socket is away: the worker that offered `max` was replaced by one
@@ -392,21 +409,23 @@ defmodule ForgeWeb.ReconnectTest do
   # because the pages that offer it are the ones whose project has types.
   describe "a proposal's chosen type" do
     defp proposal_html(drafts) do
-      render_component(&ForgeWeb.Operator.Components.proposals/1,
-        proposals: [
-          %{
-            title: "Extract the score table",
-            file: "proposal-score-table.md",
-            body: "It is a day's work.",
-            version_id: "v1",
-            project: "game",
-            ticket_number: 7,
-            readable: true,
-            suggested: "chore"
-          }
-        ],
+      item = %{
+        title: "Extract the score table",
+        file: "proposal-score-table.md",
+        body: "It is a day's work.",
+        version_id: "v1",
+        readable: true,
+        suggested: "chore",
+        at: DateTime.utc_now()
+      }
+
+      render_component(&ForgeWeb.ProposalsView.reader/1,
+        item: item,
+        group: %{job_id: "j1", chat: false, source: "ticket #7", at: item.at, items: [item]},
+        position: {1, 1},
         types: [%{name: "bug", parses: true}, %{name: "chore", parses: true}],
-        drafts: drafts
+        drafts: drafts,
+        now: DateTime.utc_now()
       )
     end
 
@@ -464,7 +483,7 @@ defmodule ForgeWeb.ReconnectTest do
       project: project,
       ticket: ticket
     } do
-      path = ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide"
+      path = ~p"/tickets/#{project.name}/#{ticket.number}?tab=steps"
       {:ok, view, html} = live(conn, path)
       assert html =~ "test-report.md"
       assert_recoverable(html, "a human state's document")
@@ -477,6 +496,43 @@ defmodule ForgeWeb.ReconnectTest do
                "half of a sentence"
     end
 
+    # The editors are drawn only while nothing is pending. A Save that crosses an approval
+    # arriving is refused with the editors gone, and the refusal is still drawn.
+    test "a refused Save is drawn after its editor has gone", %{
+      conn: conn,
+      project: project,
+      user: user,
+      ticket: ticket
+    } do
+      {:ok, _ticket} = Forge.Operator.edit(ticket, user, "test-report.md", "mine, v1\n")
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=steps")
+      assert has_element?(view, "#writable")
+
+      {:ok, _ticket} = Forge.Operator.edit(ticket, user, "test-report.md", "theirs, v2\n")
+
+      Tickets.get!(ticket.id)
+      |> Ecto.Changeset.change(
+        pending_transition: %{
+          "from" => "review_ready",
+          "to" => "merged",
+          "outcome" => nil,
+          "approve" => ["test-report.md"]
+        }
+      )
+      |> Forge.Repo.update!()
+
+      render_hook(view, "write_document", %{
+        "draft" => "write-test-report.md",
+        "ticket" => ticket.id,
+        "name" => "test-report.md",
+        "base" => "1",
+        "content" => "typed against v1\n"
+      })
+
+      refute has_element?(view, "#writable")
+      assert has_element?(view, "#write-refusal", "is at v2 now")
+    end
+
     # The draft outlives the socket, not the send. Left behind, it would be drawn over the
     # version that was just written — and over every later one.
     test "stops holding the draft once it is saved", %{
@@ -484,7 +540,7 @@ defmodule ForgeWeb.ReconnectTest do
       project: project,
       ticket: ticket
     } do
-      path = ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide"
+      path = ~p"/tickets/#{project.name}/#{ticket.number}?tab=steps"
       {:ok, view, _html} = live(conn, path)
 
       view
@@ -518,7 +574,7 @@ defmodule ForgeWeb.ReconnectTest do
       project: project,
       ticket: ticket
     } do
-      path = ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide"
+      path = ~p"/tickets/#{project.name}/#{ticket.number}?tab=steps"
       {:ok, view, _html} = live(conn, path)
 
       # An unclosed question block: `ForgeCore.Document.parse/1` refuses it, so nothing is
@@ -550,7 +606,7 @@ defmodule ForgeWeb.ReconnectTest do
     } do
       {:ok, _ticket} = Forge.Operator.edit(ticket, user, "test-report.md", "mine, v1\n")
 
-      path = ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide"
+      path = ~p"/tickets/#{project.name}/#{ticket.number}?tab=steps"
       {:ok, view, _html} = live(conn, path)
       editor = ~s(form[id="write-test-report.md"])
 
@@ -582,7 +638,7 @@ defmodule ForgeWeb.ReconnectTest do
     } do
       {:ok, _ticket} = Forge.Operator.edit(ticket, user, "test-report.md", "mine, v1\n")
 
-      path = ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide"
+      path = ~p"/tickets/#{project.name}/#{ticket.number}?tab=steps"
       {:ok, view, _html} = live(conn, path)
       editor = ~s(form[id="write-test-report.md"])
 
@@ -609,7 +665,7 @@ defmodule ForgeWeb.ReconnectTest do
       project: project,
       ticket: ticket
     } do
-      path = ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide"
+      path = ~p"/tickets/#{project.name}/#{ticket.number}?tab=steps"
       {:ok, view, _html} = live(conn, path)
 
       view
@@ -650,13 +706,6 @@ defmodule ForgeWeb.ReconnectTest do
       {"live/project_settings_live.ex", "set-secret"} => "a secret's name and its value",
       {"live/project_settings_live.ex", "add-mirror"} => "a mirror's url, user and token",
       {"live/workers_live.ex", "save"} => "a worker's memory and cores",
-      {"live/project_settings_live.ex", "harness"} =>
-        "a harness select, which a rejoin puts back to what is saved",
-      {"live/project_settings_live.ex", "codex"} =>
-        "Codex's model and effort, typed, as the model and the effort above are",
-      {"live/project_settings_live.ex", "model"} => "a model name, while no worker is connected",
-      {"live/project_settings_live.ex", "effort"} =>
-        "an effort level, while no worker offers one",
       {"live/user_live/login.ex", "submit_magic"} => "an email, to be sent a link",
       {"live/user_live/login.ex", "submit_password"} => "an email and a password"
     }
@@ -688,11 +737,14 @@ defmodule ForgeWeb.ReconnectTest do
       recovering = Enum.map(recovers, &elem(&1, 0))
 
       for site <- [
-            {"live/chat_live.ex", "send"},
-            {"live/operator/components.ex", "decide"},
-            {"live/operator/components.ex", "decide_proposal"},
+            {"components/chat_views.ex", "send"},
+            {"live/chats_live.ex", "chat:start"},
+            {"live/operator/decision.ex", "decision:decide"},
+            {"components/proposals_view.ex", "decide_proposal"},
             {"live/operator/components.ex", "write_document"},
-            {"live/project_live.ex", "release:start"}
+            {"live/project_live.ex", "release:start"},
+            # Project settings' one form for the model and the effort (`9g`).
+            {"live/project_settings_live.ex", "defaults"}
           ] do
         assert site in recovering, "#{inspect(site)} is not in the scan at all"
       end

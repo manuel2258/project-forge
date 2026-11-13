@@ -6,8 +6,9 @@ defmodule ForgeWeb.UserLive.Pending do
   decides. Until then there is nothing to show and nothing to do, so this page says so plainly
   and offers the one action that is genuinely available: logging out.
 
-  The nav is off. Every link in it leads somewhere this account is redirected away from, and a
-  row of links that bounce you back here reads as a broken product rather than a closed door.
+  It is drawn in the sign-in frame, not the frame (`Layouts.sign_in/1`): every place the frame
+  leads to redirects this account back here, and a row of links that bounce you back reads as a
+  broken product rather than a closed door.
   """
 
   use ForgeWeb, :live_view
@@ -20,24 +21,19 @@ defmodule ForgeWeb.UserLive.Pending do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} nav={false} measure="34rem">
-      <h1 class="text-2xl font-semibold -tracking-[.025em]">Waiting for approval</h1>
-
-      <p class="mt-3 text-sm/[1.55] opacity-70">
-        Your account exists and is waiting for an administrator of this node to approve it.
-        Nothing here is available until then.
-      </p>
-
-      <p class="mt-4 font-mono text-[12.5px] opacity-60">{@current_scope.user.email}</p>
-
-      <.link
-        href={~p"/users/log-out"}
-        method="delete"
-        class="mt-6 inline-flex min-h-[46px] items-center rounded-field border border-base-300 px-3 text-sm hover:border-base-content/30"
-      >
-        Log out
-      </.link>
-    </Layouts.app>
+    <Layouts.sign_in flash={@flash}>
+      <div id="pending" class="signin signin-sent">
+        <h1 class="signin-sent-title">Waiting for approval</h1>
+        <p class="signin-sent-text">
+          Your account exists and is waiting for an administrator of this node to approve it.
+          Nothing here is available until then.
+        </p>
+        <p class="signin-address">{@current_scope.user.email}</p>
+        <.button href={~p"/users/log-out"} method="delete" variant="outline" size="xl" class="w-full">
+          Sign out
+        </.button>
+      </div>
+    </Layouts.sign_in>
     """
   end
 end

@@ -82,34 +82,38 @@ defmodule ForgeWeb.MembershipScopingTest do
       end
     end
 
-    test "the board shows nothing", %{conn: conn, project: project, outsider: outsider} do
-      {:ok, _view, html} = conn |> log_in_user(outsider) |> live(~p"/board")
-      refute html =~ project.name
+    test "the projects page shows nothing", %{conn: conn, project: project, outsider: outsider} do
+      {:ok, view, _html} = conn |> log_in_user(outsider) |> live(~p"/projects")
+      refute render(view) =~ project.name
     end
 
-    test "the member sees the same board with the project on it", %{
+    test "the member sees the projects page with the project on it", %{
       conn: conn,
       project: project,
       owner: owner
     } do
-      # The pair is the assertion: without it, "the board shows nothing" would pass against a
-      # board that was broken for everyone.
-      {:ok, _view, html} = conn |> log_in_user(owner) |> live(~p"/board")
-      assert html =~ project.name
+      # The pair is the assertion: without it, "the projects page shows nothing" would pass
+      # against a page that was broken for everyone.
+      {:ok, view, _html} = conn |> log_in_user(owner) |> live(~p"/projects")
+      assert has_element?(view, "#project-#{project.id}", project.name)
     end
   end
 
   describe "an outsider on the other pages" do
-    test "the review page is a miss", %{
+    # The change and the presentation are the ticket's Changes view, which is the ticket's page
+    # and guarded where it mounts, whatever sub-view or file the address names.
+    test "the Changes view is a miss, a whole file included", %{
       conn: conn,
       project: project,
       ticket: ticket,
       outsider: outsider
     } do
-      assert_raise Ecto.NoResultsError, fn ->
-        conn
-        |> log_in_user(outsider)
-        |> live(~p"/tickets/#{project.name}/#{ticket.number}/review")
+      for query <- ["?tab=changes", "?tab=changes&sub=files&file=README.md&lines=1-2"] do
+        assert_raise Ecto.NoResultsError, fn ->
+          conn
+          |> log_in_user(outsider)
+          |> live(~p"/tickets/#{project.name}/#{ticket.number}" <> query)
+        end
       end
     end
 
@@ -168,7 +172,7 @@ defmodule ForgeWeb.MembershipScopingTest do
       asked(chat)
 
       {:ok, view, _html} = conn |> log_in_user(owner) |> live(~p"/")
-      view |> element("#item-chat-#{chat.id} form") |> render_submit()
+      view |> element(~s(form[id^="form-chat-#{chat.id}"])) |> render_submit()
 
       assert %{role: :user, text: "**Which one?**\nThe first one"} =
                List.last(Forge.Conversations.messages(chat.id))
@@ -184,9 +188,9 @@ defmodule ForgeWeb.MembershipScopingTest do
         conn |> log_in_user(plain) |> live(~p"/projects/#{project.name}/settings")
 
       # Not offered, since it would be refused.
-      refute has_element?(view, "#model-form")
+      refute has_element?(view, "#defaults-form")
 
-      render_change(view, "model", %{"project" => %{"model" => "evil-model"}})
+      render_submit(view, "defaults", %{"project" => %{"model" => "evil-model"}})
 
       assert Forge.Projects.get!(project.id).model == nil
     end
@@ -282,7 +286,7 @@ defmodule ForgeWeb.MembershipScopingTest do
       newcomer = user_fixture()
 
       {:ok, view, _html} =
-        conn |> log_in_user(owner) |> live(~p"/projects/#{project.name}/settings")
+        conn |> log_in_user(owner) |> live(~p"/projects/#{project.name}/settings?section=people")
 
       view
       |> form("form[phx-submit='add-member']", %{
@@ -299,7 +303,7 @@ defmodule ForgeWeb.MembershipScopingTest do
       owner: owner
     } do
       {:ok, view, _html} =
-        conn |> log_in_user(owner) |> live(~p"/projects/#{project.name}/settings")
+        conn |> log_in_user(owner) |> live(~p"/projects/#{project.name}/settings?section=people")
 
       html =
         view
@@ -323,7 +327,7 @@ defmodule ForgeWeb.MembershipScopingTest do
       pending = pending_user_fixture()
 
       {:ok, view, _html} =
-        conn |> log_in_user(owner) |> live(~p"/projects/#{project.name}/settings")
+        conn |> log_in_user(owner) |> live(~p"/projects/#{project.name}/settings?section=people")
 
       html =
         view
@@ -334,7 +338,9 @@ defmodule ForgeWeb.MembershipScopingTest do
 
       assert html =~ "No approved account for that address."
       assert Forge.Projects.role(project, pending) == nil
-      refute html =~ pending.email
+      # Not drawn as somebody in the project: the address is only in the field it was typed in.
+      refute has_element?(view, "#member-#{pending.id}")
+      refute view |> element("#people") |> render() =~ pending.email
     end
 
     test "a suspended account is named as one, and is not added", %{
@@ -345,7 +351,7 @@ defmodule ForgeWeb.MembershipScopingTest do
       {:ok, suspended} = Accounts.suspend_user(user_fixture(), node_admin_fixture())
 
       {:ok, view, _html} =
-        conn |> log_in_user(owner) |> live(~p"/projects/#{project.name}/settings")
+        conn |> log_in_user(owner) |> live(~p"/projects/#{project.name}/settings?section=people")
 
       html =
         view
@@ -362,7 +368,7 @@ defmodule ForgeWeb.MembershipScopingTest do
       plain = member_fixture(project, :member)
 
       {:ok, view, _html} =
-        conn |> log_in_user(plain) |> live(~p"/projects/#{project.name}/settings")
+        conn |> log_in_user(plain) |> live(~p"/projects/#{project.name}/settings?section=people")
 
       refute has_element?(view, "form[phx-submit='add-member']")
     end
@@ -372,7 +378,7 @@ defmodule ForgeWeb.MembershipScopingTest do
       newcomer = user_fixture()
 
       {:ok, view, _html} =
-        conn |> log_in_user(plain) |> live(~p"/projects/#{project.name}/settings")
+        conn |> log_in_user(plain) |> live(~p"/projects/#{project.name}/settings?section=people")
 
       # The hidden form is cosmetics. This is the guard: a member who sends the event by hand
       # still changes nothing, because `Forge.Projects` is what refuses.

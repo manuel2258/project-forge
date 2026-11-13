@@ -139,7 +139,22 @@ account may create projects freely (§ Projects and members), because getting ap
 step that means something.
 
 Suspension is the reverse and is how a person leaves: `users.suspended_at`, sessions and tokens
-refused. **An account that has decided anything is never deleted** — `answers`, `approvals` and
+refused. **It takes effect at once, not at the next request**: the account's sessions are deleted
+in the transaction that suspends it, and every page they hold open is told to disconnect when it
+commits (`live_socket_id`, as logging out does), so an open tab reconnects to a login page rather
+than going on acting with the user it mounted with. API tokens are kept and refused by
+`User.active?/1`, so reinstating gives them back.
+
+**Every governing act reads its actor again, when it acts.** A page holds the `%User{}` it
+mounted with, and a node admin suspended or demoted while `/accounts` was open went on approving
+from it and reinstated themselves (review fixes 7, H1). `Forge.Accounts` reads the node admins'
+rows inside the act's transaction, locked, and the actor must be **an admin who can act**: the
+flag, and `User.active?/1`. That one definition is also the last-admin rule's: **nobody drops the
+flag of the last admin who can act**, themselves included — a suspended admin reinstates nobody,
+so it does not count. **Nobody suspends themselves**, and so the last admin who can act is never
+suspended: the actor is one, and is not the account suspended. Two admins suspending or demoting
+each other at once take the same lock, and the second finds itself unable to act. **An account
+that has decided anything is never deleted** — `answers`, `approvals` and
 `proposal_decisions` reference users with `on_delete: :restrict` precisely so that the record of
 who decided what cannot be erased by removing the decider.
 
@@ -257,6 +272,17 @@ chat — with nothing but a LiveView mount in front of them, which is the page a
 Two rules live there because they are about the membership table itself: a caller needs
 `:manage`, and a project always keeps an admin. The contexts keep unguarded functions for the
 engine and for the command line, which is past every gate there is.
+
+**The role is read at the act, and so is the account's standing.** `Forge.Projects.role/2` is
+what every project guard asks — `Operator`, membership, assigning a machine, a template or a
+credential — and it reads the membership from the database each time, so a member removed while
+their page was open was already refused at their next act. It did not ask about the account: a
+member suspended meanwhile kept their row (§ Projects and members) and so kept acting until the
+page closed. It answers nil now for an account `User.active?/1` refuses, whatever its rows say
+(review fixes 7, H1). The writes that reach no project — a person's own credentials, templates,
+provider credentials and machines — read no role; for those the suspension's disconnect is what
+stops an open page, and `Workers.mint/2`, whose token would outlive the suspension, reads the
+owner again as well (§ Minting a permanent machine).
 
 **Contexts take the acting user, not the scope.** The scope is built where a project is in
 hand — at the web edge by `ForgeWeb.Access`, and inside `Operator` and `Projects` where the
@@ -545,8 +571,8 @@ The vocabulary:
 What that comes to (taking a ticket out of the merge queue is `member`, as approving is: the
 `take-out` action on a ticket page and on the project page, both `Forge.Operator.take_out/2`):
 
-- **`member`** is most of the product: the queue and board, every project, ticket, review, job,
-  chat and artifact page, the ticket and proposal endpoints of the JSON API (for a project token, classified in `test/support/token_routes.ex`),
+- **`member`** is most of the product: the queue, every project, ticket, job, chat and artifact
+  page, the ticket and proposal endpoints of the JSON API (for a project token, classified in `test/support/token_routes.ex`),
   and every
   conversation write.
 - **`manage`** is the settings actions — the model, the effort, the project's secrets, minting a

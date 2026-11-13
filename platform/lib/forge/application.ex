@@ -21,6 +21,12 @@ defmodule Forge.Application do
     # `Forge.Workers.booted!/1` is tested through the sweep.
     if Forge.Jobs.config(:run_jobs, true), do: Forge.Workers.booted!()
 
+    # The first file of a language to be drawn pays for compiling its parser from WebAssembly;
+    # this moves that off the first request for the languages most of this platform's projects
+    # are written in (`ForgeWeb.Highlight`). In the background and never matched on: a warm-up
+    # cannot stop a boot, and a parser it did not reach is compiled on first use anyway.
+    Lumis.Languages.async_load(~w(elixir heex markdown markdown_inline comment))
+
     children =
       [
         ForgeWeb.Telemetry,

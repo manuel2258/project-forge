@@ -51,7 +51,8 @@ defmodule ForgeWeb.CreateLiveTest do
       assert html =~ "Set it up in a chat"
 
       # The clone URL is still here, for working by hand, with the credential a click away.
-      assert html =~ "/git/#{name}.git"
+      # The URL may break after a `/` (`breakable/1`), so it is read as text.
+      assert html |> LazyHTML.from_document() |> LazyHTML.text() =~ "/git/#{name}.git"
       assert html =~ ~s(data-target="clone-url")
       assert html =~ "/projects/#{name}/settings"
     end
@@ -68,8 +69,134 @@ defmodule ForgeWeb.CreateLiveTest do
         })
         |> render_submit()
 
-      assert html =~ "has already been taken"
+      # Under the field it belongs to (`11c`), not in a line of its own beneath the form.
+      assert has_element?(view, "#project_name-error", "has already been taken")
       refute html =~ "is registered"
+    end
+
+    test "an invalid name is refused under the name, and the branch's under the branch", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, ~p"/projects/new")
+
+      view
+      |> form("#project-form", %{
+        "project" => %{"name" => "Not A Name", "default_branch" => "-rf"}
+      })
+      |> render_submit()
+
+      assert has_element?(view, "#project_name-error", "Not a valid name: lowercase letters")
+      assert has_element?(view, "#project_default_branch-error", "valid git branch name")
+      refute has_element?(view, "#project_name-error", "branch")
+    end
+
+    # The clone URL the name would make, as it is typed, from the function that makes the real
+    # one — so a typo is seen before it becomes the repository's name.
+    #
+    # Drawn from the first render — with `<name>` standing in while the name is blank — so that it
+    # never appears under the finger and pushes *Create it* down (ux/c.md C2).
+    test "previews the clone URL the name will make", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/projects/new")
+
+      assert has_element?(
+               view,
+               ~s(#clone-preview[data-preview="blank"]),
+               Forge.Git.Url.for(%Forge.Projects.Project{name: "<name>"})
+             )
+
+      view
+      |> form("#project-form", %{"project" => %{"name" => "leader-1", "default_branch" => "main"}})
+      |> render_change()
+
+      assert has_element?(
+               view,
+               ~s(#clone-preview[data-preview="ok"]),
+               Forge.Git.Url.for(%Forge.Projects.Project{name: "leader-1"})
+             )
+
+      view
+      |> form("#project-form", %{"project" => %{"name" => "  ", "default_branch" => "main"}})
+      |> render_change()
+
+      assert has_element?(view, ~s(#clone-preview[data-preview="blank"]))
+    end
+
+    # A name the platform would refuse is refused as it is typed, by the same changeset, and the
+    # preview stops presenting it as the address you will get.
+    test "refuses a bad name as it is typed, and does not promise its address", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/projects/new")
+
+      view
+      |> form("#project-form", %{
+        "project" => %{"name" => "Bad Name!", "default_branch" => "main"}
+      })
+      |> render_change()
+
+      assert has_element?(
+               view,
+               "#project_name-error",
+               "Not a valid name: lowercase letters, digits, - or _, starting with a letter or digit."
+             )
+
+      assert has_element?(view, ~s(#clone-preview[data-preview="invalid"]), "Not a valid name")
+      refute has_element?(view, "#clone-preview", "first administrator")
+
+      # A blank field is not shouted at while it is typed.
+      view
+      |> form("#project-form", %{"project" => %{"name" => "", "default_branch" => ""}})
+      |> render_change()
+
+      refute has_element?(view, "#project_name-error")
+      refute has_element?(view, "#project_default_branch-error")
+    end
+
+    # A project made here has no template, machine or credential yet, and the projects page says
+    # it runs nothing; the next steps say so first, with where each is added, and the chat is no
+    # longer the loud action, since it would sit there with nothing to run it (ux/c.md C3).
+    test "says first that it has nowhere to run, and where to add it", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/projects/new")
+      name = "bare-#{System.unique_integer([:positive])}"
+
+      html =
+        view
+        |> form("#project-form", %{"project" => %{"name" => name, "default_branch" => "main"}})
+        |> render_submit()
+
+      assert has_element?(view, "#run-somewhere", "no template or machine, and no credential")
+      assert has_element?(view, ~s(#run-somewhere a[href="/templates"]))
+      assert has_element?(view, ~s(#run-somewhere a[href="/users/settings#credentials"]))
+      assert has_element?(view, "#chat-needs", "once the project has somewhere to run")
+      refute has_element?(view, "#set-up-in-chat.ui-btn--primary")
+
+      run = :binary.match(html, ~s(id="run-somewhere")) |> elem(0)
+      chat = :binary.match(html, ~s(id="set-up-in-chat")) |> elem(0)
+      assert run < chat
+    end
+
+    # `11d`'s routes in their order, the old link to the board gone with it, and on a wide
+    # screen the new project already in the table beside them (`11e`).
+    test "ends on three routes, in order, beside a table that holds it", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/projects/new")
+      name = "routes-#{System.unique_integer([:positive])}"
+
+      html =
+        view
+        |> form("#project-form", %{"project" => %{"name" => name, "default_branch" => "main"}})
+        |> render_submit()
+
+      chat = :binary.match(html, ~s(href="/chats/new?project=#{name}")) |> elem(0)
+      clone = :binary.match(html, ~s(id="clone-url")) |> elem(0)
+      ticket = :binary.match(html, ~s(id="first-ticket")) |> elem(0)
+      assert chat < clone and clone < ticket
+
+      # Not a button to the ticket form, which can only say "not ready" until the workflow is
+      # merged: a line saying where the first ticket goes, linking the project (ux/c.md C3).
+      refute html =~ ~s(href="/tickets/new?project=#{name}")
+      assert has_element?(view, ~s(#first-ticket a[href="/projects/#{name}"]))
+
+      refute html =~ "/board"
+      assert has_element?(view, "#top-bar a.ui-top-context[href='/projects/#{name}']")
+      assert has_element?(view, "#projects-table a[href='/projects/#{name}']")
     end
   end
 
@@ -137,8 +264,16 @@ defmodule ForgeWeb.CreateLiveTest do
 
       {:ok, view, html} = live(conn, ~p"/tickets/new?project=#{project.name}")
 
-      # The state the first job will run in, named before anything is typed.
-      assert html =~ "starts in"
+      # The state the first job will run in, its budget, and its job in small print, named before
+      # anything is typed (`12e`), each once (ux/c.md C19).
+      assert html =~ "First step"
+      assert has_element?(view, "#first-step .ui-state", "refining")
+      assert has_element?(view, "#first-step .ui-state-mark", "▸")
+      assert has_element?(view, "#first-step .first-step-line", "20 turns")
+      assert has_element?(view, "#first-step .first-step-job", "refine.md → refinement.md")
+      refute has_element?(view, "#first-step .first-step-line", "refine.md")
+
+      assert has_element?(view, "#top-bar .ui-top-title > .ui-top-sub", "admitted to ready-")
 
       assert {:error, {:live_redirect, %{to: to}}} =
                view
@@ -170,9 +305,33 @@ defmodule ForgeWeb.CreateLiveTest do
       # on its own holds whichever of them fired — and they say different things to do next.
       assert html =~ "there is no .forge/workflow.yml on its default branch"
 
-      # The attribute, not the string: `disabled:opacity-40` is in the button's class list on
-      # every render, so `html =~ "disabled"` would pass however the control behaved.
+      # The attribute, not the string: a class list can say "disabled" however the control
+      # behaved.
       assert has_element?(view, "#ticket-form button[type=submit][disabled]")
+
+      # The way to fix it is a chat, as the created screen says — not the clone URL, which this
+      # card used to offer while that screen said pushing to the default branch is not the way.
+      assert has_element?(view, ~s(#not-ready a[href="/chats/new?project=#{project.name}"]))
+      refute has_element?(view, "#not-ready", "clone URL")
+
+      # Nobody types a ticket they cannot submit (ux/c.md C3).
+      assert has_element?(view, "#ticket_title[disabled]")
+      assert has_element?(view, "#ticket_body[disabled]")
+    end
+
+    test "a ready project's boxes are open to type in", %{conn: conn, user: user} do
+      {:ok, project} =
+        Projects.register(
+          %{name: "open-#{System.unique_integer([:positive])}", repo_path: seeded_repo()},
+          user
+        )
+
+      {:ok, view, _html} = live(conn, ~p"/tickets/new?project=#{project.name}")
+
+      assert has_element?(view, "#ticket_title")
+      refute has_element?(view, "#ticket_title[disabled]")
+      refute has_element?(view, "#ticket_body[disabled]")
+      refute has_element?(view, "#not-ready")
     end
 
     test "and is offered when the project is ready", %{conn: conn, user: user} do
@@ -294,7 +453,7 @@ defmodule ForgeWeb.CreateLiveTest do
     end
   end
 
-  test "new project is a top-bar action, and new ticket belongs to a project", %{
+  test "new project is the projects page's action, and new ticket belongs to a project", %{
     conn: conn,
     user: user
   } do
@@ -309,13 +468,12 @@ defmodule ForgeWeb.CreateLiveTest do
 
     {:ok, _ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
 
-    # The top bar carries New project on every page; the board and the queue carry neither.
-    {:ok, board, board_html} = live(conn, ~p"/board")
-    assert has_element?(board, ~s(header a[href="/projects/new"]))
-    refute board_html =~ "New ticket"
+    # A project is made from the projects page, its `+ New` the top bar's right end; the queue
+    # offers no ticket.
+    {:ok, projects, _html} = live(conn, ~p"/projects")
+    assert has_element?(projects, ~s(#top-bar a.ui-top-context[href="/projects/new"]))
 
-    {:ok, queue, queue_html} = live(conn, ~p"/")
-    assert has_element?(queue, ~s(header a[href="/projects/new"]))
+    {:ok, _queue, queue_html} = live(conn, ~p"/")
     refute queue_html =~ "New ticket"
 
     # The project page is the one place a ticket is offered.

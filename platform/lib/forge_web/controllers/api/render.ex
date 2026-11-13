@@ -245,9 +245,9 @@ defmodule ForgeWeb.Api.Render do
     end
   end
 
-  # Nil where the stored uri is not a commit, as `ReviewLive.diff/3` and `Merge.changeset/1` both
-  # say in their own words: interpolated, it makes `base..`, which git reads as `base..HEAD` and
-  # answers with the default branch's diff as this ticket's change.
+  # Nil where the stored uri is not a commit, as the ticket's Changes view and `Merge.changeset/1`
+  # both say in their own words: interpolated, it makes `base..`, which git reads as
+  # `base..HEAD` and answers with the default branch's diff as this ticket's change.
   defp diff(_repo, _base, nil, uri), do: %{error: inspect({:not_a_commit, uri})}
 
   # The same bound the pages draw a change under (`ForgeWeb.Diff`), for the same reason and one

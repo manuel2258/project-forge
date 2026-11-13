@@ -9,11 +9,10 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
   use ForgeWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
-  import Forge.ForgeFixtures, only: [credential_fixture: 2, pool!: 2, project_fixture: 0]
   import Forge.GitFixtures
 
   alias Forge.Git.Tokens
-  alias Forge.{Projects, Repo, Tickets, Workers}
+  alias Forge.{Projects, Repo, Tickets}
 
   setup :register_and_log_in_user
 
@@ -43,16 +42,25 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
     view |> form("#token-form", %{"token" => Map.merge(@defaults, params)}) |> render_submit()
   end
 
+  # Settings belong to the project, so they carry its strip (`ui.md` § The bottom strip).
+  test "the strip is the project's views", %{conn: conn, project: project} do
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+
+    for key <- ~w(tickets merge chats workflow proposals) do
+      assert has_element?(view, ~s|#tab-#{key}[href="/projects/#{project.name}?view=#{key}"]|)
+    end
+  end
+
   test "issues a read token and shows it once, with the line that uses it", ctx do
     %{conn: conn, project: project} = ctx
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
 
     html = issue(view, %{"name" => "dashboard", "api" => "read"})
 
-    assert html =~ "Copy this now"
+    assert has_element?(view, "#issued h2", "dashboard")
     # What the token may do, said beside it: the row below can only describe it from now on.
-    assert has_element?(view, "#issued", "dashboard: Git: read · API: read")
-    assert has_element?(view, "#issued", "not shown again")
+    assert has_element?(view, "#issued", "Git: read every branch · API: read, until")
+    assert has_element?(view, "#issued .ui-notice", "Copy it now. It is not shown again.")
     assert html =~ ~s(id="issued-secret")
     assert html =~ ~s(id="issued-curl")
     assert html =~ "Authorization: Bearer"
@@ -67,19 +75,21 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
     assert token.api_access == :read
 
     # The secret is on screen and in nothing that is stored, and opens both doors.
-    assert [_, secret] = Regex.run(~r|forge:([A-Za-z0-9_-]+)@|, html)
+    # Read as text: the URL may break after its `/` and `:` (`breakable/1`).
+    text = html |> LazyHTML.from_document() |> LazyHTML.text()
+    assert [_, secret] = Regex.run(~r|forge:([A-Za-z0-9_-]+)@|, text)
     assert {:ok, %{id: id}} = Tokens.authorise(secret, project, :read)
     assert {:ok, %{id: ^id}} = Tokens.authenticate_api(secret)
     assert id == token.id
 
     # Dismissing it is the last time it exists anywhere.
-    refute view |> element("button", "Done") |> render_click() =~ secret
+    refute view |> element("#issued button", "I have copied it") |> render_click() =~ secret
     refute render(view) =~ secret
   end
 
   test "an API-only token is shown without a clone URL, and the issuer is recorded", ctx do
     %{conn: conn, project: project, user: user} = ctx
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
 
     html = issue(view, %{"git" => "none", "api" => "write"})
 
@@ -90,27 +100,48 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
     assert html =~ "issued by #{user.email}"
   end
 
+  # Each choice is visible, because each decides what the token can touch: git as five rows, the
+  # API as a switch, the days as a stepper (`9c`).
   test "nothing that writes is preselected", %{conn: conn, project: project} do
-    {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
+
+    assert has_element?(view, ~s(#token-form input[type=radio][name="token[git]"]:checked))
+    assert has_element?(view, ~s(#token-form input[name="token[git]"][value=reader][checked]))
+
+    for value <- ~w(none branch developer admin),
+        do:
+          refute(
+            has_element?(view, ~s(#token-form input[name="token[git]"][value=#{value}][checked]))
+          )
+
+    assert has_element?(view, ~s(#token-form input[name="token[api]"][value=none][checked]))
+    refute has_element?(view, ~s(#token-form input[name="token[api]"][value=write][checked]))
+    assert has_element?(view, ~s(#token-form input#token-days[type=number][value="7"]))
+  end
+
+  # The admin scope's warning is inline on its row, and only while it is the one picked.
+  test "the default branch's scope says what it reaches when picked", ctx do
+    %{conn: conn, project: project} = ctx
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
 
     assert has_element?(
              view,
-             ~s(#token-form select[name="token[git]"] option[selected][value=reader])
+             ~s(label[for=token-git-admin]),
+             "push any open ticket's branch and main"
            )
 
-    assert has_element?(
-             view,
-             ~s(#token-form select[name="token[api]"] option[selected][value=none])
-           )
+    refute has_element?(view, ~s(label[for=token-git-admin]), "every job builds on")
 
-    assert html =~ ~s(value="7")
+    view |> form("#token-form", %{"token" => %{"git" => "admin"}}) |> render_change()
+
+    assert has_element?(view, ~s(label[for=token-git-admin]), "every job builds on")
   end
 
   test "a branch token is scoped to one ticket's branch", ctx do
     %{conn: conn, project: project, user: user} = ctx
     {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
 
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
 
     html = issue(view, %{"git" => "branch", "ticket" => to_string(ticket.number)})
 
@@ -118,18 +149,25 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
     assert token.git_access == :branch
     assert token.ref == "refs/heads/" <> ticket.branch
     assert token.ticket_id == ticket.id
-    assert html =~ "refs/heads/#{ticket.branch}"
+    # Said as the form offered it, not as a ref (UX pass, D13).
+    assert html =~ "Git: write ##{ticket.number}&#39;s branch"
+    refute html =~ "refs/heads/#{ticket.branch}"
   end
 
   test "developer and admin tokens name no ref, and admin says what it reaches", ctx do
     %{conn: conn, project: project} = ctx
-    {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
 
     assert html =~ "push any open ticket&#39;s branch"
-    assert html =~ "the default branch"
+    assert html =~ "push any open ticket&#39;s branch and main"
 
     issue(view, %{"name" => "dev", "git" => "developer"})
+    view |> element("#issued button", "I have copied it") |> render_click()
     issue(view, %{"name" => "adm", "git" => "admin"})
+
+    # The band that shows it once says it in the form's words, never `admin` (UX pass, D13).
+    assert has_element?(view, "#issued", "Git: push any open ticket's branch and main")
+    refute has_element?(view, "#issued", "Git: admin")
 
     tokens = Map.new(Tokens.list(project), &{&1.name, &1})
     assert %{git_access: :developer, ref: nil} = tokens["dev"]
@@ -138,7 +176,7 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
 
   test "a job's token cannot be asked for from the page", ctx do
     %{conn: conn, project: project} = ctx
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
     issue(view, %{"name" => "plain"})
 
     assert [token] = Tokens.list(project)
@@ -148,7 +186,7 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
 
   test "a branch token with no ticket chosen is refused, not issued", ctx do
     %{conn: conn, project: project} = ctx
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
 
     html = issue(view, %{"git" => "branch", "ticket" => ""})
 
@@ -157,7 +195,7 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
   end
 
   test "a refusal keeps what was typed and says what to change", %{conn: conn, project: project} do
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
 
     html = issue(view, %{"name" => "keep me", "days" => "366"})
     assert html =~ "from 1 to 365"
@@ -172,7 +210,7 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
 
   test "a name over sixty characters is refused, and one with markup is drawn as text", ctx do
     %{conn: conn, project: project} = ctx
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
 
     # The input's own `maxlength` is the browser's; the server says it too.
     long = String.duplicate("n", 61)
@@ -196,7 +234,7 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
   end
 
   test "a second submit of the same form makes no second token", %{conn: conn, project: project} do
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
     params = Map.put(@defaults, "nonce", nonce(view))
 
     render_submit(view, "issue", %{"token" => params})
@@ -206,15 +244,15 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
   end
 
   test "with no tokens the section says what one is for", %{conn: conn, project: project} do
-    {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
 
-    assert html =~ "lets an outside program"
-    refute html =~ "None yet. One issued above"
+    assert has_element?(view, "#tokens-section", "lets an outside program")
+    refute has_element?(view, "#tokens")
   end
 
   test "a row says what the token may do, who issued it and when it was used", ctx do
     %{conn: conn, project: project, user: user} = ctx
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
     issue(view, %{"name" => "nightly", "api" => "read"})
     [token] = Tokens.list(project)
 
@@ -222,9 +260,9 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
       Ecto.Changeset.change(token, last_used_at: DateTime.utc_now(:second), last_used_via: :api)
     )
 
-    {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
     assert html =~ "nightly"
-    assert html =~ "Git: read · API: read"
+    assert html =~ "Git: read every branch · API: read"
     assert html =~ "issued by #{user.email}"
     assert html =~ "via api"
   end
@@ -236,7 +274,7 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
       Tokens.issue(project, name: "orphan", git: :reader, api: :read, issued_by_id: user.id)
 
     Repo.update!(Ecto.Changeset.change(token, issued_by_id: nil))
-    {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
 
     refute html =~ "removed account"
     refute html =~ "issued by"
@@ -245,7 +283,7 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
 
   test "a hand-sent value outside the choices is refused, not a crash", ctx do
     %{conn: conn, project: project} = ctx
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
     nonce = nonce(view)
 
     for {field, value} <- [{"git", "root"}, {"api", "admin"}, {"days", "7abc"}] do
@@ -261,7 +299,7 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
   test "a branch token for a ticket that is not this project's is refused", ctx do
     %{conn: conn, project: project, user: user} = ctx
     {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
 
     params = @defaults |> Map.merge(%{"git" => "branch", "ticket" => "#{ticket.number + 1}"})
     html = render_submit(view, "issue", %{"token" => Map.put(params, "nonce", nonce(view))})
@@ -270,21 +308,15 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
     assert Tokens.list(project) == []
   end
 
-  test "a long name opens whole on a tap, and a short one is plain", ctx do
+  # Whole, wrapping rather than cut: a `title` is a hover, and a phone has none.
+  test "a long name is drawn whole", ctx do
     %{conn: conn, project: project} = ctx
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
     long = String.duplicate("long-name-", 5)
     issue(view, %{"name" => long})
-    issue(view, %{"name" => "short"})
+    [token] = Tokens.list(project)
 
-    html = render(view)
-    assert html =~ ~r/<details[^>]*>\s*<summary[^>]*>\s*#{long}/
-    refute html =~ ~r/<summary[^>]*>\s*short/
-    assert html =~ "short"
-
-    # Whole inside the opened part, and drawn there once: a name over the bound is not also plain.
-    assert html =~ ~r/<p class="break-words">\s*#{long}\s*<\/p>/
-    assert length(String.split(html, long)) - 1 == 2
+    assert has_element?(view, "#token-#{token.id} .settings-name", long)
   end
 
   test "the heading counts the live tokens, not the revoked ones", %{
@@ -295,21 +327,22 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
     {:ok, _secret, gone} = Tokens.issue(project, name: "gone", git: :reader, api: :read)
     {:ok, _} = Tokens.revoke(gone.id)
 
-    {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
 
-    assert html =~ "Tokens · 1 live"
+    assert has_element?(view, "#tokens-section .settings-count", "1 live")
+    assert has_element?(view, "#section-tokens", "1 live")
   end
 
   test "four hundred tokens leave the page readable", %{conn: conn, project: project} do
     for i <- 1..400,
         do: {:ok, _, _} = Tokens.issue(project, name: "token #{i}", git: :reader, api: :read)
 
-    {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/settings")
-    assert html =~ "Tokens · 400 live"
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
+    assert has_element?(view, "#tokens-section .settings-count", "400 live")
   end
 
   test "a live token can be revoked, and then is not live", %{conn: conn, project: project} do
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
     issue(view, %{})
     [token] = Tokens.list(project)
 
@@ -320,8 +353,11 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
     refute Tokens.live?(revoked, DateTime.utc_now())
 
     # The row stays — it is the audit trail — but only behind the disclosure.
-    refute html =~ "Revoke"
-    assert view |> element("button", "Show expired and revoked") |> render_click() =~ "revoked"
+    refute html =~ ~s(phx-click="revoke")
+    refute has_element?(view, "#token-#{token.id}")
+
+    view |> element("button", "Show expired and revoked · 1") |> render_click()
+    assert has_element?(view, "#token-#{token.id}.settings-spent", "revoked just now")
   end
 
   test "a token a job holds is listed and not revocable by hand", %{
@@ -333,9 +369,9 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
     [job] = Forge.Jobs.for_ticket(ticket.id)
     {:ok, _secret, token} = Tokens.issue_for_job(job, ticket, project)
 
-    {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
 
-    assert html =~ "held by a job"
+    assert html =~ "held by a job · revoked when it ends"
     refute has_element?(view, ~s(button[phx-value-id="#{token.id}"]))
 
     # And the context refuses it even if the button is bypassed: revoking mid-run fails the job
@@ -343,268 +379,95 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
     assert {:error, :held_by_job} = Tokens.revoke(token.id)
   end
 
-  # The same field as the new-chat form, and the same rule: the models are this project's pool's —
-  # the accounts its jobs will actually run on — and not some other project's
-  # (`docs/design/credentials.md` § Checked on save).
-  test "the default model is a dropdown of what this project's credentials may use", %{
-    conn: conn,
-    project: project
-  } do
-    owner = Forge.AccountsFixtures.user_fixture()
-    models = [%{"id" => "claude-sonnet-5", "name" => "Claude Sonnet 5"}]
-    pool!(project, credential_fixture(owner, models: models))
-
-    elsewhere = project_fixture()
-    pool!(elsewhere, credential_fixture(owner, models: [%{"id" => "not-this-projects"}]))
-
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
-
-    assert has_element?(view, ~s(select#project_model option[value="claude-sonnet-5"]))
-    refute has_element?(view, ~s(select#project_model option[value="not-this-projects"]))
-
-    view
-    |> form("#model-form", %{"project" => %{"model" => "claude-sonnet-5"}})
-    |> render_submit()
-
-    assert Projects.get!(project.id).model == "claude-sonnet-5"
-  end
-
-  defp connected_worker(offer) do
-    {:ok, worker, _token} = Workers.create(%{provider: "fake"})
-    {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000, "harness" => offer})
-    worker
-  end
-
-  # A box because no worker is connected to offer a level, so a project can be configured before a
-  # machine exists. `docs/design/workflow-grammar-v1.md` § Effort says why nothing here checks it.
-  test "the default effort is a box that saves what is typed while nothing is offered", %{
-    conn: conn,
-    project: project
-  } do
-    {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/settings")
-
-    refute has_element?(view, ~s(select#project_effort))
-    assert html =~ "No connected worker offers a level"
-
-    view
-    |> form("#effort-form", %{"project" => %{"effort" => "xhigh"}})
-    |> render_submit()
-
-    assert Projects.get!(project.id).effort == "xhigh"
-  end
-
-  test "the default effort is a dropdown of the levels the workers offer", %{
-    conn: conn,
-    project: project
-  } do
-    connected_worker(%{"efforts" => ~w(low high)})
-    {:ok, project} = Projects.set_effort(project, "low")
-
-    {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/settings")
-
-    refute has_element?(view, ~s(input#project_effort))
-    assert html =~ "Offered by the workers connected now"
-
-    assert has_element?(
-             view,
-             ~s(select#project_effort option[value=""]),
-             "— the machine's —"
-           )
-
-    assert has_element?(view, ~s(select#project_effort option[value="low"][selected]))
-    assert has_element?(view, ~s(select#project_effort option[value="high"]))
-
-    view |> form("#effort-form", %{"project" => %{"effort" => "high"}}) |> render_submit()
-    assert Projects.get!(project.id).effort == "high"
-
-    view |> form("#effort-form", %{"project" => %{"effort" => ""}}) |> render_submit()
-    assert is_nil(Projects.get!(project.id).effort)
-  end
-
-  # Decided on the levels reported, not on what the select would hold: a stored level counts as an
-  # option to keep, and a select of one stored value cannot be typed over.
-  test "a stored level with no one offering levels is still a box", %{
-    conn: conn,
-    project: project
-  } do
-    {:ok, project} = Projects.set_effort(project, "turbo")
-
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
-    assert has_element?(view, ~s(input#project_effort[type=text][value=turbo]))
-    refute has_element?(view, ~s(select#project_effort))
-
-    # Likewise a worker that reports aliases and no levels.
-    connected_worker(%{"aliases" => ["opus"]})
-    {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/settings")
-    assert has_element?(view, ~s(input#project_effort[type=text][value=turbo]))
-    refute has_element?(view, ~s(select#project_effort))
-    assert html =~ "No connected worker offers a level"
-  end
-
-  # The worker with the level may be asleep, or a later harness may have dropped it. A form that
-  # dropped it would change a setting nobody touched, so saving unchanged must keep it.
-  test "a stored level nothing offers stays selected, marked Set, and survives an unchanged save",
-       %{
-         conn: conn,
-         project: project
-       } do
-    connected_worker(%{"efforts" => ~w(low high)})
-    {:ok, project} = Projects.set_effort(project, "turbo")
-
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
-
-    assert has_element?(
-             view,
-             ~s(select#project_effort optgroup[label="Set"] option[value=turbo][selected])
-           )
-
-    view |> form("#effort-form") |> render_submit()
-
-    assert Projects.get!(project.id).effort == "turbo"
-  end
-
-  test "an offered level is not also drawn as Set", %{conn: conn, project: project} do
-    connected_worker(%{"efforts" => ~w(low high)})
-    {:ok, project} = Projects.set_effort(project, "high")
-
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
-
-    assert has_element?(view, ~s(select#project_effort option[value=high][selected]))
-    refute has_element?(view, ~s(select#project_effort optgroup[label="Set"]))
-  end
-
-  # The select is the browser's protection and not the platform's: a harness newer than the
-  # workers may take a level they never reported.
-  test "a level nobody offers is still stored", %{conn: conn, project: project} do
-    connected_worker(%{"efforts" => ~w(low high)})
-
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
-    assert has_element?(view, ~s(select#project_effort))
-
-    render_submit(view, "effort", %{"project" => %{"effort" => "ultra"}})
-
-    assert Projects.get!(project.id).effort == "ultra"
-  end
-
-  # Escaped because HEEx escapes: adding `raw` to the option label is what the `refute` guards
-  # against. The option assertion also fails if a reported level stops reaching the select.
-  test "a level with markup in it is shown as text", %{conn: conn, project: project} do
-    connected_worker(%{"efforts" => ["<b>x</b>"]})
-
-    {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/settings")
-
-    assert has_element?(view, ~s(select#project_effort option), "<b>x</b>")
-    refute has_element?(view, ~s(select#project_effort b))
-    assert html =~ "&lt;b&gt;x&lt;/b&gt;"
-  end
-
-  # Saving one dial must not disturb the other: the two forms post separate params, and a
-  # changeset that cast both from one would clear whichever was not on the page.
-  test "saving the effort leaves the model alone, and the other way round", %{
-    conn: conn,
-    project: project
-  } do
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
-
-    # Free text, because no worker is connected to offer anything.
-    view
-    |> form("#model-form", %{"project" => %{"model" => "a-model-no-worker-has"}})
-    |> render_submit()
-
-    view
-    |> form("#effort-form", %{"project" => %{"effort" => "max"}})
-    |> render_submit()
-
-    assert %{model: "a-model-no-worker-has", effort: "max"} = Projects.get!(project.id)
-
-    # And back the other way: the model form posts no `effort`, so a changeset casting both from
-    # one set of params would clear it here.
-    view
-    |> form("#model-form", %{"project" => %{"model" => "a-model-no-worker-has"}})
-    |> render_submit()
-
-    assert %{model: "a-model-no-worker-has", effort: "max"} = Projects.get!(project.id)
-  end
-
-  # The worker holding it may be asleep rather than gone, and a form that silently dropped it
-  # would change a setting nobody touched — docs/design/workflow-grammar-v1.md § Model.
-  test "a model nothing currently offers stays selected rather than being dropped", %{
-    conn: conn,
-    project: project
-  } do
-    {:ok, project} = Projects.set_model(project, "a-model-no-worker-has")
-    {:ok, worker, _token} = Workers.create(%{provider: "fake"})
-
-    {:ok, _worker} =
-      Workers.ready(worker, %{"memory_budget" => 8_000, "harness" => %{"aliases" => ["opus"]}})
-
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
-
-    assert has_element?(
-             view,
-             ~s(select#project_model option[value="a-model-no-worker-has"][selected])
-           )
-  end
-
-  # The model field shares `kept/2` with the effort field. A stored alias or model id that is
-  # offered is in its own group and must not be drawn a second time under "Set".
-  test "an offered alias or model id is not also drawn as Set", %{conn: conn, project: project} do
-    owner = Forge.AccountsFixtures.user_fixture()
-    pool!(project, credential_fixture(owner, models: [%{"id" => "claude-sonnet-5"}]))
-    connected_worker(%{"aliases" => ["opus"]})
-
-    for stored <- ["opus", "claude-sonnet-5"] do
-      {:ok, project} = Projects.set_model(project, stored)
-      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
-
-      assert has_element?(view, ~s(select#project_model option[value="#{stored}"][selected]))
-      refute has_element?(view, ~s(select#project_model optgroup[label="Set"]))
-    end
-  end
-
   test "it requires a logged-in operator", %{project: project} do
     assert {:error, {:redirect, %{to: "/users/log-in"}}} =
              live(build_conn(), ~p"/projects/#{project.name}/settings")
   end
 
-  # `docs/design/codex.md`: the project's default harness, and Codex's own model and effort. The
-  # Model and Effort sections above stay Claude Code's.
+  # One block per row on a phone and a table from 768px, from the same markup: the expiry is on
+  # the name's line on a phone and in its own column on a desktop, and the control is in both.
+  test "a token row draws its expiry for both widths and keeps its control", ctx do
+    %{conn: conn, project: project} = ctx
+    {:ok, _secret, token} = Tokens.issue(project, name: "t", days: 7)
+
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
+
+    assert has_element?(
+             view,
+             "#token-#{token.id} .settings-name-line .settings-phone",
+             ~r/in [67]d/
+           )
+
+    assert has_element?(view, "#token-#{token.id} td.settings-desk", ~r/in [67]d/)
+    assert has_element?(view, ~s(#token-#{token.id} button[phx-click="revoke"]))
+  end
+
+  # About to lapse is something to look at; a job's token, which lasts hours by design, is not.
+  test "a token about to lapse is in warning, a job's is not", ctx do
+    %{conn: conn, project: project, user: user} = ctx
+    {:ok, _secret, soon} = Tokens.issue(project, name: "soon", days: 2)
+    {:ok, _secret, later} = Tokens.issue(project, name: "later", days: 4)
+
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    [job] = Forge.Jobs.for_ticket(ticket.id)
+    {:ok, _secret, held} = Tokens.issue_for_job(job, ticket, project)
+
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
+
+    assert has_element?(view, "#token-#{soon.id} td.settings-warning")
+    refute has_element?(view, "#token-#{later.id} td.settings-warning")
+    refute has_element?(view, "#token-#{held.id} td.settings-warning")
+
+    assert has_element?(
+             view,
+             "#section-tokens .ui-row-latest--warning",
+             "1 expires within 3 days"
+           )
+  end
+
+  # `docs/design/codex.md`: the project's default harness, and Codex's own model and effort, in the
+  # one Save with Claude Code's (`docs/design/ui.md` § Model and effort).
   describe "the harness" do
     test "an admin sets the project's harness and Codex's dials, and clears them", ctx do
       %{conn: conn, project: project} = ctx
-      {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/settings")
-      assert html =~ "Default harness"
-      assert has_element?(view, ~s(select#project_harness option[value="claude_code"][selected]))
-
-      view |> form("#harness-form", %{"project" => %{"harness" => "codex"}}) |> render_submit()
-      assert Projects.get!(project.id).harness == "codex"
+      {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/settings?section=agent")
+      assert html =~ "Harness"
+      assert has_element?(view, ~s(#project_harness input[value="claude_code"][checked]))
 
       view
-      |> form("#codex-form", %{"codex" => %{"model" => "gpt-x", "effort" => "high"}})
+      |> form("#defaults-form", %{
+        "project" => %{"harness" => "codex", "codex_model" => "gpt-x", "codex_effort" => "high"}
+      })
       |> render_submit()
 
-      assert %{codex_model: "gpt-x", codex_effort: "high", model: nil, effort: nil} =
+      assert %{harness: "codex", codex_model: "gpt-x", codex_effort: "high", model: nil} =
                Projects.get!(project.id)
 
+      assert has_element?(view, ~s(#project_harness input[value="codex"][checked]))
+      assert has_element?(view, "#section-agent", "Codex · model: gpt-x · effort: high")
+
       view
-      |> form("#codex-form", %{"codex" => %{"model" => "", "effort" => ""}})
+      |> form("#defaults-form", %{"project" => %{"codex_model" => "", "codex_effort" => ""}})
       |> render_submit()
 
-      assert %{codex_model: nil, codex_effort: nil} = Projects.get!(project.id)
+      assert %{harness: "codex", codex_model: nil, codex_effort: nil} = Projects.get!(project.id)
     end
 
-    test "a plain member is not shown the forms, and the context refuses them", ctx do
+    test "a plain member is not shown the form, and the context refuses it", ctx do
       %{conn: conn, project: project} = ctx
       member = Forge.AccountsFixtures.user_fixture()
       Forge.ForgeFixtures.join!(project, member, :member)
       conn = log_in_user(build_conn(), member)
 
-      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
-      refute has_element?(view, "#harness-form")
-      refute has_element?(view, "#codex-form")
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=agent")
+      refute has_element?(view, "#defaults-form")
 
       assert {:error, :forbidden} = Forge.Operator.set_harness(project, member, "codex")
-      assert Projects.get!(project.id).harness == "claude_code"
+
+      assert {:error, :forbidden} =
+               Forge.Operator.set_defaults(project, member, %{codex_model: "gpt-x"})
+
+      assert %{harness: "claude_code", codex_model: nil} = Projects.get!(project.id)
     end
   end
 end

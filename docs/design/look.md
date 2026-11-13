@@ -13,21 +13,24 @@ devshell, against a database of its own, and ships in no release.
 ## Using it
 
 ```
-bin/look --setup NAME --as USER [--timeout SECONDS] < steps
+bin/look --setup NAME [--as USER] [--timeout SECONDS] < steps
 ```
+
+`--as` is optional in the redesign's standard: without it the look is logged out, which is how the
+sign-in screens are photographed (`ui.md` § Signing in).
 
 The steps are read from standard input, **not kept**: the setups are code in the repository and
 reusable, the list of what to click is a throwaway. One step a line, `#` comments, quoted arguments:
 
 | Step | Does |
 |---|---|
-| `width phone` / `width desktop` | resize the window to 390×844 or 1280×800 |
+| `width phone` / `portrait` / `wide` / `desktop` | resize the window to 412×915, 1080×1500, 1600×1000 or 1280×800 (§ The redesign's widths) |
 | `visit /path` / `visit :name` | go to a path on the app, or to a path the setup names |
 | `click <css>` / `click text "T"` | click the first match; text names the deepest element holding it |
 | `fill <css> "value"` | type into a field |
 | `wait <css>` / `wait text "T"` | wait (up to `--timeout`, default 5 s) for it to appear |
 | `text <css>` | print an element's text |
-| `shot page <file>` | the whole page: the window is grown to the document's height (capped at 12,000 px) and restored |
+| `shot page <file>` | the whole page: the window is grown to the document's height, plus what the frame's own scroller holds below the fold and the browser's own bars above the viewport (capped at 12,000 px), and restored |
 | `shot <css> <file>` | one element, by WebDriver's own element screenshot |
 
 It prints a line a step as it runs, and on a failure `FAILED step N: <the step as written>` and the
@@ -52,6 +55,13 @@ paths a `shot` names; the run's own temporary directory (data directory and stor
 it ends. The code is
 `platform/test/support/look/`, compiled in `test` only and counted by the coverage floor.
 
+### The redesign's widths
+
+`ui.md` § Three layouts draws every page at three widths, and a look photographs each at the size
+the handoff drew it: **`phone` 412×915**, **`portrait` 1080×1500** and **`wide` 1600×1000**.
+`desktop` stays at 1280×800, because `.forge/agents/implement.md` names it; on the redesign it is a
+portrait layout. The overflow check below is at `phone` width, whichever that is.
+
 ### What fails a step
 
 The tool fails a run on its own for the things a machine can see, and for nothing else — the rest
@@ -59,7 +69,13 @@ is judged by eye:
 
 - the platform's side, which the browser cannot report (`Forge.Look.Watch`): a response of 500 or
   more, an exception in a LiveView's `mount`, `handle_params` or `handle_event`, and any
-  error-level log, which is what a crashed LiveView process makes;
+  error-level log, which is what a crashed LiveView process makes. An exception whose status is
+  under 500 is the platform answering, not crashing — a row a page cannot see raises
+  `Ecto.NoResultsError` and renders the not-found page (`ui.md` § Not found) — so on a page's
+  first, dead render it fails nothing, and that page can be photographed. Raised in a connected
+  process instead — a live navigation to the missing row, an event — it is excused as an
+  exception but still crashes that process, and the crash is logged at error level, which fails
+  the step;
 - a script error in the browser;
 - a `wait` for something that never appears;
 - a `visit` after which the LiveView never connected;
@@ -71,10 +87,28 @@ is judged by eye:
 A setup is a module with `build/0`, listed in `Forge.Look.Setups`, returning
 `%{users: %{name => user}, paths: %{name => path}}` built from the suite's own fixtures into the
 look's throwaway database. `setups_test.exs` builds every registered one, so a setup that rots
-fails the gate and not the next ticket. Two ship — `ticket`: a project, a member, a ticket with a
-document, giving the queue, the project and the ticket pages; and `usage`: a ticket with a job counted in weighted tokens and one converted from dollars, and a credential with a day's usage, giving the job, converted-job, ticket and account-settings pages. The review page needs a git
-repository behind its ticket, which the fixtures make (`Forge.GitFixtures`) and this one does not;
-the next ticket that photographs it adds a setup beside this. **Never a project secret's value** in
+fails the gate and not the next ticket. One ships — `ticket`: a project, a member, a ticket with a
+document, giving the queue, the project and the ticket pages. The redesign adds one setup per
+area it rebuilds, each named in this list when it lands: `changes` — `look-changes#1` in review with a
+changeset of three files, a `presentation.md` quoting `lib/game/settings.ex` and
+`lib/game/audio.ex` and an image, a `commit-message`, an approved refinement, a plan and an
+answered question, and `look-changes#2` implementing with no presentation, for a ticket's Changes
+view; `usage` — two credentials averaging 91 %
+and 63 %, spend over five hours and a week in two projects and one the member is not in, and a
+colleague's credential in a pool, for `/usage` and the panel; `projects` — four projects of
+`member`'s (one with three items waiting and three jobs running, one with one of each, one idle and
+last merged three days ago, one that can run nothing) and `newcomer`, in none (`ui.md` § The
+projects page); `repo` — `game`'s default branch with a history by three authors over weeks, an
+Elixir module, a binary image and a 600 KB file, two open tickets' branches and one nobody's, for
+the repository's history, branch sheet, tree, file screen and commit page (`ui.md` § The project's
+repository); `forge_release` — projects whose repositories record a forge release behind, current,
+not recorded, newer than the node and not a release (hostile, and over the bound), for the project
+page's notice (`ui.md` § The project page); `image_builds` — one owner's three Hetzner-like
+credentials on the fake driver, one with a running build and four ended every way, for the
+Credentials view's builds (`ui.md` § Templates and credentials); `weighted_usage` — a ticket with a
+job counted in weighted tokens and one converted from dollars, and a credential with a day's usage,
+for the job, converted-job, ticket and account-settings pages; `codex` — Codex credentials, a
+project on Codex and its jobs and chats (`codex.md`). **Never a project secret's value** in
 a setup: nothing masks a picture (`secrets.md`, which this leaves as written).
 
 ## What it is built on
@@ -161,6 +195,18 @@ not this note's.
 Chromium's own sandbox is on. `FORGE_LOOK_NO_SANDBOX=1` turns it off, for a machine that refuses
 user namespaces; the browser then loads only the app's made-up pages inside a namespace of its own.
 It was not needed where this was built.
+
+### What a look cannot show, and the browser test does
+
+A step list cannot drop the socket, move a button by script or wait out a toast, so the frame's
+transient states (`ui.md` § Transient states) are the gate's browser test's: a lost connection
+(the bar's words, a sender disabled at its own place and size, the way back), the moved-button
+guard on a static page loading the app's own script and styles (a scroll arms nothing, the
+keyboard is never swallowed, a moved button ignores a click and takes one 600 ms later), and a
+toast gone 4.5 s after logging out put it there. Each runs as a `{:call, fun}` between ordinary
+steps, an operation `Forge.Look.Steps` never parses, so a list cannot name it. The guard test
+clicks within 500 ms of a move: a machine slow enough to take longer between two WebDriver calls
+would fail it.
 
 ## What a look costs
 

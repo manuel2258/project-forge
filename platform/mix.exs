@@ -37,7 +37,7 @@ defmodule Forge.MixProject do
       # lines apart) read 91.20% and 91.27%; before it, 90 since the ticket-types branch, whose
       # three runs read 90.13%, 90.06% and 90.06%. The next raise waits until the lowest clears 92.
       test_coverage: [
-        summary: [threshold: 91],
+        summary: [threshold: 93],
         ignore_modules: [
           Forge.AccountsFixtures,
           Forge.DataCase,
@@ -116,26 +116,47 @@ defmodule Forge.MixProject do
       {:phoenix_live_dashboard, "~> 0.8.3"},
       {:esbuild, "~> 0.10", runtime: Mix.env() == :dev},
       {:tailwind, "~> 0.5", runtime: Mix.env() == :dev},
-      {:heroicons,
-       github: "tailwindlabs/heroicons",
-       tag: "v2.2.0",
-       sparse: "optimized",
-       app: false,
-       compile: false,
-       depth: 1},
-      {:daisyui,
-       github: "saadeghi/daisyui",
-       tag: "v5.5.20",
-       sparse: "packages/bundle",
-       app: false,
-       compile: false,
-       depth: 1},
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_poller, "~> 1.0"},
       {:gettext, "~> 1.0"},
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
-      {:bandit, "~> 1.5"}
+      {:bandit, "~> 1.5"},
+      # Server-side syntax highlighting for the repository's file view, and for the whole-file
+      # view Changes is to draw (`ForgeWeb.Highlight`, docs/design/ui.md § The project's
+      # repository). Tree-sitter behind a precompiled NIF, emitting classes rather than inline
+      # colours, so the palette stays the design's `--syntax-*` tokens. `flake.nix` hands the release its NIF, because
+      # `rustler_precompiled` downloads it at compile time and a Nix build has no network.
+      {:lumis, "~> 0.10.8"},
+      # Lumis ships no grammars; each `lumis_wasm_*` is one, compiled from WebAssembly on first
+      # use. The languages a project file is likely to be, plus the ones injected inside
+      # another: `markdown_inline` (inside markdown), `css` and `javascript` (inside HTML and
+      # HEEx), `eex`/`heex` (inside Elixir sigils), `comment` (TODO/FIXME inside comments).
+      {:lumis_wasm_elixir, "~> 0.26.10"},
+      {:lumis_wasm_eex, "~> 0.26.2"},
+      {:lumis_wasm_heex, "~> 0.26.5"},
+      {:lumis_wasm_erlang, "~> 0.26.8"},
+      {:lumis_wasm_javascript, "~> 0.26.6"},
+      {:lumis_wasm_typescript, "~> 0.26.5"},
+      {:lumis_wasm_tsx, "~> 0.26.5"},
+      {:lumis_wasm_json, "~> 0.26.7"},
+      {:lumis_wasm_yaml, "~> 0.26.5"},
+      {:lumis_wasm_toml, "~> 0.26.4"},
+      {:lumis_wasm_nix, "~> 0.26.2"},
+      {:lumis_wasm_bash, "~> 0.26.8"},
+      {:lumis_wasm_css, "~> 0.26.6"},
+      {:lumis_wasm_html, "~> 0.26.6"},
+      {:lumis_wasm_markdown, "~> 0.26.4"},
+      {:lumis_wasm_markdown_inline, "~> 0.26.4"},
+      {:lumis_wasm_rust, "~> 0.26.7"},
+      {:lumis_wasm_python, "~> 0.26.7"},
+      {:lumis_wasm_go, "~> 0.26.6"},
+      {:lumis_wasm_sql, "~> 0.26.7"},
+      {:lumis_wasm_diff, "~> 0.26.7"},
+      {:lumis_wasm_dockerfile, "~> 0.26.5"},
+      {:lumis_wasm_make, "~> 0.26.2"},
+      {:lumis_wasm_xml, "~> 0.26.6"},
+      {:lumis_wasm_comment, "~> 0.26.2"}
     ]
   end
 

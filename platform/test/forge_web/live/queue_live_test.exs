@@ -1,11 +1,13 @@
 defmodule ForgeWeb.QueueLiveTest do
   @moduledoc """
-  The home screen, on the two things its own doc says it is: "one ordered list of decisions,
-  oldest first" and one interruption per stopped job rather than one per question.
+  The home screen, on the things its own doc says it is: one item per screen, oldest first, one
+  interruption per stopped job rather than one per question, and a pass that ends somewhere
+  definite.
 
-  Both are properties of arrangement, and arrangement is what a page-wide `assert html =~` cannot
-  see — every item is on the page in any order, and every question is on the page whether or not
-  it was answered. So the assertions here are on position and on what is left open afterwards.
+  Most of these are properties of arrangement, and arrangement is what a page-wide `assert html =~`
+  cannot see — every item is in the list column in any order, and every question is in the card
+  whether or not its tab shows. So the assertions here are on position, on which item is on screen
+  (`#queue-item`'s `data-key`), and on what is left open afterwards.
 
   `docs/design/ui.md` § The affordance rule and `ForgeWeb.QueueLive`'s moduledoc are the standard.
   """
@@ -94,10 +96,10 @@ defmodule ForgeWeb.QueueLiveTest do
     )
   end
 
-  # "One ordered list of decisions, oldest first" is the first line of the page's own doc, and it
-  # is what makes the queue drainable: the operator works down it and the thing that has been
-  # waiting longest is never at the bottom where a long list hides it. Reversing the order leaves
-  # every item on the page, so only position can tell the two apart.
+  # "Oldest first" is what makes the queue drainable: the operator works down it and the thing that
+  # has been waiting longest is never at the bottom where a long list hides it. Reversing the order
+  # leaves every item in the list, so only position — and which one the pass opens on — can tell
+  # the two apart.
   test "items are oldest first", %{conn: conn, project: project} do
     older = admit(project, "Waiting since yesterday")
     newer = admit(project, "Only just arrived")
@@ -108,10 +110,92 @@ defmodule ForgeWeb.QueueLiveTest do
     aged(older_version, 3600)
     aged(newer_version, 60)
 
-    {:ok, _view, html} = live(conn, ~p"/")
+    {:ok, view, html} = live(conn, ~p"/")
 
     assert index(html, "item-questions-#{older_version.id}") <
              index(html, "item-questions-#{newer_version.id}")
+
+    assert on_screen(view) == "questions-#{older_version.id}"
+    # What the queue shows waits on you: the card's current step is the amber one (`ui.md`
+    # § Colour), as it is nowhere a ticket waits on nobody.
+    assert has_element?(view, "#queue-item .ui-context .ui-track.ui-track--waiting")
+    # The whole queue is the top bar's right end on a phone, where the queue has no parent to
+    # name — not a row of its own above the item (UX pass, A1).
+    assert has_element?(view, "#top-bar button.ui-top-context", "All 2")
+    # Nothing spent yet is left out, not drawn as `0 windows` (UX pass, A11).
+    assert has_element?(view, "#queue-item .ui-context-facts", "1 job")
+    refute view |> element("#queue-item .ui-context-facts") |> render() =~ "windows"
+    # The card is the way to the ticket, and the only one in the item.
+    ticket_page = ~p"/tickets/#{project.name}/#{older.number}"
+    assert has_element?(view, ~s(#queue-item a.ui-context[href="#{ticket_page}"]))
+
+    assert view
+           |> element("#queue-item")
+           |> render()
+           |> String.split(~s(href="#{ticket_page}"))
+           |> length() == 2
+  end
+
+  # What the agent said as it stopped, recorded as the harness records it.
+  defp said(ticket, text) do
+    [job | _] = Jobs.for_ticket(ticket.id)
+
+    Repo.insert!(%Forge.Events.Event{
+      ticket_id: ticket.id,
+      project_id: ticket.project_id,
+      job_id: job.id,
+      actor: %{"kind" => "job", "id" => job.id},
+      type: "job.harness.text",
+      payload: %{"text" => text}
+    })
+  end
+
+  describe "what the agent said" do
+    # The passage the questions are about comes before the ticket's card: on a phone the card
+    # under the sentence pushed it beneath the question card's split pane (UX pass, A1).
+    test "is drawn before the ticket's card", %{conn: conn, project: project} do
+      ticket = admit(project, "Shape the screen")
+      ask(ticket, [blocking("rank", "Which rank?")])
+      said(ticket, "Two things are open.")
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      item = view |> element("#queue-item") |> render()
+
+      [{agent, _}] = :binary.matches(item, ~s(id="queue-agent"))
+      [{band, _}] = :binary.matches(item, ~s(class="queue-band"))
+      assert agent < band
+    end
+
+    # Clamped to four lines on a phone with *more* at its end — and only when it is long enough
+    # to be cut: a short passage offering *more* would offer what is already on screen.
+    test "a long passage is clamped with more, a short one is not", %{
+      conn: conn,
+      project: project
+    } do
+      short = admit(project, "Short")
+      ask(short, [blocking("a", "Short?")])
+      said(short, "Two things are open.")
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      refute has_element?(view, "#queue-said.queue-said--clamped")
+      refute has_element?(view, "#queue-said-more")
+
+      long = admit(project, "Long")
+      version = ask(long, [blocking("b", "Long?")])
+      said(long, String.duplicate("word ", 40))
+
+      {:ok, view, _html} = live(conn, ~p"/?item=questions-#{version.id}")
+
+      assert has_element?(view, "#queue-said.queue-said--clamped")
+      assert has_element?(view, "#queue-said-more", "more")
+
+      many = admit(project, "Many lines")
+      version = ask(many, [blocking("c", "Many?")])
+      said(many, "one\ntwo\nthree\nfour\nfive")
+
+      {:ok, view, _html} = live(conn, ~p"/?item=questions-#{version.id}")
+      assert has_element?(view, "#queue-said.queue-said--clamped")
+    end
   end
 
   # A document's questions are one form (`docs/design/ui.md` § Answering questions): its
@@ -153,11 +237,22 @@ defmodule ForgeWeb.QueueLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/")
 
-    item = view |> element("#item-questions-#{version.id}") |> render()
-    assert item =~ "1 blocking question · 1 optional"
-    assert item =~ "What should the table be called?"
+    assert view |> element("#queue-item .queue-eyebrow") |> render() =~
+             "1 blocking question · 1 optional · plan.md v1"
+
+    # The row names the document once, on its latest line; its kicker is the kind (UX pass, A24).
+    row = view |> element("#item-questions-#{version.id}") |> render()
+    assert row =~ ~r/ui-row-kicker-text">\s*1 blocking question\s*</
+    assert row |> String.split("plan.md v1") |> length() == 2
+
+    # Asked moments ago, in the sentence's words: never "waiting now" (r3 L3).
+    assert has_element?(view, "#queue-item .queue-age", "waiting <1m")
+
+    assert view |> element("#form-#{version.id}") |> render() =~
+             "What should the table be called?"
+
     refute has_element?(view, "#queue-digest")
-    assert view |> element("main header span.font-mono") |> render() =~ "1 decision · 1 item"
+    assert subline(view) == "1 of 1 · 1 decision"
   end
 
   describe "the question form" do
@@ -172,9 +267,9 @@ defmodule ForgeWeb.QueueLiveTest do
       """
     end
 
-    # Folded is the form's state, drawn below `lg` only: the question's inputs are in the form
-    # whether or not it is folded, so whether radios are drawn says nothing about it.
-    defp folded?(view, question), do: has_element?(view, question <> "[data-folded]")
+    # Which question the card shows: the others are in the form all the same, `hidden`, so whether
+    # their radios are drawn says nothing about it.
+    defp shown?(view, question), do: has_element?(view, question <> "[data-shown]")
 
     defp choose(view, version, key, choice, text \\ "") do
       view
@@ -244,36 +339,53 @@ defmodule ForgeWeb.QueueLiveTest do
       refute has_element?(view, "#form-#{version.id}-left")
     end
 
-    # Folded, a question is one line, its answer in its own inputs hidden beside it; tapping the
-    # line opens it; choosing folds it again; typing keeps it open.
-    test "a locked question folds, and opens again", %{conn: conn, project: project} do
+    # One question shows at a time, under its tab, in the order written; the card opens on the
+    # first with nothing locked in, a tab shows its own question, and every other one is hidden
+    # rather than gone.
+    test "a tab shows its question and hides the others", %{conn: conn, project: project} do
       ticket = admit(project, "Persist scores")
-      version = ask(ticket, [blocking("backend", "Which backend?")])
-      question = "#question-#{version.id}-backend"
+
+      version =
+        ask(ticket, [blocking("backend", "Which backend?"), open_blocking("format", "Which?")])
+
+      backend = "#question-#{version.id}-backend"
+      format = "#question-#{version.id}-format"
 
       {:ok, view, _html} = live(conn, ~p"/")
 
-      # Recommended, so chosen, so folded: a line, and the line says what was chosen — the whole
-      # text of it, since a one-letter label is in any class list.
-      assert folded?(view, question)
-      assert has_element?(view, question <> " button span.font-medium", ~r/^\s*a\s*$/)
+      # The backend's recommendation is chosen, so the card opens where something is left.
+      assert shown?(view, format)
+      refute shown?(view, backend)
+      assert has_element?(view, backend <> "[hidden]")
+      assert has_element?(view, "#tab-#{version.id}-format[aria-selected=true]")
+      assert view |> element("#tab-#{version.id}-backend") |> render() =~ "●"
+      assert view |> element("#tab-#{version.id}-format") |> render() =~ "○"
 
-      view |> element(question <> " button[phx-click='form:open']") |> render_click()
-      refute folded?(view, question)
-      refute has_element?(view, question <> " button[phx-click='form:open']")
+      view |> element("#tab-#{version.id}-backend") |> render_click()
 
-      view
-      |> element("#form-#{version.id}")
-      |> render_change(%{
-        "_target" => ["answers", "backend", "text"],
-        "answers" => %{"backend" => %{"choice" => "a", "text" => "and keep the old file"}}
-      })
+      assert shown?(view, backend)
+      refute shown?(view, format)
+      assert view |> element(backend) |> render() =~ "1 of 2"
+    end
 
-      refute folded?(view, question)
+    # Locking an answer in does not move the card to another question under the thumb: the one
+    # touched is the one that stays shown, though another is now the first with nothing locked.
+    test "the question touched stays shown", %{conn: conn, project: project} do
+      ticket = admit(project, "Persist scores")
 
-      choose(view, version, "backend", "b", "and keep the old file")
-      assert folded?(view, question)
-      assert view |> element(question) |> render() =~ "b — and keep the old file"
+      version =
+        ask(ticket, [
+          open_blocking("backend", "Which backend?"),
+          open_blocking("format", "Which?")
+        ])
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      assert shown?(view, "#question-#{version.id}-backend")
+
+      choose(view, version, "backend", "b")
+
+      assert shown?(view, "#question-#{version.id}-backend")
+      refute shown?(view, "#question-#{version.id}-format")
     end
 
     test "a note rides the choice, and a cleared choice leaves your own words", %{
@@ -353,13 +465,12 @@ defmodule ForgeWeb.QueueLiveTest do
         }
       })
 
-      refute folded?(view, naming)
+      refute has_element?(view, naming <> " input[value=a][checked]")
 
       view |> element("#form-#{version.id}") |> render_submit()
 
       assert [%{key: "naming"}] = Artifacts.open_questions(ticket.id)
-      assert folded?(view, naming)
-      assert view |> element(naming) |> render() =~ "change"
+      assert has_element?(view, naming <> " input[value=a][checked]")
     end
 
     # The job reads every answer, not whichever landed before the resume: one `answers.md`
@@ -423,26 +534,6 @@ defmodule ForgeWeb.QueueLiveTest do
       assert view |> element("#question-#{version.id}-format") |> render() =~ "JSON, please"
     end
 
-    # Clearing a choice leaves the question to be answered in words, so it stays open even with a
-    # note already typed — it does not fold under the thumb.
-    test "clearing a choice keeps the question open", %{conn: conn, project: project} do
-      ticket = admit(project, "Persist scores")
-      version = ask(ticket, [blocking("backend", "Which backend?")])
-      question = "#question-#{version.id}-backend"
-
-      {:ok, view, _html} = live(conn, ~p"/")
-      view |> element(question <> " button[phx-click='form:open']") |> render_click()
-
-      view
-      |> element("#form-#{version.id}")
-      |> render_change(%{
-        "_target" => ["answers", "backend", "choice"],
-        "answers" => %{"backend" => %{"choice" => "", "text" => "neither"}}
-      })
-
-      refute folded?(view, question)
-    end
-
     # Off the wire, a payload of the wrong shape is ignored, not raised on: a crash here is the
     # page going away under the person holding it.
     test "a malformed event is ignored", %{conn: conn, project: project} do
@@ -492,13 +583,6 @@ defmodule ForgeWeb.QueueLiveTest do
   # What the form draws, and what its Send carries from what is drawn — the rendered inputs, not
   # parameters a test hands in. `docs/design/ui.md` § Answering questions is the standard.
   describe "what the form draws and carries" do
-    defp classes(view, selector) do
-      [{_tag, attrs, _children}] =
-        view |> element(selector) |> render() |> Floki.parse_fragment!()
-
-      attrs |> List.keyfind("class", 0, {"class", ""}) |> elem(1) |> String.split()
-    end
-
     defp rich(key, opts) do
       recommended = if opts[:recommended], do: ", recommended: true", else: ""
 
@@ -519,12 +603,6 @@ defmodule ForgeWeb.QueueLiveTest do
       """
     end
 
-    defp opened(view, version, key) do
-      view
-      |> element("#question-#{version.id}-#{key} button[phx-click='form:open']")
-      |> render_click()
-    end
-
     test "an option is its headline and its sentence, the recommendation tagged", %{
       conn: conn,
       project: project
@@ -532,7 +610,6 @@ defmodule ForgeWeb.QueueLiveTest do
       ticket = admit(project, "Persist scores")
       version = ask(ticket, [rich("store", recommended: true)])
       {:ok, view, _html} = live(conn, ~p"/")
-      opened(view, version, "store")
 
       question = "#question-#{version.id}-store"
       assert has_element?(view, question <> " label", "Where the data is.")
@@ -545,7 +622,6 @@ defmodule ForgeWeb.QueueLiveTest do
       ticket = admit(project, "Persist scores")
       version = ask(ticket, [rich("store", recommended: true), rich("size", [])])
       {:ok, view, _html} = live(conn, ~p"/")
-      opened(view, version, "store")
 
       assert has_element?(view, "#question-#{version.id}-store label", "Clear choice")
       refute has_element?(view, "#question-#{version.id}-size label", "Clear choice")
@@ -573,28 +649,19 @@ defmodule ForgeWeb.QueueLiveTest do
                index(html, "question-#{version.id}-store")
     end
 
-    # `docs/design/ui.md` § Answering questions: the fold is the width's. Below `lg` a folded
-    # question is its line and its fields are hidden; at `lg` and up the line is hidden and the
-    # fields drawn, so choosing never shrinks a question under the pointer on a laptop. A media
-    # query is CSS, which no ExUnit test evaluates, so what is pinned is the classes that say it.
-    test "at lg and up nothing folds", %{conn: conn, project: project} do
+    # `docs/design/ui.md` § The question card: the card sits in the split pane under the item, its
+    # handle above it, with Later beside Send. The limit and the fold are the browser's (the
+    # `.SplitPane` hook); what is pinned here is that the card is drawn inside it.
+    test "the card sits in the split pane, Later beside Send", %{conn: conn, project: project} do
       ticket = admit(project, "Persist scores")
-      version = ask(ticket, [rich("store", recommended: true), rich("size", [])])
+      version = ask(ticket, [rich("store", recommended: true)])
       {:ok, view, _html} = live(conn, ~p"/")
 
-      folded = "#question-#{version.id}-store"
-      assert folded?(view, folded)
-      assert "lg:hidden" in classes(view, folded <> " button[phx-click='form:open']")
-      group = classes(view, folded <> " [role=group]")
-      assert "hidden" in group
-      assert "lg:flex" in group
-
-      open = "#question-#{version.id}-size"
-      refute folded?(view, open)
-      group = classes(view, open <> " [role=group]")
-      assert "flex" in group
-      # Hidden at no width: an open question has no line to stand in for it.
-      refute Enum.any?(group, &(&1 =~ ~r/(^|:)(hidden|invisible|sr-only)$/))
+      pane = ~s(#queue-pane[phx-hook="ForgeWeb.Operator.QuestionForm.SplitPane"])
+      assert has_element?(view, pane <> " .qpane-handle")
+      assert has_element?(view, pane <> " #form-#{version.id}")
+      assert has_element?(view, "#form-#{version.id} .qcard-dock #queue-later")
+      refute has_element?(view, "#queue-dock")
     end
 
     # `docs/design/ui.md` § The affordance rule: Enter never sends a question form. A one-line
@@ -621,11 +688,11 @@ defmodule ForgeWeb.QueueLiveTest do
              )
     end
 
-    # Folded, a question carries its answer in its own inputs, hidden: a note typed before
-    # choosing is still there when the Send is taken from the page.
-    test "a note on a folded question rides the Send", %{conn: conn, project: project} do
+    # A question whose tab is not shown carries its answer in its own inputs, hidden: a note typed
+    # on it is still there when the Send is taken from another tab.
+    test "a note on a question not shown rides the Send", %{conn: conn, project: project} do
       ticket = admit(project, "Persist scores")
-      version = ask(ticket, [rich("store", [])])
+      version = ask(ticket, [rich("store", []), rich("size", recommended: true)])
       {:ok, view, _html} = live(conn, ~p"/")
 
       view
@@ -642,39 +709,22 @@ defmodule ForgeWeb.QueueLiveTest do
         "answers" => %{"store" => %{"choice" => "SQLite", "text" => "and keep a copy"}}
       })
 
-      assert folded?(view, "#question-#{version.id}-store")
+      view |> element("#tab-#{version.id}-size") |> render_click()
+      refute shown?(view, "#question-#{version.id}-store")
       view |> element("#form-#{version.id}") |> render_submit()
 
-      assert [%{answer: %{choice: "SQLite", text: "and keep a copy"}}] =
-               Artifacts.answered(ticket.id)
+      answers = Map.new(Artifacts.answered(ticket.id), &{&1.question.key, &1.answer})
+      assert %{choice: "SQLite", text: "and keep a copy"} = answers["store"]
     end
 
     test "a question opened by hand sends the choice it shows", %{conn: conn, project: project} do
       ticket = admit(project, "Persist scores")
       version = ask(ticket, [rich("store", recommended: true)])
       {:ok, view, _html} = live(conn, ~p"/")
-      opened(view, version, "store")
 
       view |> element("#form-#{version.id}") |> render_submit()
 
       assert [%{answer: %{choice: "SQLite", text: nil}}] = Artifacts.answered(ticket.id)
-    end
-
-    # Open because nothing is chosen, not because it was opened by hand: typing locks it, and it
-    # stays open all the same.
-    test "typing keeps a question open", %{conn: conn, project: project} do
-      ticket = admit(project, "Persist scores")
-      version = ask(ticket, [rich("store", [])])
-      {:ok, view, _html} = live(conn, ~p"/")
-
-      view
-      |> element("#form-#{version.id}")
-      |> render_change(%{
-        "_target" => ["answers", "store", "text"],
-        "answers" => %{"store" => %{"text" => "neither"}}
-      })
-
-      refute folded?(view, "#question-#{version.id}-store")
     end
 
     # Whitespace is no answer: an optional question left with some is skipped, not sent blank and
@@ -708,6 +758,10 @@ defmodule ForgeWeb.QueueLiveTest do
       end
 
       assert send.(%{"store" => %{"choice" => "SQLite"}}) =~ "Not sent: answer size first"
+
+      # Refused, the item stays on screen and is not counted decided.
+      assert on_screen(view) == "questions-#{version.id}"
+      refute has_element?(view, "#item-questions-#{version.id}[data-decided]")
 
       assert send.(%{"store" => %{"choice" => "MySQL"}, "size" => %{"choice" => "SQLite"}}) =~
                "Not sent: &quot;MySQL&quot; is not an option of store"
@@ -759,8 +813,6 @@ defmodule ForgeWeb.QueueLiveTest do
 
       assert index(html, "item-questions-#{decision.id}") <
                index(html, "assumption-#{question.id}")
-
-      assert index(html, "assumption-#{question.id}") < index(html, "queue-end")
     end
 
     test "its lines are oldest first", %{conn: conn, project: project} do
@@ -808,7 +860,7 @@ defmodule ForgeWeb.QueueLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/")
 
-      refute has_element?(view, "main header span.font-mono")
+      assert subline(view) == "nothing waiting"
       assert view |> element("#queue-end") |> render() =~ "Nothing needs you."
       assert has_element?(view, "#queue-digest")
     end
@@ -830,10 +882,84 @@ defmodule ForgeWeb.QueueLiveTest do
     assert has_element?(view, "#queue-end")
   end
 
-  # The queue is one of the four surfaces that approve a changeset, and approving one is what
-  # merges: the message the merge will commit is on the item, and where nothing has written one
-  # the item offers no Approve (`docs/design/ui.md` § Changes).
-  test "an approval item shows the message its merge would commit", %{
+  # The queue never decides; it links (`docs/design/ui.md` § The decision row). What a merge
+  # will commit is in the decision's panel on the ticket, beside the diff, and not here.
+  test "an approval item links to its change, and decides nothing", %{
+    conn: conn,
+    project: project
+  } do
+    ticket = admit(project, "Persist scores")
+    changeset!(ticket, seeded_head(project))
+    commit_message!(ticket, "Persist the scores\n")
+    pend_merge(ticket)
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    assert has_element?(
+             view,
+             ~s(a#review-#{ticket.id}[href="/tickets/#{project.name}/#{ticket.number}?tab=changes"]),
+             "Review the changeset"
+           )
+
+    refute has_element?(view, ~s([id="#{commit_message_id(ticket)}"]))
+    refute has_element?(view, ~s(button[value="approved"]))
+    refute has_element?(view, ~s(button[value="rejected"]))
+
+    # 18a: enough to know what you are walking into — what the merge will write, and the change.
+    message = view |> element("#queue-commit-message") |> render()
+    assert message =~ "Persist the scores"
+    # Drawn by the one component every merge message is (`WorkScreen.commit_message/1`).
+    refute message =~ "view only"
+    assert message =~ "commit-message-subject"
+    assert message =~ "v1"
+    assert has_element?(view, "#queue-changeset")
+    assert view |> element("#queue-item .queue-eyebrow") |> render() =~ "review_ready → merged"
+
+    # The row's kicker is the kind alone, its age apart at the right; the transition is said once,
+    # on the latest line (UX pass, A24).
+    row = "#item-approval-#{ticket.id}"
+    assert view |> element("#{row} .ui-row-kicker-text") |> render() =~ ">approval<"
+    assert has_element?(view, "#{row} .ui-row-age", "now")
+    assert has_element?(view, "#{row} .ui-row-latest", "→ merged")
+    assert view |> element(row) |> render() |> String.split("→") |> length() == 2
+  end
+
+  # The queue draws the message only where the panel would: an approval that does not merge says
+  # nothing of a commit, whatever the ticket has written (`Decision.commit/1`, one rule for both).
+  test "an approval that does not merge draws no commit message", %{
+    conn: conn,
+    project: project
+  } do
+    ticket = admit(project, "Persist scores")
+    commit_message!(ticket, "Persist the scores\n")
+
+    {:ok, _version} =
+      Artifacts.record_version(ticket.id, "refinement.md", :document, :system, %{
+        content: "# Refinement\n"
+      })
+
+    ticket
+    |> Ecto.Changeset.change(
+      state: "refining",
+      status: :active,
+      pending_transition: %{
+        "from" => "refining",
+        "to" => "planning",
+        "outcome" => "done",
+        "approve" => ["refinement.md"]
+      }
+    )
+    |> Repo.update!()
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    assert has_element?(view, "#queue-item")
+    refute has_element?(view, "#queue-commit-message")
+  end
+
+  # A merging approval with nothing written for it says so, as its panel does, where the panel
+  # draws no Approve.
+  test "a merging approval with no message says there is nothing to merge yet", %{
     conn: conn,
     project: project
   } do
@@ -843,14 +969,7 @@ defmodule ForgeWeb.QueueLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/")
 
-    assert view |> element("##{commit_message_id(ticket)}") |> render() =~ "nothing to merge yet"
-    refute has_element?(view, ~s(button[value="approved"]))
-
-    commit_message!(ticket, "Persist the scores\n")
-    {:ok, view, _html} = live(conn, ~p"/")
-
-    assert view |> element("##{commit_message_id(ticket)}") |> render() =~ "Persist the scores"
-    assert has_element?(view, ~s(button[value="approved"]))
+    assert has_element?(view, "#queue-commit-message", "nothing to merge yet")
   end
 
   # **A merge decision is never a one-line summary**, and what makes it one is the state it enters
@@ -876,8 +995,8 @@ defmodule ForgeWeb.QueueLiveTest do
 
     assert has_element?(
              view,
-             ~s(a[href="/tickets/#{project.name}/#{ticket.number}/review"]),
-             "Read the change first"
+             ~s(#review-#{ticket.id}[href="/tickets/#{project.name}/#{ticket.number}?tab=changes"]),
+             "Review the changeset"
            )
   end
 
@@ -894,10 +1013,8 @@ defmodule ForgeWeb.QueueLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/")
 
-    # Drawn, and nothing claimed about a merge it cannot be sure of: Approve is offered and the
-    # commit message's block is not.
-    assert has_element?(view, "#approval-#{ticket.id}")
-    assert has_element?(view, ~s(button[value="approved"]))
+    # Drawn, linked to its ticket, and nothing claimed about a merge it cannot be sure of.
+    assert has_element?(view, "#review-#{ticket.id}", "Review the changeset")
     refute has_element?(view, ~s([id="#{commit_message_id(ticket)}"]))
   end
 
@@ -919,6 +1036,270 @@ defmodule ForgeWeb.QueueLiveTest do
   defp seeded_head(project) do
     {:ok, sha} = Forge.Git.resolve(Projects.repo_path(project), "refs/heads/main")
     sha
+  end
+
+  # The pass (`docs/design/ui.md` § The queue, `ForgeWeb.QueuePass`): one item on screen, Later to
+  # the end, deciding moves on in place, the end says what was decided and what was left.
+  describe "the pass" do
+    defp questions!(project, title, key, age) do
+      ticket = admit(project, title)
+      version = ask(ticket, [blocking(key, "Which #{key}?")])
+      aged(version, age)
+      {ticket, version}
+    end
+
+    test "Later sends the item to the end, and the pass ends after the last", %{
+      conn: conn,
+      project: project
+    } do
+      {first_ticket, first} = questions!(project, "First", "backend", 3600)
+      {_second, second} = questions!(project, "Second", "format", 60)
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      assert on_screen(view) == "questions-#{first.id}"
+      assert subline(view) == "1 of 2 · 2 decisions"
+
+      view |> element("#queue-later") |> render_click()
+
+      assert on_screen(view) == "questions-#{second.id}"
+      html = render(view)
+
+      assert index(html, "item-questions-#{second.id}") <
+               index(html, "item-questions-#{first.id}")
+
+      view |> element("#queue-later") |> render_click()
+
+      assert on_screen(view) == nil
+      ending = view |> element("#queue-end") |> render()
+      refute ending =~ "decided"
+      assert ending =~ "2 left for later."
+      # Over items left for later the end does not say done (UX pass, A9): green and *End of
+      # queue* are for a pass with nothing left.
+      assert has_element?(view, "#queue-end .ui-eyebrow", "End of the pass")
+      refute has_element?(view, "#queue-end .ui-eyebrow--success")
+      # What is left is drawn as the *All* sheet draws it: its kind and the item's title.
+      assert has_element?(view, "#back-questions-#{first.id}.ui-row", "First")
+
+      assert has_element?(
+               view,
+               "#back-questions-#{first.id} .ui-row-kicker",
+               "1 blocking question"
+             )
+
+      assert subline(view) == "done · 2 decisions left"
+
+      # And back to it: the end's way back shows the item again.
+      view |> element("#back-questions-#{first.id}") |> render_click()
+      assert on_screen(view) == "questions-#{first.id}"
+
+      # Nothing was answered by any of it.
+      assert Artifacts.latest(first_ticket.id, "answers.md") == nil
+    end
+
+    # Deciding moves the pass on in place: no navigation, the next item on screen, and the one
+    # decided still in the list and the sheet, dimmed with a tick.
+    test "answering sends once and shows the next item without a navigation", %{
+      conn: conn,
+      project: project
+    } do
+      {first_ticket, first} = questions!(project, "First", "backend", 3600)
+      {_second_ticket, second} = questions!(project, "Second", "format", 60)
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      assert view |> element("#form-#{first.id}") |> render_submit() =~ "Sent 1 answer"
+      refute_redirected(view)
+
+      assert [%{question: %{key: "backend"}}] = Artifacts.answered(first_ticket.id)
+      assert on_screen(view) == "questions-#{second.id}"
+      assert has_element?(view, "#item-questions-#{first.id}[data-decided]", "✓")
+      assert has_element?(view, "#all-item-questions-#{first.id}[data-decided]", "✓")
+      refute has_element?(view, "#item-questions-#{second.id}[data-decided]")
+      assert subline(view) == "2 of 2 · 1 decision"
+
+      view |> element("#form-#{second.id}") |> render_submit()
+
+      assert on_screen(view) == nil
+      assert view |> element("#queue-end") |> render() =~ "2 decided"
+      refute view |> element("#queue-end") |> render() =~ "left for later"
+      assert has_element?(view, "#queue-end .ui-eyebrow--success", "End of queue")
+      refute has_element?(view, "#queue-left")
+    end
+
+    # `?item=` — the list column's rows, *All*'s rows — shows that item; anything else is ignored.
+    test "a row jumps the pass to its item", %{conn: conn, project: project} do
+      {_first, first} = questions!(project, "First", "backend", 3600)
+      {_second, second} = questions!(project, "Second", "format", 60)
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      view |> element("#item-questions-#{second.id}") |> render_click()
+      assert on_screen(view) == "questions-#{second.id}"
+
+      {:ok, view, _html} = live(conn, ~p"/?item=nothing")
+      assert on_screen(view) == "questions-#{first.id}"
+
+      {:ok, view, _html} = live(conn, ~p"/?item=end")
+      assert on_screen(view) == nil
+      assert has_element?(view, "#queue-end")
+    end
+
+    # The queue does not rearrange itself under a thumb: what arrives joins the end, and an item
+    # answered somewhere else while on screen stays there, saying so, until the person moves on.
+    test "an arrival joins the end, and an item answered elsewhere stays on screen", %{
+      conn: conn,
+      project: project,
+      user: user
+    } do
+      {first_ticket, first} = questions!(project, "First", "backend", 3600)
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      {_late, late} = questions!(project, "Arrived late, waiting longest", "format", 7200)
+      {:ok, _ticket} = Forge.Operator.answer(first_ticket, user, "backend", %{choice: "a"})
+      # The page hears changes through the frame, which counts the first in a second at once and
+      # the rest at the second's end: the arrival was the first, so this is that end.
+      send(view.pid, :frame_recount)
+
+      assert on_screen(view) == "questions-#{first.id}"
+      assert has_element?(view, "#queue-gone")
+
+      html = render(view)
+      assert index(html, "item-questions-#{first.id}") < index(html, "item-questions-#{late.id}")
+
+      view |> element("#queue-later") |> render_click()
+      assert on_screen(view) == "questions-#{late.id}"
+      refute has_element?(view, "#item-questions-#{first.id}")
+    end
+
+    # 13c: why, in words, and the ways forward as choice rows; the dock's button takes the one
+    # picked, and the pass moves on.
+    test "a stuck ticket's ways forward are choice rows, and the dock takes the one picked", %{
+      conn: conn,
+      project: project
+    } do
+      ticket = admit(project, "Persist scores")
+      [job | _] = Jobs.for_ticket(ticket.id)
+      {:ok, _} = job |> Ecto.Changeset.change(status: :finished, outcome: :error) |> Repo.update()
+      ticket = ticket |> Ecto.Changeset.change(state: "verifying") |> Repo.update!()
+      {:ok, ticket} = Forge.Engine.stick(ticket, "the job failed")
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      assert on_screen(view) == "stuck-#{ticket.id}"
+      assert has_element?(view, "#queue-attempt")
+      # Its row's line is amber, as a wait is, not a warning (UX re-check #4).
+      assert has_element?(view, "#item-stuck-#{ticket.id} .ui-row-latest--accent")
+      refute has_element?(view, "#item-stuck-#{ticket.id} .ui-row-latest--warning")
+      ways = "#ways-#{ticket.id}"
+      assert has_element?(view, ways <> " label", "Retry verifying")
+      assert has_element?(view, ways <> " label", "Move to review_ready")
+      # Nothing is preselected: the dock's button names no way and takes none until one is picked.
+      refute has_element?(view, ways <> " input[checked]")
+      assert has_element?(view, ~s(#queue-take[form="ways-#{ticket.id}"][disabled]), "Pick a way")
+      refute has_element?(view, "#queue-item [phx-click]")
+
+      # Picking changes what the dock says, and nothing else.
+      view |> element(ways) |> render_change(%{"ticket" => ticket.id, "way" => "to:review_ready"})
+      assert has_element?(view, "#queue-take", "Move to review_ready")
+      refute has_element?(view, "#queue-take[disabled]")
+      assert has_element?(view, ways <> ~s( input[value="to:review_ready"][checked]))
+      assert Tickets.get!(ticket.id).status == :stuck
+
+      view
+      |> element(ways)
+      |> render_submit(%{"ticket" => ticket.id, "way" => "to:review_ready"})
+
+      refute_redirected(view)
+      assert %{state: "review_ready", status: :active} = Tickets.get!(ticket.id)
+      assert has_element?(view, "#item-stuck-#{ticket.id}[data-decided]", "✓")
+      refute on_screen(view) == "stuck-#{ticket.id}"
+    end
+  end
+
+  # A way the operation refuses, taken from the item on screen: said in the dock under it, since
+  # a failure is never a toast. Here the edge the press names is not one the ticket has.
+  test "a way refused from the item on screen is said in its dock", %{
+    conn: conn,
+    project: project
+  } do
+    ticket = admit(project, "Persist scores")
+    [job | _] = Jobs.for_ticket(ticket.id)
+    {:ok, _} = job |> Ecto.Changeset.change(status: :finished, outcome: :error) |> Repo.update()
+    {:ok, ticket} = Forge.Engine.stick(ticket, "the job failed")
+
+    {:ok, view, _html} = live(conn, ~p"/")
+    assert on_screen(view) == "stuck-#{ticket.id}"
+
+    view
+    |> element("#ways-#{ticket.id}")
+    |> render_submit(%{"ticket" => ticket.id, "way" => "to:nowhere"})
+
+    assert on_screen(view) == "stuck-#{ticket.id}"
+    assert has_element?(view, "#queue-refusal[role=alert]", "Failed")
+    refute has_element?(view, "#toast")
+  end
+
+  # The browser's refusal to subscribe is said beside Notify me, on the queue as on You.
+  test "a push subscription the browser refused is said beside Notify me", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    render_hook(view, "push:error", %{"reason" => "permission was not granted"})
+
+    assert has_element?(view, "#queue-list #push-error", "permission was not granted")
+  end
+
+  # The context names what happened on the ticket since this person last opened it, and nothing
+  # from before that (`docs/design/ui.md` § The end of the pass, and *All*).
+  test "the context lists only what happened since you last looked", %{
+    conn: conn,
+    project: project,
+    user: user
+  } do
+    ticket = admit(project, "Persist scores")
+    ask(ticket, [blocking("backend", "Which backend?")])
+
+    event! = fn type, payload, ago ->
+      Repo.insert!(%Forge.Events.Event{
+        ticket_id: ticket.id,
+        project_id: project.id,
+        actor: %{"kind" => "system", "id" => nil},
+        type: type,
+        payload: payload,
+        inserted_at: DateTime.add(DateTime.utc_now(:second), -ago)
+      })
+    end
+
+    event!.("transition.taken", %{"from" => "triage", "to" => "refining"}, 7200)
+    event!.("ticket.stuck", %{"reason" => "nothing could hold it"}, 600)
+
+    other = Forge.ForgeFixtures.member_fixture(project, :member)
+
+    for {who, text} <- [{user, "Keep it to one screen."}, {other, "Two screens, surely."}] do
+      Repo.insert!(%Forge.Events.Event{
+        ticket_id: ticket.id,
+        project_id: project.id,
+        actor: %{"kind" => "user", "id" => who.id},
+        type: "chat.message",
+        payload: %{"text" => text},
+        inserted_at: DateTime.add(DateTime.utc_now(:second), -300)
+      })
+    end
+
+    Forge.Tickets.Views.touch(user, ticket)
+
+    Repo.update_all(
+      from(v in Forge.Tickets.View, where: v.user_id == ^user.id),
+      set: [viewed_at: DateTime.add(DateTime.utc_now(), -3600)]
+    )
+
+    {:ok, view, _html} = live(conn, ~p"/")
+    since = view |> element("#queue-since") |> render()
+
+    assert since =~ "stuck: nothing could hold it"
+    # The viewer's own words are theirs; another person's are not called theirs.
+    assert since =~ "you: “Keep it to one screen.”"
+    assert since =~ "someone: “Two screens, surely.”"
+    refute since =~ "triage → refining"
+    assert since =~ "1h"
   end
 
   # The group the ticket asks for: whether a ticket's work is on a machine or still waiting for
@@ -950,13 +1331,19 @@ defmodule ForgeWeb.QueueLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/")
 
-      assert view |> element("#under-way-#{running.id}") |> render() =~ "Running on a worker."
-
-      assert view |> element("#under-way-#{waiting.id}") |> render() =~ "Not yet on a worker."
+      # Each half says what it is once, over its titles, rather than on every line (UX pass, A9).
+      assert has_element?(view, "#under-way-running #under-way-#{running.id}")
+      assert has_element?(view, "#under-way-waiting #under-way-#{waiting.id}")
+      refute has_element?(view, "#under-way-running #under-way-#{waiting.id}")
+      refute under_way(view) =~ "Not yet on a worker."
 
       # Asymmetric on purpose: with one of each, a sentence that counted the two groups the wrong
       # way round would read the same and nothing here would notice.
-      assert under_way(view) =~ "2 tickets running on a worker, 1 ticket not yet on one."
+      assert view |> element("#under-way-running .queue-quiet") |> render() =~
+               "2 tickets running on a worker."
+
+      assert view |> element("#under-way-waiting .queue-quiet") |> render() =~
+               "1 ticket not yet on a worker."
 
       # Each line leads to its ticket, and offers nothing that commits — the digest's rule.
       assert has_element?(
@@ -984,7 +1371,6 @@ defmodule ForgeWeb.QueueLiveTest do
                index(html, "assumption-#{question.id}")
 
       assert index(html, "assumption-#{question.id}") < index(html, "under-way-#{moving.id}")
-      assert index(html, "under-way-#{moving.id}") < index(html, "queue-end")
     end
 
     # Criterion 3. Accent is the queue's mark for an item waiting on a human and is used for
@@ -997,13 +1383,7 @@ defmodule ForgeWeb.QueueLiveTest do
       {:ok, view, _html} = live(conn, ~p"/")
       section = under_way(view)
 
-      for class <- [
-            "bg-accent",
-            "text-accent",
-            "badge-accent",
-            "border-primary",
-            "border-success"
-          ] do
+      for class <- ["accent", "ui-row", "ui-eyebrow--", "ui-choice"] do
         refute section =~ class
       end
     end
@@ -1014,7 +1394,7 @@ defmodule ForgeWeb.QueueLiveTest do
       ask(admit(project, "Stopped"), [blocking("backend", "Which backend?")])
 
       {:ok, before_view, _html} = live(conn, ~p"/")
-      before_header = before_view |> element("main header span.font-mono") |> render()
+      before_header = subline(before_view)
 
       on_worker(admit(project, "Already on a machine"))
       admit(project, "Still queued for one")
@@ -1022,8 +1402,9 @@ defmodule ForgeWeb.QueueLiveTest do
       {:ok, view, _html} = live(conn, ~p"/")
 
       assert has_element?(view, "#queue-under-way")
-      assert view |> element("main header span.font-mono") |> render() == before_header
-      assert before_header =~ "1 decision · 1 item"
+      assert subline(view) == before_header
+      assert before_header == "1 of 1 · 1 decision"
+      assert view |> element("#desktop-header .frame-queue .ui-count") |> render() =~ ">1<"
     end
 
     test "a ticket under way alone leaves the badge off entirely", %{
@@ -1035,8 +1416,8 @@ defmodule ForgeWeb.QueueLiveTest do
       {:ok, view, _html} = live(conn, ~p"/")
 
       assert has_element?(view, "#queue-under-way")
-      refute has_element?(view, "span.badge-accent")
-      refute has_element?(view, "main header span.font-mono")
+      assert subline(view) == "nothing waiting"
+      refute has_element?(view, "#desktop-header .frame-queue .ui-count--accent")
       assert view |> element("#queue-end") |> render() =~ "Nothing needs you."
     end
 
@@ -1100,7 +1481,9 @@ defmodule ForgeWeb.QueueLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/")
 
-      assert view |> element("#under-way-#{ticket.id}") |> render() =~ "Running on a worker."
+      assert has_element?(view, "#under-way-running #under-way-#{ticket.id}")
+      # A half with nothing in it is not drawn as *0 tickets*.
+      refute has_element?(view, "#under-way-waiting")
     end
 
     test "a ticket whose current job has finished has no line", %{conn: conn, project: project} do
@@ -1115,6 +1498,164 @@ defmodule ForgeWeb.QueueLiveTest do
       refute has_element?(view, "#under-way-#{ticket.id}")
       refute has_element?(view, "#queue-under-way")
     end
+  end
+
+  # The key of the item on screen, or nil at the end of the pass.
+  defp on_screen(view) do
+    view
+    |> render()
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.query("#queue-item")
+    |> LazyHTML.attribute("data-key")
+    |> List.first()
+  end
+
+  # One count: a document's questions are one decision however many there are, and an account
+  # waiting on a node admin is one too, so the subline says what the queue button says.
+  test "the subline counts decisions as the queue button does", %{conn: conn, project: project} do
+    ticket = admit(project, "Persist scores")
+    ask(ticket, [blocking("backend", "Which backend?"), blocking("format", "Which format?")])
+    admin = Forge.ForgeFixtures.member_fixture(project, :member)
+    {:ok, admin} = admin |> Ecto.Changeset.change(node_admin: true) |> Repo.update()
+    Forge.AccountsFixtures.pending_user_fixture()
+
+    {:ok, view, _html} = build_conn() |> log_in_user(admin) |> live(~p"/")
+
+    assert subline(view) == "1 of 2 · 2 decisions"
+    assert Forge.Queue.count(admin) == 2
+
+    {:ok, view, _html} = live(conn, ~p"/")
+    assert subline(view) == "1 of 1 · 1 decision"
+  end
+
+  # Accounts waiting on a node admin are counted as decisions on the queue button, so the queue
+  # lists them where the count says they are: one item, whose way on is Accounts (UX pass, A23).
+  # Before, the count said 2 and the pass had nothing in it.
+  test "accounts waiting on an admin are one item, leading to Accounts", %{project: project} do
+    admin = Forge.ForgeFixtures.member_fixture(project, :member)
+    {:ok, admin} = admin |> Ecto.Changeset.change(node_admin: true) |> Repo.update()
+    Forge.AccountsFixtures.pending_user_fixture()
+    Forge.AccountsFixtures.pending_user_fixture()
+
+    {:ok, view, _html} = build_conn() |> log_in_user(admin) |> live(~p"/")
+
+    assert subline(view) == "1 of 1 · 2 decisions"
+    assert Forge.Queue.count(admin) == 2
+    assert on_screen(view) == "accounts"
+
+    assert view |> element("#queue-item .queue-sentence") |> render() =~
+             "2 accounts wait to be approved."
+
+    assert has_element?(
+             view,
+             ~s(#queue-dock a#queue-accounts[href="/accounts"]),
+             "Review the accounts"
+           )
+
+    assert has_element?(view, "#item-accounts .ui-row-kicker", "accounts")
+    # Nothing is decided here: the accounts are, on their page.
+    refute has_element?(view, ~s(#queue-item [phx-click="approve"]))
+
+    # Later leaves them for later, like any item, and the end does not say done.
+    view |> element("#queue-later") |> render_click()
+    refute view |> element("#queue-end") |> render() =~ "Nothing needs you"
+    assert has_element?(view, "#back-accounts", "2 accounts wait to be approved.")
+
+    # A member who is not a node admin has none.
+    {:ok, member_view, _html} =
+      build_conn()
+      |> log_in_user(Forge.ForgeFixtures.member_fixture(project, :member))
+      |> live(~p"/")
+
+    refute has_element?(member_view, "#item-accounts")
+  end
+
+  # The item has waited as long as the oldest account in it, not the newest (review fixes 7, L5).
+  test "the accounts item is as old as the oldest account waiting", %{project: project} do
+    admin = Forge.ForgeFixtures.member_fixture(project, :member)
+    {:ok, admin} = admin |> Ecto.Changeset.change(node_admin: true) |> Repo.update()
+    oldest = Forge.AccountsFixtures.pending_user_fixture()
+    Forge.AccountsFixtures.pending_user_fixture()
+
+    oldest
+    |> Ecto.Changeset.change(inserted_at: DateTime.add(DateTime.utc_now(:second), -3, :day))
+    |> Repo.update!()
+
+    {:ok, view, _html} = build_conn() |> log_in_user(admin) |> live(~p"/")
+
+    assert on_screen(view) == "accounts"
+    assert view |> element("#queue-item .queue-age") |> render() =~ "waiting 3d"
+  end
+
+  test "one account waiting is said in the singular", %{project: project} do
+    admin = Forge.ForgeFixtures.member_fixture(project, :member)
+    {:ok, admin} = admin |> Ecto.Changeset.change(node_admin: true) |> Repo.update()
+    Forge.AccountsFixtures.pending_user_fixture()
+
+    {:ok, view, _html} = build_conn() |> log_in_user(admin) |> live(~p"/")
+
+    assert view |> element("#queue-item .queue-sentence") |> render() =~
+             "1 account waits to be approved."
+  end
+
+  # The queue button recounts on the frame's own signals — a change in one of the viewer's
+  # projects, and the minute tick that reads a node admin's waiting accounts — and the page follows
+  # them, so it moves when the button does. A sign-up announces nothing else.
+  test "the page counts again when the queue button does", %{project: project} do
+    admin = Forge.ForgeFixtures.member_fixture(project, :member)
+    {:ok, admin} = admin |> Ecto.Changeset.change(node_admin: true) |> Repo.update()
+
+    {:ok, view, _html} = build_conn() |> log_in_user(admin) |> live(~p"/")
+    assert subline(view) == "nothing waiting"
+
+    Forge.AccountsFixtures.pending_user_fixture()
+    send(view.pid, :capacity_tick)
+    assert subline(view) == "1 of 1 · 1 decision"
+
+    Forge.AccountsFixtures.pending_user_fixture()
+    send(view.pid, {:queue_changed, project.id})
+    assert subline(view) == "1 of 1 · 2 decisions"
+  end
+
+  # One ticket change, one read of the queue (r3 L4): the frame's recount takes the page's own
+  # count rather than reading the queue again, and the page hears the change only through the
+  # frame — which a ticket change reaches as a `:queue_changed` (`Forge.Events.notify/1`). Counted
+  # by the questions the view reads, which `Forge.Queue.items/1` reads once per call and nothing
+  # else on the page reads at all.
+  test "a ticket change reads the queue once", %{conn: conn, project: project} do
+    ticket = admit(project, "Persist scores")
+    ask(ticket, [blocking("backend", "Which backend?")])
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    test = self()
+    handler = "queue-reads-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:forge, :repo, :query],
+      fn _event, _measurements, meta, pid ->
+        if self() == pid and meta.source == "questions", do: send(test, :questions)
+      end,
+      view.pid
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    Forge.Events.notify(ticket.id)
+    assert subline(view) =~ "1 decision"
+
+    assert_received :questions
+    refute_received :questions
+  end
+
+  # The queue's subline: the place in the pass and the decisions left, as the title row draws it.
+  defp subline(view) do
+    view
+    |> element("#title-row .frame-subline")
+    |> render()
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.text()
+    |> String.trim()
   end
 
   defp index(html, id) do

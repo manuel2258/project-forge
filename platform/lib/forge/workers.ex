@@ -2248,7 +2248,8 @@ defmodule Forge.Workers do
     case released do
       :ok ->
         Logger.info("destroyed worker #{worker.id}")
-        gone(worker, %{status: :destroyed}, {:info, "#{ended(worker)}#{why}"})
+        # The driver's earlier refusal is answered: the row no longer says it would not.
+        gone(worker, %{status: :destroyed, last_error: nil}, {:info, "#{ended(worker)}#{why}"})
 
       # **No driver to ask is not the same as a driver that said no.** A row naming a provider
       # this node no longer has can never be destroyed from here however many times it is

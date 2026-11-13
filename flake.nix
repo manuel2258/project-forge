@@ -85,8 +85,28 @@
           platformDeps = mixDeps {
             name = "forge";
             subdir = "platform";
-            hash = "sha256-f5gsN385ciaPh67MNTGOzOG5ODq5rUKiUbaJ6tu26cw=";
+            hash = "sha256-h6chxKZKv3FHeilRgF/SHCYcNV0Krah8e5TLisjZr3g=";
           };
+
+          # Lumis's NIF (`ForgeWeb.Highlight`), which `rustler_precompiled` downloads while Mix
+          # compiles the `lumis` dependency — inside `mixRelease`'s sandbox, which has no network.
+          # Fetched here instead and handed to it as its cache (`forge`'s `preConfigure`): Lumis's
+          # own `guides/deployment.md` § Build with Nix describes the same mechanism inside
+          # `fetchMixDeps`, kept apart here so that `platformDeps` stays the same on every system.
+          #
+          # **The legacy-CPU build**, for x86_64: Lumis chooses at compile time between it and
+          # one that needs AVX and FMA, and the machine that compiles says nothing about the one
+          # the image runs on. The hash is the one in the package's own
+          # `checksum-Elixir.Lumis.Native.exs`, which `rustler_precompiled` checks again before
+          # it extracts the archive. One attribute per system a platform is built for; a system
+          # with none fails to build `forge` at `lumis`, saying it could not download the NIF.
+          lumisNifs = {
+            x86_64-linux = pkgs.fetchurl {
+              url = "https://github.com/leandrocp/lumis/releases/download/hex-lumis/v0.10.8/liblumis_nif-v0.10.8-nif-2.15-x86_64-unknown-linux-gnu--legacy_cpu.so.tar.gz";
+              sha256 = "2d47b287cbe736190c38ee50aa53b42ffcfd01eeb4073ade2b87f09e0bdb8773";
+            };
+          };
+          lumisNif = lumisNifs.${pkgs.stdenv.hostPlatform.system} or null;
 
           forge-worker = beam.mixRelease {
             pname = "forge-worker";
@@ -121,7 +141,17 @@
               # what makes building the platform build the image first.
               FORGE_WORKER_IMAGE_RELEASE =
                 "${self.packages.x86_64-linux.worker-image-release}/release.env";
+              # Which of Lumis's NIFs `rustler_precompiled` asks its cache for: `lumisNif` above.
+              LUMIS_USE_LEGACY_ARTIFACTS = "true";
             };
+            # `preConfigure` and not `preBuild`: `mixRelease` compiles the dependencies in its
+            # configure phase. A writable copy, under the archive's own name, because
+            # `rustler_precompiled` writes a `metadata-*.exs` beside it.
+            preConfigure = lib.optionalString (lumisNif != null) ''
+              export RUSTLER_PRECOMPILED_GLOBAL_CACHE_PATH="$TMPDIR/rustler-cache"
+              mkdir -p "$RUSTLER_PRECOMPILED_GLOBAL_CACHE_PATH"
+              cp ${lumisNif} "$RUSTLER_PRECOMPILED_GLOBAL_CACHE_PATH/${lumisNif.name}"
+            '';
             # Assets are built after `mix compile` (colocated CSS is emitted by the
             # compiler) and before `mix release` (which copies priv/static).
             # `--no-deps-check` is needed because the fetched deps have no .git

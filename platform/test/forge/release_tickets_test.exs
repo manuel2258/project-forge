@@ -8,6 +8,7 @@ defmodule Forge.ReleaseTicketsTest do
 
   use Forge.DataCase, async: false
 
+  import Ecto.Query, only: [from: 2]
   import Forge.AccountsFixtures
   import Forge.ForgeFixtures
   import Forge.GitFixtures
@@ -662,6 +663,100 @@ defmodule Forge.ReleaseTicketsTest do
   end
 
   # The agent's whole run on a release: commits the version and writes notes saying it.
+  # `docs/design/ui.md` § Steps (`21e`): what a release is the release of.
+  describe "since/1" do
+    setup do
+      project = project_fixture()
+      now = DateTime.utc_now(:second)
+      %{project: project, at: &DateTime.add(now, -&1, :second)}
+    end
+
+    defp ticket!(project, number, attrs \\ %{}) do
+      ticket_fixture(
+        Map.merge(%{project: project, number: number, branch: "ticket/#{number}"}, attrs)
+      )
+    end
+
+    defp release!(project, number, title, status, at) do
+      ticket =
+        ticket!(project, number, %{
+          title: title,
+          workflow: Map.put(workflow_map(), "release", true)
+        })
+
+      Repo.update_all(from(t in Ticket, where: t.id == ^ticket.id),
+        set: [status: status, updated_at: at]
+      )
+
+      ticket
+    end
+
+    defp merged!(ticket, at) do
+      Repo.insert!(%Events.Event{
+        type: "ticket.merged",
+        actor: %{"kind" => "system", "id" => nil},
+        ticket_id: ticket.id,
+        project_id: ticket.project_id,
+        payload: %{},
+        inserted_at: at
+      })
+    end
+
+    test "is the previous release done, by its title, and what merged after it, newest first",
+         %{project: project, at: at} do
+      _older = release!(project, 1, "0.16.0", :done, at.(9000))
+      before = ticket!(project, 2)
+      previous = release!(project, 3, "0.17.0", :done, at.(3600))
+      _cancelled = release!(project, 4, "Release in progress", :cancelled, at.(1000))
+      first = ticket!(project, 5)
+      second = ticket!(project, 6)
+      current = release!(project, 7, "Release in progress", :active, at.(0))
+      elsewhere = ticket!(project_fixture(), 8)
+
+      merged!(before, at.(5000))
+      # A release merging is not something it releases.
+      merged!(previous, at.(3500))
+      merged!(first, at.(1800))
+      merged!(second, at.(600))
+      merged!(elsewhere, at.(600))
+
+      assert %{version: "0.17.0", tickets: tickets} = ReleaseTickets.since(current)
+      assert Enum.map(tickets, & &1.id) == [second.id, first.id]
+    end
+
+    # Another project's release, however low its number, is not this one's previous.
+    test "is nothing when the only earlier release done is another project's", %{
+      project: project,
+      at: at
+    } do
+      _theirs = release!(project_fixture(), 1, "9.9.9", :done, at.(3600))
+      current = release!(project, 2, "Release in progress", :active, at.(0))
+
+      assert ReleaseTickets.since(current) == nil
+    end
+
+    # Reopened and merged again: one ticket, listed once.
+    test "lists a ticket merged twice since once", %{project: project, at: at} do
+      _previous = release!(project, 1, "0.1.0", :done, at.(3600))
+      twice = ticket!(project, 2)
+      current = release!(project, 3, "Release in progress", :active, at.(0))
+      merged!(twice, at.(1800))
+      merged!(twice, at.(600))
+
+      assert %{tickets: [%{id: id}]} = ReleaseTickets.since(current)
+      assert id == twice.id
+    end
+
+    test "is nothing with no earlier release done, and never this one or a later one",
+         %{project: project, at: at} do
+      _cancelled = release!(project, 1, "0.1.0", :cancelled, at.(3600))
+      current = release!(project, 2, "Release in progress", :active, at.(0))
+      _later = release!(project, 3, "0.3.0", :done, at.(0))
+
+      assert ReleaseTickets.since(current) == nil
+    end
+  end
+
   defp release_run(worker, ticket, version) do
     written = Map.put(notes(version), "commit-message", FakeWorker.commit_message())
     run_pending(worker, ticket, commit: {"VERSION", "#{version}\n"}, written: written)

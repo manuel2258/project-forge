@@ -10,6 +10,8 @@ defmodule Forge.Look.StepsTest do
 
   test "every step form parses to its operation" do
     assert parse!("width phone") == {:width, :phone}
+    assert parse!("width portrait") == {:width, :portrait}
+    assert parse!("width wide") == {:width, :wide}
     assert parse!("width desktop") == {:width, :desktop}
     assert parse!("visit /tickets/game/1") == {:visit, {:path, "/tickets/game/1"}}
     assert parse!("visit :ticket") == {:visit, {:named, "ticket"}}
@@ -66,15 +68,19 @@ defmodule Forge.Look.StepsTest do
     assert {:error, %{n: 2, text: "wiggle", reason: ~s|unknown step "wiggle"|}} =
              Steps.parse("width phone\nwiggle")
 
-    assert {:error, %{reason: "width is phone or desktop"}} = Steps.parse("width tablet")
+    assert {:error, %{reason: "width is phone, portrait, wide or desktop"}} =
+             Steps.parse("width tablet")
+
     assert {:error, %{reason: "wrong arguments for fill"}} = Steps.parse("fill input")
     assert {:error, %{reason: "unbalanced quote"}} = Steps.parse(~s|click text "Save|)
     assert {:error, %{reason: reason}} = Steps.parse(~s|click text "it's \\"x\\""|)
     assert reason =~ "not both"
   end
 
-  test "the widths are a phone's and a desktop's" do
-    assert Steps.size(:phone) == {390, 844}
+  test "the widths are the sizes the handoff drew each layout at, and the prompts' desktop" do
+    assert Steps.size(:phone) == {412, 915}
+    assert Steps.size(:portrait) == {1080, 1500}
+    assert Steps.size(:wide) == {1600, 1000}
     assert Steps.size(:desktop) == {1280, 800}
   end
 end

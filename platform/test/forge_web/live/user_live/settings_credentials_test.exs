@@ -51,7 +51,8 @@ defmodule ForgeWeb.UserLive.SettingsCredentialsTest do
     {view, _html} = open(conn)
     row = view |> element("#credential-#{credential.id} [title]") |> render()
     assert row =~ ~s(title="#{name}")
-    assert row =~ "truncate"
+    # Cut to one line by `.you-credential-name` (an ellipsis, `areas/account.css`).
+    assert row =~ ~s(class="you-credential-name")
   end
 
   test "a credential is added, and its token is in neither the page nor the state", %{conn: conn} do
@@ -76,7 +77,7 @@ defmodule ForgeWeb.UserLive.SettingsCredentialsTest do
 
     assert html =~ "work"
     assert html =~ "Subscription token"
-    assert html =~ "1 models"
+    assert html =~ "1 model"
     refute html =~ @token
     refute state(view) =~ @token
   end
@@ -124,10 +125,18 @@ defmodule ForgeWeb.UserLive.SettingsCredentialsTest do
 
     {view, _html} = open(conn)
 
-    html = view |> element("#credential-#{credential.id} button", "Revoke") |> render_click()
+    assert view |> element("#revoke-credential-#{credential.id}-confirm") |> render() =~
+             "No job will start on it again"
+
+    html = view |> element("#revoke-credential-#{credential.id}", "Revoke it") |> render_click()
 
     assert html =~ "revoked"
-    refute has_element?(view, "#credential-#{credential.id} button", "Revoke")
+
+    refute has_element?(
+             view,
+             ~s(#credential-#{credential.id} button[phx-click="revoke-credential"])
+           )
+
     assert Credentials.get(user, credential.id).revoked_at
   end
 
@@ -191,6 +200,35 @@ defmodule ForgeWeb.UserLive.SettingsCredentialsTest do
     assert Credentials.pool(project.id, "claude_code") == []
   end
 
+  # The select offers the projects this credential does not fund yet, from a blank, and goes once
+  # it funds them all (UX pass, D5).
+  test "Assign offers only the projects the credential does not fund yet", %{
+    conn: conn,
+    user: user
+  } do
+    funded = Forge.ForgeFixtures.project_fixture()
+    other = Forge.ForgeFixtures.project_fixture()
+    Forge.ForgeFixtures.join!(funded, user, :member)
+    Forge.ForgeFixtures.join!(other, user, :member)
+    credential = Forge.ForgeFixtures.credential_fixture(user)
+    {:ok, _} = Credentials.assign(user, credential.id, funded.id)
+
+    {view, _html} = open(conn)
+
+    select =
+      view
+      |> element("#credential-#{credential.id} form[phx-submit=assign-credential] select")
+      |> render()
+
+    refute select =~ ~s(value="#{funded.id}")
+    assert select =~ ~s(value="#{other.id}")
+    assert select =~ ~r/<option value="" disabled="" selected="">add a project…/
+
+    {:ok, _} = Credentials.assign(user, credential.id, other.id)
+    {view, _html} = open(conn)
+    refute has_element?(view, "#credential-#{credential.id} form[phx-submit=assign-credential]")
+  end
+
   # What each has used today and whether it is rate-limited now are what an owner of several
   # needs to see which one the pool is leaning on (`docs/design/credentials.md` § Spend). The
   # limit is beside the figure and says it is not enforced, because it is not.
@@ -231,6 +269,12 @@ defmodule ForgeWeb.UserLive.SettingsCredentialsTest do
 
     assert view |> element("#credential-#{limited.id}-five_hour.text-warning") |> render() =~
              "5h · resets #{Calendar.strftime(resets_at, "%H:%M")} UTC · rate-limited"
+
+    # A limited credential counts as full: its line is drawn at 100 though it reported no figure.
+    assert has_element?(
+             view,
+             ~s(#credential-#{limited.id}-five_hour [role=meter][aria-valuenow="100"])
+           )
   end
 
   # The tokens counted behind the figure, by kind, and — only on a Claude API key, which is billed
@@ -302,6 +346,17 @@ defmodule ForgeWeb.UserLive.SettingsCredentialsTest do
 
     refute has_element?(view, "#credential-#{reported.id} .text-warning")
     refute has_element?(view, "[id^=credential-#{silent.id}-]")
+
+    # Each its usage line, the one the frame draws for that window.
+    assert has_element?(
+             view,
+             ~s{#credential-#{reported.id}-five_hour .ui-usage:not(.ui-usage--week)[aria-valuenow="53"]}
+           )
+
+    assert has_element?(
+             view,
+             ~s(#credential-#{reported.id}-seven_day .ui-usage--week[aria-valuenow="15"])
+           )
   end
 
   # Ticket 32: a window a newer report leaves out is still the week as last reported.
@@ -368,5 +423,19 @@ defmodule ForgeWeb.UserLive.SettingsCredentialsTest do
 
     assert html =~ "could not assign it"
     assert Credentials.pool(project.id, "claude_code") == []
+  end
+
+  # An empty list is the provider not saying, not a credential with no models (UX pass, D20);
+  # and the form that adds one says what it is.
+  test "a credential with no list of models says so, and the form is headed", %{
+    conn: conn,
+    user: user
+  } do
+    credential = Forge.ForgeFixtures.credential_fixture(user)
+    {view, _html} = open(conn)
+
+    assert has_element?(view, "#credential-#{credential.id}", "models not listed")
+    refute has_element?(view, "#credential-#{credential.id}", "0 models")
+    assert has_element?(view, "#credential-form h2", "Add a credential")
   end
 end

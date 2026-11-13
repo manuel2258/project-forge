@@ -1,0 +1,198 @@
+/* The settings area's styles (docs/design/ui.md). Edited only by the slice that builds that area.
+
+   Project settings (§ Project settings, 9a–9i, 21h). One render, three arrangements:
+   - phone: the index is the page; a section replaces it; a section's form (`data-aside="form"`)
+     replaces the section, and People's Add someone (`data-aside="foot"`) sits under its rows.
+   - portrait (768–1439): the index is a 272px column on the left, the section beside it, and its
+     form under the section.
+   - wide (1440 and up): the index, the section, and its form in the right-hand column. */
+
+@layer components {
+  .settings { display: flex; flex-direction: column; }
+
+  /* What is drawn only on a phone, or only from 768px. */
+  @media (width >= 768px) { .settings-phone { display: none !important; } }
+  @media (width < 768px) { .settings-desk { display: none !important; } }
+
+  /* -- the index ----------------------------------------------------------------------------- */
+  .settings-index { display: flex; flex-direction: column; }
+  .settings-group { padding: 18px 0 6px; }
+  .settings-group:first-child { padding-top: 4px; }
+  .settings-index .ui-row { min-height: 60px; align-items: center; padding-left: 0; }
+  /* A section's state wraps to a second line rather than cutting off the warning (D10). */
+  .settings-index .ui-row-latest {
+    display: -webkit-box;
+    overflow: hidden;
+    white-space: normal;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+  .settings-index .ui-row--selected { padding-left: 10px; box-shadow: inset 2px 0 0 var(--ink); }
+  /* A phone's index is a menu, not a selection: nothing is marked until a section is open. */
+  @media (width < 768px) {
+    .settings-index:not([data-open]) .ui-row--selected { padding-left: 0; background: none; box-shadow: none; }
+  }
+  .settings-clone { display: flex; flex-direction: column; gap: 6px; margin-top: 24px; }
+
+  /* -- a section ----------------------------------------------------------------------------- */
+  .settings-back {
+    display: flex;
+    min-height: 44px;
+    align-items: center;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--ink-2);
+  }
+  @media (width >= 768px) { .settings-back { display: none; } }
+
+  .settings-heading { display: flex; align-items: baseline; gap: 10px; margin: 4px 0 8px; }
+  .settings-heading h2 { font-size: 18px; font-weight: 600; letter-spacing: -.02em; }
+  .settings-heading--sub { margin-top: 28px; }
+  .settings-heading--sub h3 { font-size: 15px; font-weight: 600; }
+  .settings-count { font-family: var(--font-mono); font-size: var(--text-meta); color: var(--ink-3); }
+  .settings-form-title { margin: 4px 0 12px; font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
+
+  .settings-note { margin: 4px 0 12px; font-size: var(--text-small); line-height: 1.55; color: var(--ink-2); }
+  .settings-note code,
+  .settings-mono { font-family: var(--font-mono); font-size: 12px; }
+  .settings-break { overflow-wrap: anywhere; }
+  .settings-sub { font-family: var(--font-mono); font-size: var(--text-meta); color: var(--ink-3); }
+  .settings-warning { color: var(--warning); }
+  .settings-code { font-family: var(--font-mono); font-size: .92em; }
+  .settings-danger { font-family: var(--font-mono); font-size: var(--text-meta); color: var(--danger); }
+  .settings-success { color: var(--success); }
+  .settings-error { margin: 8px 0; }
+
+  .settings-toggle { margin-top: 8px; }
+  .settings-add { width: 100%; margin-top: 16px; }
+
+  /* A section's list: a table from 768px, one block per row on a phone, each cell a line. */
+  .settings-table { width: 100%; border-collapse: collapse; font-size: var(--text-ui); }
+  .settings-table th {
+    padding: 8px 12px 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: var(--text-eyebrow);
+    font-weight: 400;
+    letter-spacing: var(--tracking-eyebrow);
+    text-align: left;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .settings-table td { padding: 12px 12px 12px 0; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+  .settings-table td.settings-act { padding-right: 0; text-align: right; white-space: nowrap; }
+  .settings-spent { opacity: .5; }
+  .settings-name-line { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .settings-name { font-family: var(--font-mono); font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+  .settings-name-line > :last-child { flex-shrink: 0; font-family: var(--font-mono); font-size: var(--text-meta); }
+  .settings-capability { overflow-wrap: anywhere; }
+
+  @media (width < 768px) {
+    .settings-table thead { display: none; }
+    .settings-table,
+    .settings-table tbody,
+    .settings-table tr,
+    .settings-table td { display: block; }
+    .settings-table tr { padding: 12px 0; border-bottom: 1px solid var(--border-soft); }
+    .settings-table td { padding: 2px 0; border: 0; }
+    /* A destructive act in a list row is small and red at the row's end, never a full-width bar
+       under every row (ui.md § The confirm). */
+    .settings-table td.settings-act { padding-top: 8px; text-align: right; }
+  }
+
+  /* -- people -------------------------------------------------------------------------------- */
+  .settings-people { border-top: 1px solid var(--border-soft); }
+  .settings-person {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    min-height: 60px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .settings-person-name { display: flex; min-width: 0; flex: 1 1 0%; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+  .settings-person-reason { flex-basis: 100%; }
+  /* A role is the add form's segmented, changed in place (UX pass, A14); a promotion's confirm
+     opens under the row, full width, from the option itself — its own trigger is never drawn. */
+  .settings-role { display: contents; }
+  .settings-role-seg { width: 152px; flex: none; }
+  .settings-role-seg .ui-seg-opt { font-family: var(--font-mono); font-size: 12px; }
+  /* Under the row, and only while it is open: closed, it would take a line of its own. */
+  .settings-role-confirm { order: 10; flex-basis: 100%; }
+  .settings-role-confirm:not(:has(> .ui-confirm-panel[style*="flex"])) { display: none; }
+  @media (width < 768px) { .settings-role-seg { width: 124px; } }
+  .settings-role-confirm > .ui-btn { display: none !important; }
+  .settings-x { width: 40px; height: 40px; padding: 0; font-size: 18px; }
+
+  /* -- measures (UX pass, D8): a section of fields stops at a form's width, a table at a table's - */
+  .settings-main > section { max-width: 60rem; }
+  .settings-main > #agent,
+  .settings-main > #people { max-width: 40rem; }
+
+  /* The main-branch choice says why it is worth choosing on purpose, as a warning (D13). */
+  .ui-choice:has(#token-git-admin) .ui-choice-detail { color: var(--warning); }
+  .ui-choice:has(#token-git-admin) .ui-choice-detail::before { content: "△ "; }
+
+  /* A secret's value is dots until shown (D19). */
+  .settings-masked { -webkit-text-security: disc; }
+  .settings-form > .settings-reveal { width: auto; align-self: flex-start; margin-top: -6px; }
+
+  /* -- forms --------------------------------------------------------------------------------- */
+  .settings-form { display: flex; flex-direction: column; gap: 12px; }
+  .settings-fieldset { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; border: 0; }
+  .settings-legend {
+    margin-bottom: 4px;
+    font-family: var(--font-mono);
+    font-size: var(--text-eyebrow);
+    letter-spacing: var(--tracking-eyebrow);
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .settings-dock { display: flex; gap: 10px; margin-top: 8px; }
+  /* A form's one button spans it; `fill` would collapse it in a column. */
+  .settings-form > .ui-btn,
+  #issued > .ui-btn { width: 100%; flex: none; }
+
+  /* -- portrait: the index on the left, the section and then its form beside it -------------- */
+  @media (768px <= width < 1440px) {
+    .frame-columns:has(#settings) {
+      display: grid;
+      grid-template-columns: 272px minmax(0, 1fr);
+      grid-template-areas: "list body" "list aside";
+      align-content: start;
+    }
+    .frame-columns:has(#settings) > .frame-list { grid-area: list; border-right: 1px solid var(--border); }
+    .frame-columns:has(#settings) > .frame-main { grid-area: body; }
+    .frame-columns:has(#settings) > .frame-aside { grid-area: aside; padding-top: 0; }
+    .frame-aside .settings-aside { padding-top: 24px; border-top: 1px solid var(--border); }
+
+    /* The form spreads into two columns under the table (21h), its choices and button across. */
+    .frame-aside .settings-form:not(.settings-form--single) {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      column-gap: 24px;
+      align-items: start;
+    }
+    .frame-aside .settings-form .settings-span { grid-column: 1 / -1; }
+  }
+
+  /* -- wide: index 272, the section, the form in the right-hand column ------------------------ */
+  @media (width >= 1440px) {
+    .frame-columns:has(#settings) > .frame-list { width: 272px; min-width: 272px; }
+  }
+
+  /* -- phone: one thing at a time ------------------------------------------------------------- */
+  @media (width < 768px) {
+    /* A section open: the index goes. */
+    .frame-list:has(> #settings-sections[data-open]) { display: none; }
+    /* The form goes too, unless this is its screen or People's foot. */
+    .frame-columns:has(#settings:not([data-aside])) > .frame-aside { display: none; }
+    /* On a form's own screen the section it belongs to goes. */
+    #settings[data-aside="form"] .settings-main { display: none; }
+    .frame-columns:has(#settings[data-aside]) > .frame-aside { padding-top: 0; }
+    /* With the aside on screen the content column takes only its own height: growing, it pushed
+       the issued token and the forms down an empty screen. */
+    .frame-columns:has(#settings[data-aside]) > .frame-main { flex-grow: 0; }
+  }
+}

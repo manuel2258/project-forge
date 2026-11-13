@@ -1,81 +1,108 @@
 defmodule Forge.Look.Setups.Usage do
   @moduledoc """
-  Usage in weighted tokens, where cost was drawn: a ticket with a job that used 3,150 weighted
-  tokens, one whose figure was converted from dollars by the migration, and a credential with a
-  day's usage and a daily limit on the member's account settings.
-  Users: `member`. Paths: `job`, `converted`, `ticket`, `settings`.
+  Usage (`23a`, `23b`, `22e`): a member with two credentials whose reports average 91 % of the
+  five-hour window and 63 % of the week, and spend across the last five hours and the week in two
+  projects — three items running now, two finished, a handful earlier — and some in a third
+  project the member is not in, which is drawn as *elsewhere*. A colleague's credential is in
+  `game`'s pool, so the panel on that project has someone it must not name.
+
+  Users: `member`. Paths: `usage`, `project` (`game`, for the panel over its pool).
   """
 
   @behaviour Forge.Look.Setups
 
-  import Ecto.Query, only: [from: 2]
   import Forge.AccountsFixtures
   import Forge.ForgeFixtures
+  import Forge.UsageFixtures
 
   @impl true
   def build do
     member = user_fixture()
-    project = project_fixture(%{name: "look-usage"}) |> join!(member)
-    ticket = ticket_fixture(%{project: project, title: "Persist the high score table"})
+    game = project_fixture(%{name: "game"}) |> join!(member)
+    forge = project_fixture(%{name: "forge"}) |> join!(member)
+    site = project_fixture(%{name: "site"})
+    now = DateTime.utc_now(:second)
 
-    # A spec by hand, since a real one needs a git repository behind the project: the job page
-    # draws its budget and its inputs.
-    spec =
-      %ForgeCore.Job.Spec{
-        job_id: "look-1",
-        ticket: %{number: ticket.number, title: ticket.title, ticket_type: nil},
-        state: "planning",
-        attempt: 1,
-        prompt: "Write a plan.",
-        prompt_path: "agents/plan.md",
-        env: "default",
-        commit: String.duplicate("a", 40),
-        branch: "ticket/#{ticket.number}",
-        budget: %{turns: 80, tokens: 800_000},
-        preamble_hash: "sha256:x",
-        inputs: [],
-        produces: ["plan.md"],
-        outcomes: ["done"]
-      }
-      |> ForgeCore.Job.Spec.to_json()
-      |> Jason.decode!()
+    work = pool!(game, credential_fixture(member, name: "work-max"))
+    pool!(forge, work)
+    spare = pool!(game, credential_fixture(member, name: "spare-pro"))
+    pool!(site, spare)
 
-    counted = job_fixture(%{ticket: ticket, spec: spec})
-    converted = job_fixture(%{ticket: ticket, attempt: 2, spec: spec})
+    five_hour = DateTime.add(now, 72 * 60)
+    week = DateTime.add(now, 2 * 86_400 + 3 * 3_600)
 
-    for {job, usage, flag} <- [{counted, 3_150, false}, {converted, 420_000, true}] do
-      job
-      |> Ecto.Changeset.change(
-        status: :finished,
-        outcome: :converged,
-        usage: usage,
-        usage_converted: flag,
-        turns: 7
-      )
-      |> Forge.Repo.update!()
-    end
+    reported!(game, work, %{"five_hour" => {0.95, five_hour}, "seven_day" => {0.70, week}})
+    reported!(game, spare, %{"five_hour" => {0.87, five_hour}, "seven_day" => {0.56, week}})
 
-    ticket
-    |> Ecto.Changeset.change(usage: 423_150, usage_converted: true)
-    |> Forge.Repo.update!()
+    colleague = member_fixture(game)
+    theirs = pool!(game, credential_fixture(colleague, name: "colleague-max"))
+    reported!(game, theirs, %{"five_hour" => {0.40, five_hour}})
 
-    credential = credential_fixture(member)
-
-    Forge.Repo.update_all(
-      from(c in Forge.Credentials.Credential, where: c.id == ^credential.id),
-      set: [daily_limit: 4_000_000]
-    )
-
-    run!(chat_fixture(%{project: project}), credential: credential, usage: 350_000)
+    spend!(game, forge, site, work, spare, now)
 
     %{
       users: %{"member" => member},
-      paths: %{
-        "job" => "/tickets/#{project.name}/#{ticket.number}/jobs/#{counted.id}",
-        "converted" => "/tickets/#{project.name}/#{ticket.number}/jobs/#{converted.id}",
-        "ticket" => "/tickets/#{project.name}/#{ticket.number}",
-        "settings" => "/users/settings"
-      }
+      paths: %{"usage" => "/usage", "project" => "/projects/#{game.name}"}
     }
+  end
+
+  defp spend!(game, forge, site, work, spare, now) do
+    ago = fn minutes -> DateTime.add(now, -60 * minutes) end
+
+    # Running now: a job, a conversation, a review in the other project.
+    job(game, 41, "Persist the high score table", "implementing", 2, :running)
+    |> spent!(work, 220_000, ago.(3), open: true)
+
+    chat = chat_fixture(%{project: game, status: :running})
+
+    {:ok, _} =
+      Forge.Events.append("chat.message", :system, %{
+        job_id: chat.id,
+        payload: %{"text" => "Why is the build so slow on CI?"}
+      })
+
+    spent!(chat, spare, 110_000, ago.(6), open: true)
+
+    job(forge, 118, "Retry backoff for the worker socket", "review", 1, :running)
+    |> spent!(work, 90_000, ago.(12), open: true)
+
+    # Finished this window.
+    job(game, 44, "Replace the font atlas", "implementing", 1, :finished, :did_not_converge)
+    |> spent!(work, 190_000, ago.(70))
+
+    job(game, 42, "Shape the leaderboard screen", "shaping", 1, :finished, :converged)
+    |> spent!(spare, 140_000, ago.(110))
+
+    for {minutes, cost} <- [{150, 40_000}, {170, 30_000}, {190, 50_000}, {205, 20_000}] do
+      job(forge, nil, "Earlier work", "refining", 1, :finished, :converged)
+      |> spent!(spare, cost, ago.(minutes))
+    end
+
+    # In a project the member is not in.
+    job(site, nil, "Not the member's to read", "implementing", 1, :finished, :converged)
+    |> spent!(spare, 60_000, ago.(40))
+
+    # Earlier in the week.
+    for {hours, cost, project} <- [
+          {30, 800_000, game},
+          {52, 1_300_000, forge},
+          {75, 600_000, game},
+          {98, 1_000_000, game},
+          {120, 440_000, forge}
+        ] do
+      job(project, nil, "Earlier in the week", "implementing", 1, :finished, :converged)
+      |> spent!(work, cost, DateTime.add(now, -3_600 * hours))
+    end
+  end
+
+  # A ticket numbered as the handoff draws it, where it draws one, and its job.
+  defp job(project, number, title, state, attempt, status, outcome \\ nil) do
+    attrs = %{project: project, title: title, state: state}
+    ticket = ticket_fixture(if number, do: Map.put(attrs, :number, number), else: attrs)
+
+    %{ticket: ticket, state: state, attempt: attempt}
+    |> job_fixture()
+    |> Forge.Jobs.Job.progress_changeset(%{status: status, outcome: outcome})
+    |> Forge.Repo.update!()
   end
 end

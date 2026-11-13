@@ -90,8 +90,8 @@ defmodule Forge.Push do
   **The rule is the queue's, not a list kept beside it** (`docs/design/ui.md` § The phone): a
   blocking question, an approval, a stuck ticket, a ticket resting where only a person can move
   it, and a conversation's reply all push; an assumption does not, and a kind added to the queue
-  later pushes or does not for the same reason. Each links to the work screen on the tab that
-  holds it: Decide for a ticket, Talk for a conversation.
+  later pushes or does not for the same reason. Each links to where it waits: a ticket's page,
+  which opens on the view holding it, or a conversation's Talk.
 
   Tagged per thing waiting, so a re-ask or a later reply replaces its notification instead of
   stacking another.
@@ -119,7 +119,9 @@ defmodule Forge.Push do
 
   defp describe(%{kind: kind, project: project, ticket: ticket} = item) do
     label = "#{project.name}##{ticket.number}"
-    url = "/tickets/#{project.name}/#{ticket.number}?tab=decide"
+
+    # The ticket itself: it opens on the view holding what waits (`docs/design/ui.md` § The ticket).
+    url = "/tickets/#{project.name}/#{ticket.number}"
 
     case kind do
       :question ->

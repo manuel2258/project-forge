@@ -81,7 +81,10 @@ defmodule ForgeWeb.TicketTypesLiveTest do
         |> render_change()
 
       assert html =~ "Something that worked and does not."
-      assert html =~ "starts in fixing"
+      # Said under the select that chose it, as its hint, not above the first step (ux/c.md C19).
+      assert has_element?(view, "#ticket_ticket_type-hint", "Something that worked and does not.")
+      refute has_element?(view, "#first-step", "Something that worked")
+      assert has_element?(view, "#first-step .ui-state", "fixing")
       refute has_element?(view, ~s(#ticket-form button[type="submit"][disabled]))
 
       view
@@ -121,11 +124,13 @@ defmodule ForgeWeb.TicketTypesLiveTest do
           ".forge/workflows/bug.yml" => workflow("fixing", "Bugs.")
         })
 
-      {:ok, view, html} = live(conn, ~p"/tickets/new?project=#{project.name}")
+      {:ok, view, _html} = live(conn, ~p"/tickets/new?project=#{project.name}")
 
       refute has_element?(view, ~s(select[name="ticket[ticket_type]"]))
       assert has_element?(view, "#implied-type", "bug")
-      assert html =~ "starts in fixing"
+      assert has_element?(view, "#type-description", "Bugs.")
+      refute has_element?(view, "#first-step", "Bugs.")
+      assert has_element?(view, "#first-step .ui-state", "fixing")
 
       view |> form("#ticket-form", %{"ticket" => %{"title" => "x"}}) |> render_submit()
       assert [%{ticket_type: "bug"}] = Tickets.list(project)
@@ -138,7 +143,7 @@ defmodule ForgeWeb.TicketTypesLiveTest do
 
       refute has_element?(view, ~s(select[name="ticket[ticket_type]"]))
       refute html =~ "Type"
-      assert html =~ "starts in refining"
+      assert has_element?(view, "#first-step .ui-state", "refining")
     end
   end
 
@@ -146,12 +151,38 @@ defmodule ForgeWeb.TicketTypesLiveTest do
     test "shows each type's workflow under its name", %{conn: conn, project: project} do
       {:ok, view, html} = live(conn, ~p"/projects/#{project.name}")
 
-      assert html =~ "Workflows the next tickets will pin"
+      assert html =~ "How a new ticket moves"
       assert has_element?(view, "#type-bug h3", "bug")
       assert has_element?(view, "#workflow-bug", "fixing")
       assert has_element?(view, "#workflow-feature", "building")
       refute has_element?(view, "#workflow-bug", "building")
       assert html =~ "Something new."
+    end
+
+    test "shows the type with the most open tickets first, each type's count in the switch", %{
+      conn: conn,
+      project: project
+    } do
+      # With nothing open, the first type is shown, as before.
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}")
+      refute has_element?(view, "#type-bug[hidden]")
+      assert has_element?(view, "#type-feature[hidden]")
+
+      for title <- ["One", "Two"] do
+        {:ok, _} = Tickets.admit(project, %{title: title, ticket_type: "feature"}, :system)
+      end
+
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}")
+
+      refute has_element?(view, "#type-feature[hidden]")
+      assert has_element?(view, "#type-bug[hidden]")
+
+      assert view |> element(~s(#workflow-types button[value="feature"] .ui-count)) |> render() =~
+               ">2<"
+
+      # What the person picks still wins.
+      view |> element(~s(#workflow-types button[value="bug"])) |> render_click()
+      refute has_element?(view, "#type-bug[hidden]")
     end
 
     test "says what is in the directory and is not a type, and a broken type's reason", %{
@@ -208,6 +239,7 @@ defmodule ForgeWeb.TicketTypesLiveTest do
 
       assert html =~ "suggests bug"
       assert has_element?(view, ~s(select[name="ticket_type"] option[value="bug"][selected]))
+      refute has_element?(view, ~s(#proposal-reader button[value="accepted"][disabled]))
       refute has_element?(view, ~s(select[name="ticket_type"] option[value="feature"][selected]))
 
       view
@@ -233,6 +265,7 @@ defmodule ForgeWeb.TicketTypesLiveTest do
       assert html =~ "suggests chore, which is not a type here"
       refute has_element?(view, ~s(select[name="ticket_type"] option[selected]))
 
+      # The server refuses an Admit with no type whatever the page drew.
       html =
         view
         |> element("form[phx-submit=decide_proposal]")
@@ -240,6 +273,17 @@ defmodule ForgeWeb.TicketTypesLiveTest do
 
       assert html =~
                "Not admitted: it has more than one ticket type, so one must be chosen: bug, feature."
+
+      # Admit waits for a type, and says so; choosing one lets it go.
+      assert has_element?(view, ~s(#proposal-reader button[value="accepted"][disabled]))
+      assert has_element?(view, "#proposal-admit-why", "Choose a type")
+
+      view
+      |> element("form[phx-submit=decide_proposal]")
+      |> render_change(%{"draft" => "propose-#{version.id}", "ticket_type" => "bug"})
+
+      refute has_element?(view, ~s(#proposal-reader button[value="accepted"][disabled]))
+      refute has_element?(view, "#proposal-admit-why")
     end
 
     test "a type that does not parse is marked, and choosing it says why", %{
@@ -393,88 +437,46 @@ defmodule ForgeWeb.TicketTypesLiveTest do
     end
   end
 
-  describe "the board" do
-    alias ForgeWeb.Operator.Board
-
-    test "draws a lane per type, each with its own workflow's columns", %{
+  describe "the tickets and the map" do
+    # The board drew a lane per type; its successor draws each ticket on its own type's workflow:
+    # the row's track from the workflow the ticket pinned, and each type's map with its own
+    # tickets as dots and nobody else's.
+    test "each type's map draws its own states and its own tickets", %{
       conn: conn,
       project: project
     } do
-      {:ok, _bug} = Tickets.admit(project, %{title: "Lost slot", ticket_type: "bug"})
-      {:ok, _feature} = Tickets.admit(project, %{title: "Co-op", ticket_type: "feature"})
-
-      for path <- [~p"/projects/#{project.name}", ~p"/board"] do
-        {:ok, view, _html} = live(conn, path)
-
-        # `fixing` is bug's and `building` is feature's: each lane has its own, and neither has
-        # the other's.
-        bug_fixing = "#" <> Board.column_id(project.name, "bug", "fixing")
-        feature_building = "#" <> Board.column_id(project.name, "feature", "building")
-
-        assert has_element?(view, bug_fixing, "Lost slot")
-        assert has_element?(view, feature_building, "Co-op")
-        refute has_element?(view, "#" <> Board.column_id(project.name, "bug", "building"))
-        refute has_element?(view, "#" <> Board.column_id(project.name, "feature", "fixing"))
-
-        # `review_ready` is in both workflows, and is two columns.
-        assert has_element?(view, "#" <> Board.column_id(project.name, "bug", "review_ready"))
-        assert has_element?(view, "#" <> Board.column_id(project.name, "feature", "review_ready"))
-
-        assert has_element?(view, "h3[data-lane]", "bug")
-        assert has_element?(view, "h3[data-lane]", "feature")
-      end
-    end
-
-    test "one lane draws no heading, and keeps the columns' old ids", %{
-      conn: conn,
-      register: register
-    } do
-      project = register.(%{})
-      {:ok, _ticket} = Tickets.admit(project, %{title: "Persist scores"})
+      {:ok, bug} = Tickets.admit(project, %{title: "Lost slot", ticket_type: "bug"})
+      {:ok, feature} = Tickets.admit(project, %{title: "Co-op", ticket_type: "feature"})
+      # `review_ready` is a state of both types: a feature ticket in it is on feature's map only.
+      Forge.Repo.update!(Ecto.Changeset.change(feature, state: "review_ready"))
 
       {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}")
 
-      assert has_element?(
-               view,
-               "#" <> Board.column_id(project.name, "refining"),
-               "Persist scores"
-             )
+      assert has_element?(view, "#tickets-rest-#{bug.number}", "fixing")
+      assert has_element?(view, "#map-bug", "fixing")
+      refute has_element?(view, "#map-bug", "building")
+      assert has_element?(view, "#map-feature", "building")
+      assert has_element?(view, "#map-bug", "review_ready")
 
-      refute has_element?(view, "h3[data-lane]")
+      # One ticket of each type, so one dot on each map: a map counting every type's tickets
+      # would draw two.
+      bug_map = view |> element("#map-bug") |> render()
+      assert length(Regex.scan(~r/wf-map-dot /, bug_map)) == 1
     end
 
-    test "tickets from the single file are a lane of their own once the project has types" do
-      lanes =
-        Board.lanes([
-          ticket(nil, "refining"),
-          ticket("bug", "fixing"),
-          ticket("feature", "building")
-        ])
+    test "the switch shows the chosen type's workflow and hides the others", %{
+      conn: conn,
+      project: project
+    } do
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}")
 
-      assert Enum.map(lanes, &{&1.ticket_type, &1.heading}) == [
-               {nil, "workflow.yml"},
-               {"bug", "bug"},
-               {"feature", "feature"}
-             ]
+      assert has_element?(view, "#type-bug:not([hidden])")
+      assert has_element?(view, "#type-feature[hidden]")
 
-      assert [[%{name: "refining"}], [%{name: "fixing"}], [%{name: "building"}]] =
-               Enum.map(lanes, & &1.columns)
-    end
+      view |> element(~s(#workflow-types button[value="feature"])) |> render_click()
 
-    # With several types and tickets of only one, the one lane still says whose columns they are.
-    test "a type's lane is headed alone too; the single file's is not" do
-      assert [%{heading: "bug"}] = Board.lanes([ticket("bug", "fixing")])
-      assert [%{heading: nil}] = Board.lanes([ticket(nil, "refining")])
-    end
-
-    test "a type's lane is the type's column ids, not another lane's" do
-      refute Board.column_id("p", "bug", "fixing") == Board.column_id("p", "feature", "fixing")
-      refute Board.column_id("p", "bug", "fixing") == Board.column_id("p", "fixing")
-      assert Board.column_id("p", nil, "fixing") == Board.column_id("p", "fixing")
-    end
-
-    defp ticket(type, state) do
-      %Forge.Tickets.Ticket{ticket_type: type, state: state, workflow: %{}, status: :active}
+      assert has_element?(view, "#type-feature:not([hidden])")
+      assert has_element?(view, "#type-bug[hidden]")
     end
   end
 

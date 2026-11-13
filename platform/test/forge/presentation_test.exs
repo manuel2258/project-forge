@@ -186,9 +186,13 @@ defmodule Forge.PresentationTest do
         }
       )
 
-    {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
 
-    assert html =~ "deck.md!"
-    refute html =~ "not written"
+    # Declares is on the Manifest pane.
+    view |> element(~s(#job-panes button[value="manifest"])) |> render_click()
+    manifest = view |> element("#job-manifest") |> render()
+
+    assert manifest =~ "deck.md!"
+    refute manifest =~ "not written"
   end
 end

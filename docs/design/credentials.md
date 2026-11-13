@@ -360,28 +360,37 @@ pool is leaning on.
 
 ## Showing the windows
 
-Two places, both drawn by `capacity.md`'s rules — the gauge only from a utilization the provider
-reported, the countdown from any known reset, neutral and never accent.
+Three places, all drawn by `capacity.md`'s rules — a line only from a utilization the provider
+reported, a reset from any known one, neutral and never accent — and laid out by `ui.md` § Usage.
 
-- **Each row on `/users/settings`** carries its credential's windows: five-hour and weekly, each
-  with its utilization when one was reported, its reset, and *rate-limited* in warning colour
-  while it blocks. A credential that has never reported a window — an API key, as far as
-  anything recorded here shows — draws none.
-- **The top bar** carries a small gauge for the five-hour and the weekly window **of a set of
-  credentials, chosen by the page**: on a page about a project — the project, a ticket, a job, a
+- **Each row on `/users/settings`** (the You page) carries its credential's windows: five-hour and
+  weekly, each its line with its utilization when one was reported, its reset, and *rate-limited*
+  in warning colour while it blocks. A credential that has never reported a window — an API key, as
+  far as anything recorded here shows — draws none.
+- **The usage lines** frame the top bar on every signed-in page, one per window, **of a set of
+  credentials chosen by the page**: on a page about a project — the project, a ticket, a job, a
   conversation in it — that project's pool, which is what its work draws on; everywhere else the
-  viewer's own credentials. For each window the gauge is the **mean utilization** of the
-  credentials in the set that have reported one, a limited credential counting as full, beside a
-  countdown to the **soonest reset** in the set. What it averages over is said in its title —
-  *2 of 3 reporting*: of the credentials that have a known window of that kind, how many gave a
-  utilization — because a mean over the ones that happen to have reported is a different claim
-  from one over all of them. A set in which nothing has reported a window draws nothing.
+  viewer's own credentials. For each window the line is the **mean utilization** of the credentials
+  in the set that have reported one, a limited credential counting as full. Where it is written out
+  it says what it averages over — *2 of 3 reporting*: of the credentials that have a known window of
+  that kind, how many gave a utilization — because a mean over the ones that happen to have
+  reported is a different claim from one over all of them, and the **soonest reset** in the set. A
+  set in which nothing has reported a window draws nothing.
+- **The usage panel and `/usage`** break the windows down per credential, and **name only the
+  viewer's own**. On a page about a project, the rest of its pool is one line that names nobody.
+  `/usage` itself is about the viewer's own credentials.
 
-A project's pool holds other people's credentials, and the gauge over it is an aggregate of their
+A project's pool holds other people's credentials, and the line over it is an aggregate of their
 accounts' usage. That is shown to the project's members, whose work those credentials fund; with
-one other person's credential in a pool, the aggregate is that person's usage, which is accepted
-as the price of the gauge meaning *what this project can still draw on*. The rows on
-`/users/settings`, which name a credential, stay the owner's alone.
+one other person's credential in a pool, the aggregate is that person's usage, which is accepted as
+the price of the line meaning *what this project can still draw on*. **A row that names a
+credential stays its owner's alone** — on `/users/settings`, in the panel, on `/usage` — so a
+member reads how full the pool is and never whose credential is filling it.
+
+The lines, the panel and `/usage` are built (`ForgeWeb.Capacity`, `ForgeWeb.UsagePanel`,
+`ForgeWeb.UsageLive`); the panel reads the set its line averages from the capacity assign's `:set`
+and names a credential only when the viewer owns it (`Forge.Usage.credentials/3`). The rows on
+`/users/settings` draw each window as a usage line with its figure (`UserLive.Settings`).
 
 ## Delivery to the machine
 

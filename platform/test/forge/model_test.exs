@@ -124,7 +124,7 @@ defmodule Forge.ModelTest do
   # Who sets what a project's jobs run on is who sets what it spends, so the log names them.
   #
   # **The atomicity of the write itself is tested once**, in `effort_test.exs` § the audit log:
-  # both dials go through the same `Projects.set_dial/5`, so a rejected event rolling the setting
+  # both dials go through the same `Projects.set_defaults/3`, so a rejected event rolling the setting
   # back is one claim about one function, not two. Duplicating it here would be a second copy of
   # a test of shared code, which is what a reader of either file should know rather than find.
   describe "the audit log" do

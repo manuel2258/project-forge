@@ -1,0 +1,53 @@
+/* A project's releases (docs/design/ui.md § A project's releases): the list, a release's own
+   page, and the latest release among the project page's facts. One column at every width; every
+   link and download a full-size target; a long version, label, name or URL wraps and never
+   stretches the page. */
+@layer components {
+  .releases { display: flex; min-width: 0; flex-direction: column; }
+  .releases-line { color: var(--ink-2); font-size: 13.5px; line-height: 1.55; overflow-wrap: anywhere; }
+  .releases-line code { font-family: var(--font-mono); font-size: 12.5px; }
+
+  .release-entry {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 8px;
+    padding: 20px 0;
+    border-top: 1px solid var(--border-soft);
+  }
+  .release-heading { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; overflow-wrap: anywhere; }
+  .release-tag { font-size: 13.5px; overflow-wrap: anywhere; }
+  .release-notes { min-width: 0; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+  .release-group { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+
+  .release-target {
+    display: inline-flex;
+    min-height: var(--target-min);
+    min-width: 0;
+    align-items: center;
+    color: var(--link);
+    text-decoration: none;
+    overflow-wrap: anywhere;
+  }
+  .release-target:hover { text-decoration: underline; }
+  .release-heading .release-target { color: var(--ink); }
+  .release-mono { font-family: var(--font-mono); font-size: 12.5px; }
+  .release-file { flex-wrap: wrap; gap: 0 12px; font-size: 14px; }
+  .release-file-name { min-width: 0; word-break: break-all; }
+  .release-file-size { color: var(--ink-3); font-family: var(--font-mono); font-size: 12.5px; }
+  .release-link { font-size: 14px; }
+
+  .release-more {
+    display: flex;
+    min-height: var(--target-min);
+    align-items: center;
+    justify-content: center;
+    border-top: 1px solid var(--border-soft);
+    color: var(--link);
+    font-size: 13.5px;
+    text-decoration: none;
+  }
+
+  .release-latest { display: inline; overflow-wrap: anywhere; }
+  .release-latest-rest { color: var(--ink-3); }
+}

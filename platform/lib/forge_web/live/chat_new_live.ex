@@ -230,27 +230,24 @@ defmodule ForgeWeb.ChatNewLive do
 
   @impl true
   def render(assigns) do
+    assigns = assign(assigns, machine_open: machine_open?(assigns.form))
+
     ~H"""
     <%!-- The queue's measure: the first message is prose, not a form field. --%>
     <Layouts.app
+      section="Chats"
       flash={@flash}
       current_scope={@current_scope}
+      frame={@frame}
       capacity={@capacity}
-      active={:board}
+      title="New chat"
+      subline={@project && "in #{@project.name}"}
+      context={{where(@fixed, @project, @ticket), back(@fixed, @project, @ticket)}}
       measure="34rem"
     >
-      <.link
-        navigate={back(@fixed, @project, @ticket)}
-        class="flex min-h-[46px] items-center font-mono text-[12.5px] opacity-60 hover:opacity-100"
-      >
-        ‹ {where(@fixed, @project, @ticket)}
-      </.link>
+      <p class="mt-2 text-sm/[1.55] text-ink-2">{about(@ticket)}</p>
 
-      <h1 class="mt-4 text-2xl font-semibold -tracking-[.025em]">New chat</h1>
-
-      <p class="mt-2 text-sm/[1.55] opacity-70">{about(@ticket)}</p>
-
-      <p :if={@projects == []} class="mt-4 text-sm/[1.55] opacity-60">
+      <p :if={@projects == []} class="mt-4 text-sm/[1.55] text-ink-2">
         You are not in a project yet. A conversation is always about one.
       </p>
 
@@ -260,7 +257,7 @@ defmodule ForgeWeb.ChatNewLive do
         id="chat-form"
         phx-change="validate"
         phx-submit="open"
-        class="mt-6 flex flex-col gap-4"
+        class="chat-new"
       >
         <%!-- Reached from a project, the project is not a question and nothing here asks it:
               the view holds it and `open` reads it from there, so there is not even a hidden
@@ -275,6 +272,114 @@ defmodule ForgeWeb.ChatNewLive do
           options={Enum.map(@projects, &{&1.name, &1.name})}
         />
 
+        <%!-- Picked here and only here, none by default, and fixed for the life of the process
+              like the model (`docs/design/secrets.md` § Conversations). What it holds, anyone
+              in the project can read through it, and the sentence says so where the choice is
+              made. Each is a chip: a checkbox drawn as its name. --%>
+        <fieldset :if={@secret_names != []} id="chat-secrets" class="chat-new-secrets">
+          <legend class="text-sm font-medium">Secrets it may hold</legend>
+          <div class="chat-chips">
+            <label :for={name <- @secret_names} class="chat-chip">
+              <input
+                type="checkbox"
+                name="chat[secrets][]"
+                value={name}
+                checked={name in picked(@form.params["secrets"])}
+              />
+              <span aria-hidden="true" class="chat-chip-tick">✓</span>
+              <span>{name}</span>
+            </label>
+          </div>
+          <p class="mt-2 text-[12.5px]/[1.5] text-ink-2">
+            Set in its environment by name. Anyone in this project can ask it what they are.
+          </p>
+        </fieldset>
+
+        <%!-- The model, the effort and the machine, folded to one line because they are rarely
+              changed (`12d`): all fixed when the harness process starts, so a conversation that
+              wants different ones is one you close and open again. Blank is the platform's own
+              figure, which is an agent's and not a build's (`docs/design/conversations.md`
+              § What it asks for) — so a conversation that will compile something says so here,
+              before it is placed on a machine too small. Open whenever any of them holds
+              something, so a refusal is never folded out of sight. --%>
+        <%!-- The harness is chosen here, like the model and the effort, and fixed when its process
+              starts; it defaults to the project's (`docs/design/conversations.md` § What it asks
+              for). Not folded: it decides which model and effort the fold offers. --%>
+        <fieldset id="chat-harness" class="chat-new-harness">
+          <legend class="text-sm font-medium">Harness</legend>
+          <.segmented
+            id="chat-harness-switch"
+            name="chat[harness]"
+            value={@form[:harness].value}
+            options={for h <- Forge.Harness.names(), do: {Forge.Harness.label(h), h}}
+          />
+        </fieldset>
+
+        <details
+          id="chat-machine-fold"
+          class="chat-new-machine"
+          open={@machine_open}
+          phx-mounted={ForgeWeb.Actions.keep_open()}
+        >
+          <summary>
+            <span>{machine_line(@form, @defaults)}</span>
+            <span class="text-link">Change ▾</span>
+          </summary>
+          <div class="chat-new-machine-fields">
+            <%!-- Claude Code's are offered from what the workers and credentials say; nothing
+                  lists Codex's models, so Codex's is typed, and empty is Codex's own. --%>
+            <ForgeWeb.Operator.Components.model_field
+              :if={@form[:harness].value != "codex"}
+              field={@form[:model]}
+              offered={@offered}
+              fallback={(@project && @project.model) || "the platform's"}
+            />
+
+            <ForgeWeb.Operator.Components.effort_field
+              :if={@form[:harness].value != "codex"}
+              field={@form[:effort]}
+              offered={@offered}
+              fallback={(@project && @project.effort) || "the platform's"}
+            />
+
+            <.input
+              :if={@form[:harness].value == "codex"}
+              field={@form[:model]}
+              type="text"
+              label="Model"
+              placeholder={(@project && @project.codex_model) || "Codex's own default"}
+              autocomplete="off"
+            />
+
+            <ForgeWeb.Operator.Components.effort_field
+              :if={@form[:harness].value == "codex"}
+              offered={%{@offered | efforts: @offered.codex_efforts}}
+              field={@form[:effort]}
+              label="Effort"
+              fallback={(@project && @project.codex_effort) || "Codex's own default"}
+            />
+
+            <div class="flex flex-wrap items-end gap-3">
+              <.input
+                field={@form[:memory]}
+                type="text"
+                label="Memory"
+                placeholder={Resources.humanize(@defaults.memory)}
+                autocomplete="off"
+              />
+              <.input
+                field={@form[:cores]}
+                type="number"
+                label="Cores"
+                placeholder={to_string(@defaults.cores)}
+              />
+            </div>
+          </div>
+        </details>
+
+        <%!-- Last, directly above *Start the chat*: it is the field a person finishes on, and
+              Enter sends from it — first, it sent before the secrets and the machine below it
+              were reached (UX pass, B18). --%>
         <ForgeWeb.Conversations.message_box
           id="chat_text"
           name="chat[text]"
@@ -283,113 +388,43 @@ defmodule ForgeWeb.ChatNewLive do
           label="First thing to say"
         />
 
-        <%!-- The harness is chosen here, like the model and the effort, and fixed when its process
-              starts. It defaults to the project's. --%>
-        <.input
-          field={@form[:harness]}
-          type="select"
-          label="Harness"
-          options={for h <- Forge.Harness.names(), do: {Forge.Harness.label(h), h}}
-        />
-
-        <%!-- Both optional, and only here: the model and the effort are fixed when the harness
-              process starts, so a conversation that wants different ones is one you close and
-              open again. Claude Code's are offered from what the workers and credentials say;
-              nothing lists Codex's models, so Codex's are typed, and empty is Codex's own. --%>
-        <ForgeWeb.Operator.Components.model_field
-          :if={@form[:harness].value != "codex"}
-          field={@form[:model]}
-          offered={@offered}
-          fallback={(@project && @project.model) || "the platform's"}
-        />
-
-        <ForgeWeb.Operator.Components.effort_field
-          :if={@form[:harness].value != "codex"}
-          field={@form[:effort]}
-          offered={@offered}
-          fallback={(@project && @project.effort) || "the platform's"}
-        />
-
-        <.input
-          :if={@form[:harness].value == "codex"}
-          field={@form[:model]}
-          type="text"
-          label="Model"
-          placeholder={(@project && @project.codex_model) || "Codex's own default"}
-          autocomplete="off"
-        />
-
-        <ForgeWeb.Operator.Components.effort_field
-          :if={@form[:harness].value == "codex"}
-          offered={%{@offered | efforts: @offered.codex_efforts}}
-          field={@form[:effort]}
-          label="Effort"
-          fallback={(@project && @project.codex_effort) || "Codex's own default"}
-        />
-
-        <%!-- What the gate reserves for it, and what its slice is capped at. Blank is the
-              platform's own figure, which is an agent's and not a build's
-              (`docs/design/conversations.md` § What it asks for) — so a conversation that will
-              compile something says so here, before it is placed on a machine too small. --%>
-        <div class="flex flex-wrap items-end gap-3">
-          <.input
-            field={@form[:memory]}
-            type="text"
-            label="Memory"
-            placeholder={Resources.humanize(@defaults.memory)}
-            autocomplete="off"
-          />
-          <.input
-            field={@form[:cores]}
-            type="number"
-            label="Cores"
-            placeholder={to_string(@defaults.cores)}
-          />
-        </div>
-
-        <%!-- Picked here and only here, none by default, and fixed for the life of the process
-              like the model (`docs/design/secrets.md` § Conversations). What it holds, anyone
-              in the project can read through it, and the sentence says so where the choice is
-              made. --%>
-        <fieldset :if={@secret_names != []} id="chat-secrets" class="flex flex-col">
-          <legend class="text-sm font-medium">Secrets it may use</legend>
-          <label
-            :for={name <- @secret_names}
-            class="flex min-h-[46px] items-center gap-3 font-mono text-[12.5px]"
-          >
-            <input
-              type="checkbox"
-              name="chat[secrets][]"
-              value={name}
-              checked={name in picked(@form.params["secrets"])}
-              class="checkbox checkbox-sm"
-            />
-            {name}
-          </label>
-          <p class="text-sm/[1.55] opacity-60">
-            Set in its environment by name. Anyone in this project can ask it what they are.
-          </p>
-        </fieldset>
-
-        <p :if={@error} class="text-sm text-error">{@error}</p>
-
-        <button
-          type="submit"
-          class="min-h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
-        >
-          Start it
-        </button>
+        <.error_note :if={@error} id="chat-form-error">{@error}</.error_note>
       </.form>
 
       <%!-- What it costs and what it holds, before it is started rather than after: a
             conversation takes a machine for as long as it is open. --%>
-      <p class="mt-6 text-sm/[1.55] opacity-60">
+      <p class="mt-6 text-sm/[1.55] text-ink-3">
         It waits for a free worker, and holds it until you end the conversation or it goes idle.
         Its work goes to a branch of its own, which you can merge from its page.
       </p>
+
+      <:composer :if={@projects != []}>
+        <div class="chat-new-dock">
+          <.button type="submit" form="chat-form" variant="primary" fill>Start the chat</.button>
+        </div>
+      </:composer>
     </Layouts.app>
     """
   end
+
+  # The folded line: what it will run on, the platform's figures where nothing is typed.
+  defp machine_line(form, defaults) do
+    memory = blank(form[:memory].value) || Resources.humanize(defaults.memory)
+    cores = blank(form[:cores].value) || to_string(defaults.cores)
+    "Machine · #{memory} · #{cores} #{if cores == "1", do: "core", else: "cores"}"
+  end
+
+  defp machine_open?(form),
+    do: Enum.any?([:model, :effort, :memory, :cores], &(blank(form[&1].value) != nil))
+
+  defp blank(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      text -> text
+    end
+  end
+
+  defp blank(_value), do: nil
 
   # Where the ‹ goes: back where you came from. Off the bare route there is no project in the
   # address even when one is selected below, so it goes to the list that linked here.

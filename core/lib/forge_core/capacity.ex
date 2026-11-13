@@ -27,7 +27,8 @@ defmodule ForgeCore.Capacity do
   def windows(tokens, window_tokens) when is_number(tokens), do: tokens / window_tokens
 
   @doc """
-  A window count at two significant figures: `1.4 windows`, `0.67 windows`, `12 windows`.
+  A window count at two significant figures and at most two decimals: `1.4 windows`,
+  `0.67 windows`, `12 windows`, `0.08 windows`; under a hundredth, `<0.01 windows`.
 
   Returns `nil` when there is nothing truthful to say, so callers render nothing rather than a
   zero that looks like a measurement.
@@ -36,8 +37,11 @@ defmodule ForgeCore.Capacity do
   def format(nil), do: nil
   def format(windows) when windows == 0, do: "0 windows"
 
+  def format(windows) when is_number(windows) and windows > 0 and windows < 0.01,
+    do: "<0.01 windows"
+
   def format(windows) when is_number(windows) and windows > 0 do
-    decimals = max(0, 1 - floor(:math.log10(windows)))
+    decimals = min(2, max(0, 1 - floor(:math.log10(windows))))
     "#{:erlang.float_to_binary(windows / 1, decimals: decimals)} windows"
   end
 

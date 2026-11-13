@@ -395,6 +395,11 @@ defmodule Forge.Tickets do
     end
   end
 
+  @doc "The highest number a ticket of `project` has, or nil before its first."
+  @spec last_number(Project.t()) :: pos_integer() | nil
+  def last_number(%Project{id: project_id}),
+    do: Repo.one(from t in Ticket, where: t.project_id == ^project_id, select: max(t.number))
+
   @spec get_by_number!(Project.t(), pos_integer()) :: Ticket.t()
   def get_by_number!(%Project{id: project_id}, number) do
     Repo.one!(from t in Ticket, where: t.project_id == ^project_id and t.number == ^number)
@@ -464,5 +469,21 @@ defmodule Forge.Tickets do
   @spec put_progress(Multi.t(), term(), Ticket.t(), map()) :: Multi.t()
   def put_progress(multi, key, %Ticket{} = ticket, attrs) do
     Multi.update(multi, key, Ticket.progress_changeset(ticket, attrs))
+  end
+
+  @doc """
+  Which time `ticket` is in its current state: the transitions that brought it there, or 1 for a
+  ticket that has not left the state it was admitted into. A queue item's context draws it as
+  *review · visit 2* (`docs/design/ui.md` § The queue).
+  """
+  @spec visit(Ticket.t()) :: pos_integer()
+  def visit(%Ticket{id: id, state: state}) do
+    Repo.one(
+      from e in Forge.Events.Event,
+        where: e.ticket_id == ^id and e.type == "transition.taken",
+        where: fragment("?->>'to'", e.payload) == ^state,
+        select: count()
+    )
+    |> max(1)
   end
 end

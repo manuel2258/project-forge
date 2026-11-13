@@ -1,176 +1,156 @@
 defmodule ForgeWeb.Components.StepAccept do
   @moduledoc """
-  The Accept area of a chat step (`docs/design/ui.md` § The Accept area): the documents the step
-  declares with their latest versions, the outcome the person picks when there is a choice, and a
-  deliberate second step before the ticket moves on.
+  The Accept area of a chat step (`docs/design/ui.md` § The Accept area), in two parts drawn from
+  one read model, `Forge.Steps.view/2`, on the conversation's page and on the ticket's:
 
-  One component for the conversation's page and the ticket's Decide tab, drawn from
-  `Forge.Steps.view/2`. Every name that reaches it — a document, an outcome, a state — is text a
-  workflow author or an agent chose, so it is drawn escaped (never as markup) and, where it sits
-  in a line, cut with `truncate` rather than allowed to widen the page.
+    * `status/1`, in place — what the step says while there is nothing to accept yet, or no
+      longer anything: nothing written, a reply in flight before the first version, the step
+      over;
+    * `panel/1`, the body of Accept's drop panel under the decision row
+      (`ForgeWeb.Operator.Decision`) — the documents with their versions, the outcome when there
+      is a choice, what blocks it, and the hidden fields that say what the person was shown.
+
+  Every name that reaches it — a document, an outcome, a state — is text a workflow author or an
+  agent chose, so it is drawn escaped (never as markup) and, where it sits in a line, cut with
+  `truncate` rather than allowed to widen the page.
   """
 
   use Phoenix.Component
 
+  import ForgeWeb.UI.Forms, only: [choice_row: 1]
+
+  @doc """
+  Whether the step has a decision to show as a row: it is current and something it must produce
+  has a version, or it must produce nothing (`16e` → `16f`). A reply in flight keeps the row with
+  its button disabled; it does not take the row away.
+  """
+  @spec row?(map() | nil) :: boolean()
+  def row?(%{over: nil} = step), do: not nothing_yet?(step)
+  def row?(_step), do: false
+
   attr :step, :map, required: true, doc: "`Forge.Steps.view/2`"
+
+  @doc "What the step says in place while it has no row: nothing yet, or over."
+  def status(assigns) do
+    assigns = assign(assigns, wrap: "min-w-0 [overflow-wrap:anywhere]")
+
+    ~H"""
+    <section
+      :if={not row?(@step)}
+      id="step-status"
+      aria-label="Accepting this step"
+      class="flex min-w-0 flex-col gap-1 text-sm text-ink-2"
+    >
+      <p :if={@step.over} id="step-over" class={@wrap}>{over_words(@step.over)}</p>
+      <p :if={@step.over == nil} id="step-nothing-yet" class={@wrap}>
+        Nothing to accept yet. Expected: {Enum.map_join(own(@step), ", ", & &1.name)}. They appear
+        as the agent writes them.
+      </p>
+      <p :if={@step.over == nil and @step.in_flight} id="step-waiting">
+        Waiting for the reply to finish.
+      </p>
+      <p :if={@step.over == nil and @step.dormant} id="step-dormant" class={@wrap}>
+        The conversation has stopped. Reopen it to go on.
+      </p>
+    </section>
+    """
+  end
+
+  attr :step, :map, required: true
   attr :pick, :string, default: nil
-  attr :confirming, :boolean, default: false
-  attr :error, :string, default: nil
 
-  def accept_area(assigns) do
-    pick = effective_pick(assigns.step, assigns.pick)
-
+  @doc """
+  The Accept panel's body: inside the decision panel's form, so the outcome picked rides in the
+  form's `phx-change` and comes back on a rejoin, and the version of each document as it was drawn
+  rides in hidden fields — what Accept is told it was shown, so it never approves a version nobody
+  saw (`ForgeWeb.Operator.Decision`).
+  """
+  def panel(assigns) do
     assigns =
       assign(assigns,
-        picked: pick,
+        picked: effective_pick(assigns.step, assigns.pick),
         choice: choice?(assigns.step),
         wrap: "min-w-0 [overflow-wrap:anywhere]"
       )
 
     ~H"""
-    <section
-      id="step-accept"
-      aria-label="Accept this step"
-      class="flex min-w-0 flex-col gap-2 rounded-box border border-base-300 p-3"
+    <ul id="step-documents" class="flex flex-col gap-1">
+      <li :for={doc <- @step.documents} class="flex min-w-0 items-baseline gap-2 text-sm">
+        <span class="min-w-0 truncate font-mono text-[12.5px]">{doc.name}</span>
+        <span class="shrink-0 text-ink-2">{document_words(doc)}</span>
+      </li>
+      <li :if={@step.documents == []} class="text-sm text-ink-2">
+        This step declares no document.
+      </li>
+    </ul>
+
+    <p :if={@step.in_flight} id="step-waiting" class="text-sm text-ink-2">
+      Waiting for the reply to finish.
+    </p>
+
+    <p
+      :if={not @step.in_flight and @step.missing != []}
+      id="step-missing"
+      class={["text-sm text-ink-2", @wrap]}
     >
-      <h3 class="min-w-0 truncate text-sm font-medium">
-        Accept step <span class="font-mono text-[12.5px]">{@step.state}</span>
-      </h3>
+      Not written yet: {Enum.join(@step.missing, ", ")}. Ask the agent for it.
+    </p>
 
-      <p :if={@error} id="step-error" role="alert" class={["text-sm text-error", @wrap]}>{@error}</p>
+    <p :if={@step.dormant} id="step-dormant" class={["text-sm text-ink-2", @wrap]}>
+      The conversation has stopped. You can still accept what it wrote, or reopen it to go on.
+    </p>
 
-      <p :if={@step.over} id="step-over" class={["text-sm opacity-70", @wrap]}>
-        {over_words(@step.over)}
-      </p>
-
-      <ul :if={@step.over == nil} id="step-documents" class="flex flex-col gap-1">
-        <li :for={doc <- @step.documents} class="flex min-w-0 items-baseline gap-2 text-sm">
-          <span class="min-w-0 truncate font-mono text-[12.5px]">{doc.name}</span>
-          <span class="shrink-0 opacity-70">{document_words(doc)}</span>
-        </li>
-        <li :if={@step.documents == []} class="text-sm opacity-70">
-          This step declares no document.
+    <div :if={blocked_all?(@step)} id="step-blocked" class="flex min-w-0 flex-col gap-1 text-sm">
+      <p class="text-ink-2">No way out of this step can be taken now.</p>
+      <ul class="flex flex-col gap-1">
+        <li :for={outcome <- @step.outcomes} class="flex min-w-0 items-baseline gap-2">
+          <span class="min-w-0 truncate font-mono text-[12.5px]">{outcome.outcome}</span>
+          <span class={["text-ink-2", @wrap]}>{outcome_words(outcome)}</span>
         </li>
       </ul>
+    </div>
 
-      <p
-        :if={@step.over == nil and nothing_yet?(@step)}
-        id="step-nothing-yet"
-        class={["text-sm opacity-70", @wrap]}
-      >
-        Expected: {Enum.map_join(own(@step), ", ", & &1.name)}. They appear here as the agent
-        writes them.
-      </p>
+    <%!-- What the person was shown, sent back as it was drawn: Accept refuses if a newer version
+          has been written since, and never approves one nobody saw. --%>
+    <input
+      :for={doc <- @step.documents}
+      type="hidden"
+      name={"seen[#{doc.name}]"}
+      value={doc.version}
+    />
 
-      <div :if={blocked_all?(@step)} id="step-blocked" class="flex min-w-0 flex-col gap-1 text-sm">
-        <p class="opacity-70">No way out of this step can be taken now.</p>
-        <ul class="flex flex-col gap-1">
-          <li :for={outcome <- @step.outcomes} class="flex min-w-0 items-baseline gap-2">
-            <span class="min-w-0 truncate font-mono text-[12.5px]">{outcome.outcome}</span>
-            <span class={["opacity-70", @wrap]}>{outcome_words(outcome)}</span>
-          </li>
-        </ul>
-      </div>
-
-      <p :if={@step.over == nil and @step.in_flight} id="step-waiting" class="text-sm opacity-70">
-        Waiting for the reply to finish.
-      </p>
-
-      <p
-        :if={
-          @step.over == nil and not @step.in_flight and @step.missing != [] and
-            not nothing_yet?(@step)
-        }
-        id="step-missing"
-        class={["text-sm opacity-70", @wrap]}
-      >
-        Not written yet: {Enum.join(@step.missing, ", ")}. Ask the agent for it.
-      </p>
-
-      <p :if={@step.over == nil and @step.dormant} id="step-dormant" class="text-sm opacity-70">
-        The conversation has stopped. You can still accept what it wrote, or reopen it to go on.
-      </p>
-
-      <form
-        :if={@step.over == nil and @step.ready}
-        id="step-accept-form"
-        phx-change="step:pick"
-        phx-submit="step:accept"
-        class="flex min-w-0 flex-col gap-2"
-      >
-        <input type="hidden" name="confirming" value={to_string(@confirming)} />
-        <%!-- What the person was shown, sent back as it was drawn: Accept refuses if a newer
-              version has been written since, and never approves one nobody saw. --%>
-        <input
-          :for={doc <- @step.documents}
-          type="hidden"
-          name={"seen[#{doc.name}]"}
-          value={doc.version}
-        />
-
-        <fieldset :if={@choice} class="flex min-w-0 flex-col gap-2">
-          <legend class="text-sm opacity-70">Where to next</legend>
-          <label
-            :for={outcome <- @step.outcomes}
-            class={[
-              "flex min-h-[46px] min-w-0 items-center gap-3 rounded-field border border-base-300 px-3 py-1",
-              outcome.blocked && "opacity-50"
-            ]}
-          >
-            <input
-              type="radio"
-              name="outcome"
-              value={outcome.outcome}
-              checked={@picked == outcome.outcome}
-              disabled={outcome.blocked != nil}
-            />
-            <span class="min-w-0 flex-1 text-sm">
-              <span class="block truncate font-mono text-[12.5px]">{outcome.outcome}</span>
-              <span class="block truncate opacity-70">{outcome_words(outcome)}</span>
-            </span>
-          </label>
-        </fieldset>
-        <input :if={not @choice} type="hidden" name="outcome" value={@picked} />
-
-        <button
-          :if={not @confirming}
-          type="button"
-          phx-click="step:review"
-          disabled={@picked == nil}
-          class="min-h-[46px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100 disabled:opacity-40"
-        >
-          Review, then accept
-        </button>
-
-        <div :if={@confirming and @picked} id="step-confirm" class="flex flex-col gap-2">
-          <p class={["text-sm", @wrap]}>
-            {summary(@step, @picked)}
-          </p>
-          <div class="flex gap-2">
-            <button
-              type="submit"
-              phx-disable-with="Accepting…"
-              class="min-h-[46px] min-w-0 flex-1 rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
-            >
-              Accept
-            </button>
-            <button
-              type="button"
-              phx-click="step:cancel"
-              class="min-h-[46px] rounded-field border border-base-300 px-4 text-sm"
-            >
-              Not yet
-            </button>
-          </div>
-        </div>
-      </form>
-    </section>
+    <%!-- None preselected (`ui.md` § The Accept area): the outcome decides where the ticket goes,
+          and a default would be that decision taken for the person. --%>
+    <fieldset
+      :if={@step.ready and @choice}
+      id="step-outcomes"
+      class="flex min-w-0 flex-col gap-2"
+    >
+      <legend class="mb-1 font-mono text-[11px] tracking-[.14em] uppercase text-ink-3">
+        outcome
+      </legend>
+      <.choice_row
+        :for={outcome <- @step.outcomes}
+        id={"step-outcome-#{outcome.outcome}"}
+        name="outcome"
+        value={outcome.outcome}
+        label={outcome.outcome}
+        detail={outcome_words(outcome)}
+        selected={@picked == outcome.outcome}
+        disabled={outcome.blocked != nil}
+      />
+    </fieldset>
+    <input :if={@step.ready and not @choice} type="hidden" name="outcome" value={@picked} />
     """
   end
 
-  # A step with one way out picks it; several leave nothing preselected, and a pick that is no
-  # longer an outcome with an edge left is dropped rather than carried into a refusal.
-  defp effective_pick(%{outcomes: outcomes}, pick) do
+  @doc """
+  The outcome Accept would take: the one picked, when it is still open; the only one, for a step
+  with one way out; otherwise none. A pick that is no longer an outcome with an edge left is
+  dropped rather than carried into a refusal.
+  """
+  @spec effective_pick(map(), String.t() | nil) :: String.t() | nil
+  def effective_pick(%{outcomes: outcomes}, pick) do
     open = for %{outcome: name, blocked: nil} <- outcomes, do: name
 
     cond do
@@ -180,8 +160,33 @@ defmodule ForgeWeb.Components.StepAccept do
     end
   end
 
-  # Every outcome refused and nothing else the page says explains it: the documents are written and
-  # no reply is in flight, so without this the area lists documents and offers nothing, and no
+  @doc "What accepting with `picked` does, in a sentence; a prompt to pick when nothing is."
+  @spec summary(map(), String.t() | nil) :: String.t()
+  def summary(%{outcomes: outcomes}, picked) do
+    case Enum.find(outcomes, &(&1.outcome == picked)) do
+      %{to: to, approve: []} ->
+        "Ends the chat step and moves the ticket to #{to}."
+
+      %{to: to, approve: names} ->
+        "Ends the chat step, approves the latest version of #{Enum.join(names, ", ")} and " <>
+          "moves the ticket to #{to}."
+
+      nil ->
+        "Ends the chat step. Pick where the ticket goes next."
+    end
+  end
+
+  @doc "Where accepting with `picked` takes the ticket, or nil while nothing is picked."
+  @spec target(map(), String.t() | nil) :: String.t() | nil
+  def target(%{outcomes: outcomes}, picked) do
+    case Enum.find(outcomes, &(&1.outcome == picked)) do
+      %{to: to} -> to
+      nil -> nil
+    end
+  end
+
+  # Every outcome refused and nothing else the panel says explains it: the documents are written
+  # and no reply is in flight, so without this it lists documents and offers nothing, and no
   # reason.
   defp blocked_all?(%{over: nil, in_flight: false, missing: [], outcomes: outcomes}),
     do: Enum.all?(outcomes, &(&1.blocked != nil))
@@ -218,18 +223,6 @@ defmodule ForgeWeb.Components.StepAccept do
 
   defp outcome_words(%{to: to, approve: names}),
     do: "goes to #{to}, approving #{Enum.join(names, ", ")}"
-
-  defp summary(%{outcomes: outcomes}, picked) do
-    outcome = Enum.find(outcomes, &(&1.outcome == picked))
-
-    case outcome do
-      %{to: to, approve: []} ->
-        "Accepting moves the ticket to #{to} and starts what comes next there."
-
-      %{to: to, approve: names} ->
-        "Accepting approves the latest version of #{Enum.join(names, ", ")} and moves the ticket to #{to}."
-    end
-  end
 
   defp over_words(:accepted), do: "This step was accepted."
   defp over_words(:moved), do: "The ticket has moved on from this step."

@@ -9,10 +9,18 @@ defmodule ForgeWeb.WorkerLive do
   somebody else's machine is not here exactly as a missing one is not
   (`docs/design/identity.md` § Sequencing). A destroyed machine's log is still here: that is when
   it is read.
+
+  Drawn as `12g`: the machine's short id as the title, how it stands and where it comes from as
+  the subline, its identifiers, and the log as two-line entries, a job id linking to its job page
+  where the viewer may open that.
   """
 
   use ForgeWeb, :live_view
 
+  import Ecto.Query, only: [from: 2]
+
+  alias Forge.Jobs.Job
+  alias Forge.Projects
   alias Forge.Workers
   alias Forge.Workers.Log
   alias ForgeWeb.WorkersLive
@@ -29,7 +37,7 @@ defmodule ForgeWeb.WorkerLive do
 
     {:ok,
      socket
-     |> assign(page_title: "Worker #{short(worker.id)}", worker_id: worker.id)
+     |> assign(page_title: "Machine #{short(worker.id)}", worker_id: worker.id)
      |> load()}
   end
 
@@ -38,16 +46,44 @@ defmodule ForgeWeb.WorkerLive do
 
   defp load(socket) do
     id = socket.assigns.worker_id
+    worker = Workers.get!(id)
+    lines = Log.for_worker(id)
 
     assign(socket,
-      worker: Workers.get!(id),
+      worker: worker,
       connected: Workers.connected?(id),
-      lines: Log.for_worker(id),
-      current_build: Workers.current_build()
+      lines: lines,
+      jobs: job_paths(socket.assigns.current_scope.user, lines),
+      serves: WorkersLive.serving(worker),
+      current_build: Workers.current_build(),
+      now: DateTime.utc_now()
     )
   end
 
-  defp at(at), do: Calendar.strftime(at, "%Y-%m-%d %H:%M:%S")
+  # Where each job a line names may be opened, for this viewer: its job page, or its chat's —
+  # **only in a project the viewer is in**. The machine is the owner's, but the work it ran was
+  # some project's, and a project a person is not in is not one they may learn exists
+  # (`docs/design/identity.md` § Workers); such a job is its short id and no link. One query for
+  # the whole log, re-read with it.
+  defp job_paths(user, lines) do
+    ids = lines |> Enum.map(& &1.job_id) |> Enum.reject(&is_nil/1) |> Enum.uniq()
+    member_of = MapSet.new(Projects.list(user), & &1.id)
+
+    from(j in Job, where: j.id in ^ids, preload: [:ticket, :project])
+    |> Forge.Repo.all()
+    |> Enum.filter(&MapSet.member?(member_of, &1.project_id))
+    |> Map.new(&{&1.id, job_path(&1)})
+  end
+
+  defp job_path(%{kind: :chat, id: id}), do: ~p"/chats/#{id}"
+
+  defp job_path(%{ticket: %{number: number}, project: %{name: name}, id: id}),
+    do: ~p"/tickets/#{name}/#{number}/jobs/#{id}"
+
+  defp job_path(_job), do: nil
+
+  defp at(at), do: Calendar.strftime(at, "%Y-%m-%d")
+  defp time(at), do: Calendar.strftime(at, "%H:%M:%S")
 
   defp short(id), do: String.slice(id, 0, 8)
 
@@ -55,57 +91,74 @@ defmodule ForgeWeb.WorkerLive do
   defp source(:platform), do: "platform"
   defp source(:worker), do: "machine"
 
+  # The subline (`12g`): how the machine stands — for a destroyed one, how long ago — and where
+  # it comes from, as its row on /workers says it.
+  defp subline(%{worker: %{status: :destroyed} = worker, serves: serves, now: now}),
+    do: WorkersLive.destroyed(worker, now) <> " · " <> WorkersLive.where_from(serves)
+
+  defp subline(%{worker: worker, serves: serves}),
+    do: "#{worker.status} · " <> WorkersLive.where_from(serves)
+
   @impl true
   def render(assigns) do
     ~H"""
     <Layouts.app
+      section="Machines"
       flash={@flash}
       current_scope={@current_scope}
+      frame={@frame}
       capacity={@capacity}
-      active={:workers}
-      measure="74rem"
+      title={short(@worker.id)}
+      subline={subline(assigns)}
+      context={{"Machines", ~p"/workers"}}
+      measure="52rem"
     >
-      <.link
-        navigate={~p"/workers"}
-        class="inline-flex min-h-[46px] items-center text-sm text-primary hover:underline"
-      >
-        ‹ Workers
-      </.link>
-
       <header
         id="machine"
-        class={[
-          "flex flex-wrap items-center gap-x-3 gap-y-1",
-          @worker.status == :destroyed && "opacity-50"
-        ]}
+        class={["machine-header", @worker.status == :destroyed && "machine--gone"]}
       >
         <WorkersLive.identity worker={@worker} connected={@connected} current_build={@current_build} />
       </header>
 
-      <p class="mt-2 text-sm/[1.55] opacity-60">
-        What the platform saw happen to this machine, and what the machine said about itself —
-        newest first, times in UTC. What an agent did inside a job is on that job's page.
+      <div class="machine-log-head">
+        <.eyebrow>Log</.eyebrow>
+        <span class="machine-log-zone">UTC</span>
+      </div>
+
+      <p class="machine-log-note">
+        What the platform saw happen to this machine, and what the machine said about itself,
+        newest first. What an agent did inside a job is on that job's page.
       </p>
 
-      <p :if={@lines == []} class="mt-6 text-sm opacity-60">Nothing has been written yet.</p>
+      <p :if={@lines == []} class="machine-log-note">Nothing has been written yet.</p>
 
-      <ol :if={@lines != []} id="log" class="mt-4">
+      <%!-- Two lines an entry (`12g`): when, from whom and what kind above, the message under it.
+            An error keeps the danger colour across the whole entry. --%>
+      <ol :if={@lines != []} id="log" class="machine-log">
         <li
           :for={line <- @lines}
           id={"line-#{line.id}"}
-          class={[
-            "grid gap-x-4 border-t border-base-300/60 py-[9px] text-[12.5px]",
-            "sm:grid-cols-[10.5rem_4.5rem_9rem_minmax(0,1fr)]",
-            line.level == :error && "text-error"
-          ]}
+          class={["machine-log-entry", line.level == :error && "text-danger"]}
         >
-          <span class="font-mono opacity-60">{at(line.at)}</span>
-          <span class="font-mono opacity-60">{source(line.source)}</span>
-          <span class="font-mono break-all">{line.type}</span>
-          <span class="[overflow-wrap:anywhere]">
+          <div class="machine-log-top">
+            <span class="machine-log-day">{at(line.at)}</span>
+            <span>{time(line.at)}</span>
+            <span class="machine-log-source">{source(line.source)}</span>
+            <span class="machine-log-type">{line.type}</span>
+          </div>
+          <div class="machine-log-message">
             {line.message}
-            <span :if={line.job_id} class="ml-1 font-mono opacity-60">job {short(line.job_id)}</span>
-          </span>
+            <.link
+              :if={line.job_id && @jobs[line.job_id]}
+              navigate={@jobs[line.job_id]}
+              class="machine-log-job"
+            >
+              job {short(line.job_id)}
+            </.link>
+            <span :if={line.job_id && !@jobs[line.job_id]} class="machine-log-job">
+              job {short(line.job_id)}
+            </span>
+          </div>
         </li>
       </ol>
     </Layouts.app>

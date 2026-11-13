@@ -216,7 +216,7 @@ defmodule Forge.Look.Setups.Codex do
       users: %{"member" => member},
       paths: %{
         "settings" => "/users/settings",
-        "project_settings" => "/projects/#{project.name}/settings",
+        "project_settings" => "/projects/#{project.name}/settings?section=agent",
         "new_chat" => "/chats/new?project=#{project.name}",
         "chat" => "/chats/#{chat.id}",
         "workers" => "/workers",

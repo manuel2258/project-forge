@@ -98,6 +98,28 @@ defmodule ForgeCore.DocumentTest do
     end
   end
 
+  # The lines a surface replaces with what a question asks: found by the parser's own scan, so a
+  # fence inside another block is in no span and each question's `line` opens exactly one.
+  describe "question_spans/1" do
+    test "spans each question block the parser reads, from fence to fence, in text lines" do
+      text =
+        "\uFEFF---\noutcome: done\n---\nIntro.\n" <>
+          "````md\n```question\nkey: no\ntext: t\n```\n````\n" <>
+          "  ``` question\n  key: a\n  text: t\n  blocking: true\n  ````\n" <>
+          "```question\r\nkey: b\r\ntext: t\r\nblocking: true\r\n```\n"
+
+      assert {:ok, %Document{questions: [%Question{key: "a", line: 11}, %Question{line: 16}]}} =
+               Document.parse(text)
+
+      assert Document.question_spans(text) == [{11, 15}, {16, 20}]
+    end
+
+    test "a block left open spans nothing" do
+      assert Document.question_spans("```question\nkey: a\n") == []
+      assert Document.question_spans("No questions.") == []
+    end
+  end
+
   # `docs/design/conversations.md` § Questions makes this a standard: "The flag is ignored for
   # chats — `Document.parse(text, blocking: :always)`". In a conversation the turn has ended and
   # the agent is waiting whichever way the flag was written, so there is no "instead" for an

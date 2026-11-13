@@ -15,8 +15,8 @@ This is a web application written using the Phoenix web framework.
 - Anytime you run into errors with no `current_scope` assign:
   - You failed to follow the Authenticated Routes guidelines, or you failed to pass `current_scope` to `<Layouts.app>`
   - **Always** fix the `current_scope` error by moving your routes to the proper `live_session` and ensure you pass `current_scope` as needed
-- Phoenix v1.8 moved the `<.flash_group>` component to the `Layouts` module. You are **forbidden** from calling `<.flash_group>` outside of the `layouts.ex` module
-- Out of the box, `core_components.ex` imports an `<.icon name="hero-x-mark" class="w-5 h-5"/>` component for hero icons. **Always** use the `<.icon>` component for icons, **never** use `Heroicons` modules or similar
+- There is no `<.flash_group>`: the `:info` flash is the toast `Layouts.app` draws, and a failure is never a flash — draw it where the person acted with `<.error_note>` (`docs/design/ui.md` § Errors stay where you acted). A test fails on any `put_flash` with `:error` under `lib/forge_web`
+- **No icon set.** `docs/design/ui.md` § Marks: state is a Unicode mark with a fixed meaning, an object's kind is a glyph in a tinted tile, and the only drawings are two inline SVGs. There is no `<.icon>` and no Heroicons; **never add either back**
 - **Always** use the imported `<.input>` component for form inputs from `core_components.ex` when available. `<.input>` is imported and using it will save steps and prevent errors
 - If you override the default input classes (`<.input class="myclass px-2 py-1 rounded-lg">)`) class with your own values, no default classes are inherited, so your
 custom classes must fully style the input
@@ -65,9 +65,13 @@ fail when they are swapped.
 
 - **Always use and maintain this import syntax** in the app.css file for projects generated with `phx.new`
 - **Never** use `@apply` when writing raw css
-- daisyUI is loaded `themes: false` with two hand-authored themes in `assets/css/app.css`. Build
-  components from those theme variables — **never** hard-code a colour, and never introduce a third
-  theme or a third surface
+- **No component library.** Colours, type, spacing and radii are the tokens of `docs/design/ui.md`
+  § Tokens, dark on `:root` and light under `[data-theme="light"]`; components are HEEx function
+  components ported from the handoff's primitives (`docs/design/ui/design_system/components/`),
+  **never** a hard-coded colour and never a third theme. The tokens are `assets/css/tokens.css`,
+  as utilities (`bg-surface-2`, `text-ink-3`, `border-border`, `text-danger`). Its block of
+  daisyUI names (`base-100`, `primary`, `rounded-field`…) is temporary, for the pages not yet
+  rebuilt; **never use one of those names in new markup**
 - Out of the box **only the app.js and app.css bundles are supported**
   - You cannot reference an external vendor'd script `src` or link `href` in the layouts
   - You must import the vendor deps into app.js and app.css to use them
@@ -77,21 +81,24 @@ fail when they are swapped.
 
 **`docs/design/ui.md` is the standard. Read it before touching an operator surface.** It is not
 advisory: it carries the affordance rule, the three axes, the mono rule, colour discipline, the
-per-route measures and the semantics that must not be lost. A change of mind updates that note
+frame and its three layouts, and the semantics that must not be lost. The design it follows is
+vendored under `docs/design/ui/`, every screen by id in `screens/final-design.dc.html`. A change of mind updates that note
 first, then the code.
 
 The short version, because these are the rules most easily broken by habit:
 
-- The product is **quiet**. Structure is 1px rules, not cards or shadows (`--depth: 0`). Nothing
-  pulses and nothing is decorative. Live output only where a person is waiting for it — a
-  conversation streams its reply; a running job's stream is allowed and not built — and it never
-  scrolls away from what the reader is looking at (`docs/design/ui.md` § Motion and structure).
+- The product is **quiet**. Structure is 1px rules, not cards; shadows only on what floats or
+  pins. Nothing pulses and nothing is decorative. Live output only where a person is looking at the
+  work — a conversation's reply, a ticket's running job — and it never scrolls away from what the
+  reader is looking at (`docs/design/ui.md` § Motion and structure).
 - **A border means you can tap it.** Identifiers — states, outcomes, branches, artifact names — are
   plain mono text with no box. Boxes are for things that do something.
-- **Accent means one thing: a human is being waited on.** Never use it for anything else.
+- **Accent (amber) means one thing: a human is being waited on.** Never use it for anything else.
+- **Approve, accept and merge live only in a decision row** and the panel it drops; the queue links
+  to a decision and never takes one; the bottom strip only navigates and the composer only replies.
 - Mono is for things the system named; never for language a person wrote or reads.
-- Tap targets are ≥46px and **`btn-sm` does not appear on any operator page**.
-- There is no global page padding and no global measure — each route sets its own.
+- Phone targets are ≥44px, with the control sizes `docs/design/ui.md` § Space, sizes and targets
+  gives. A disabled control keeps its size and place.
 
 
 <!-- phoenix-gen-auth-start -->

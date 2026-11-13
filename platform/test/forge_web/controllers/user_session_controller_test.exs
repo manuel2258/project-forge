@@ -25,7 +25,8 @@ defmodule ForgeWeb.UserSessionControllerTest do
       response = html_response(conn, 200)
       assert response =~ user.email
       assert response =~ ~p"/users/settings"
-      assert response =~ ~p"/users/log-out"
+      # Signed in: the frame is drawn, and its log out is in the title menu.
+      assert response =~ ~s(id="top-bar")
     end
 
     test "logs the user in with remember me", %{conn: conn, user: user} do
@@ -67,8 +68,25 @@ defmodule ForgeWeb.UserSessionControllerTest do
           "user" => %{"email" => user.email, "password" => "invalid_password"}
         })
 
-      assert Phoenix.Flash.get(conn.assigns.flash, :error) == "Invalid email or password"
-      assert redirected_to(conn) == ~p"/users/log-in"
+      assert Phoenix.Flash.get(conn.assigns.flash, :sign_in_error) ==
+               "That email and password don't match an account here."
+
+      assert redirected_to(conn) == ~p"/users/log-in?way=password"
+      refute conn.resp_cookies[ForgeWeb.SignIn.cookie()]
+    end
+
+    # The device remembers how it signed in, so the login page opens on the password next time
+    # (`docs/design/ui.md` § Signing in). Http-only, because no script has any business with it.
+    test "remembers on the device that it signed in with a password", %{conn: conn, user: user} do
+      user = set_password(user)
+
+      conn =
+        post(conn, ~p"/users/log-in", %{
+          "user" => %{"email" => user.email, "password" => valid_user_password()}
+        })
+
+      assert %{value: "password", http_only: true} = conn.resp_cookies[ForgeWeb.SignIn.cookie()]
+      assert conn.resp_cookies[ForgeWeb.SignIn.cookie()].max_age == 365 * 24 * 60 * 60
     end
   end
 
@@ -89,7 +107,8 @@ defmodule ForgeWeb.UserSessionControllerTest do
       response = html_response(conn, 200)
       assert response =~ user.email
       assert response =~ ~p"/users/settings"
-      assert response =~ ~p"/users/log-out"
+      # Signed in: the frame is drawn, and its log out is in the title menu.
+      assert response =~ ~s(id="top-bar")
     end
 
     test "confirms unconfirmed user", %{conn: conn, unconfirmed_user: user} do
@@ -123,10 +142,19 @@ defmodule ForgeWeb.UserSessionControllerTest do
           "user" => %{"token" => "invalid"}
         })
 
-      assert Phoenix.Flash.get(conn.assigns.flash, :error) ==
+      assert Phoenix.Flash.get(conn.assigns.flash, :sign_in_error) ==
                "The link is invalid or it has expired."
 
-      assert redirected_to(conn) == ~p"/users/log-in"
+      assert redirected_to(conn) == ~p"/users/log-in?way=link"
+      refute conn.resp_cookies[ForgeWeb.SignIn.cookie()]
+    end
+
+    test "remembers on the device that it signed in with a link", %{conn: conn, user: user} do
+      {token, _hashed_token} = generate_user_magic_link_token(user)
+
+      conn = post(conn, ~p"/users/log-in", %{"user" => %{"token" => token}})
+
+      assert %{value: "magic", http_only: true} = conn.resp_cookies[ForgeWeb.SignIn.cookie()]
     end
   end
 

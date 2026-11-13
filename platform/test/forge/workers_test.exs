@@ -1124,6 +1124,22 @@ defmodule Forge.WorkersTest do
       assert Enum.any?(Workers.list(), &(&1.id == worker.id and &1.status != :destroyed))
     end
 
+    # The next sweep tries again, and when the driver says yes the refusal is answered: the row
+    # does not go on saying the driver would not.
+    test "a destroy that succeeds after a refusal leaves no refusal on the row" do
+      Provider.Fake.refuse_destroy({:fake, "nope"})
+      on_exit(&Provider.Fake.allow/0)
+
+      {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+      {:ok, worker} = Workers.update(worker, %{provider_id: "fake-1"})
+      assert {:error, _} = Workers.destroy(worker)
+
+      Provider.Fake.allow()
+      assert :ok = Workers.destroy(Workers.get!(worker.id))
+
+      assert %{status: :destroyed, last_error: nil} = Workers.get!(worker.id)
+    end
+
     # The way out, and deliberately a person's: what it writes down is a claim about the world
     # that the platform could not check.
     test "a refused destroy can be forced, and says that it was" do

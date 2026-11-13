@@ -39,6 +39,32 @@ defmodule ForgeWeb.Format do
   end
 
   @doc """
+  `ago/2` as a phrase a sentence can carry: `just now` under a minute, else `4m ago`. Every
+  "… ago" the pages write is this, so none says `now ago`.
+  """
+  @spec ago_phrase(DateTime.t() | NaiveDateTime.t(), DateTime.t()) :: String.t()
+  def ago_phrase(at, now \\ DateTime.utc_now()) do
+    case ago(at, now) do
+      "now" -> "just now"
+      age -> age <> " ago"
+    end
+  end
+
+  @doc """
+  How long something has lasted, as a sentence carries it after the word for it — `waiting 4m`,
+  `stuck 2h`, `suspended 3d` — and `<1m` under a minute, so that none says `stuck now`. Bare
+  `ago/2` is for a cell or a `·`-separated segment of its own, where `now` is the whole of it;
+  a point in time inside a sentence is `ago_phrase/2`.
+  """
+  @spec lasted(DateTime.t() | NaiveDateTime.t(), DateTime.t()) :: String.t()
+  def lasted(at, now \\ DateTime.utc_now()) do
+    case ago(at, now) do
+      "now" -> "<1m"
+      age -> age
+    end
+  end
+
+  @doc """
   How long until `at`, compactly: `12m`, `1h 12m`, `2d 3h` — the countdown a window's reset is
   drawn with (`docs/design/capacity.md` § Two objects). A moment already here is `now`.
   """
@@ -53,6 +79,18 @@ defmodule ForgeWeb.Format do
   end
 
   @doc """
+  `until/2` as a phrase a sentence can carry: `in 1h 12m`, and `in under a minute` for anything
+  less than a minute off, so that none says `in now`.
+  """
+  @spec until_phrase(DateTime.t(), DateTime.t()) :: String.t()
+  def until_phrase(%DateTime{} = at, now \\ DateTime.utc_now()) do
+    case until(at, now) do
+      "now" -> "in under a minute"
+      left -> "in " <> left
+    end
+  end
+
+  @doc """
   Whether a worker build is the one this platform ships with, in the words both the workers and
   the templates pages use: `current` or `other build` — never "older", because a build is a hash
   with no order (`docs/design/ui.md` § The workers page). Nil when the platform knows no build of
@@ -62,6 +100,14 @@ defmodule ForgeWeb.Format do
   def build_hint(_build, nil), do: nil
   def build_hint(current, current), do: "current"
   def build_hint(_build, _current), do: "other build"
+
+  @doc """
+  A count with its noun, the noun plural but for one: `1 turn`, `3 turns`, `0 jobs`. Every count
+  drawn with a word goes through this, so none says `1 turns` (UX pass, B19).
+  """
+  @spec counted(integer() | nil, String.t()) :: String.t()
+  def counted(1, noun), do: "1 " <> noun
+  def counted(n, noun), do: "#{n || 0} #{noun}s"
 
   @doc """
   How long a job ran, from its start to its finish: `42s`, `3m 5s`, `1h 12m`; `running` for one
@@ -88,6 +134,14 @@ defmodule ForgeWeb.Format do
   def windows(tokens) do
     tokens |> Capacity.windows(window_tokens()) |> Capacity.format()
   end
+
+  @doc """
+  What something used, as `windows/1` draws it, or nil when it used nothing: a row leaves a zero
+  out rather than print `0 windows` beside every job that has not started (UX pass, A11).
+  """
+  @spec spent(number() | nil) :: String.t() | nil
+  def spent(tokens) when is_number(tokens) and tokens > 0, do: windows(tokens)
+  def spent(_nothing), do: nil
 
   @doc """
   The exact weighted tokens behind a figure, for a title: `1,234,567 weighted tokens`. The windows
@@ -133,7 +187,5 @@ defmodule ForgeWeb.Format do
 
   @doc "The configured weighted tokens of one five-hour window. See `docs/design/capacity.md`."
   @spec window_tokens() :: number()
-  def window_tokens do
-    :forge |> Application.get_env(:capacity, []) |> Keyword.get(:window_tokens, 0)
-  end
+  defdelegate window_tokens, to: Forge.Usage
 end

@@ -250,7 +250,7 @@ defmodule Forge.IdentityTest do
     # The accounts page asked this once per row, on mount and after every approve, suspend and
     # promote. Counted rather than eyeballed: the assertion that matters is the query count, and
     # nothing about the returned data changes when it goes back to one call per user.
-    test "issuers_by_user/1 answers for every account in a single query" do
+    test "identities_by_user/1 answers for every account in a single query" do
       {:ok, one} = Accounts.log_in_with_identity(claim(%{subject: "a"}))
       {:ok, two} = Accounts.log_in_with_identity(claim(%{subject: "b"}))
       {:ok, three} = Accounts.log_in_with_identity(claim(%{subject: "c"}))
@@ -258,7 +258,7 @@ defmodule Forge.IdentityTest do
 
       users = [one, two, three, local]
       parent = self()
-      handler = "issuers-query-count-#{System.unique_integer([:positive])}"
+      handler = "identities-query-count-#{System.unique_integer([:positive])}"
 
       :telemetry.attach(
         handler,
@@ -271,15 +271,16 @@ defmodule Forge.IdentityTest do
 
       on_exit(fn -> :telemetry.detach(handler) end)
 
-      issuers = Accounts.issuers_by_user(users)
+      identities = Accounts.identities_by_user(users)
 
       assert_receive :queried
       refute_receive :queried, 50
 
-      assert issuers[one.id] == ["https://issuer.example.test"]
-      assert issuers[local.id] == []
-      assert map_size(issuers) == 4
-      assert Map.has_key?(issuers, two.id) and Map.has_key?(issuers, three.id)
+      assert identities[one.id] == [{"https://issuer.example.test", "a"}]
+      assert identities[two.id] == [{"https://issuer.example.test", "b"}]
+      assert identities[local.id] == []
+      assert map_size(identities) == 4
+      assert Map.has_key?(identities, three.id)
     end
 
     test "is empty for an account that has never used an issuer" do

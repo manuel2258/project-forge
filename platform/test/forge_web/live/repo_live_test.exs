@@ -7,6 +7,9 @@ defmodule ForgeWeb.RepoLiveTest do
   directory that is read only when it is opened, the file at exactly the size limit, and the
   binary file that must be named and never drawn. And the guard over all of it — a non-member
   gets a miss — plus the promise that none of this writes to the repository.
+
+  The page's arrangement is CSS's (`areas/repo.css`): below 1440 one of history, tree and file
+  is seen, chosen by `#repo[data-shown]`, and that attribute is what these tests read for it.
   """
 
   use ForgeWeb.ConnCase, async: false
@@ -56,13 +59,31 @@ defmodule ForgeWeb.RepoLiveTest do
 
       assert has_element?(view, ~s|a[href="/projects/#{project.name}/repo"]|, "Repository")
     end
-  end
 
-  describe "the branch picker" do
-    test "first load selects the project's default branch", %{conn: conn, project: project} do
+    test "the strip is the project's views, and the top bar's parent is the project", %{
+      conn: conn,
+      project: project
+    } do
       {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo")
 
-      assert has_element?(view, ~s|option[selected][value="#{project.default_branch}"]|)
+      for {key, label} <- [{"tickets", "Tickets"}, {"merge", "Merge"}, {"proposals", "Proposals"}] do
+        assert has_element?(
+                 view,
+                 ~s|#tab-#{key}[href="/projects/#{project.name}?view=#{key}"]|,
+                 label
+               )
+      end
+
+      assert has_element?(view, ~s|#top-bar a[href="/projects/#{project.name}"]|, project.name)
+    end
+  end
+
+  describe "the branch sheet" do
+    test "first load is on the project's default branch", %{conn: conn, project: project} do
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo")
+
+      assert has_element?(view, "#branch-current", project.default_branch)
+      assert has_element?(view, ~s|#branches-default a[data-branch="main"][aria-current]|)
     end
 
     test "every branch is offered and none of the platform's own refs is", %{
@@ -76,11 +97,109 @@ defmodule ForgeWeb.RepoLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo")
 
-      assert has_element?(view, ~s|option[value="ticket/4"]|)
+      assert has_element?(view, ~s|#branches-other a[data-branch="ticket/4"]|)
       # Dropping the `refs/heads/` pattern from `Git.branches/1` offers this one, by its own
       # short name: the platform's pins are not somewhere a person chooses to look.
-      refute has_element?(view, ~s|option[value="forge/approved/4"]|)
-      refute has_element?(view, ~s|option[value="refs/forge/approved/4"]|)
+      refute has_element?(view, ~s|#branch-sheet a[data-branch="forge/approved/4"]|)
+      refute has_element?(view, ~s|#branch-sheet a[data-branch="refs/forge/approved/4"]|)
+    end
+
+    test "an open ticket's branch is named by its ticket, and only this project's", %{
+      conn: conn,
+      project: project,
+      repo: repo
+    } do
+      {:ok, head} = Git.resolve(repo, "refs/heads/main")
+
+      for name <- ~w(forge/mine-41 forge/theirs forge/done-2) do
+        :ok = Git.create_branch(repo, name, head)
+      end
+
+      mine = Forge.ForgeFixtures.ticket_fixture(%{project: project, branch: "forge/mine-41"})
+
+      done =
+        Forge.ForgeFixtures.ticket_fixture(%{
+          project: project,
+          branch: "forge/done-2",
+          title: "Already merged"
+        })
+
+      Forge.Repo.update!(Ecto.Changeset.change(done, status: :done))
+
+      # Another project's open ticket carrying a branch name this repository also has. The
+      # mutation: read the tickets of every project, and this one labels a branch it has nothing
+      # to do with.
+      Forge.ForgeFixtures.ticket_fixture(%{branch: "forge/theirs", title: "Somebody else's"})
+
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo")
+
+      row = ~s|#branches-tickets a[data-branch="forge/mine-41"]|
+      assert has_element?(view, row, "##{mine.number}")
+      assert has_element?(view, row, mine.title)
+      assert has_element?(view, row, "refining")
+      assert has_element?(view, "#branches-tickets", "Open tickets · 1")
+
+      for other <- ~w(forge/theirs forge/done-2) do
+        assert has_element?(view, ~s|#branches-other a[data-branch="#{other}"]|)
+      end
+
+      refute render(view) =~ "Somebody else's"
+      refute render(view) =~ "Already merged"
+    end
+
+    test "the search narrows the branches, a ticket's by its number and title too", %{
+      conn: conn,
+      project: project,
+      repo: repo
+    } do
+      {:ok, head} = Git.resolve(repo, "refs/heads/main")
+
+      for name <- ~w(forge/x experiment/sdf) do
+        :ok = Git.create_branch(repo, name, head)
+      end
+
+      ticket = Forge.ForgeFixtures.ticket_fixture(%{project: project, branch: "forge/x"})
+
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo")
+
+      # Its first act is typing: the sheet names the search as the field to focus (UX re-check #10).
+      assert has_element?(view, ~s|#branch-sheet[data-focus="#branch-search input"]|)
+      assert has_element?(view, "#branch-sheet #branch-search input")
+
+      view |> element("#branch-search") |> render_change(%{"q" => "SDF"})
+      assert has_element?(view, ~s|#branch-sheet a[data-branch="experiment/sdf"]|)
+      refute has_element?(view, ~s|#branch-sheet a[data-branch="forge/x"]|)
+      refute has_element?(view, ~s|#branch-sheet a[data-branch="main"]|)
+
+      view |> element("#branch-search") |> render_change(%{"q" => "high score"})
+      assert has_element?(view, ~s|#branch-sheet a[data-branch="forge/x"]|)
+      refute has_element?(view, ~s|#branch-sheet a[data-branch="experiment/sdf"]|)
+
+      view |> element("#branch-search") |> render_change(%{"q" => "##{ticket.number}"})
+      assert has_element?(view, ~s|#branch-sheet a[data-branch="forge/x"]|)
+
+      view |> element("#branch-search") |> render_change(%{"q" => "nothing like it"})
+      assert has_element?(view, "#branch-groups", "No branch matches.")
+    end
+
+    # The query is kept to a bound, not to its first letters: two branches that differ only past
+    # them are still told apart.
+    test "the search reads the whole of a query, not only its start", %{
+      conn: conn,
+      project: project,
+      repo: repo
+    } do
+      {:ok, head} = Git.resolve(repo, "refs/heads/main")
+
+      for name <- ~w(experiment/sdf experiment/abc) do
+        :ok = Git.create_branch(repo, name, head)
+      end
+
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo")
+
+      view |> element("#branch-search") |> render_change(%{"q" => "experiment/s"})
+      assert has_element?(view, ~s|#branch-sheet a[data-branch="experiment/sdf"]|)
+      refute has_element?(view, ~s|#branch-sheet a[data-branch="experiment/abc"]|)
     end
 
     test "picking a branch changes the commit list and the file tree", %{
@@ -95,15 +214,13 @@ defmodule ForgeWeb.RepoLiveTest do
       {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo")
       refute render(view) =~ "a commit only seven has"
 
-      html =
-        view
-        |> element("form[phx-change=branch]")
-        |> render_change(%{"branch" => "ticket/7"})
+      html = view |> element(~s|#branch-sheet a[data-branch="ticket/7"]|) |> render_click()
 
       assert html =~ "a commit only seven has"
+      assert has_element?(view, "#branch-current", "ticket/7")
 
       # And the tree is the new branch's too, not the one the page mounted on.
-      assert view |> element("a", "Files") |> render_click() =~ "only-on-seven.txt"
+      assert view |> element("#repo-tab-files") |> render_click() =~ "only-on-seven.txt"
     end
 
     test "a file opened on one branch is not still open under another's name", %{
@@ -119,13 +236,87 @@ defmodule ForgeWeb.RepoLiveTest do
       commit_to(repo, "ticket/7", %{"README.md" => "# Seven\n"})
 
       {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files")
-      assert view |> element(~s|li[data-path="README.md"] button|) |> render_click() =~ "# Game"
+      assert view |> element(~s|li[data-path="README.md"] a|) |> render_click() =~ "# Game"
 
       after_switch =
-        view |> element("form[phx-change=branch]") |> render_change(%{"branch" => "ticket/7"})
+        view |> element(~s|#branch-sheet a[data-branch="ticket/7"]|) |> render_click()
 
       refute after_switch =~ "# Game"
-      refute after_switch =~ "data-file"
+      refute has_element?(view, "[data-file]")
+    end
+
+    # The address can carry the same file across a branch change — a link, or the address edited
+    # — and the file that differs between the two must be read again from the new branch.
+    test "a branch change that keeps the file reads it from the new branch", %{
+      conn: conn,
+      project: project,
+      repo: repo
+    } do
+      {:ok, head} = Git.resolve(repo, "refs/heads/main")
+      :ok = Git.create_branch(repo, "ticket/7", head)
+      commit_to(repo, "ticket/7", %{"README.md" => "# Seven\n"})
+
+      {:ok, view, _html} =
+        live(conn, ~p"/projects/#{project.name}/repo?#{[tab: "files", file: "README.md"]}")
+
+      assert view |> element("[data-file]") |> render() =~ "# Game"
+
+      html =
+        render_patch(
+          view,
+          ~p"/projects/#{project.name}/repo?#{[branch: "ticket/7", tab: "files", file: "README.md"]}"
+        )
+
+      assert has_element?(view, "#branch-current", "ticket/7")
+      assert view |> element("[data-file]") |> render() =~ "# Seven"
+      refute html =~ "# Game"
+    end
+
+    # A ticket's recorded branch the repository does not have (never pushed, or deleted) is no
+    # row of the sheet, and the count beside it does not count it either.
+    test "an open ticket whose branch is not in the repository is not counted", %{
+      conn: conn,
+      project: project,
+      repo: repo
+    } do
+      {:ok, head} = Git.resolve(repo, "refs/heads/main")
+      :ok = Git.create_branch(repo, "forge/here-1", head)
+      Forge.ForgeFixtures.ticket_fixture(%{project: project, branch: "forge/here-1"})
+      Forge.ForgeFixtures.ticket_fixture(%{project: project, branch: "forge/gone-2"})
+
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo")
+
+      assert has_element?(view, ".repo-about-count", "2 branches · 1 for open tickets")
+      refute has_element?(view, ~s|#branch-sheet a[data-branch="forge/gone-2"]|)
+    end
+
+    test "no branch row carries the open file or a file's history to another branch", %{
+      conn: conn,
+      project: project,
+      repo: repo
+    } do
+      {:ok, head} = Git.resolve(repo, "refs/heads/main")
+      :ok = Git.create_branch(repo, "forge/t", head)
+      :ok = Git.create_branch(repo, "other", head)
+      Forge.ForgeFixtures.ticket_fixture(%{project: project, branch: "forge/t"})
+
+      {:ok, view, html} =
+        live(conn, ~p"/projects/#{project.name}/repo?file=README.md&path=README.md")
+
+      assert has_element?(view, "[data-file]")
+
+      hrefs =
+        html
+        |> Floki.parse_document!()
+        |> Floki.find("#branch-sheet a")
+        |> Floki.attribute("href")
+
+      assert length(hrefs) == 3
+
+      for href <- hrefs do
+        refute href =~ "file="
+        refute href =~ "path="
+      end
     end
 
     test "the default branch being gone does not split the picker from the page", %{
@@ -133,16 +324,15 @@ defmodule ForgeWeb.RepoLiveTest do
       project: project,
       repo: repo
     } do
-      # With no `selected` option the browser shows the first one, so a page that fell back to
-      # the deleted default drew `ticket/9` in the picker and the missing branch's empty state
-      # underneath it.
+      # A page that fell back to the deleted default's name drew the picker on one branch and
+      # the missing branch's empty state underneath it.
       {:ok, head} = Git.resolve(repo, "refs/heads/main")
       :ok = Git.create_branch(repo, "ticket/9", head)
       :ok = Git.delete_branch(repo, project.default_branch)
 
       {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/repo")
 
-      assert has_element?(view, ~s|option[selected][value="ticket/9"]|)
+      assert has_element?(view, "#branch-current", "ticket/9")
       assert html =~ "seed"
       refute html =~ "No commits on this branch at this page."
     end
@@ -153,7 +343,7 @@ defmodule ForgeWeb.RepoLiveTest do
     } do
       {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo?branch=gone")
 
-      assert has_element?(view, ~s|option[selected][value="#{project.default_branch}"]|)
+      assert has_element?(view, "#branch-current", project.default_branch)
     end
   end
 
@@ -203,6 +393,43 @@ defmodule ForgeWeb.RepoLiveTest do
       assert has_element?(commit_view, ~s|a[href="#{back}"]|)
     end
 
+    # On a wide screen the list sits beside an open file: a commit opened from it comes back to
+    # that file, on the view it was open on (r2 L3).
+    test "a commit opened beside an open file comes back to that file", %{
+      conn: conn,
+      project: project
+    } do
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files&file=README.md")
+
+      {:error, {:live_redirect, %{to: to}}} =
+        view |> element(~s|#commits li:first-child a|) |> render_click()
+
+      {:ok, commit_view, _html} = live(conn, to)
+
+      back =
+        ~p"/projects/#{project.name}/repo?#{[branch: "main", tab: "files", file: "README.md"]}"
+
+      assert has_element?(commit_view, ~s|#commit-back[href="#{back}"]|)
+    end
+
+    test "each row names its author, and the foot says which commits these are", %{
+      conn: conn,
+      project: project
+    } do
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo")
+
+      # `seed_commits/3` commits as `t` and the seeded root as `seed`: two authors, each drawn
+      # on its own row.
+      assert has_element?(view, "#commits li:first-child .commit-author", "t")
+      assert has_element?(view, "#commits .repo-foot-at", "1–30")
+      assert has_element?(view, "#commits .repo-foot-off", "‹ Newer")
+
+      view |> element("a", "Older ›") |> render_click()
+      assert has_element?(view, "#commits li:last-child .commit-author", "seed")
+      refute has_element?(view, "#commits .commit-author", "t")
+      assert has_element?(view, "#commits .repo-foot-at", "31–31")
+    end
+
     test "a page beyond the history is empty rather than an error", %{
       conn: conn,
       project: project
@@ -231,6 +458,8 @@ defmodule ForgeWeb.RepoLiveTest do
       view |> element(~s|li[data-path=".forge"] summary|) |> render_click()
 
       assert has_element?(view, ~s|li[data-path=".forge/workflow.yml"]|)
+      # A folder says so by its trailing slash, not by an icon.
+      assert has_element?(view, ~s|li[data-path=".forge/agents"] summary|, "agents/")
       assert has_element?(view, ~s|li[data-path=".forge/agents"]|)
       # One level only: the directory inside it is named, and its own children still are not.
       refute has_element?(view, ~s|li[data-path=".forge/agents/plan.md"]|)
@@ -239,9 +468,30 @@ defmodule ForgeWeb.RepoLiveTest do
     test "a file under the limit shows its exact content", %{conn: conn, project: project} do
       {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files")
 
-      html = view |> element(~s|li[data-path="README.md"] button|) |> render_click()
+      html = view |> element(~s|li[data-path="README.md"] a|) |> render_click()
 
-      assert html =~ "# Game"
+      assert drawn(html, "README.md") =~ "# Game"
+    end
+
+    test "a file is drawn highlighted, its markup escaped", %{
+      conn: conn,
+      project: project,
+      repo: repo
+    } do
+      # The page's half of `ForgeWeb.HighlightTest`: the file it read is the one highlighted, by
+      # its own name, and what the file says is text on the page and never markup in it.
+      source = ~s|defmodule Evil do\n  # </span><script>alert(1)</script>\nend\n|
+      commit_to(repo, "main", %{"evil.ex" => source})
+
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files")
+      html = view |> element(~s|li[data-path="evil.ex"] a|) |> render_click()
+
+      assert has_element?(view, ~s|[data-file="evil.ex"] .code-highlighted .l-comment|)
+      refute html =~ "<script>"
+      # Spaces aside: LiveViewTest's own tree drops the whitespace-only text between two spans,
+      # which a browser keeps (`ForgeWeb.HighlightTest` holds the exact text).
+      assert drawn(html, "evil.ex") |> String.replace(~r/\s/, "") ==
+               source |> String.replace(~r/\s/, "")
     end
 
     test "a file at the limit is named and not loaded; one a byte under is drawn", %{
@@ -258,11 +508,14 @@ defmodule ForgeWeb.RepoLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files")
 
-      html = view |> element(~s|li[data-path="exactly.txt"] button|) |> render_click()
-      assert html =~ "too large to show"
+      html = view |> element(~s|li[data-path="exactly.txt"] a|) |> render_click()
+      # In the words Changes uses for the same file, from the same function (r2 L6).
+      assert html =~
+               "exactly.txt is 512 KB; this page draws a file under 512 KB. Read it with git."
+
       refute html =~ String.duplicate("a", 200)
 
-      html = view |> element(~s|li[data-path="just-under.txt"] button|) |> render_click()
+      html = view |> element(~s|li[data-path="just-under.txt"] a|) |> render_click()
       assert html =~ String.duplicate("b", 200)
     end
 
@@ -284,10 +537,8 @@ defmodule ForgeWeb.RepoLiveTest do
 
       for name <- ~w(logo.bin late.bin latin1.txt) do
         assert html =~ name
-        drawn = view |> element(~s|li[data-path="#{name}"] button|) |> render_click()
+        drawn = view |> element(~s|li[data-path="#{name}"] a|) |> render_click()
         assert drawn =~ "This file is binary."
-        # Closed again, so the next one is opened rather than added beside it.
-        view |> element(~s|li[data-path="#{name}"] button|) |> render_click()
       end
 
       refute render(view) =~ "NOTTEXT"
@@ -297,20 +548,93 @@ defmodule ForgeWeb.RepoLiveTest do
 
     # The whole of it, not a window: the review's own probe was a file whose first bytes were
     # fine. `String.valid?` reads every byte, so there is no window left to get wrong.
-    test "only one file is open at a time", %{conn: conn, project: project, repo: repo} do
+    test "only one file is open at a time, as its own screen", %{
+      conn: conn,
+      project: project,
+      repo: repo
+    } do
       commit_to(repo, "main", %{"one.txt" => "FIRSTFILE\n", "two.txt" => "SECONDFILE\n"})
 
       {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files")
+      assert has_element?(view, ~s|#repo[data-shown="tree"]|)
 
-      assert view |> element(~s|li[data-path="one.txt"] button|) |> render_click() =~ "FIRSTFILE"
+      assert view |> element(~s|li[data-path="one.txt"] a|) |> render_click() =~ "FIRSTFILE"
+      assert has_element?(view, ~s|#repo[data-shown="file"]|)
 
-      second = view |> element(~s|li[data-path="two.txt"] button|) |> render_click()
+      second = view |> element(~s|li[data-path="two.txt"] a|) |> render_click()
       assert second =~ "SECONDFILE"
       refute second =~ "FIRSTFILE"
 
-      # And the open one closes.
-      closed = view |> element(~s|li[data-path="two.txt"] button|) |> render_click()
+      # And the back row closes it, onto the tree.
+      closed = view |> element("#file-back") |> render_click()
       refute closed =~ "SECONDFILE"
+      assert has_element?(view, ~s|#repo[data-shown="tree"]|)
+    end
+
+    test "the tree keeps its place while a file is open", %{
+      conn: conn,
+      project: project,
+      repo: repo
+    } do
+      # The file is a screen of its own on a phone; the tree is still the page's, with every
+      # directory it had read, so going back finds it as it was left.
+      commit_to(repo, "main", %{"lib/game/scores.ex" => "defmodule Scores do\nend\n"})
+
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files")
+      view |> element(~s|li[data-path="lib"] summary|) |> render_click()
+      view |> element(~s|li[data-path="lib/game"] summary|) |> render_click()
+      view |> element(~s|li[data-path="lib/game/scores.ex"] a|) |> render_click()
+
+      assert has_element?(view, ~s|#repo[data-shown="file"]|)
+      assert has_element?(view, ~s|#files li[data-path="lib/game/scores.ex"] a[aria-current]|)
+      assert has_element?(view, "#file-size", "2 lines")
+      assert has_element?(view, "#file-path", "lib/game/scores.ex")
+      assert has_element?(view, "#top-bar .ui-top-title > .ui-top-sub", "main at ")
+    end
+
+    test "a file opened from the address is shown where it sits in the tree", %{
+      conn: conn,
+      project: project,
+      repo: repo
+    } do
+      # A link to a file deep in the tree: on a wide screen the tree is beside it, and a tree
+      # drawn at its root would not say where the file is (`10f`).
+      commit_to(repo, "main", %{"lib/game/scores.ex" => "x\n", "lib/other/a.ex" => "y\n"})
+
+      {:ok, view, _html} =
+        live(conn, ~p"/projects/#{project.name}/repo?tab=files&file=lib/game/scores.ex")
+
+      assert has_element?(view, ~s|#files li[data-path="lib"] > details[open]|)
+      assert has_element?(view, ~s|#files li[data-path="lib/game"] > details[open]|)
+      assert has_element?(view, ~s|#files li[data-path="lib/game/scores.ex"] a[aria-current]|)
+      # Only the way to it: a sibling directory is named and not opened.
+      refute has_element?(view, ~s|#files li[data-path="lib/other"] > details[open]|)
+      refute has_element?(view, ~s|#files li[data-path="lib/other/a.ex"]|)
+    end
+
+    test "a file's history is a link to the commits that changed it", %{
+      conn: conn,
+      project: project,
+      repo: repo
+    } do
+      commit_to(repo, "main", %{"one.txt" => "1\n"}, "touch one")
+      commit_to(repo, "main", %{"two.txt" => "2\n"}, "touch two")
+
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files&file=one.txt")
+
+      html = view |> element("#file-history") |> render_click()
+
+      assert has_element?(view, ~s|#repo[data-shown="commits"]|)
+      assert has_element?(view, "#commits", "History of one.txt")
+      # The path is drawn as it is named, out of the eyebrow's capitals (UX pass, C11).
+      assert has_element?(view, "#commits .ui-eyebrow .ui-id", "one.txt")
+      assert subjects(html) == ["touch one"]
+
+      # The commit it opens comes back to this history.
+      assert has_element?(view, ~s|#commits li:first-child a[href*="path=one.txt"]|)
+
+      html = view |> element("#history-all") |> render_click()
+      assert subjects(html) == ["touch two", "touch one", "seed"]
     end
 
     # The crash the patch guard did not reach: a *filename* that is not valid UTF-8. The only
@@ -338,7 +662,7 @@ defmodule ForgeWeb.RepoLiveTest do
       escaped = ~s("caf\\351.txt")
       assert escaped in paths(html)
 
-      opened = render_click(view, "open", %{"path" => escaped})
+      opened = render_patch(view, ~p"/projects/#{project.name}/repo?#{[file: escaped]}")
       assert String.valid?(opened)
       assert opened =~ "LATINCONTENT"
     end
@@ -391,24 +715,42 @@ defmodule ForgeWeb.RepoLiveTest do
 
       assert html =~ "This repository has no branches yet."
       assert html =~ "No commits on this branch at this page."
-      refute has_element?(view, "option")
-      assert view |> element("a", "Files") |> render_click() =~ "no branches yet"
+      refute has_element?(view, "#branch-button")
+      refute has_element?(view, "#branch-sheet a")
+      assert view |> element("#repo-tab-files") |> render_click() =~ "no branches yet"
+    end
+
+    # With no branch there is no commit to read a file from: the address's file opens nothing,
+    # rather than being named a binary file.
+    test "a file in the address of a repository with no commit opens nothing", %{
+      conn: conn,
+      project: project,
+      repo: repo
+    } do
+      :ok = Git.delete_branch(repo, project.default_branch)
+
+      {:ok, view, html} =
+        live(conn, ~p"/projects/#{project.name}/repo?#{[tab: "files", file: "README.md"]}")
+
+      refute has_element?(view, "[data-file]")
+      refute html =~ "This file is binary"
     end
 
     test "a path the commit does not hold opens nothing and raises nothing", %{
       conn: conn,
       project: project
     } do
-      # The path arrives off the wire, so it is not only what the tree offered.
+      # The path arrives in the address, so it is not only what the tree offered.
       {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files")
 
       # A real file first, so `data-file` is known to appear when something *is* open — the
       # first version of this asserted on `README.md`, which the seeded root draws either way.
-      assert view |> element(~s|li[data-path="README.md"] button|) |> render_click() =~
+      assert view |> element(~s|li[data-path="README.md"] a|) |> render_click() =~
                "data-file"
 
       for path <- ["../../etc/passwd", "../config", "/etc/passwd", "./README.md", ".forge"] do
-        refute render_click(view, "open", %{"path" => path}) =~ ~s|data-file="#{path}"|
+        render_patch(view, ~p"/projects/#{project.name}/repo?#{[tab: "files", file: path]}")
+        refute has_element?(view, "[data-file]")
       end
     end
 
@@ -423,8 +765,7 @@ defmodule ForgeWeb.RepoLiveTest do
       before = render(view)
 
       render_click(view, "expand", %{"path" => ["a", "b"]})
-      render_click(view, "open", %{"path" => %{"a" => "b"}})
-      render_change(view, "branch", %{"branch" => ["main"]})
+      render_change(view, "search", %{"q" => %{"a" => "b"}})
 
       # Still alive, and showing exactly what it showed.
       assert render(view) == before
@@ -451,7 +792,14 @@ defmodule ForgeWeb.RepoLiveTest do
       # binary: `?page[]=2` raised `FunctionClauseError` in `handle_params` for any member.
       # `tab` and `branch` need no clause of their own — `in @tabs` and `in branches` are both
       # false for a list — which is why this is the one guard here.
-      for query <- ["page[]=2", "page[]=2&page[]=3", "tab[]=files", "branch[]=main"] do
+      for query <- [
+            "page[]=2",
+            "page[]=2&page[]=3",
+            "tab[]=files",
+            "branch[]=main",
+            "file[]=README.md",
+            "path[]=README.md"
+          ] do
         {:ok, _view, html} = live(conn, "/projects/#{project.name}/repo?#{query}")
         assert html =~ "seed"
       end
@@ -470,12 +818,14 @@ defmodule ForgeWeb.RepoLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo")
 
-    view |> element("form[phx-change=branch]") |> render_change(%{"branch" => "ticket/8"})
-    view |> element("a", "Files") |> render_click()
+    view |> element(~s|#branch-sheet a[data-branch="ticket/8"]|) |> render_click()
+    view |> element("#branch-search") |> render_change(%{"q" => "ticket"})
+    view |> element("#repo-tab-files") |> render_click()
     view |> element(~s|li[data-path="nested"] summary|) |> render_click()
     view |> element(~s|li[data-path="nested/deep"] summary|) |> render_click()
-    view |> element(~s|li[data-path="nested/deep/file.txt"] button|) |> render_click()
-    view |> element("a", "Commits") |> render_click()
+    view |> element(~s|li[data-path="nested/deep/file.txt"] a|) |> render_click()
+    view |> element("#file-history") |> render_click()
+    view |> element("#repo-tab-commits") |> render_click()
     view |> element(~s|#commits li:first-child a|) |> render_click()
 
     assert tree_of(repo) == before
@@ -508,15 +858,23 @@ defmodule ForgeWeb.RepoLiveTest do
   defp paths(html) do
     html
     |> Floki.parse_document!()
-    |> Floki.find(~s|#files > div > ul > li|)
+    |> Floki.find(~s|#files .repo-tree-body > ul > li|)
     |> Floki.attribute("data-path")
+  end
+
+  # The open file's text as the reader sees it, its lines joined again.
+  defp drawn(html, path) do
+    html
+    |> LazyHTML.from_document()
+    |> LazyHTML.query(~s|[data-file="#{path}"] .code-text|)
+    |> Enum.map_join("\n", &LazyHTML.text/1)
   end
 
   # The subject of each commit row, in the order the page drew them.
   defp subjects(html) do
     html
     |> Floki.parse_document!()
-    |> Floki.find("#commits li span.flex-1")
+    |> Floki.find("#commits li .commit-subject")
     |> Enum.map(&(&1 |> Floki.text() |> String.trim()))
   end
 end

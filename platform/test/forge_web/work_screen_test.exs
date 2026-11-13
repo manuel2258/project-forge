@@ -42,7 +42,8 @@ defmodule ForgeWeb.WorkScreenTest do
       events: events,
       shown: Keyword.get(opts, :shown, 50),
       notices: Keyword.get(opts, :notices, false),
-      heading: "Activity"
+      heading: "Activity",
+      since: Keyword.get(opts, :since)
     )
     |> Floki.parse_fragment!()
   end
@@ -92,7 +93,7 @@ defmodule ForgeWeb.WorkScreenTest do
 
       assert [row] = rows(doc)
       assert Floki.find(row, "[data-clipped]") == []
-      assert Floki.find(row, ".truncate") |> Floki.text() =~ "text"
+      assert Floki.find(row, ".truncate") |> Floki.text() =~ "agent"
       refute Floki.find(row, ".truncate") |> Floki.text() =~ "short and sweet"
       assert Floki.text(row) =~ "short and sweet"
 
@@ -243,6 +244,44 @@ defmodule ForgeWeb.WorkScreenTest do
 
       assert events |> Enum.take(50) |> draw() |> Floki.find(~s(button[phx-click="more"])) ==
                []
+    end
+  end
+
+  # `docs/design/ui.md` § Activity: rows new since the person last looked are marked, and with no
+  # previous look nothing is.
+  describe "since the person last looked" do
+    test "marks the rows after it, and only those" do
+      events = [
+        %{
+          event(1, "job.harness.text", %{"text" => "before"})
+          | inserted_at: ~U[2026-09-26 11:00:00Z]
+        },
+        %{
+          event(2, "job.harness.text", %{"text" => "after"})
+          | inserted_at: ~U[2026-09-26 13:00:00Z]
+        }
+      ]
+
+      marked = fn doc ->
+        for row <- rows(doc), "work-act--new" in classes(row), do: Floki.text(row)
+      end
+
+      assert [after_look] = events |> draw(since: @at) |> marked.()
+      assert after_look =~ "after"
+      assert events |> draw() |> marked.() == []
+    end
+  end
+
+  describe "message/1" do
+    # One drawing of a commit message, as git keeps it: the subject apart from the body, which
+    # one rendering used to run into the subject's sentence.
+    test "is the subject and the body after the blank line, front matter dropped" do
+      version = %{
+        content: "---\noutcome: done\n---\n\nPersist the scores\n\nLost on restart.\nTwo.\n"
+      }
+
+      assert WorkScreen.message(version) == {"Persist the scores", "Lost on restart.\nTwo."}
+      assert WorkScreen.message(%{content: "Only a subject\n"}) == {"Only a subject", ""}
     end
   end
 end

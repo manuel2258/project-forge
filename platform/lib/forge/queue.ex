@@ -74,6 +74,50 @@ defmodule Forge.Queue do
   def items(%User{} = user), do: build(Enum.map(Projects.list(user), & &1.id))
 
   @doc """
+  The queue button's count (`docs/design/ui.md` § What the queue counts): the number of items the
+  queue page draws for this user — a document version's blocking questions are one item however
+  many they are, and an assumption is none — and, for a node admin, the accounts waiting for
+  approval, because an account waiting on an admin is a decision too.
+
+  Scoped by membership like `items/1`, which it reads.
+  """
+  @spec count(User.t()) :: non_neg_integer()
+  def count(%User{} = user), do: count(items(user), waiting_accounts(user))
+
+  @doc """
+  `count/1` over a queue already read: `items/1`'s items and `waiting_accounts/1`'s figure. The
+  queue page reads both to draw them and counts with this, so its subline and the queue button
+  are one computation over the same reads, not two that agree.
+  """
+  @spec count([item()], non_neg_integer()) :: non_neg_integer()
+  def count(items, accounts) when is_list(items), do: tally(items) + accounts
+
+  @doc """
+  How many of `items` the queue page draws: the waiting ones, a document version's blocking
+  questions counted once. `count/1` is this over a user's queue, and the projects page is this
+  over each project's share of it (`docs/design/ui.md` § The projects page), so the two never
+  disagree about what one item is.
+  """
+  @spec tally([item()]) :: non_neg_integer()
+  def tally(items) do
+    {questions, rest} =
+      items |> Enum.filter(&waiting?/1) |> Enum.split_with(&(&1.kind == :question))
+
+    versions = questions |> Enum.uniq_by(& &1.question.artifact_version_id) |> length()
+
+    versions + length(rest)
+  end
+
+  @doc """
+  The accounts waiting on `user`'s approval: for a node admin the pending accounts, for anybody
+  else none. Part of `count/1`, and the queue page adds it to the items it draws, so its subline
+  and the queue button say one number (`docs/design/ui.md` § What the queue counts).
+  """
+  @spec waiting_accounts(User.t()) :: non_neg_integer()
+  def waiting_accounts(%User{node_admin: true}), do: Forge.Accounts.count_pending_users()
+  def waiting_accounts(%User{}), do: 0
+
+  @doc """
   The queue's items for one ticket, read the way the queue reads every ticket: what a ticket's
   own page counts as waiting is then what the queue would count for it, from one definition
   (`docs/design/ui.md` § Decide and Timeline). A finished ticket has none.

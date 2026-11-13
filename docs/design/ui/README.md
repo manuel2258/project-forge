@@ -1,475 +1,338 @@
-# Handoff: forge operator UI redesign
+# Handoff: forge UI redesign (phone and desktop)
 
 ## Overview
+A full redesign of forge's web UI (Phoenix LiveView, `platform/lib/forge_web` in `manuel2258/project-forge`). The main goal is that the phone becomes fully usable: more vertical space for agent output and decisions, one clear place for every decision, and consistent navigation. Desktop is designed vertical-first (portrait monitor), with wide layouts adding columns.
 
-A full redesign of the operator interface for **forge**, a self-hosted platform that
-moves software tickets through a per-repository, statechart-defined lifecycle executed
-by disposable AI agent jobs. Scope was layout and information architecture, not styling
-alone: new routes, a new queue model, the ticket page rebuilt as a state timeline, and
-consumption re-modelled from money to provider capacity.
-
-The governing idea, taken from the product's own vision: **the operator's attention is
-the scarce resource, and the queue is an inbox, not a dashboard**. Exactly one thing in
-the interface is allowed to be loud — an item waiting on a human — and it is marked in
-ochre, which is used for nothing else.
+It covers every screen in the app: the queue (home), ticket, changes and review, job, chat, project, proposals, repository, projects, project settings, machines/templates/credentials, accounts, usage, sign-in, app-wide states (connection, toasts, errors, not found) and a light theme.
 
 ## About the design files
-
-The two HTML files in this bundle are **design references**, not production code.
-They are built as static HTML with inline styles so they render anywhere; they are not
-components and they are not meant to be copied into the app.
-
-The target is **Phoenix LiveView with server-rendered HEEx, Tailwind CSS 4 and daisyUI 5**.
-The task is to recreate these designs in that environment using its established patterns:
-`phx-click` / `phx-submit` bindings, function components in HEEx, daisyUI theme variables,
-and Heroicons via the `hero-<name>` class plugin. Hard constraints from the brief that the
-implementation must respect:
-
-- No React/Vue/Svelte and no client-side routing. The DOM is patched by the server over a
-  websocket; anything stateful in the client must survive patching.
-- Tailwind runs `source(none)` with explicit `@source` globs. daisyUI is loaded
-  `themes: false` with hand-authored themes in `assets/css/app.css` as
-  `@plugin "daisyui-theme"` blocks. All colour values are oklch.
-- Two themes, light and dark, both first class. Root carries `data-theme` and
-  `data-theme-source`; theme is applied before first paint.
-- Heroicons only. No build step beyond Tailwind + esbuild. **No webfont CDN** — fonts must
-  be self-hosted, possibly without internet egress.
-- Progressive enhancement; respect `prefers-reduced-motion`.
+The files in this bundle are **design references created in HTML**: prototypes showing the intended look and behaviour, not production code to copy. The task is to **recreate these designs in the existing codebase**: Phoenix LiveView with HEEx function components and the app's CSS (`assets/css/app.css`). Use its established patterns: function components for the primitives, LiveView assigns and events for state, and CSS custom properties for the tokens. The React components in `design_system/components/` describe each primitive's props and states. Port them as HEEx function components, don't ship React.
 
 ## Fidelity
-
-**High fidelity.** Colours, type scale, spacing, tap-target sizes and copy are final and
-should be reproduced exactly. Every colour in the mockups is oklch and maps to a daisyUI
-theme variable listed in `forge Spec.html` §4. The two mockup files disagree with nothing —
-where an earlier section of the mockup file is superseded, it says so in its caption.
-
-Read `forge Spec.html` first. It is the specification; `forge Mockups.html` is the
-evidence. Where the two ever differ, the spec wins.
-
-## Reading order
-
-1. `forge Spec.html` §1 (IA and measures) and §2 (the three axes) — these two sections
-   carry most of the design's value.
-2. `forge Mockups.html` turns 4, 3 and 2 at the top of the file — these are the newest
-   decisions and they supersede the queue drawn in section 02.
-3. `forge Spec.html` §6, the implementation order. It is sequenced cheapest-highest-impact
-   first and every step ships on its own.
-
-## The central problem this design solves
-
-Three orthogonal axes currently render as one indistinguishable `badge-sm`. They are given
-three different **forms**, not three colours of one badge — form survives greyscale,
-colour-blindness and a glance:
-
-| Axis | Form | Rules |
-|---|---|---|
-| **1 · workflow state** | Plain mono text, leading topology glyph, **no box** | `▸` job state (runs a job on entry) · `●` human state with outgoing transitions · `■` terminal. Never coloured by status, never abbreviated. |
-| **2 · ticket status** | Filled uppercase flag, *beside* the state | Only rendered when not `active`. `stuck` = filled accent carrying its age (`STUCK 19h`). Never replaces the state; never a board column. |
-| **3 · job outcome** | Bare mono text, coloured, at type scale | The **declared** outcome is the largest thing on the job page (30px). The engine outcome is demoted to smaller mono beside it. |
-
-Outcome colour: `converged` and declared successes → success. `did_not_converge` and
-`budget_exhausted` → warning (**`did_not_converge` is not an error** — it is the agent
-honestly reporting it could not finish). `error` and declared failures → error.
-
-## The affordance rule
-
-**A border means you can tap it.** This governs every component.
-
-- **Identifier** — states, statuses, outcomes, branches, commits, artifact names: plain mono
-  text, no border, no padding.
-- **Answer row** — 52px tall, 1px border `oklch(38% 0.01 300)`, background
-  `oklch(20.5% 0.009 300)`, radius 6px, label left, `›` right, sends on tap. This is the
-  only shape in the queue that commits something.
-- **Filled button** — white/base-content fill, only ever "commit what I typed" (the Send
-  beside a free-text field).
-- **Flag** — filled, uppercase, sharp corners. A label, never a control.
-
-Transition actions carry a verb: `Move to planning ›`, not `→ planning`.
-
-## Screens
-
-### 1. Queue — `/`
-
-**Purpose.** One ordered list of decisions, oldest first, answerable without navigating.
-No tabs and no filters — the operator must be able to reach the end and know they are done.
-
-**Layout.** 34rem measure, centred, at *every* viewport — the queue deliberately does not
-widen on a laptop, because width only lets a second item compete for the same glance. On a
-laptop the extra space buys a 1px rule either side of the column and a capacity readout in
-the top bar. Page gutter `px-5` phone / `px-6` laptop. Items separated by a 1px top rule,
-not cards.
-
-**The queue item is one interruption, not one question.** A job that stops inside a document
-typically stops with several questions; one card per question would turn three decisions into
-twenty items with identical timestamps. An item is one job, stopped, against one artifact
-version, carrying N questions.
-
-Each item is three lines plus its fast path:
-- Mark + kind label (counting: `6 BLOCKING QUESTIONS`) + waiting figure, right-aligned mono 16–17px.
-- The decision sentence, 17px on the list / 20px when focused, `font-medium`, `-tracking-[.01em]`.
-- One answer row carrying the fast path (`Accept all 6 recommendations`, `Approve v3`, `Move to planning`).
-- A mono footer of identifiers: `forge#41 · ▸ planning · plan.md v2`.
-
-**Three marks carry all kinds**, so the vocabulary scales to the ~8 planned kinds without
-becoming a colour quiz:
-- Filled accent **diamond** — a job is held or the ticket is stuck (blocking questions, stuck; later: experiment requests).
-- Hollow primary **square** — advances state or spends capacity (approval; later: promotion decisions).
-- Hollow success **circle** — routine (review ready; later: analysis proposals).
-
-The kind is named in words beside the mark. Eight kinds need eight labels but only three marks.
-
-**Header** carries `9 decisions · 4 items` and a filled **Start answering ›** button.
-
-**Non-blocking questions** are a digest below the last actionable item under the heading
-*Not waiting on you* — present, never hidden, never competing, and never pushed to the phone.
-
-**The end of the queue is the success state.** A success-coloured `END OF QUEUE` micro-label,
-a sentence phrased as completion, and one line of evidence that work happened without you.
-The same block, alone, is the empty state.
-
-### 2. Sequence — the primary answering mode on a phone
-
-**Purpose.** One ordered pass over every decision in the queue. Nine decisions across four
-items are counted as nine. This is how the design expresses "work through these in order".
-
-**Layout.** Full screen. Header: `✕`, `7 of 9`, `item 3 of 4` right-aligned, and a progress
-bar **segmented by item, not by decision** — a six-question interruption is one wide segment
-containing six ticks, so you can see both how far through you are and how lumpy the rest is.
-Body 22px/20px padding. Footer: a 58px `‹` back button and a full-width `Skip for now`.
-
-**Every kind renders here**, not just questions — an approval, a stuck ticket and a
-review-ready ticket are each one screen. A focused screen can afford context the card cannot;
-the approval screen states what the work cost to reach that point (`3 jobs in implementing ·
-0.9 windows · 2 questions answered`) and links to the document.
-
-**Skip is not dismiss.** It advances and leaves the decision open; the item stays in the queue
-until every question has an answer. Nothing can be silently cleared.
-
-**Partial answers are first class.** Each question has a stable `key`, so each answer is its
-own idempotent mutation — which is what the offline outbox needs anyway. Four answered and two
-open is a real state: the queue item reads `4 OF 6 ANSWERED` with a six-tick progress bar and
-a `Continue at question 5 ›` row. The job stays held until all six land.
-
-**Open decision:** whether the pass is frozen at entry or live. Recommendation is to freeze at
-entry and show a quiet `1 new since you started` on the closing screen, rather than silently
-moving the goalposts at 7 of 9.
-
-### 3. Document with margin questions — laptop
-
-At width the document comes back, because questions were asked *next to a passage*. The anchor
-is highlighted in place (accent underline, `oklch(24% 0.035 62)` ground) and the question sits
-in a 400px right panel beside it. Only the current question is expanded; answered ones collapse
-to their answer with a success `✓ answered`; ones below collapse to their recommendation. Header
-offers `Accept the remaining 5 recommendations` — never "all 6" when one is already answered, as
-that would overwrite an answer the operator gave.
-
-### 4. Ticket — `/projects/:project/tickets/:number`
-
-**Purpose.** What happened to this ticket, what it cost, and the one thing it may be waiting for.
-
-**Layout.** 74rem cap: a 53rem timeline column and a 21rem facts rail, divided by a 1px rule.
-Below `lg` the rail moves under the timeline.
-
-**Header.** `project#number` in mono 12px; title at `text-3xl`, `font-semibold`,
-`-tracking-[.03em]`; then the state (plain mono with glyph), the status flag if any, and a
-plain-language clause for why it is waiting. Usage is **not** in the header — it is the first
-block of the rail, where it can carry its allowance.
-
-**Hoisted decision.** If the ticket has an answerable action it appears **once**, directly under
-the header, in an accent-bordered block on `oklch(18.5% 0.014 62)`. Everything below is
-reference. This and the current-step dot are the only accent on the page.
-
-**Timeline.** One step per state visit, with a 26px rail column: an 11px dot, a 1px connector.
-Each step carries the state name in mono, the topology glyph, a jobs table (attempt, declared
-outcome, turns, usage), artifact chips written in that state, and a right-aligned summary
-(`3 jobs · 0.67 windows`). The current step's dot is accent with a 4px ring at 18% alpha.
-States not yet reached are drawn at 50% opacity; the rail stops at a terminal state.
-
-**Stuck is drawn on the step, never as a step.** There is no `stuck` row in the timeline
-because there is no such state.
-
-**Branching and going back** (discussed, not yet drawn — implement when the case arises): order
-the spine by **time, not topology**. A step is a *visit* to a state, so a revisit is simply
-another step further down with the same name, its head carrying the cause
-(`planning · returned from implementing`). Unreached states then collapse into one dimmed *ahead*
-block at the foot rather than being interleaved. Fan-out within a state (planned §7 "blocks")
-stays inside the jobs table as one level of indent with a rejoin label — **never a drawn graph.
-The spine is always linear, because it is a history and history does not branch.**
-
-**Rail.** Usage meter, facts (branch, base, workflow commit, admitted), artifact index with
-approval state per version, and the last four events with a link to all of them. The full event
-timeline moves off the page into its own disclosure — 200 rows of mono is a post-mortem tool.
-
-### 5. Job — `/projects/:project/tickets/:number/jobs/:job_id`
-
-Same 74rem frame. **The declared outcome is the page headline** at `text-3xl` mono in its
-outcome colour, with the engine outcome as smaller mono beside it and a caption naming which is
-which. Turns, usage and duration are three figures in a row, turns always against budget.
-
-**Rail = the pinned manifest**: branch, workflow commit, environment, budget, session, then each
-input artifact **at its exact version**. When an input has been superseded the row reads
-`v2 exists` in warning and a sentence states the platform did not re-run on its own.
-Allowed outcomes are listed as plain mono with the taken one coloured and marked `←`.
-
-**Harness stream** is headed `COMPLETE · 212 ENTRIES`, newest first, 50 per page, with a
-`Load 50 more` button. **No tailing, no autoscroll, no pulse** — there is deliberately no live
-transcript in this product. Rows are a `56px 132px 1fr` grid: elapsed, kind, summary (truncated).
-
-### 6. Board — `/projects/:project/board`
-
-Full viewport width, **no max measure** — the columns are the workflow topology and capping them
-destroys the artefact. Columns in workflow-walk order from the initial state, each headed by the
-state name, its topology glyph and its count.
-
-**Columns cap at four rows and then say how many remain** (`8 more →`). A column that scrolls
-independently hides its own count and breaks the board as a shape. Finding a specific ticket is
-`/tickets`, not this page.
-
-Cards are two lines: number in mono 11px, title in sans 13px. A ticket waiting on a human gains a
-2px accent left rule and a mono age (`STUCK 19h`). The human-state column gets a tinted ground
-(`oklch(17.8% 0.012 285)`). Terminal columns are dimmed. Header carries three figures only: open
-count, `2 waiting on you` in accent, capacity.
-
-On a phone the columns become sections in the same order, collapsed except any section containing
-work that waits on you.
-
-### 7. Artifacts
-
-The unit is a **chip**: name, version, approval state. **There is no chip without a version and
-the word "latest" appears nowhere in the product** — approval attaches to an exact version, and a
-human edit creating v3 does not carry v2's approval.
-
-- `✓ approved` in success · `◇ unapproved` in warning · no marker where approval does not apply.
-- Chips are bordered because they are links — consistent with the affordance rule.
-- Opening a chip discloses a version strip: `v1 · agent → v2 · you, edited → v3 · agent`. This is
-  provenance, and it is where multi-user attribution lands later without a redesign.
-- A **presentation** is drawn dashed with `VIEW ONLY` and **has no approval slot at all**, so it
-  cannot be misread as approvable. Nothing downstream consumes it.
-
-### 8. Auth and settings
-
-Same shell, same type, same buttons, 26rem measure. They must not read as a different product.
-Registration stays disabled with its existing copy.
-
-## Capacity, not cost
-
-Consumption is modelled as **consumed capacity, not money**. One unit is one percent of a
-five-hour window, and quantities are stated in **windows** to two significant figures
-(`1.4 windows`). This survives work that spans four windows and a week, which a percentage
-cannot, and it replaces `$0.15562769999999998` everywhere.
-
-Two objects, never drawn the same way:
-
-- **Usage** is absolute and never resets: a job's usage, a step's sum, a ticket's total against
-  its allowance. A figure plus a 5px meter filled accent.
-- **Capacity** is a live shared pool that refills: the current five-hour window and the week.
-  The window is a **twenty-tick gauge** (one tick per five percent) with a mono reset countdown,
-  because you are consuming it rather than progressing through it; it compresses to ten ticks in
-  the top bar. The week is a thin plain bar beneath and becomes the headline only when it binds.
-
-A ticket allowance stays **absolute** — a cap expressed as a share of a refilling pool would mean
-something different on Monday than on Friday.
-
-**Three things can run out, and only one is the operator's:**
-
-| Exhausted | Resolved by | Treatment |
-|---|---|---|
-| A job's own budget | **the workflow** — a retry, or an edge onward to a person | outcome `budget_exhausted` on the job row, nowhere else |
-| Ticket allowance | **a human** — raise it or reroute | sticks the ticket, enters the queue, drawn in **accent** |
-| Window / weekly capacity | **time** | `PAUSED · CAPACITY 1h 12m`, neutral, on board and ticket, **never in the queue** |
-
-Keeping the third out of the queue is load-bearing. A paused ticket in the inbox trains the
-operator to open items they cannot act on, which is the exact failure the thesis is written
-against.
-
-## Message state — the stated differentiator
-
-Four states, **one row shape, always attached to the item acted on — never a toast**, because a
-toast that disappears is precisely the failure the vision calls impossible by construction.
-
-| State | Drawing | Copy |
-|---|---|---|
-| Queued / sending | 14px spinner ring, accent top-border | "Answer queued — sending" / "saved on this device" + **Undo** |
-| Retrying | accent diamond, accent-bordered row on `oklch(18.5% 0.014 62)` | "Retrying — attempt 2 of 5" / "next in 8s · offline" + **Retry now** |
-| Failed | error dot, error-bordered row on `oklch(19% 0.03 22)` | "Not sent — gave up after 5 tries" / "still saved · tap to try again" |
-| Confirmed | success `✓` | "Confirmed by the server" / "19:41 · job resumed" |
-
-The answered item **stays in place and does not reorder**. The answer is never discarded. The
-confirmed row names the *consequence* (`job resumed`), so it closes the loop rather than just the
-request. An offline banner states how many answers are waiting to send. The two generic reconnect
-banners are replaced by one that names the consequence for the operator's own work.
-
-**One tap still sends** — the safety net is the Undo row, not a confirm step. Answering one-handed
-in seconds is the product's primary interaction and a confirm step doubles every tap in it.
-
-## Interactions and behaviour
-
-- **Answering never navigates.** Tapping an answer does not move you, open a page, or reorder the
-  list. The item changes to its sent state in place.
-- **Entering the sequence is not navigation either** — it is the item opening full-screen, and
-  leaving returns you to the list at the item you were on, with everything answered already sent.
-- **Nav.** Phone: fixed three-item bottom bar (Queue, Board, Tickets), 56px plus safe-area inset,
-  each item a full-height tap target. Queue carries a count badge — the only badge in the product.
-  Bottom rather than top because answering is a thumb action. Laptop: the same three as a
-  hairline-ruled top row after the wordmark. **No hamburger at any width.**
-- **Ticket, job and artifact are pushed views** — a back affordance naming where you came from, not
-  a tab. A ticket opened from a push notification backs out to the queue.
-- **Tap targets** are ≥46px, answer rows 52px, and `btn-sm` does not appear on any operator page.
-- **Motion** is minimal and must respect `prefers-reduced-motion`. Nothing pulses, nothing tails.
-
-## State management
-
-Server-side (LiveView assigns): the ordered queue with each item's `since` timestamp; per-question
-answer state keyed by the question `key`; ticket timeline grouped by state visit; capacity window
-and week with reset times; per-mutation send state.
-
-Client-side, and this is the real engineering in the design: an **outbox** that survives LiveView
-DOM patching and page reload. Each answer carries an **idempotency key** (the question `key` plus
-the artifact version) so a retry cannot double-apply. The design assumes **no live socket at the
-moment of answering** — answers are composed offline and synced. A service worker already exists
-for web push and is the natural home for the store.
-
-## Design tokens
-
-Both themes are specified in full as `@plugin "daisyui-theme"` blocks in **`forge Spec.html` §4.1
-and §4.2** — copy them verbatim into `assets/css/app.css`. Every variable the current themes set is
-covered, in oklch, contrast-checked to WCAG AA for body text.
-
-Hue is constant across both themes (300 neutrals, 290 primary, 62 accent, 240 info, 150 success,
-22 error); only lightness and chroma move. Body text is ≥7:1 against its own base in both themes,
-muted text ≥4.5:1.
-
-**The accent is deliberately identical in both themes** with dark content text, so the one loud
-mark in the product does not shift meaning when the theme does.
-
-**Colour discipline, which matters more than the values:**
-
-- **Accent (ochre) means one thing: a human is being waited on.** The queue mark on a blocking or
-  stuck item, the `STUCK` flag, the ticket's current-step dot, the board's left rule, the
-  "waiting on you" count, the usage meter fill and the window gauge. **Nothing else may use it** —
-  its value is entirely in its scarcity. (Note: the `RECOMMENDED` tag is *outlined*, not accent,
-  for exactly this reason.)
-- **Primary (indigo)** — links, human states, decisions that advance state or spend capacity.
-- **Info (blue)** — the job-state glyph and harness tool calls. Nothing else.
-- **Success** — approval and the end of the queue. **Error** — engine errors, declared failures, failed sends.
-- **Two surfaces per theme at most**: `base-100` for pages, `base-200` for the one row in a changed
-  state. Structure is **rules, not cards** — `--depth: 0`, no shadows.
-
-**Type.** Instrument Sans for language, JetBrains Mono for identifiers. Both OFL and self-hostable,
-which is the binding constraint. Ship subsetted woff2 (latin; weights 400/500/600 and 400/500/700)
-in `assets/fonts/` with a local `@font-face` block and `font-display: swap` — roughly 90 KB total.
-(As built they are one latin-subset variable woff2 per face in `platform/priv/static/fonts/`;
-`ui.md` § Type is the record.)
-Scale and the full mono-vs-sans rule are in **`forge Spec.html` §3**. The short version:
-
-- **Mono is for things the system named** — states, statuses, outcomes, artifact names and versions,
-  branches, commits, session ids, environments, capacity, counts, durations, ages, transition
-  targets, micro labels.
-- **Mono is never for things a person wrote or reads as language** — ticket titles, question text,
-  option labels, anchor quotations, explanatory sentences, empty-state copy, verb button labels.
-
-This rule alone roughly halves the volume of monospace while every identifier still looks like one.
-
-**Spacing.** Base unit 4px. Page gutter `px-5` phone / `px-6`–`px-[30px]` laptop. Queue item
-`py-[15px]` collapsed, `py-[18px]` expanded, internal stack gap `gap-[11px]`. Timeline step
-`pb-[26px]` laptop / `pb-5` phone. **The existing `py-20` page padding goes** — vertical space on a
-phone is the scarcest resource in the product after attention.
-
-**Radii.** `--radius-selector: 0.3125rem`, `--radius-field: 0.375rem`, `--radius-box: 0.5rem`,
-`--border: 1px`, `--depth: 0`, `--noise: 0`.
-
-## Assets
-
-None. No images, no illustrations, no custom SVG. Every glyph in the design is either a Heroicon
-or a text character (`▸ ● ■ ✓ ◇ › ‹ ✕ ←`) — the topology glyphs are deliberately text so they
-inherit colour and size from the identifier they belong to.
-
-## Implementation order
-
-`forge Spec.html` §6 has the full table with reasoning. Sequenced cheapest-highest-impact first;
-every step ships on its own and none requires the next:
-
-1. Theme blocks, self-hosted fonts, remove `py-20`, raise tap targets off `btn-sm`. *(Pure CSS.)*
-2. Capacity formatter and relative-age helper; show the waiting figure on every queue item.
-   *(The `since` value is already loaded and discarded — cheapest real information gain here.)*
-3. The three indicator components, replacing every `badge-sm`. *(Every later step consumes them.)*
-4. Queue item shape, per-kind marks, the interruption model, the digest, the end-of-queue block.
-5. Per-page measures and the phone bottom bar; drop the global `max-w-2xl`.
-6. Board: workflow-order columns at full width, row cap, waiting marks, phone sections.
-7. Message state: pending / retrying / failed / confirmed, with an idempotency key per mutation.
-   *(Visible state and retry first, offline compose second.)*
-8. The answering sequence.
-9. Ticket page as a state timeline; artifact chips; events behind a disclosure.
-10. Job page: declared outcome as headline, manifest rail, paged stream, stale-input notice.
-11. Addressable artifact versions, then `/tickets`.
-
-## Semantics that must not be lost
-
-Getting these wrong makes the UI lie. They are the acceptance criteria:
-
-- Approval attaches to an **exact artifact version**. Never imply "approve whatever is latest".
-- **Blocking and non-blocking questions are different.** One has halted a job. Only blocking ones
-  are pushed to the phone.
-- **`stuck` is a flag, not a state.** A stuck ticket is still in its workflow state.
-- **Free text is always a valid answer**, alongside any options — a real field with its own Send,
-  not an escape hatch behind a link.
-- The queue is **one ordered list**. No tabs or filters that can hide an item.
-- A **human state with outgoing transitions** waits for a person; one without is terminal. The
-  topology glyph is the only thing distinguishing them.
-- **`did_not_converge` is not an error.**
-- **No live transcript.** Do not build an activity feed, a streaming log, or anything that invites
-  watching agents work.
-- **Presentations carry no approval semantics.** **Experimental results are advisory** and must
-  never read as verified.
-
-## Open decisions — answer before or during implementation
-
-These are design-affecting, not cosmetic. `forge Spec.html` §8 carries the full list.
-
-1. **Can a job resume on a partial answer set?** If yes, the sequence should order questions by
-   what unblocks the most and "answer the two that matter" becomes a real affordance. If no, the
-   all-or-nothing hold as drawn is correct.
-2. **Can two jobs on one ticket be held at once?** If so the queue carries two items for one
-   ticket and each must name its job.
-3. **Does the provider report a real window boundary and reset time?** Without it the capacity
-   countdown is a guess, and a wrong countdown is worse than none.
-4. **Does a job at a window edge hibernate and resume, or fail and retry?** The `PAUSED`
-   treatment assumes the former; it is where the planned hibernation work surfaces.
-5. **Is the answering pass frozen at entry or live?** Recommendation: frozen, with a quiet
-   `1 new since you started` on the closing screen.
-6. **Can the workflow grammar declare a bucket** (success / non-completion / failure) per allowed
-   outcome, so declared-outcome colour is not inferred by string matching? Declared outcomes are
-   project-defined; **do not hard-code the list.**
-7. **Can the engine report "an input artifact of this job has been superseded"?** The stale-input
-   notice needs it.
-8. **Is `/tickets` worth the query work now?** Nothing else depends on it; without it the phone
-   bar drops to two items.
-9. **Do dollars survive anywhere?** Recommendation: they leave every operator surface. A number the
-   operator cannot act on is noise.
-10. **Retry policy** — five attempts with backoff is assumed by the copy and should match what is
-    implemented.
-11. **Are self-hosted webfonts acceptable at all?** If not, the system stack is a supported
-    fallback; the design depends on the sans/mono *distinction*, not on these two faces.
-
-## Where this design could paint you into a corner
-
-Stated plainly so it is a known trade rather than a surprise:
-
-- **Capping board columns at four rows** assumes the board stays a *shape* rather than becoming a
-  workspace. If tickets ever need dragging between states, the cap has to go and columns become
-  scrollers.
-- **The queue's refusal of tabs and filters** is correct at one operator and a handful of items.
-  If multi-user arrives and the list carries items addressed to other people, the honest answer is
-  **per-person queues, not filters.**
-- **A time-ordered timeline spine** loses the "see where this ticket is going" property that a
-  topology-ordered one has. The dimmed *ahead* block recovers most of it, but it cannot show which
-  branch of a conditional the ticket will take — and it should not guess.
+**High-fidelity.** Colours, type, spacing, heights, radii, copy and interactions are final. Recreate them closely, using the token values below. The copy is final wording and is part of the design. Model names, euro prices and the provider name/host are placeholders (see RULES.md §8).
 
 ## Files
+- `screens/Final Design.dc.html`: **every agreed screen**, grouped by area, each with an id (e.g. `18b`) and a caption that explains the behaviour. Open it in a browser; it needs `support.js`, `fonts/` and `assets/` beside it. Pan and zoom the canvas. Captions are part of the spec.
+- `RULES.md`: the design rules: principles, frame, components, colour, type, the **screen → source file map**, "needs code" (backend work the design assumes) and "check against the code".
+- `design_system/`: the derived design system.
+  - `readme.md`: principles, recipes for new features, content and visual rules, iconography.
+  - `styles.css` + `tokens/*.css`: all tokens as CSS custom properties. Copy them into `app.css` almost verbatim.
+  - `components/<group>/<Name>.jsx | .d.ts | .prompt.md`: 24 primitives with props contracts and usage notes. Each group folder has a `*.card.html` preview.
+  - `guidelines/*.html`: foundation specimen cards.
+  - `ui_kits/forge-phone/index.html`: a clickable queue → changeset → approve → toast → next item loop.
 
-| File | What it is |
-|---|---|
-| `forge Spec.html` | **The specification.** Both daisyUI theme blocks in oklch, type and spacing scales, the mono rule, per-component specs, IA and measures, implementation order, fit with the planned roadmap, open decisions. Printable. **Read this first; where it and the mockups differ, it wins.** |
-| `forge Mockups.html` | **The evidence.** Annotated mockups at phone (390px) and laptop (1180px). Newest work is at the **top**: turn 4 (sequence as primary mode), turn 3 (many questions per interruption), turn 2 (the affordance rule). Below them, sections 01–07: IA, queue, ticket timeline, job, board at 50 tickets, component specimens, capacity. Annotations beside each frame give the *reason*, not the pixel. |
-| `forge Directions.html` | **Not in this repository.** The handoff named it and it was never vendored. It held the three visual directions explored before "Bureau" was chosen — historical context only, and nothing here depends on it. |
-| `forge-ui-design-brief.md` | The original brief this work answers. |
+## Implementation order
+1. **Tokens and fonts.** Add `tokens/*.css` to `app.css`, with dark as `:root` and light under `[data-theme="light"]`. Self-host the two woff2 files.
+2. **Frame.** Build `top_bar` (queue button, title/subline, context button, usage lines, disconnected state) and `bottom_strip` as function components. Put them in the root layout so every LiveView gets the same frame.
+3. **Decision row and drop panel.** Then move every approve/accept/merge into them: step accept (`step_accept.ex`), changeset approval, document approval, chat merge.
+4. **Queue as home.** One item per screen, context card, "All" sheet, end of queue (`queue_live.ex`).
+5. **Navigation.** The title menu `Queue ▾` on top-level pages replaces the global nav. Retire `board_live.ex` and fold `review_live.ex` into Changes.
+6. **Ticket, then changes and review, job, chat.** The rest follow the same frame.
+7. **App-wide states:** connection, toast, inline errors, not found.
+8. **Desktop layouts and the light theme.**
+
+## Layout: the phone frame
+Width reference 412px. Top to bottom:
+| Band | Height | Notes |
+|---|---|---|
+| 5h usage line | 3px | track `--track`, fill 60% ink; ≥80% `--warning`, ≥95% `--danger`. Tappable (opens usage). |
+| Top bar | 52px | padding 0 4px. Left: queue button (46px hit area, 34px pill, amber when count > 0, ‹ + inbox icon + mono count 12.5px). Middle: title 14px/500 ellipsis + mono subline 11.5px (state). Right: context button (34px, border, mono 12px, "game ›"). Top-level pages: title + ▾ (11px, 60%). |
+| Week usage line | 2px | replaces the top bar's bottom border; fill 45% ink. |
+| Decision row (optional) | 60px | padding 0 10px 0 16px; 26px TypeIcon · title mono 14/500 · meta mono 11/65% · button 42px. Inset 2px left edge in amber (waits on you) or 50% ink (neutral). Shadow `0 8px 14px -10px`. |
+| Content | flex | scrolls; gutters 20px. Optional split pane for questions: 16px handle, fits its card up to a user-set limit. |
+| Composer (optional) | 64px | field 48px, radius 24px, send = 40px round icon button inside the field. |
+| Bottom strip | 56px | padding 0 8px, gap 4px, `--surface-2` bg; tabs flex equal, 40px, 13px; active tab bg `--bg` + 1px border + 500. Grey count bubbles 18px. **Navigation only.** |
+
+Desktop: header 56px (wordmark + mono version, Projects ▾, Queue + count, usage digits, account); title row (back link mono 12px, h1 20–22/600, state, view tabs 32px); decision row 56px spanning the window; columns 320–360px list left and/or 360–440px context right on wide screens. Portrait stacks the same blocks in phone order.
+
+## Screens / views
+Each id below is a drawn screen in `screens/Final Design.dc.html`. Read its caption for behaviour. The source file each area replaces is in RULES.md §6.
+
+### Home and navigation
+- **19a**: Queue · the only top level, no strip
+- **19b**: Title tapped · the menu drops from the top bar
+- **19c**: Another top-level page · same switch, queue on the left
+
+### Queue
+- **18a**: Queue · approval: read first, decide on the change
+- **13b**: Questions · context above, the card below
+- **13c**: Stuck · why, what was tried, the ways forward
+- **13d**: End of the pass · what is left to know
+- **13e**: All items · the list as a sheet
+
+### Ticket
+- **16e**: D · before the first version: no header
+- **16f**: D · the document header, with Accept
+- **16g**: D · Accept tapped: the band opens in place
+- **5d**: Activity · job running, nothing waiting
+- **5g**: Steps · done, nothing waiting
+- **6a**: Docs · every document on the ticket
+- **6d**: Details · sheet from tapping the subline
+- **16h**: Desktop, portrait (1080 × 1500): the same pinned row under the title
+- **16i**: Desktop, wide (1600 × 1000): conversation and document side by side, Accept open
+
+### Changes and review
+- **19d**: Changes in review · the presentation is the default
+- **19e**: Whole file · from an excerpt, and back
+- **19f**: No presentation · Files is the default
+- **18b**: Changes · the approval pinned under the top bar
+- **18c**: Approve tapped · what it commits, and Reject
+- **18d**: Docs · approving a document, same row
+
+### Job
+- **6e**: Job page · a drill-in from Activity or Steps
+- **21a**: Job page, desktop wide (1600 × 900): what it did on the left, where it stands on the right
+- **21b**: Job page, desktop portrait (1080 × 1500): where it stands on top, the transcript below
+
+### Chat
+- **12c**: Chats · find one again
+- **12d**: New chat · after the first message
+- **15a**: Talk · responding, with its plan and a way to stop
+- **18e**: Chat · merging its branch, the row in neutral
+- **15c**: Changes · does not merge cleanly
+- **15d**: Stopped · reopen, in today's words
+- **15e**: Details · this chat, and ending it
+
+### Project
+- **7a**: Tickets · every open ticket, what it is doing
+- **7b**: Merge · the order approved tickets land in
+- **7c**: Chats · conversations about the project
+- **7d**: Workflow · what the next ticket will pin
+- **7e**: Proposals · the pane opened from the strip
+- **7f**: Details · sheet from tapping the project name
+- **12e**: New ticket · title, body, type
+- **21c**: + New · ticket, chat, or the release
+- **21d**: The release block · its other four states
+- **21e**: A release ticket · same frame, its own badge
+
+### Proposals
+- **8a**: Proposals · grouped by where they came from
+- **8b**: Review · one proposal at a time
+
+### Cache textures by content hash
+- **8c**: Select · several at once
+- **8f**: Long-press a group: all of its source selected
+- **8d**: History · what became of them
+
+### Repository
+- **10a**: Commits · the default branch, newest first
+- **10b**: Branch · grouped, ticket branches named
+- **10c**: Files · the tree at the branch head
+- **10d**: A file · its own screen, lines wrap
+- **10e**: A commit · what it changed
+
+### Projects
+- **11a**: Projects · what needs you, and what can run
+- **11b**: Projects · none yet
+- **11c**: New project · two fields
+- **11d**: Created · the one thing to do next
+
+### Project settings
+- **9a**: Settings · one row per section
+- **9b**: Tokens · what each may do, in a sentence
+- **9c**: Issue a token · choices as rows, nothing that writes preselected
+- **9d**: Issued · shown once
+- **9e**: Secrets · who receives each, never its value
+- **9f**: People · role in place, add at the foot
+- **9g**: Model and effort · one page, two dials
+- **9h**: Branch and mirrors · what the last push said
+
+### Tokens
+- **21h**: Settings, desktop portrait (1080 × 1500): the form moves under the table
+
+### Machines, templates, credentials
+- **12f**: Machines · what each is doing
+- **12g**: A machine · its log, newest first
+- **14a**: Templates · each one's ceiling, in money
+- **14b**: A template · ceiling, image, projects, failures
+- **14c**: New template · steps in the order the provider needs
+- **14d**: Credentials · yours, write-only
+- **14e**: None yet · why nothing runs
+- **12o**: Desktop, wide: machines as a table, templates and credentials beside
+
+### Accounts and you
+- **12i**: Accounts · who may sign in
+- **12j**: You · your account and this device
+
+### Usage
+- **23a**: Usage · its own top-level page (drawn tall)
+- **23b**: Usage, desktop wide (1600 × 900): both windows side by side, what spent it below
+
+### Signing in
+- **21o**: Sign in · provider configured: the provider, nothing else
+- **21p**: Sign in · no provider configured, or “Other ways”
+- **21n**: Coming back · provider errors in plain words
+- **21g**: Link sent · and the link opened
+
+### App-wide states
+- **20a**: Connection lost · the top bar changes, nothing moves
+- **20b**: A message after an action · a floating pill, no buttons
+- **20d**: An action that fails · the error stays where you acted
+- **20c**: Not found · say what was asked for, and where to go
+
+### Light theme
+- **21i**: Light · the queue item
+- **21j**: Light · the approval row, and a toast
+
+## Interactions and behaviour
+- **Queue.**
+  - Opens on the oldest item. "Later" sends it to the end of the pass.
+  - An approval item links to the changeset ("Review the changeset ›", an outline button). It never approves in place.
+  - Questions open the tabbed question card in a split pane.
+  - Stuck shows ways forward as choice rows plus a dock button.
+  - "All N" opens a bottom sheet with every item. Decided items stay, dimmed with ✓, for the pass.
+  - The end of the queue is its own state.
+- **Decision row.**
+  - Appears only once the decision exists, e.g. after a document's first version.
+  - Its button drops a panel (DropPanel) under the row, over a 60% scrim. It shows what happens, what it pins or commits, warnings, and the secondary act (Reject outlined red, or Answer first) plus the primary in the same colour as the trigger.
+  - Tap outside or Cancel folds it. Nothing underneath moves.
+  - When questions are open, Accept warns "N open questions will stay unanswered". It never offers answers inside the panel.
+  - Reject requires a note (assumed; see RULES.md §7).
+- **Title.**
+  - On top-level pages, tapping the title drops the navigation menu (19b).
+  - On inner pages, tapping it drops the object's details (6d, 15e, 7f). The title shows ▴ while open.
+  - Close it with the title, the handle at the panel's bottom edge, or a tap outside.
+- **Bottom strip.** Switches views. A new view is a new tab with a grey count, never a special button.
+- **Toast.**
+  - After an action. A 372px pill floating 84–90px above the bottom, icon plus two lines, no buttons, `pointer-events:none`, 4s, one at a time.
+  - Errors are never toasts. They stay inside the panel or field where you acted (20d).
+- **Disconnected.** The top bar turns red-hatched with a 2px red top rule, the title reads "Not connected", and the subline counts down. Senders grey out in place, and nothing is hidden or moved. On reconnect it shows green briefly.
+- **Moved-button guard.** A button whose position changed in the last 500ms ignores taps.
+- **Motion.** 120–220ms, `cubic-bezier(.2,.7,.2,1)`. Panels drop or rise and toasts fade. No pulsing, no spinners: running is shown with ▸ and words.
+- **Hover (desktop):** `--surface-2` background. **Pressed:** no shrink. **Disabled:** 45% opacity, same size and place.
+- **Focus:** use a 2px `--link` outline with a 2px offset on all interactive elements (not drawn; please add).
+- **Responsive.**
+  - Phone below 768px.
+  - Desktop portrait for tall screens, where blocks stack.
+  - Desktop wide from 1440px, which adds columns.
+  - Vertical order is the same in every layout.
+
+## State management (LiveView assigns)
+- Global, in the root layout: `queue_count`, `usage` (`%{five_h: pct, week: pct, resets: …}`), `connected?`, `flash` (rendered as a toast), `theme`.
+- Per object page: `pending_decision` (nil or `%{kind, title, meta, action, tone}`), `decision_open?`, `active_view` (strip tab), `details_open?`, `split_limit_px` (persisted per person).
+- Queue: `items` (oldest first), `index`, `deferred` ("Later"), `decided` (for the pass).
+- New data the design needs, listed in RULES.md §7: "since you last looked" per person and ticket, waiting and running counts per project, the reviewer's summary and presentation.md, reject notes, usage pace and spend per job, and the machine a chat holds.
+
+## Design tokens
+All tokens are in `design_system/tokens/`. Values are authored in OKLCH; the hex values are sRGB approximations for reference.
+
+### Colour, dark (default)
+| Token | OKLCH | ≈ hex |
+|---|---|---|
+| `--bg` | `oklch(15.5% 0.008 300)` | `#0d0b0f` |
+| `--surface-1` | `oklch(17.5% 0.008 300)` | `#111014` |
+| `--surface-2` | `oklch(19.5% 0.009 300)` | `#151418` |
+| `--surface-3` | `oklch(22% 0.010 300)` | `#1b1a1f` |
+| `--border` | `oklch(24.5% 0.008 300)` | `#212024` |
+| `--border-soft` | `oklch(24.5% 0.008 300 / .6)` | `#212024 @ 60%` |
+| `--border-strong` | `oklch(40% 0.010 300)` | `#48474c` |
+| `--chip` | `oklch(30% 0.012 300)` | `#2f2d33` |
+| `--ink` | `oklch(94% 0.004 300)` | `#ebeaed` |
+| `--ink-2` | `oklch(94% 0.004 300 / .75)` | `#ebeaed @ 75%` |
+| `--ink-3` | `oklch(94% 0.004 300 / .55)` | `#ebeaed @ 55%` |
+| `--ink-4` | `oklch(94% 0.004 300 / .40)` | `#ebeaed @ 40%` |
+| `--track` | `oklch(94% 0.004 300 / .10)` | `#ebeaed @ 10%` |
+| `--accent` | `oklch(76% 0.130 62)` | `#ec9d53` |
+| `--on-accent` | `oklch(18% 0.040 62)` | `#1e0d00` |
+| `--accent-text` | `oklch(76% 0.130 62)` | `#ec9d53` |
+| `--accent-wash` | `oklch(76% 0.130 62 / .08)` | `#ec9d53 @ 8%` |
+| `--accent-line` | `oklch(76% 0.130 62 / .5)` | `#ec9d53 @ 50%` |
+| `--accent-highlight` | `oklch(24% 0.035 62)` | `#2b1b0d` |
+| `--info` | `oklch(72% 0.100 240)` | `#67addd` |
+| `--success` | `oklch(72% 0.120 150)` | `#69ba7c` |
+| `--warning` | `oklch(82% 0.110 62)` | `#f8b478` |
+| `--danger` | `oklch(72% 0.170 22)` | `#fd7273` |
+| `--danger-line` | `oklch(72% 0.170 22 / .5)` | `#fd7273 @ 50%` |
+| `--danger-wash` | `oklch(72% 0.170 22 / .06)` | `#fd7273 @ 6%` |
+| `--link` | `oklch(72% 0.130 290)` | `#a495f0` |
+| `--doc` | `oklch(74% 0.100 210)` | `#51bcce` |
+| `--diff-add` | `oklch(72% 0.120 150 / .10)` | `#69ba7c @ 10%` |
+| `--diff-del` | `oklch(72% 0.170 22 / .10)` | `#fd7273 @ 10%` |
+| `--overlay` | `oklch(8% 0.005 300 / .7)` | `#020202 @ 70%` |
+| `--overlay-soft` | `oklch(8% 0.005 300 / .6)` | `#020202 @ 60%` |
+| `--toast-bg` | `oklch(26% 0.012 300)` | `#252329` |
+| `--toast-ink` | `oklch(96% 0.004 300)` | `#f2f1f4` |
+| `--syntax-keyword` | `oklch(76% 0.08 320)` | `#c8a1d1` |
+| `--syntax-module` | `oklch(84% 0.05 200)` | `#a5d5d7` |
+| `--syntax-function` | `oklch(88% 0.04 260)` | `#c8d9f3` |
+| `--syntax-string` | `oklch(82% 0.06 110)` | `#c6c89b` |
+| `--syntax-atom` | `oklch(80% 0.06 175)` | `#95cbbb` |
+| `--syntax-number` | `oklch(78% 0.07 345)` | `#d9a6c2` |
+| `--syntax-comment` | `oklch(94% 0.004 300 / .45)` | `#ebeaed @ 45%` |
+
+### Colour, light (`[data-theme="light"]`)
+| Token | OKLCH | ≈ hex |
+|---|---|---|
+| `--bg` | `oklch(99.2% 0.004 240)` | `#fafdff` |
+| `--surface-1` | `oklch(97.5% 0.005 245)` | `#f4f7fa` |
+| `--surface-2` | `oklch(95% 0.007 245)` | `#ebeff3` |
+| `--surface-3` | `oklch(92% 0.009 248)` | `#e0e5ea` |
+| `--border` | `oklch(89% 0.012 250)` | `#d5dbe3` |
+| `--border-soft` | `oklch(89% 0.012 250 / .8)` | `#d5dbe3 @ 80%` |
+| `--border-strong` | `oklch(75% 0.012 250)` | `#a8afb5` |
+| `--chip` | `oklch(90% 0.010 250)` | `#d9dfe5` |
+| `--ink` | `oklch(22% 0.025 255)` | `#131b26` |
+| `--ink-2` | `oklch(22% 0.025 255 / .75)` | `#131b26 @ 75%` |
+| `--ink-3` | `oklch(22% 0.025 255 / .58)` | `#131b26 @ 58%` |
+| `--ink-4` | `oklch(22% 0.025 255 / .42)` | `#131b26 @ 42%` |
+| `--track` | `oklch(22% 0.025 255 / .10)` | `#131b26 @ 10%` |
+| `--accent` | `oklch(80% 0.155 72)` | `#faab35` |
+| `--on-accent` | `oklch(24% 0.060 60)` | `#331700` |
+| `--accent-text` | `oklch(56% 0.160 52)` | `#ba5100` |
+| `--accent-wash` | `oklch(80% 0.155 72 / .14)` | `#faab35 @ 14%` |
+| `--accent-line` | `oklch(70% 0.155 62 / .6)` | `#e18518 @ 60%` |
+| `--accent-highlight` | `oklch(93% 0.060 80)` | `#fde4bb` |
+| `--info` | `oklch(52% 0.150 248)` | `#006cba` |
+| `--success` | `oklch(52% 0.140 162)` | `#00804f` |
+| `--warning` | `oklch(56% 0.160 52)` | `#ba5100` |
+| `--danger` | `oklch(55% 0.200 25)` | `#cc272e` |
+| `--danger-line` | `oklch(55% 0.200 25 / .45)` | `#cc272e @ 45%` |
+| `--danger-wash` | `oklch(55% 0.200 25 / .06)` | `#cc272e @ 6%` |
+| `--link` | `oklch(50% 0.190 278)` | `#504dcb` |
+| `--doc` | `oklch(50% 0.100 215)` | `#007187` |
+| `--diff-add` | `oklch(60% 0.130 162 / .12)` | `#089868 @ 12%` |
+| `--diff-del` | `oklch(60% 0.190 25 / .10)` | `#db4241 @ 10%` |
+| `--overlay` | `oklch(30% 0.020 255 / .35)` | `#272e38 @ 35%` |
+| `--overlay-soft` | `oklch(30% 0.020 255 / .25)` | `#272e38 @ 25%` |
+| `--toast-bg` | `oklch(23% 0.020 255)` | `#171d26` |
+| `--toast-ink` | `oklch(97% 0.004 250)` | `#f3f5f8` |
+| `--syntax-keyword` | `oklch(45% 0.10 320)` | `#6d4177` |
+| `--syntax-module` | `oklch(45% 0.07 200)` | `#156165` |
+| `--syntax-function` | `oklch(40% 0.06 260)` | `#344868` |
+| `--syntax-string` | `oklch(45% 0.09 110)` | `#595911` |
+| `--syntax-atom` | `oklch(45% 0.08 175)` | `#0f6353` |
+| `--syntax-number` | `oklch(45% 0.10 345)` | `#7b3c62` |
+| `--syntax-comment` | `oklch(22% 0.025 255 / .45)` | `#131b26 @ 45%` |
+
+### Typography
+- Families: **Instrument Sans** (UI, reading) and **JetBrains Mono** (ids, paths, numbers, states, sublines, eyebrows). Both are variable woff2 in `fonts/`.
+- Scale (px):
+  - eyebrow 10.5: mono, uppercase, letter-spacing .14em, 55% opacity
+  - meta 11.5: mono
+  - small 12.5
+  - UI 13.5, tab 13
+  - body 14.5 / line-height 1.6
+  - title 15 / 600 / −.02em
+  - panel 16 / 600
+  - queue sentence 19 / 500 / −.01em / 1.3
+  - desktop h1 20–22 / 600 / −.02 to −.025em
+- Mono ligatures are off in code (`font-variant-ligatures: none`).
+
+### Spacing, sizes, radii, elevation
+- **Bars:** 5h line 3, top bar 52, week line 2, decision row 60 (56 desktop), composer 64, strip 56, desktop header 56.
+- **Controls:** xl 52 (primary, choice rows), lg 48 (fields, secondary), md 42 (decision button), tab 40, sm 36 (row actions), desk 34, desk-sm 28. Phone hit targets ≥ 44.
+- **Spacing steps:** 2, 4, 6, 8, 10, 12, 14, 16, 20, 24, 30, 40. Gutters 20 (phone) and 30 (desktop). Reading measure 680–820.
+- **Radii:** 4 (badges), 5 (desktop controls), 6 (buttons, fields, rows), 8 (cards, notices), 14 (outer corners of sheets and drop panels), 999 (queue button, bubbles, toasts, composer field).
+- **Shadows:**
+  - decision row `0 8px 14px -10px oklch(6% .005 300 / .9)`
+  - panels `0 16px 30px oklch(6% .005 300 / .8)`
+  - toast `0 10px 30px oklch(6% .005 300 / .6)`
+  - scrims `oklch(8% .005 300 / .6–.7)`
+- **Selection and attention:** a 2px inset left edge: ink (selected), amber (waits on you), red (broken).
+
+## Assets
+- `assets/forge-logo.svg`: the existing logo, used on sign-in at 72px (provider screen) and 44px (other ways).
+- `fonts/instrument-sans-var.woff2`, `fonts/jetbrains-mono-var.woff2`: self-host these.
+- Icons: none from a library. State marks are Unicode with fixed meanings: ◆ waits on you (amber), ▸ running (blue), ● step/state, ✓ done, ✗ failed, ◇ unapproved document, ○ idle, › navigates, ▾▴ open/closed, ‹ back to the queue.
+- Two inline stroke SVGs (1.5–1.6px, round caps): the queue inbox and the composer send arrow. Source is in `QueueButton.jsx` and `Composer.jsx`.
+- Object kinds: a 26px tinted square (16% of the colour) with a mono glyph: md (document), ± (changeset), ⑂ (branch), ⇡ (release), ⌁ (connection).

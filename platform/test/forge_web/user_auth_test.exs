@@ -369,7 +369,7 @@ defmodule ForgeWeb.UserAuthTest do
 
       assert redirected_to(conn) == ~p"/users/log-in"
 
-      assert Phoenix.Flash.get(conn.assigns.flash, :error) ==
+      assert Phoenix.Flash.get(conn.assigns.flash, :sign_in_error) ==
                "You must log in to access this page."
     end
 

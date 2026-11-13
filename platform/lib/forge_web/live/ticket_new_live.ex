@@ -18,6 +18,7 @@ defmodule ForgeWeb.TicketNewLive do
   use ForgeWeb, :live_view
 
   alias Forge.{Operator, Projects, ReleaseTickets, Tickets}
+  alias ForgeWeb.{Indicators, Topology, WorkflowMap}
   alias ForgeWeb.Operator.Admission
 
   @impl true
@@ -89,6 +90,20 @@ defmodule ForgeWeb.TicketNewLive do
   defp option(%{name: name, workflow: {:ok, _workflow}}), do: {name, name}
   defp option(%{name: name}), do: {"#{name} — does not parse", name}
 
+  # The first step as `12e` reads it, once (ux/c.md C19): the state by its mark, its budget beside
+  # it, and its job — the prompt and what it writes — as small print under them, as the project's
+  # Workflow view says them (`ForgeWeb.WorkflowMap`).
+  defp first_state(workflow), do: ForgeCore.Workflow.state(workflow, workflow.initial)
+
+  # The chosen type's description, said under the control that chose it: as the select's hint,
+  # or under the type a one-type project implies.
+  defp description({:ok, workflow}), do: workflow.description
+  defp description(_none_or_broken), do: nil
+
+  # Whether the form can take a ticket at all. While it cannot, the boxes are disabled too, so
+  # nobody types a ticket they cannot submit.
+  defp blocked?(project, workflow), do: project != nil and match?({:error, _reason}, workflow)
+
   @impl true
   def handle_event("validate", %{"ticket" => params}, socket) do
     socket = assign(socket, form: to_form(params, as: :ticket), error: nil)
@@ -129,7 +144,10 @@ defmodule ForgeWeb.TicketNewLive do
       {:ok, ticket} ->
         {:noreply,
          socket
-         |> put_flash(:info, "admitted #{project.name}##{ticket.number} in #{ticket.state}")
+         |> ForgeWeb.Toast.put(
+           "Admitted #{project.name}##{ticket.number}",
+           ForgeWeb.Toast.started(ticket)
+         )
          |> push_navigate(to: ~p"/tickets/#{project.name}/#{ticket.number}")}
 
       {:error, reason} ->
@@ -146,22 +164,20 @@ defmodule ForgeWeb.TicketNewLive do
     <Layouts.app
       flash={@flash}
       current_scope={@current_scope}
+      frame={@frame}
       capacity={@capacity}
-      active={:queue}
+      title="New ticket"
+      subline={@fixed && "admitted to #{@project.name}"}
+      context={
+        if @fixed,
+          do: {@project.name, ~p"/projects/#{@project.name}"},
+          else: {"Projects", ~p"/projects"}
+      }
       measure="34rem"
     >
-      <.link
-        navigate={if @fixed, do: ~p"/projects/#{@project.name}", else: ~p"/board"}
-        class="flex min-h-[46px] items-center font-mono text-[12.5px] opacity-60 hover:opacity-100"
-      >
-        ‹ {if @fixed, do: @project.name, else: "Board"}
-      </.link>
-
-      <h1 class="mt-4 text-2xl font-semibold -tracking-[.025em]">New ticket</h1>
-
       <p :if={@projects == []} class="mt-4 text-sm/[1.55] opacity-70">
         There are no projects yet.
-        <.link navigate={~p"/projects/new"} class="text-primary hover:underline">
+        <.link navigate={~p"/projects/new"} class="text-link hover:underline">
           Register one first ›
         </.link>
       </p>
@@ -177,12 +193,9 @@ defmodule ForgeWeb.TicketNewLive do
         <%!-- Reached from a project, the project is not a question. The select survives only for
               the bare /tickets/new, which nothing links to. See docs/design/ui.md § Creating
               things. --%>
-        <div :if={@fixed} class="flex flex-wrap items-baseline gap-2">
-          <span class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">Project</span>
-          <.link
-            navigate={~p"/projects/#{@project.name}"}
-            class="font-mono text-[12.5px] hover:underline"
-          >
+        <div :if={@fixed} class="ticket-new-fact">
+          <.eyebrow>Project</.eyebrow>
+          <.link navigate={~p"/projects/#{@project.name}"} class="ticket-new-fact-value">
             {@project.name}
           </.link>
         </div>
@@ -197,7 +210,8 @@ defmodule ForgeWeb.TicketNewLive do
         />
 
         <%!-- Ticket types: asked only when there is a choice, and nothing preselected. See
-              docs/design/ticket-types.md § Admission. --%>
+              docs/design/ticket-types.md § Admission. The chosen type's description is the
+              select's hint, under it rather than floating above the first step. --%>
         <.input
           :if={choices(@types) != []}
           field={@form[:ticket_type]}
@@ -205,60 +219,84 @@ defmodule ForgeWeb.TicketNewLive do
           label="Type"
           prompt="Choose a type"
           options={Enum.map(choices(@types), &option/1)}
+          hint={description(@workflow)}
         />
-        <div :if={implied(@types)} class="flex flex-wrap items-baseline gap-2">
-          <span class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">Type</span>
-          <span id="implied-type" class="font-mono text-[12.5px]">{implied(@types)}</span>
+        <div :if={implied(@types)} class="ticket-new-fact">
+          <.eyebrow>Type</.eyebrow>
+          <span id="implied-type" class="ticket-new-fact-value">{implied(@types)}</span>
         </div>
-
-        <%!-- What is wrong with the repository, said here rather than after a body is typed. --%>
-        <div
-          :if={@project && match?({:error, _reason}, @workflow)}
-          class="rounded-box border border-warning/40 bg-warning/5 p-4"
+        <p
+          :if={choices(@types) == [] and description(@workflow)}
+          id="type-description"
+          class="ui-field-hint"
         >
-          <h2 class="font-mono text-[11px] tracking-[.14em] uppercase text-warning">
-            Not ready for a ticket
-          </h2>
-          <p :if={choices(@types) == []} class="mt-2 text-sm/[1.55]">
-            This project cannot take a ticket: {Admission.explain(elem(@workflow, 1))}.
+          {description(@workflow)}
+        </p>
+
+        <%!-- What is wrong with the repository, said here rather than after a body is typed, and
+              where the way to fix it is: a chat writes the workflow on its own branch, as the
+              created screen says (ux/c.md C3). --%>
+        <.notice
+          :if={blocked?(@project, @workflow)}
+          id="not-ready"
+          tone="warning"
+          title="Not ready for a ticket"
+        >
+          {if choices(@types) == [], do: "This project", else: "This type"} cannot take a ticket: {Admission.explain(
+            elem(@workflow, 1)
+          )}. A workflow is written in a chat, on its own branch, and merged.
+          <.link
+            navigate={~p"/chats/new?#{[project: @project.name]}"}
+            class="project-link"
+          >
+            {if choices(@types) == [], do: "Set it up in a chat ›", else: "Fix it in a chat ›"}
+          </.link>
+        </.notice>
+
+        <%!-- The first step and its budget, before anything is admitted (`12e`): where the
+              ticket starts, what it may spend, and in small print what runs there. --%>
+        <div :if={@project && Admission.ready?(@workflow)} id="first-step" class="first-step">
+          <.eyebrow>First step</.eyebrow>
+          <p class="first-step-line">
+            <Indicators.state
+              name={elem(@workflow, 1).initial}
+              topology={Topology.of(elem(@workflow, 1), elem(@workflow, 1).initial)}
+            />
+            <span :if={WorkflowMap.budget(first_state(elem(@workflow, 1)))}>
+              · {WorkflowMap.budget(first_state(elem(@workflow, 1)))}
+            </span>
           </p>
-          <p :if={choices(@types) != []} class="mt-2 text-sm/[1.55]">
-            This type cannot take a ticket: {Admission.explain(elem(@workflow, 1))}.
-          </p>
-          <p class="mt-2 text-sm/[1.55] opacity-70">
-            A workflow lives in the project's own repository, so it is pushed rather than edited
-            here.
-            <.link navigate={~p"/projects/#{@project.name}"} class="text-primary hover:underline">
-              {@project.name} has the clone URL ›
-            </.link>
-          </p>
+          <p class="first-step-job">{WorkflowMap.job(first_state(elem(@workflow, 1)))}</p>
         </div>
 
-        <div :if={@project && Admission.ready?(@workflow)} class="text-[12.5px]">
-          <p :if={elem(@workflow, 1).description} class="text-sm/[1.55] opacity-80">
-            {elem(@workflow, 1).description}
-          </p>
-          <p class="font-mono opacity-60">starts in {elem(@workflow, 1).initial}</p>
-        </div>
-
-        <.input field={@form[:title]} type="text" label="Title" autocomplete="off" required />
+        <.input
+          field={@form[:title]}
+          type="text"
+          label="Title"
+          autocomplete="off"
+          required
+          disabled={blocked?(@project, @workflow)}
+        />
         <.input
           field={@form[:body]}
           type="textarea"
           label="Body"
           rows="6"
           placeholder="What is wrong, or what should exist. The first job reads this."
+          disabled={blocked?(@project, @workflow)}
         />
 
-        <p :if={@error} class="text-sm text-error">{@error}</p>
+        <.error_note :if={@error} id="ticket-new-error">{@error}</.error_note>
 
-        <button
+        <.button
           type="submit"
+          variant="primary"
+          size="xl"
+          fill
           disabled={not Admission.ready?(@workflow)}
-          class="h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100 disabled:opacity-40"
         >
           Admit it
-        </button>
+        </.button>
       </.form>
     </Layouts.app>
     """

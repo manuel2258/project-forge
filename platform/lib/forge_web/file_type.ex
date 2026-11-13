@@ -1,6 +1,6 @@
 defmodule ForgeWeb.FileType do
   @moduledoc """
-  What kind of file an artifact is, for drawing it: its icon and the hue of the tile it sits in,
+  What kind of file an artifact is, for drawing it: its glyph and the hue of the tile it sits in,
   whether a document is rendered or shown as its text, and the media type a download carries
   (`docs/design/ui.md` § Artifact types, § Documents).
 
@@ -9,8 +9,6 @@ defmodule ForgeWeb.FileType do
   """
 
   use Phoenix.Component
-
-  import ForgeWeb.CoreComponents, only: [icon: 1]
 
   @type t :: :markdown | :text | :log | :code | :image | :archive | :apk | :file | :changeset
 
@@ -54,7 +52,7 @@ defmodule ForgeWeb.FileType do
     end
   end
 
-  @doc "A type in words: what the icon says to assistive technology."
+  @doc "A type in words: what the tile says to assistive technology."
   @spec label(t()) :: String.t()
   def label(:markdown), do: "Markdown"
   def label(:text), do: "text"
@@ -119,14 +117,15 @@ defmodule ForgeWeb.FileType do
   end
 
   @doc """
-  The type's icon in its tile. The tile's hue is `app.css`'s, keyed by `data-file-type`, and the
-  icon is labelled with the type in words.
+  The type's glyph in its tile (`docs/design/ui.md` § Artifact types): a mono label — `md`, `{}`,
+  `img` — tinted with the type's hue, which is `components.css`'s, keyed by `data-file-type`. The
+  tile is labelled with the type in words, since a glyph alone says little to a screen reader.
   """
   attr :artifact, :map, required: true, doc: "anything with a `name` and a `kind`"
   attr :size, :atom, values: [:row, :chip], default: :row
 
   def file_icon(assigns) do
-    assigns = assign(assigns, :type, of(assigns.artifact))
+    assigns = assign(assigns, type: of(assigns.artifact), glyph: glyph(of(assigns.artifact)))
 
     ~H"""
     <span
@@ -135,37 +134,37 @@ defmodule ForgeWeb.FileType do
       title={label(@type)}
       data-file-type={@type}
       class={[
-        "file-icon inline-flex shrink-0 items-center justify-center rounded-field",
-        if(@size == :chip, do: "size-5", else: "size-7")
+        "file-icon inline-flex shrink-0 items-center justify-center rounded-md font-mono leading-none",
+        if(@size == :chip, do: "size-5", else: "size-[26px]"),
+        glyph_size(@glyph, @size)
       ]}
     >
-      <.glyph type={@type} class={if(@size == :chip, do: "size-3.5", else: "size-4")} />
+      <span aria-hidden="true">{@glyph}</span>
     </span>
     """
   end
 
-  attr :type, :atom, required: true
-  attr :class, :string, required: true
-
+  @doc "The glyph a type is drawn with, as § Artifact types tables it."
+  @spec glyph(t()) :: String.t()
+  def glyph(:markdown), do: "md"
+  def glyph(:text), do: "txt"
+  def glyph(:log), do: "log"
+  def glyph(:code), do: "{}"
+  def glyph(:image), do: "img"
+  def glyph(:archive), do: "zip"
+  def glyph(:apk), do: "apk"
+  def glyph(:file), do: "file"
   # The Changes tab's `+n −m`, since a changeset is a change and not a file.
-  defp glyph(%{type: :changeset} = assigns) do
-    ~H"""
-    <span aria-hidden="true" class="font-mono text-[13px] leading-none">±</span>
-    """
-  end
+  def glyph(:changeset), do: "±"
 
-  defp glyph(assigns) do
-    ~H"""
-    <.icon name={hero(@type)} class={@class} />
-    """
+  # The handoff's `TypeIcon`: 12px for one character, 9.5 for a word; a chip a step down. `file`
+  # is the one four-letter glyph, and at 9.5 it still fits the 26px tile.
+  defp glyph_size(glyph, size) do
+    case {String.length(glyph), size} do
+      {1, :row} -> "text-[12px]"
+      {1, :chip} -> "text-[11px]"
+      {_word, :row} -> "text-[9.5px]"
+      {_word, :chip} -> "text-[8px]"
+    end
   end
-
-  defp hero(:markdown), do: "hero-document-text-mini"
-  defp hero(:text), do: "hero-bars-3-bottom-left-mini"
-  defp hero(:log), do: "hero-command-line-mini"
-  defp hero(:code), do: "hero-code-bracket-mini"
-  defp hero(:image), do: "hero-photo-mini"
-  defp hero(:archive), do: "hero-archive-box-mini"
-  defp hero(:apk), do: "hero-device-phone-mobile-mini"
-  defp hero(:file), do: "hero-cube-mini"
 end

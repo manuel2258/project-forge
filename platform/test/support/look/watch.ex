@@ -77,8 +77,20 @@ defmodule Forge.Look.Watch do
 
   def handle_stop(_event, _measurements, _metadata, _config), do: :ok
 
+  # A miss is an answer, not a crash: a page that raises `Ecto.NoResultsError` for a row it cannot
+  # see renders the not-found page (`ui.md` § Not found), which a look photographs. Whatever has a
+  # status under 500 is the platform answering; the endpoint's status still records a 500.
   @doc false
   def handle_exception(event, _measurements, metadata, _config) do
+    if answer?(metadata), do: :ok, else: exception(event, metadata)
+  end
+
+  defp answer?(%{kind: :error, reason: reason}) when is_exception(reason),
+    do: Plug.Exception.status(reason) < 500
+
+  defp answer?(_metadata), do: false
+
+  defp exception(event, metadata) do
     callback = event |> Enum.slice(1..-2//1) |> Enum.map_join(" ", &to_string/1)
     reason = metadata |> Map.get(:reason, Map.get(metadata, :kind, :error)) |> inspect(limit: 5)
     record("#{callback} raised: #{String.slice(reason, 0, 300)}")

@@ -19,7 +19,8 @@ defmodule ForgeWeb.ChatsLive do
 
   **The two controls here follow from that.** Starting one is offered because this is where a
   person comes looking for conversations, and it is the only surface that must ask which project
-  — every other one is already about a project (`docs/design/ui.md` § Creating things). Ending
+  — every other one is already about a project (`docs/design/ui.md` § Creating things): the dock's
+  composer, with a picker of the viewer's projects beside it (`12c`). Ending
   one is offered because a live row is a machine running, and until it was here the only way to
   stop one was to open it first. Neither deletes a conversation, which is kept for ever
   (`docs/design/conversations.md` § Lifetime) — but ending one deletes its branch unless the
@@ -28,7 +29,7 @@ defmodule ForgeWeb.ChatsLive do
 
   use ForgeWeb, :live_view
 
-  alias Forge.{Conversations, Events, Jobs, Operator}
+  alias Forge.{Conversations, Events, Jobs, Operator, Projects}
 
   @impl true
   def mount(_params, _session, socket) do
@@ -37,17 +38,22 @@ defmodule ForgeWeb.ChatsLive do
       Events.subscribe_chats()
     end
 
-    {:ok, socket |> assign(page_title: "Chats") |> load()}
+    {:ok,
+     socket
+     |> assign(page_title: "Chats", start: %{"project" => nil, "text" => ""}, start_error: nil)
+     |> load()}
   end
 
   defp load(socket) do
     user = socket.assigns.current_scope.user
+    projects = Projects.list(user)
 
     assign(socket,
       summaries: Conversations.summaries(for: user),
+      projects: projects,
       # The projects the list was read for. `summaries(for:)` scopes with the same call, so what a
       # message is filtered by and what is then read are one model of "the viewer's projects".
-      project_ids: MapSet.new(Forge.Projects.list(user), & &1.id),
+      project_ids: MapSet.new(projects, & &1.id),
       now: DateTime.utc_now()
     )
   end
@@ -80,10 +86,46 @@ defmodule ForgeWeb.ChatsLive do
     end
   end
 
+  # The dock's composer, as it is typed: held by the page so that a reconnect gives it back
+  # (`docs/design/ui.md` § A reconnect is not a reload).
+  @impl true
+  def handle_event("start:change", params, socket) do
+    {:noreply, assign(socket, start: start_params(params), start_error: nil)}
+  end
+
+  # Starting a chat in place (`12c`). The project's name comes off the wire, so it is looked up
+  # among the viewer's own projects and nowhere else: a name of a project they are not in finds
+  # nothing and is refused here, as one that does not exist is — and `Operator.open_chat/4`
+  # checks membership again behind it.
+  def handle_event("chat:start", params, socket) do
+    start = start_params(params)
+    text = String.trim(start["text"])
+    project = Enum.find(socket.assigns.projects, &(&1.name == start["project"]))
+
+    cond do
+      is_nil(project) ->
+        {:noreply, assign(socket, start: start, start_error: "Choose one of your projects.")}
+
+      text == "" ->
+        {:noreply, assign(socket, start: start, start_error: "Say what the chat is about first.")}
+
+      true ->
+        case Operator.open_chat(project, socket.assigns.current_scope.user, text) do
+          {:ok, chat} ->
+            {:noreply, push_navigate(socket, to: ~p"/chats/#{chat.id}")}
+
+          # Only a refusal of membership reaches here, which the lookup above has already made:
+          # an equivalent mutant today, said in a sentence rather than as `inspect/1` all the same.
+          {:error, _reason} ->
+            {:noreply,
+             assign(socket, start: start, start_error: "The chat could not be started there.")}
+        end
+    end
+  end
+
   # The id comes off the wire, so the chat is read and then authorised — being able to see a
   # conversation in your own list is not the same as the row this id names being in it
   # (`docs/design/identity.md` § Sequencing).
-  @impl true
   def handle_event("end-chat", %{"id" => id}, socket) do
     with %Jobs.Job{kind: :chat} = chat <- Jobs.get(id),
          :ok <- Operator.close_chat(chat, socket.assigns.current_scope.user) do
@@ -93,36 +135,81 @@ defmodule ForgeWeb.ChatsLive do
     end
   end
 
+  # Only text, whatever the wire sent.
+  defp start_params(params) do
+    %{
+      "project" => if(is_binary(params["project"]), do: params["project"]),
+      "text" => if(is_binary(params["text"]), do: params["text"], else: "")
+    }
+  end
+
+  defp subline(summaries) do
+    live = Enum.count(summaries, & &1.live)
+    "#{live} live · #{length(summaries)} in all"
+  end
+
+  # The project the picker shows: what was picked, else the project of the conversation used
+  # last, else the first — the one a person most likely means.
+  defp picked(%{"project" => name}, _summaries, _projects) when is_binary(name), do: name
+  defp picked(_start, [summary | _], _projects), do: summary.project.name
+  defp picked(_start, [], [project | _]), do: project.name
+  defp picked(_start, [], []), do: nil
+
   @impl true
   def render(assigns) do
     ~H"""
     <Layouts.app
       flash={@flash}
       current_scope={@current_scope}
+      frame={@frame}
       capacity={@capacity}
-      active={:chats}
-      measure="34rem"
+      title="Chats"
+      subline={subline(@summaries)}
+      top_level={:chats}
+      context={{"+ New", ~p"/chats/new"}}
+      measure="40rem"
     >
-      <header class="flex flex-wrap items-baseline gap-x-4 gap-y-2">
-        <h1 class="text-2xl font-semibold -tracking-[.025em]">Chats</h1>
-        <.link
-          navigate={~p"/chats/new"}
-          class="ml-auto flex min-h-[46px] items-center rounded-field border border-base-300 px-3 text-sm hover:border-base-content/30"
-        >
-          New chat
-        </.link>
-      </header>
-
-      <p class="mt-2 text-sm/[1.55] opacity-60">
-        A conversation that needs you is in the queue. This is for finding one again.
-      </p>
-
       <ForgeWeb.Conversations.list
         summaries={@summaries}
         now={@now}
         ending="end-chat"
         empty="No conversations yet."
       />
+
+      <:composer :if={@projects != []}>
+        <.form
+          for={%{}}
+          id="chat-start"
+          phx-change="start:change"
+          phx-submit="chat:start"
+          class="chat-start"
+        >
+          <.error_note :if={@start_error} id="chat-start-error" class="chat-start-error">
+            {@start_error}
+          </.error_note>
+          <div class="chat-start-row">
+            <label class="chat-start-project">
+              <span class="sr-only">Project</span>
+              <select id="chat-start-project" name="project">
+                <option
+                  :for={project <- @projects}
+                  value={project.name}
+                  selected={project.name == picked(@start, @summaries, @projects)}
+                >
+                  {project.name}
+                </option>
+              </select>
+            </label>
+            <.composer
+              id="chat-start-text"
+              name="text"
+              value={@start["text"]}
+              placeholder="Start a chat"
+              phx-debounce="200"
+            />
+          </div>
+        </.form>
+      </:composer>
     </Layouts.app>
     """
   end

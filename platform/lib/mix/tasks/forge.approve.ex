@@ -11,6 +11,11 @@ defmodule Mix.Tasks.Forge.Approve do
     {opts, positional, _} =
       OptionParser.parse(args, strict: [reject: :boolean, comment: :string, user: :string])
 
+    # Refused before anything is booted or read: the engine would refuse it too
+    # (`Forge.Engine.decide/4`), but this says how to put it right.
+    if opts[:reject] && String.trim(opts[:comment] || "") == "",
+      do: CLI.fail("a rejection needs --comment saying why; the next job reads it")
+
     case positional do
       [ref] ->
         CLI.boot()

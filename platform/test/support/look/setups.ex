@@ -19,11 +19,28 @@ defmodule Forge.Look.Setups do
   @callback build() :: built
 
   @setups %{
+    "decision" => Forge.Look.Setups.Decision,
+    "queue" => Forge.Look.Setups.Queue,
     "ticket" => Forge.Look.Setups.Ticket,
-    "usage" => Forge.Look.Setups.Usage,
+    "repo_file" => Forge.Look.Setups.RepoFile,
+    "repo" => Forge.Look.Setups.Repo,
+    "accounts" => Forge.Look.Setups.Accounts,
+    "signin_provider" => Forge.Look.Setups.SigninProvider,
+    "settings" => Forge.Look.Setups.Settings,
+    "machines" => Forge.Look.Setups.Machines,
     "codex" => Forge.Look.Setups.Codex,
+    "weighted_usage" => Forge.Look.Setups.WeightedUsage,
     "templates" => Forge.Look.Setups.Templates,
-    "forge_release" => Forge.Look.Setups.ForgeRelease
+    "usage" => Forge.Look.Setups.Usage,
+    "projects" => Forge.Look.Setups.Projects,
+    "ticket_views" => Forge.Look.Setups.TicketViews,
+    "project" => Forge.Look.Setups.Project,
+    "proposals" => Forge.Look.Setups.Proposals,
+    "job" => Forge.Look.Setups.Job,
+    "changes" => Forge.Look.Setups.Changes,
+    "chats" => Forge.Look.Setups.Chats,
+    "forge_release" => Forge.Look.Setups.ForgeRelease,
+    "image_builds" => Forge.Look.Setups.ImageBuilds
   }
 
   @doc "The registered setups, by name."

@@ -2698,6 +2698,28 @@ defmodule Forge.ConversationsTest do
       assert Events.latest_for_ticket(ticket.id, "transition.taken") == nil
     end
 
+    # A reject needs a note, for a conversation's request as for a person's press
+    # (`docs/design/ui.md` § The decision row): refused, in words the agent can act on.
+    test "a rejection without a comment is refused and decides nothing", %{
+      ticket: ticket,
+      chat: chat,
+      opener: opener
+    } do
+      version = refinement!(ticket, opener)
+      pending!(ticket)
+
+      {:ok, _chat} =
+        Conversations.record_turn(
+          chat,
+          turn_asking(1, %{"decision" => "rejected", "comment" => nil})
+        )
+
+      assert Tickets.get!(ticket.id).pending_transition != nil
+      assert Forge.Artifacts.approvals(version.id) == []
+      assert [reason] = refusals(chat)
+      assert reason =~ "a rejection needs a comment saying why"
+    end
+
     # AC5. The chat does not stop a job, and it does not get past one either: cancelling the
     # ticket and restoring it is what a person already has, and it is theirs to do.
     test "it is refused while a job of the ticket's state is live", %{
@@ -3250,5 +3272,35 @@ defmodule Forge.ConversationsTest do
         type: "job.harness.delivered",
         payload: %{text: "…", message_id: message_id}
       })
+  end
+
+  describe "as a list counts and names them" do
+    # The title menu's Chats line: a stopped one is counted, and is not live.
+    test "counts the live ones apart from the rest" do
+      user = Forge.AccountsFixtures.user_fixture()
+      project = project_fixture()
+      join!(project, user, :member)
+      chat_fixture(%{project: project, status: :running})
+
+      chat_fixture(%{project: project})
+      |> Ecto.Changeset.change(status: :finished, outcome: :converged)
+      |> Forge.Repo.update!()
+
+      assert Conversations.counts(user) == %{live: 1, total: 2}
+    end
+
+    # Its name in a list is what it was opened with, not what was said in it since.
+    test "names a conversation by its first message, not its latest" do
+      project = project_fixture()
+      chat = chat_fixture(%{project: project})
+
+      for text <- ["What it was opened with", "What was said since"] do
+        {:ok, _} =
+          Events.append("chat.message", :system, %{job_id: chat.id, payload: %{"text" => text}})
+      end
+
+      assert [%{first: "What it was opened with"}] =
+               Conversations.summaries(project_id: project.id)
+    end
   end
 end

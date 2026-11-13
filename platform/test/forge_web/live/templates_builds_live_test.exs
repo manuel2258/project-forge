@@ -26,7 +26,8 @@ defmodule ForgeWeb.TemplatesBuildsLiveTest do
   end
 
   defp mount_page(conn) do
-    {:ok, lv, _html} = live(conn, ~p"/templates")
+    # The credentials are a view of the machines pages (`ui.md` § Machines): `?view=credentials`.
+    {:ok, lv, _html} = live(conn, ~p"/templates?view=credentials")
     html = render_async(lv)
     {lv, html}
   end
@@ -77,15 +78,16 @@ defmodule ForgeWeb.TemplatesBuildsLiveTest do
     conn: conn,
     credential: credential
   } do
-    {lv, html} = mount_page(conn)
-    assert html =~ ~r/<input[^>]*type="checkbox"[^>]*checked/
+    {lv, _html} = mount_page(conn)
+    switch = "#credential-#{credential.id} button[role=switch]"
+    assert has_element?(lv, switch <> ~s([aria-checked="true"]), "Build worker images")
 
-    lv |> element("#credential-#{credential.id} input[type=checkbox]") |> render_click()
+    lv |> element(switch) |> render_click()
     refute Repo.get!(Forge.Provisioning.Credential, credential.id).build_images
 
     # A reconnect loses nothing: the page is drawn from what is stored.
-    {_lv, html} = mount_page(conn)
-    refute html =~ ~r/<input[^>]*type="checkbox"[^>]*checked/
+    {lv, _html} = mount_page(conn)
+    assert has_element?(lv, switch <> ~s([aria-checked="false"]))
   end
 
   test "someone else's credential cannot be flipped or built by sending its id", %{conn: conn} do
@@ -165,7 +167,9 @@ defmodule ForgeWeb.TemplatesBuildsLiveTest do
 
     refute html =~ "<b>bold</b>"
     assert html =~ "&lt;b&gt;bold&lt;/b&gt;"
-    assert html =~ "truncate"
+    # Cut to one line by `.credential-build-standing` (ellipsis, `areas/machines.css`), the whole
+    # in its title.
+    assert html =~ ~r/class="credential-build-standing[^"]*" title="&lt;b&gt;bold/
   end
 
   test "an abandoned build says why", %{conn: conn, credential: credential} do

@@ -7,8 +7,8 @@ milestone live in `docs/design/`; code follows them, and a change of mind update
 `docs/design/ui.md` is the standard for every operator surface and `docs/design/capacity.md` for
 how consumption is modelled and drawn. Read both before changing anything the operator sees.
 `ui.md` describes the redesign vendored under `docs/design/ui/` — every screen by id in
-`screens/final-design.dc.html` — and is being built area by area: its § Not built yet says what the
-code does not do yet, and on those points the code still follows the note before it (`92ea7c1`).
+`screens/final-design.dc.html`, with the deviations a later UX pass made recorded in the note itself.
+**It is built**, every area of it; its § Not built yet lists what the code does not do yet.
 
 `docs/design/conversations.md` is the standard for chats — the work that does not fit a workflow
 state.

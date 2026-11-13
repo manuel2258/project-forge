@@ -328,14 +328,14 @@ defmodule ForgeWeb.TicketLive do
           name: hd(group).state,
           jobs: group,
           artifacts: Enum.filter(artifacts, &written_in?(&1, group)),
-          cost: Enum.reduce(group, Decimal.new(0), &Decimal.add(&2, &1.cost_usd))
+          cost: Enum.reduce(group, 0, &(&2 + &1.usage))
         }
       end)
 
     if Enum.any?(visits, &(&1.name == ticket.state)) do
       visits
     else
-      visits ++ [%{name: ticket.state, jobs: [], artifacts: [], cost: Decimal.new(0)}]
+      visits ++ [%{name: ticket.state, jobs: [], artifacts: [], cost: 0}]
     end
     |> Enum.map(&Map.put(&1, :topology, Board.topology(workflow, &1.name)))
   end
@@ -634,7 +634,7 @@ defmodule ForgeWeb.TicketLive do
           <span>{@ticket.branch}</span>
           <Diff.stat diff={@diff} />
           <span>{turns(@jobs)} turns</span>
-          <span>{Format.windows(@ticket.cost_usd) || "—"}</span>
+          <span>{Format.windows(@ticket.usage) || "—"}</span>
         </:strip>
 
         <WorkScreen.body :if={@shown_tab == "decide"} id="decide">
@@ -860,6 +860,12 @@ defmodule ForgeWeb.TicketLive do
                 <span class="w-8 shrink-0 font-mono">#{job.attempt}</span>
                 <span class="min-w-0 flex-1 text-sm">
                   <span class="block truncate">Conversation</span>
+                  <span
+                    id={"job-#{job.id}-harness"}
+                    class="block font-mono text-[11.5px] opacity-60 [overflow-wrap:anywhere]"
+                  >
+                    {Forge.Jobs.harness_line(job, @project)}
+                  </span>
                   <%!-- The outcome drawn with the component a job's row uses (`.outcome`), cut to
                         the line: the outcome is the workflow author's word. --%>
                   <span
@@ -881,7 +887,7 @@ defmodule ForgeWeb.TicketLive do
                 </span>
                 <span class="shrink-0 font-mono opacity-60">{job.turns} turns</span>
                 <span class="w-20 shrink-0 text-right font-mono opacity-60">
-                  {Format.windows(job.cost_usd) || "—"}
+                  {Format.windows(job.usage) || "—"}
                 </span>
                 <span class="shrink-0 font-mono opacity-40" aria-hidden="true">›</span>
               </.link>
@@ -899,6 +905,12 @@ defmodule ForgeWeb.TicketLive do
                   />
                   <.job_status :if={is_nil(job.outcome)} status={job.status} />
                   <.ceiling job={job} />
+                  <span
+                    id={"job-#{job.id}-harness"}
+                    class="block font-mono text-[11.5px] opacity-60 [overflow-wrap:anywhere]"
+                  >
+                    {Forge.Jobs.harness_line(job, @project)}
+                  </span>
                   <%!-- Language, not an identifier: sans at body size, and never accent — a
                         machine is being waited on, not the operator. --%>
                   <span
@@ -911,7 +923,7 @@ defmodule ForgeWeb.TicketLive do
                 </span>
                 <span class="shrink-0 font-mono opacity-60">{job.turns} turns</span>
                 <span class="w-20 shrink-0 text-right font-mono opacity-60">
-                  {Format.windows(job.cost_usd) || "—"}
+                  {Format.windows(job.usage) || "—"}
                 </span>
                 <span class="shrink-0 font-mono opacity-40" aria-hidden="true">›</span>
               </.link>
@@ -1109,12 +1121,21 @@ defmodule ForgeWeb.TicketLive do
     />
     <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Usage</h2>
     <div class="mt-3">
-      <div class="font-mono text-[17px]">{Format.windows(@ticket.cost_usd) || "—"}</div>
+      <div id="ticket-usage" class="font-mono text-[17px]" title={Format.exact(@ticket.usage)}>
+        {Format.windows(@ticket.usage) || "—"}
+      </div>
       <div class="mt-2 h-[5px] w-full bg-base-300">
         <div class="h-full bg-accent" style={"width: #{usage_pct(@ticket, @workflow)}%"} />
       </div>
       <div class="mt-1 font-mono text-[11px] opacity-50">
-        allowance {Format.windows(@workflow.limits.ticket_cost) || "—"}
+        allowance {Format.windows(@workflow.limits.ticket_tokens) || "—"}
+      </div>
+      <div
+        :if={@ticket.usage_converted}
+        id="ticket-usage-converted"
+        class="mt-1 font-mono text-[11px] opacity-50"
+      >
+        includes figures converted from dollars
       </div>
     </div>
 
@@ -1363,11 +1384,10 @@ defmodule ForgeWeb.TicketLive do
   end
 
   defp usage_pct(ticket, workflow) do
-    cap = workflow.limits.ticket_cost
+    cap = workflow.limits.ticket_tokens
 
     if is_number(cap) and cap > 0 do
-      ticket.cost_usd
-      |> Decimal.to_float()
+      ticket.usage
       |> Kernel./(cap)
       |> Kernel.*(100)
       |> min(100)

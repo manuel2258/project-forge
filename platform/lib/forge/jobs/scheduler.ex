@@ -382,6 +382,12 @@ defmodule Forge.Jobs.Scheduler do
       {"limited",
        "Waiting for a limit to reset: every credential this project may use is rate-limited."}
 
+  # Every login in the pool is held by a run that is live, and a run ending resolves it
+  # (`docs/design/credentials.md` § Holding a login). **It names nothing that holds them**: whose
+  # job, whose chat, is the owner's to see on their own page and nobody else's (criterion 44).
+  defp waiting({:held, :codex}),
+    do: {"held", "Waiting for a Codex login: all in this project's pool are in use."}
+
   defp waiting(:reserving),
     do:
       {"reserving",
@@ -400,7 +406,7 @@ defmodule Forge.Jobs.Scheduler do
        "Waiting its turn: the job that invoked it may run #{n} of this command at once."}
 
   defp waiting({:spend_paused, :day}),
-    do: {"spend_paused", "Waiting for midnight UTC: the node has spent its daily cap."}
+    do: {"spend_paused", "Waiting for midnight UTC: the node has used its daily cap."}
 
   # **An equivalent mutant, for what reaches it today.** `wait/2` has two callers. `offer/2` passes
   # what `Workers.provide/2` refused, which is only the refusals above and, in principle, a

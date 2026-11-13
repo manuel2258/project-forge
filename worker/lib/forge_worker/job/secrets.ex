@@ -26,21 +26,45 @@ defmodule ForgeWorker.Job.Secrets do
   alias ForgeCore.Job.Credential, as: Sealed
   alias ForgeWorker.{Config, Log}
 
-  @enforce_keys [:job_id, :sealed]
-  defstruct [:job_id, :sealed]
+  @enforce_keys [:job_id]
+  # `sealed` is the project's secrets and may be absent; `credential` is the job's own inference
+  # credential, sealed as it was delivered, which **is masked and never put in the environment by
+  # this module** — it reaches the harness by its driver (`docs/design/secrets.md` § Masking a
+  # job's own credential).
+  #
+  # `job_dir`, when given, is where to look for a login Codex rewrote: its refreshed tokens are
+  # not in the sealed credential, so they are read from `auth.json` as it is when something is
+  # masked, and a log line quoting one is masked like the delivered ones.
+  defstruct [:job_id, :sealed, :credential, :job_dir]
 
-  @type t :: %__MODULE__{job_id: String.t(), sealed: String.t()}
+  @type t :: %__MODULE__{
+          job_id: String.t(),
+          sealed: String.t() | nil,
+          credential: String.t() | nil,
+          job_dir: String.t() | nil
+        }
 
   @doc "The sealed secrets an assignment carries, or nil for a job that holds none."
   @spec from_assignment(map()) :: t() | nil
   # `is_binary(job_id)` is an **equivalent mutant** as far as the suite goes: the platform always
   # sends one. It stays because this reads the wire, and a job id that is not a string would raise
   # in the seal's associated data rather than read as no secrets.
-  def from_assignment(%{"job_id" => job_id, "secrets" => sealed})
-      when is_binary(job_id) and is_binary(sealed),
-      do: %__MODULE__{job_id: job_id, sealed: sealed}
+  def from_assignment(assignment, job_dir \\ nil)
 
-  def from_assignment(_assignment), do: nil
+  def from_assignment(%{"job_id" => job_id} = assignment, job_dir) when is_binary(job_id) do
+    sealed = if is_binary(assignment["secrets"]), do: assignment["secrets"]
+
+    credential =
+      case assignment["credential"] do
+        %{"sealed" => credential} when is_binary(credential) -> credential
+        _none -> nil
+      end
+
+    if sealed || credential,
+      do: %__MODULE__{job_id: job_id, sealed: sealed, credential: credential, job_dir: job_dir}
+  end
+
+  def from_assignment(_assignment, _job_dir), do: nil
 
   @doc """
   The secrets, opened: a map of name to value. `:error` when they will not open — another worker's
@@ -48,6 +72,8 @@ defmodule ForgeWorker.Job.Secrets do
   """
   @spec open(t() | nil) :: {:ok, %{String.t() => String.t()}} | :error
   def open(nil), do: {:ok, %{}}
+
+  def open(%__MODULE__{sealed: nil}), do: {:ok, %{}}
 
   def open(%__MODULE__{job_id: job_id, sealed: sealed}) do
     with {:ok, token_hash} <- Sealed.token_hash(Config.token()),
@@ -161,7 +187,9 @@ defmodule ForgeWorker.Job.Secrets do
   defp replacements(secrets) do
     case open(secrets) do
       {:ok, opened} ->
-        Enum.flat_map(opened, fn {name, value} ->
+        (Enum.to_list(opened) ++ credential_values(secrets))
+        |> Enum.reject(fn {_name, value} -> value == "" end)
+        |> Enum.flat_map(fn {name, value} ->
           encoded = Jason.encode!(value)
           escaped = binary_part(encoded, 1, byte_size(encoded) - 2)
           lower = Regex.replace(~r/\\u[0-9A-F]{4}/, escaped, &String.downcase/1)
@@ -169,6 +197,47 @@ defmodule ForgeWorker.Job.Secrets do
         end)
 
       :error ->
+        []
+    end
+  end
+
+  # The job's own credential: a token or key as it was, and for a ChatGPT login each of the three
+  # tokens it holds and the file whole, so a log line quoting either is masked. A credential that
+  # will not open masks nothing, as secrets that will not open mask nothing.
+  defp credential_values(%__MODULE__{credential: nil}), do: []
+
+  defp credential_values(%__MODULE__{job_id: job_id, credential: sealed, job_dir: job_dir}) do
+    with {:ok, token_hash} <- Sealed.token_hash(Config.token()),
+         {:ok, secret} <- Sealed.open(sealed, token_hash, job_id) do
+      [{"credential", secret} | login_tokens(secret)] ++ rewritten_tokens(job_dir)
+    else
+      _unopened -> []
+    end
+  end
+
+  # The tokens of the `auth.json` as Codex has left it, which a refresh changes. Nothing for a job
+  # that holds no login, or whose file is not one.
+  defp rewritten_tokens(nil), do: []
+
+  defp rewritten_tokens(job_dir) do
+    case ForgeWorker.Job.Dir.read_auth(job_dir) do
+      {:ok, text} -> login_tokens(text)
+      :error -> []
+    end
+  end
+
+  # `OPENAI_API_KEY` is the file's own field for a key and is null in a ChatGPT login; a file
+  # that holds one has a secret the three tokens do not cover, and it is masked on its own.
+  defp login_tokens(text) do
+    case Jason.decode(text) do
+      {:ok, %{"tokens" => %{} = tokens} = login} ->
+        for {value, _key} <-
+              Enum.map(~w(access_token refresh_token id_token), &{tokens[&1], &1}) ++
+                [{login["OPENAI_API_KEY"], "OPENAI_API_KEY"}],
+            is_binary(value) and value != "",
+            do: {"credential", value}
+
+      _not_a_login ->
         []
     end
   end

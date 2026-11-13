@@ -443,7 +443,7 @@ defmodule Forge.QueueTest do
           Forge.Tickets.Ticket.progress_changeset(ticket, %{
             state: ticket.state,
             status: :active,
-            cost_usd: ticket.cost_usd
+            usage: ticket.usage
           })
         )
 
@@ -612,7 +612,12 @@ defmodule Forge.QueueTest do
       {:ok, _chat} =
         Forge.Conversations.record_turn(chat, %{
           "turn" => 1,
-          "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"}
+          "harness" => %{
+            "turns" => 1,
+            "usage" => 2_000,
+            "cost_usd" => 0.01,
+            "subtype" => "success"
+          }
         })
 
       assert [%{kind: :chat}] =
@@ -844,7 +849,7 @@ defmodule Forge.QueueTest do
 
     defp pause_spend! do
       previous = Application.get_env(:forge, Forge.Spend, [])
-      Application.put_env(:forge, Forge.Spend, daily_cost_usd: 0.0)
+      Application.put_env(:forge, Forge.Spend, daily_tokens: 0)
       ExUnit.Callbacks.on_exit(fn -> Application.put_env(:forge, Forge.Spend, previous) end)
     end
 
@@ -857,7 +862,7 @@ defmodule Forge.QueueTest do
           Forge.Tickets.Ticket.progress_changeset(ticket, %{
             state: ticket.state,
             status: :done,
-            cost_usd: ticket.cost_usd
+            usage: ticket.usage
           })
         )
 

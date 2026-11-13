@@ -21,6 +21,7 @@ defmodule ForgeCore.Workflow.Parser do
   """
 
   alias ForgeCore.Error
+  alias ForgeCore.Usage
   alias ForgeCore.Workflow
 
   alias ForgeCore.Workflow.{
@@ -38,13 +39,13 @@ defmodule ForgeCore.Workflow.Parser do
 
   @top_keys ~w(version description initial states transitions limits defaults commands release
                 release_files release_notes)
-  @state_keys ~w(prompt env model effort inputs produces optional outcomes budget on_enter
+  @state_keys ~w(prompt env model effort harness inputs produces optional outcomes budget on_enter
                  on_conflict resources invoke exit may_invoke secrets chat)
   @command_keys ~w(run env produces timeout resources secrets)
   @grant_keys ~w(max concurrent)
   @transition_keys ~w(from to when approve max queue)
-  @budget_keys ~w(turns cost)
-  @limit_keys ~w(ticket_cost)
+  @budget_keys ~w(turns tokens cost)
+  @limit_keys ~w(ticket_tokens ticket_cost)
   @defaults_keys ~w(resources)
   @resources_keys ~w(memory cpu)
 
@@ -73,9 +74,20 @@ defmodule ForgeCore.Workflow.Parser do
     with {:ok, map} <- decode(yaml),
          {:ok, flat, origins} <- Imports.resolve(map, Keyword.get(opts, :read_library)) do
       case from_map(flat, opts) do
-        {:ok, workflow} -> {:ok, workflow, flat}
+        {:ok, workflow} -> refuse_legacy(workflow, flat)
         {:error, errors} -> {:error, Imports.attribute(errors, origins)}
       end
+    end
+  end
+
+  # Admission's rule, and `load/2`'s alone: the dollar keys parse (`from_map/2`, `from_pinned/1`), so
+  # a stored pin and a job already pending run on, converted — but a workflow read to admit a ticket
+  # that still names one is refused, naming the key that replaces it. The rate from dollars is a
+  # guess, fine for finishing what is running and not for governing new work silently.
+  defp refuse_legacy(workflow, flat) do
+    case Workflow.legacy_keys(workflow) do
+      [] -> {:ok, workflow, flat}
+      keys -> {:error, Enum.map(keys, &Error.new(&1, Workflow.replacement(&1)))}
     end
   end
 
@@ -376,6 +388,7 @@ defmodule ForgeCore.Workflow.Parser do
     {optional, e15} = string_list(definition, "optional", path)
     {effort, e16} = optional_string(definition, "effort", path)
     {chat, e17} = boolean(definition, "chat", path)
+    {harness, e18} = harness(definition, path)
 
     state = %State{
       name: name,
@@ -383,6 +396,7 @@ defmodule ForgeCore.Workflow.Parser do
       env: env,
       model: model,
       effort: effort,
+      harness: harness,
       inputs: inputs || [],
       produces: produces || [],
       optional: optional || [],
@@ -403,7 +417,8 @@ defmodule ForgeCore.Workflow.Parser do
        e1 ++
        e2 ++
        e3 ++
-       e4 ++ e5 ++ e6 ++ e7 ++ e8 ++ e9 ++ e10 ++ e11 ++ e12 ++ e13 ++ e14 ++ e15 ++ e16 ++ e17}
+       e4 ++
+       e5 ++ e6 ++ e7 ++ e8 ++ e9 ++ e10 ++ e11 ++ e12 ++ e13 ++ e14 ++ e15 ++ e16 ++ e17 ++ e18}
   end
 
   defp state(name, _definition) do
@@ -561,12 +576,12 @@ defmodule ForgeCore.Workflow.Parser do
 
       budget when is_map(budget) ->
         {turns, e1} = positive_integer(budget, "turns", budget_path, required: true)
-        {cost, e2} = non_negative_number(budget, "cost", budget_path, required: true)
+        {{tokens, legacy}, e2} = token_amount(budget, "tokens", "cost", budget_path)
         errors = unknown_keys(budget, @budget_keys, budget_path) ++ e1 ++ e2
-        {if(errors == [], do: %Budget{turns: turns, cost: cost}), errors}
+        {if(errors == [], do: %Budget{turns: turns, tokens: tokens, legacy_cost: legacy}), errors}
 
       _ ->
-        {nil, [Error.new(budget_path, "must be a mapping with turns and cost")]}
+        {nil, [Error.new(budget_path, "must be a mapping with turns and tokens")]}
     end
   end
 
@@ -638,14 +653,17 @@ defmodule ForgeCore.Workflow.Parser do
   defp limits(map) do
     case Map.get(map, "limits") do
       limits when is_map(limits) ->
-        {ticket_cost, errors} =
-          non_negative_number(limits, "ticket_cost", "limits", required: true)
+        {{ticket_tokens, legacy}, errors} =
+          token_amount(limits, "ticket_tokens", "ticket_cost", "limits")
 
         errors = unknown_keys(limits, @limit_keys, "limits") ++ errors
-        {if(errors == [], do: %Limits{ticket_cost: ticket_cost}), errors}
+
+        {if(errors == [],
+           do: %Limits{ticket_tokens: ticket_tokens, legacy_ticket_cost: legacy}
+         ), errors}
 
       _ ->
-        {nil, [Error.new("limits", "must be a mapping with ticket_cost")]}
+        {nil, [Error.new("limits", "must be a mapping with ticket_tokens")]}
     end
   end
 
@@ -709,6 +727,28 @@ defmodule ForgeCore.Workflow.Parser do
     end
   end
 
+  # Named against the registry rather than left to a free string: a state that says `codx` would
+  # otherwise run on whatever the project's harness is, which is a quiet substitution.
+  defp harness(map, path) do
+    case Map.get(map, "harness") do
+      nil ->
+        {nil, []}
+
+      value when is_binary(value) ->
+        if value in ForgeCore.Harness.names(),
+          do: {value, []},
+          else: {nil, [Error.new(Error.join(path, "harness"), unknown_harness(value))]}
+
+      _ ->
+        {nil, [Error.new(Error.join(path, "harness"), unknown_harness(nil))]}
+    end
+  end
+
+  defp unknown_harness(value) do
+    named = if value, do: "#{inspect(value)} is not a harness; ", else: ""
+    named <> "must be one of " <> Enum.join(ForgeCore.Harness.names(), ", ")
+  end
+
   defp optional_string(map, key, path) do
     case Map.get(map, key) do
       nil -> {nil, []}
@@ -745,12 +785,29 @@ defmodule ForgeCore.Workflow.Parser do
     end
   end
 
-  defp non_negative_number(map, key, path, required: required) do
-    case Map.get(map, key) do
-      value when is_number(value) and value >= 0 -> {value, []}
-      nil when required -> {nil, [Error.new(Error.join(path, key), "is required")]}
-      nil -> {nil, []}
-      _ -> {nil, [Error.new(Error.join(path, key), "must be a non-negative number")]}
+  # A budget in weighted tokens (`800k`) under `key`, or the older dollar figure under `legacy_key`,
+  # converted at `ForgeCore.Usage.per_dollar/0` and remembered as `legacy` so that admission can
+  # refuse it by name while a stored spec still runs. Exactly one of the two.
+  defp token_amount(map, key, legacy_key, path) do
+    case {Map.fetch(map, key), Map.fetch(map, legacy_key)} do
+      {{:ok, _}, {:ok, _}} ->
+        {{nil, nil},
+         [Error.new(Error.join(path, legacy_key), "is replaced by #{key}; give one, not both")]}
+
+      {{:ok, value}, :error} when not is_nil(value) ->
+        case Usage.parse(value) do
+          {:ok, tokens} -> {{tokens, nil}, []}
+          {:error, why} -> {{nil, nil}, [Error.new(Error.join(path, key), why)]}
+        end
+
+      {:error, {:ok, dollars}} when is_number(dollars) and dollars >= 0 ->
+        {{Usage.from_dollars(dollars), dollars}, []}
+
+      {:error, {:ok, _}} ->
+        {{nil, nil}, [Error.new(Error.join(path, legacy_key), "must be a non-negative number")]}
+
+      _ ->
+        {{nil, nil}, [Error.new(Error.join(path, key), "is required")]}
     end
   end
 end

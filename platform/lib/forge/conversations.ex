@@ -47,8 +47,13 @@ defmodule Forge.Conversations do
     with :ok <- ticket_of(project, Keyword.get(opts, :ticket)),
          {:ok, memory} <- resource(opts, :memory, Jobs.default_resources().memory),
          {:ok, cores} <- resource(opts, :cores, Jobs.default_resources().cores),
-         {:ok, secrets} <- secret_names(project, Keyword.get(opts, :secrets, [])) do
-      insert(project, text, Keyword.merge(opts, memory: memory, cores: cores, secrets: secrets))
+         {:ok, secrets} <- secret_names(project, Keyword.get(opts, :secrets, [])),
+         {:ok, harness} <- harness(Keyword.get(opts, :harness)) do
+      insert(
+        project,
+        text,
+        Keyword.merge(opts, memory: memory, cores: cores, secrets: secrets, harness: harness)
+      )
     end
   end
 
@@ -102,6 +107,9 @@ defmodule Forge.Conversations do
         model: model(opts),
         # The second dial, chosen and fixed with the model and for the same reason.
         effort: effort(opts),
+        # Chosen with the model and fixed with it: the process is one harness's. The opening form
+        # defaults it to the project's (`Jobs.resolve_harness/2`).
+        harness: Jobs.resolve_harness(Keyword.get(opts, :harness), project.id),
         memory_max: Keyword.fetch!(opts, :memory),
         cores: Keyword.fetch!(opts, :cores),
         # Fixed for the life of every process it has, as the model is; a reopened conversation
@@ -155,6 +163,15 @@ defmodule Forge.Conversations do
   # return the member's id where a second message used to say `system`
   # (`docs/design/conversations.md` § Taking a transition, under the refusal's three reasons).
   defp actor(opts), do: Keyword.get(opts, :actor, :system)
+
+  # **A harness is named against the registry, or it is refused**: it comes off a form, and one
+  # this node does not know would open a conversation nothing can run. Empty, or not a string at
+  # all, is not a choice and resolves to the project's, as the dials do.
+  defp harness(name) when is_binary(name) and name != "" do
+    if name in ForgeCore.Harness.names(), do: {:ok, name}, else: {:error, :unknown_harness}
+  end
+
+  defp harness(_name), do: {:ok, nil}
 
   # Empty is not a choice: it resolves to the project's, which is what nil already means.
   defp model(opts), do: chosen(opts, :model)
@@ -416,39 +433,40 @@ defmodule Forge.Conversations do
   end
 
   @doc """
-  Records that a turn ended: what it cost, how many turns it took, and where its work is.
+  Records that a turn ended: what it used, how many turns it took, and where its work is.
 
-  **Cost is set on the run, and the conversation's is every run's.** The harness reports
-  `total_cost_usd` cumulatively across the process — measured, see § Spend — while `num_turns`
-  counts one turn. The worker has already taken off what a session the process resumed had spent,
-  so the figure each turn carries is the process's own, still cumulative across the process.
-  `progress_attrs/2` adds both, and doing that here would count turn one's cost in every later turn: by turn five a conversation reports several times what it spent and the
-  daily cap trips early on money nobody spent. So the figure is set on the current run
-  (`Forge.Jobs.Runs.cost/3`), and a reopened conversation — a new process, whose own figure
+  **Usage is set on the run, and the conversation's is every run's.** The worker's figure is
+  cumulative across the process — weighted tokens counted per model call, so a session the process
+  resumed never contributes its past — while `num_turns` counts one turn. Adding it here would
+  count turn one's usage in every later turn: by turn five a conversation would report several
+  times what it used and the daily cap would trip early on tokens nobody used. So the figure is set
+  on the current run (`Forge.Jobs.Runs.record/3`), and a reopened conversation — a new process, whose own figure
   starts again from nothing — adds a run rather than overwriting the last one's.
 
-  Idempotent on `(job_id, session, turn)`: the worker re-sends a turn until it is acked, and it
+  Idempotent on `(job_id, run, turn)`: the worker re-sends a turn until it is acked, and it
   numbers turns from one in every process — so after a reopen, turn one is a turn nobody has
-  recorded, not a re-send of the first session's.
+  recorded, not a re-send of the first process's. **The run is in the key and not the session**,
+  because a harness that resumes the same session on a reopen (Codex's thread) would otherwise
+  have every turn of the second process dropped as a repeat of the first's.
   """
   @spec record_turn(Job.t(), map()) :: {:ok, Job.t()} | {:error, term()}
   def record_turn(%Job{kind: :chat} = chat, payload) do
     turn = payload["turn"]
-    session = get_in(payload, ["harness", "session_id"])
+    run = Runs.latest_id(chat.id)
 
-    if recorded?(chat.id, session, turn) do
+    if recorded?(chat.id, run, turn) do
       {:ok, chat}
     else
-      do_record_turn(chat, turn, payload)
+      do_record_turn(chat, run, turn, payload)
     end
   end
 
-  defp do_record_turn(chat, turn, payload) do
+  defp do_record_turn(chat, run, turn, payload) do
     harness = payload["harness"] || %{}
     {documents, refused} = documents(chat, payload)
 
     # The turn's figure is the process's running total, so it is *set* on this run
-    # (`docs/design/conversations.md` § Spend) — and the conversation's cost is every run's, since
+    # (`docs/design/conversations.md` § Spend) — and the conversation's usage is every run's, since
     # a conversation reopened is a new process whose own total starts again from nothing (the
     # worker has taken off what the session it resumed had spent).
     Multi.new()
@@ -459,13 +477,14 @@ defmodule Forge.Conversations do
       put_documents(Multi.new(), chat, documents, open?)
     end)
     |> Multi.run(:spent_before, fn _repo, _changes -> {:ok, Runs.total(chat.id)} end)
-    |> Runs.cost(chat.id, decimal(harness["cost_usd"]))
+    |> Forge.Credentials.put_renew(chat, harness["credential_return"])
+    |> Runs.record(chat.id, Runs.figure(harness))
     |> put_ticket_cost(chat)
     |> Multi.update(:job, fn %{step_open: open?} ->
       Job.progress_changeset(chat, %{
         status: if(open?, do: :running, else: chat.status),
         turns: chat.turns + (harness["turns"] || 1),
-        cost_usd: Runs.total(chat.id),
+        usage: Runs.total(chat.id),
         harness_session_id: harness["session_id"] || chat.harness_session_id,
         session_blob: Jobs.session_blob(chat, harness) || chat.session_blob
       })
@@ -476,6 +495,7 @@ defmodule Forge.Conversations do
         job_id: chat.id,
         payload: %{
           "turn" => turn,
+          "run_id" => run,
           "session_id" => harness["session_id"],
           "commit" => payload["commit"],
           # Why there is no commit, when there is none: the worker's reason, kept so the page can
@@ -483,6 +503,7 @@ defmodule Forge.Conversations do
           # person in the chat does not read (`docs/design/conversations.md` § Commits).
           "uncommitted" => payload["uncommitted"],
           "interrupted" => payload["interrupted"] == true,
+          "usage" => Runs.figure(harness).usage,
           "cost_usd" => harness["cost_usd"],
           "subtype" => harness["subtype"],
           # The job's memory as the turn ended, kept here and nowhere else
@@ -536,18 +557,18 @@ defmodule Forge.Conversations do
 
   defp lock_step_ticket(multi, %Job{}), do: multi
 
-  # A step's turn adds what it cost to its ticket's total, which a conversation about a ticket
-  # otherwise never does (`docs/design/workflow-grammar-v1.md` § `limits.ticket_cost`): the step is
+  # A step's turn adds what it used to its ticket's total, which a conversation about a ticket
+  # otherwise never does (`docs/design/workflow-grammar-v1.md` § `limits.ticket_tokens`): the step is
   # the ticket's own work, so the cap on later jobs sees it — and nothing the cap finds ends the
   # conversation. The delta, because the turn's figure is the process's running total.
   defp put_ticket_cost(multi, %Job{ticket_id: ticket_id} = chat) when is_binary(ticket_id) do
     if Job.step?(chat) do
       Multi.run(multi, :ticket_cost, fn repo, %{spent_before: before} ->
-        delta = Decimal.sub(Runs.total(chat.id), before)
+        delta = Runs.total(chat.id) - before
 
         {_count, _rows} =
           repo.update_all(from(t in Forge.Tickets.Ticket, where: t.id == ^ticket_id),
-            inc: [cost_usd: delta]
+            inc: [usage: delta]
           )
 
         {:ok, delta}
@@ -1076,22 +1097,17 @@ defmodule Forge.Conversations do
 
   defp push_reply(chat), do: Forge.Push.chat_reply(chat)
 
-  # `IS NOT DISTINCT FROM` so that a turn with no session matches another with none: a harness
-  # that never reported one is one session as far as this can tell, which is what it was before
-  # sessions were recorded.
-  defp recorded?(job_id, session, turn) do
+  # `IS NOT DISTINCT FROM` so that a turn with no run matches another with none (a chat that has
+  # no run row at all, which is how the first tests of it were written).
+  defp recorded?(job_id, run, turn) do
     Repo.exists?(
       from e in Event,
         where:
           e.job_id == ^job_id and e.type == "chat.turn" and
             fragment("(? -> 'turn')::int = ?", e.payload, ^turn) and
-            fragment("(? ->> 'session_id') IS NOT DISTINCT FROM ?::text", e.payload, ^session)
+            fragment("(? ->> 'run_id') IS NOT DISTINCT FROM ?::text", e.payload, ^run)
     )
   end
-
-  defp decimal(nil), do: Decimal.new(0)
-  defp decimal(number) when is_float(number), do: Decimal.from_float(number)
-  defp decimal(number) when is_integer(number), do: Decimal.new(number)
 
   @closed "closed"
   # A step ended by Accept: over for good, so it ends as `closed` does (status, branch), but the
@@ -1137,6 +1153,12 @@ defmodule Forge.Conversations do
         chat,
         forgetting(%{status: status, finished_at: DateTime.utc_now(:second)}, forget?)
       )
+    )
+    # A login the last turn refreshed comes back with the report that ends the chat, if the turn
+    # report that would have carried it never did (`Forge.Credentials.put_renew/3`).
+    |> Forge.Credentials.put_renew(
+      chat,
+      get_in(opts[:result] || %{}, ["harness", "credential_return"])
     )
     |> Runs.close(chat.id, DateTime.utc_now(:second))
     |> Events.log(:ended, "chat.ended", actor(opts), %{
@@ -2136,7 +2158,7 @@ defmodule Forge.Conversations do
     - Status: #{job.status}
     - Outcome: #{outcome_line(job)}
     - Turns: #{job.turns}
-    - Cost: #{job.cost_usd} USD
+    - Usage: #{ForgeCore.Usage.format(job.usage)} weighted tokens
     - Started: #{job.started_at || "—"}
     - Finished: #{job.finished_at || "—"}
 

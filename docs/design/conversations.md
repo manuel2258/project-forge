@@ -94,7 +94,7 @@ So `Conversations.messages/1` folds `Events.for_job/1`:
 | `chat.message` | a user message |
 | `job.harness.delivered` | that message's state, once the harness has taken it (§ The wire) |
 | `job.harness.text` | assistant text, appended within the current turn |
-| `chat.turn` | the turn boundary, closing the reply and numbering it; the event also carries the turn's commit and `cost_usd` |
+| `chat.turn` | the turn boundary, closing the reply and numbering it; the event also carries the turn's commit, its `usage` in weighted tokens and the `cost_usd` the harness reported |
 
 `chat.turn` is written by the platform when it records the turn (§ Spend). `job.harness.finished`
 also arrives once a turn and is not the boundary. Tool calls and the rest of the harness stream
@@ -452,7 +452,7 @@ ticket chat is given for a refused move.
   is recorded as its wait reason, `no_secret`, drawn on both pages: on the conversation's, and on
   the ticket's row for the step and in its Decide card. A step sticks no ticket for it, as no
   conversation does, and unlike a job, which does.
-- **Spend** — each turn adds its cost to `ticket.cost_usd` as well as to the conversation. The
+- **Spend** — each turn adds its usage, in weighted tokens, to `ticket.usage` as well as to the conversation. The
   ticket allowance never stops it.
 
 ## Taking a transition
@@ -833,14 +833,16 @@ Spend). A reopen resumes its session as a fork, and the harness starts that proc
 what the session had already spent (`docs/measurements.md` § Session resume), so the worker takes
 the baseline the assignment names off each turn's figure and reports the rest as `cost_usd`.
 
-**The harness's ceiling is set once, not per turn.** What is left of the day is read when the
-conversation is assigned — `remaining_today/0`, in `Jobs.assignment/4` — and passed as
-`--max-budget-usd` when the process starts, or not at all when the day has no cap. It is not
-refreshed as the day's spend moves: money spent elsewhere on the node after the conversation
-started does not lower it, and a reopen is what reads it again. The cap is therefore enforced
-twice: by the harness, at the figure it started with, and by the node, which assigns nothing once
-the day is gone. Whether the harness measures its ceiling per turn or across the session has not
-been measured; `bin/measure streaming` does not pass the flag.
+**The ceiling is set once, not per turn, and it is the worker's.** What is left of the day, in weighted
+tokens, is read when the conversation is assigned — `remaining_today/0`, in `Jobs.assignment/4` —
+and passed as `max_tokens`; **no harness is given a flag for it** (`--max-budget-usd` is gone). The
+worker counts the process's calls as they stream (`ForgeWorker.Job.Meter`) and, past `max_tokens`,
+kills it; its result says `token budget reached` and the conversation goes dormant
+(`Conversations.ended/4`, on the platform, from the worker's result), as reaching the old flag ended the turn. That the session is kept for
+a reopen is the path any hibernation takes, and is not separately tested. It is not refreshed as the day's spend moves: usage elsewhere on the node after the
+conversation started does not lower it, and a reopen is what reads it again. The cap is therefore
+enforced twice: by the worker, at the figure it started with, and by the node, which assigns
+nothing once the day is gone.
 
 **Cost is set on the run, and added across runs; turns are added.** The spike measured
 `total_cost_usd` as cumulative across the process and `num_turns` as per turn; a process that
@@ -1061,3 +1063,14 @@ Two things it adds are this note's to state:
 
 Nothing, now. What was open is above, decided. The first thing to disagree with a decision here
 should change this note before it changes the code.
+
+## Spend in tokens, and the harness (ticket 43)
+
+A conversation's ceiling is what is left of the day in weighted tokens (`max_tokens`, replacing
+`max_cost_usd`); reaching it stops the process: the worker kills it through the wall-clock path, its result says
+`token budget reached`, and the conversation hibernates with that reason (`Conversations.ended/4`, on the platform, from the worker's result)
+like any other that ends, to be reopened the same way. The dollar ceiling ended the *turn* and kept
+the process; a kill does not, and a turn in flight when it lands has no report. **What the
+platform's page says of such a conversation was not looked at.**
+The opening form picks the conversation's harness, defaulting to the project's, and its model and
+effort selects offer that harness's.

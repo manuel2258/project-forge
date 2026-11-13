@@ -14,6 +14,7 @@ if config_env() != :test do
     Enum.reject(
       [
         executable: System.get_env("FORGE_CLAUDE_EXECUTABLE"),
+        codex_executable: System.get_env("FORGE_CODEX_EXECUTABLE"),
         model: System.get_env("FORGE_CLAUDE_MODEL"),
         effort: System.get_env("FORGE_CLAUDE_EFFORT")
       ],

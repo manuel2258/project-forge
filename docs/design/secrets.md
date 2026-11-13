@@ -466,3 +466,10 @@ can see a key on screen when the picture was taken does not change — any membe
    line of stderr. Each guard named in step 3 — the reserved-name check on both ends, a secret the
    state does not name, another project's secret picked for a conversation, the seal's purpose —
    and each masking site was mutated and seen to fail a test.
+
+## Masking a job's own credential (ticket 43)
+
+Masking widens from project secrets to the job's own credential: Claude's token or key, a login's
+three tokens (and those of the `auth.json` at mask time, since a renewal changes them) and an
+access token — the exact value and its JSON-escaped form, in events, transcripts, session files,
+documents and failure reasons. Against accidents, not an agent that means it.

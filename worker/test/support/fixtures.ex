@@ -8,6 +8,11 @@ defmodule ForgeWorker.Fixtures do
 
   def fake_executable, do: @fake
 
+  @fake_codex Path.expand("fake_codex.sh", __DIR__)
+
+  @doc "The stand-in for `codex app-server` (`test/support/fake_codex.sh`)."
+  def fake_codex_executable, do: @fake_codex
+
   def spec(overrides \\ %{}) do
     Map.merge(
       %Spec{
@@ -20,7 +25,7 @@ defmodule ForgeWorker.Fixtures do
         env: "implement",
         commit: String.duplicate("a", 40),
         branch: "ticket/7",
-        budget: %{turns: 40, cost: 2.0},
+        budget: %{turns: 40, tokens: 400_000},
         preamble_hash: ForgeCore.Prompt.preamble_hash(),
         inputs: [
           %Input{name: "ticket", version: 1, content: "Scores vanish on restart."},
@@ -49,6 +54,9 @@ defmodule ForgeWorker.Fixtures do
         ForgeCore.Job.Credential.seal(Jason.encode!(secrets), token_hash(), job_id, :secrets)
     }
   end
+
+  @doc "The digest of this machine's token, as the platform keeps it; sets a token for the test when there is none."
+  def worker_token_hash, do: token_hash()
 
   defp token_hash do
     token =

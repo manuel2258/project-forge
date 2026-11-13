@@ -9,6 +9,8 @@ defmodule ForgeWeb.OperatorLiveTest do
   import Forge.MergeFixtures, only: [changeset!: 2]
   import ForgeWeb.Operator.Components, only: [commit_message_id: 1]
 
+  import Ecto.Query, only: [from: 2]
+
   alias Forge.{Jobs, Projects, Tickets}
 
   setup :register_and_log_in_user
@@ -890,8 +892,8 @@ defmodule ForgeWeb.OperatorLiveTest do
   # only record was the free text of an event. "Ran out of money" and "ran out of turns" want
   # different responses from whoever reads the row.
   for {scenario, word, other} <- [
-        {"max_turns", "turns", "cost"},
-        {"max_budget", "cost", "turns"}
+        {"max_turns", "turns", "tokens"},
+        {"max_budget", "tokens", "turns"}
       ] do
     test "a job stopped by the #{word} ceiling says which one, on every row that draws it", %{
       conn: conn,
@@ -968,6 +970,113 @@ defmodule ForgeWeb.OperatorLiveTest do
            |> Floki.parse_document!()
            |> Floki.find("[data-ceiling]")
            |> Floki.attribute("data-ceiling") == ["wall clock"]
+  end
+
+  # Windows are an estimate on a placeholder constant; what was counted is the weighted tokens, and
+  # a figure converted from dollars at the migration says so (`docs/design/capacity.md`).
+  test "usage is drawn in windows with the exact weighted tokens behind it", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    scenario("success", "refinement.md")
+    job = run_pending(ticket.id)
+    assert Jobs.get!(job.id).usage == 3150
+
+    {:ok, view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
+    assert html =~ ~r/0\.003\d windows/
+    assert view |> element("#job-usage") |> render() =~ "3,150 weighted tokens"
+    refute html =~ "converted from dollars"
+
+    {:ok, _} = Forge.Repo.update(Ecto.Changeset.change(Jobs.get!(job.id), usage_converted: true))
+    {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
+    assert html =~ "converted from dollars"
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+    assert view |> element("#ticket-usage") |> render() =~ "3,150 weighted tokens"
+    refute has_element?(view, "#ticket-usage-converted")
+
+    # The ticket's own total says so too (criterion 12), not only the job it came from.
+    {:ok, _} =
+      Forge.Repo.update(Ecto.Changeset.change(Tickets.get!(ticket.id), usage_converted: true))
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+    assert has_element?(view, "#ticket-usage-converted", "converted from dollars")
+  end
+
+  test "a job page says which harness ran it", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    scenario("success", "refinement.md")
+    job = run_pending(ticket.id)
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
+    assert view |> element("#job-harness") |> render() =~ "Claude Code"
+
+    Forge.Repo.update!(Ecto.Changeset.change(Jobs.get!(job.id), harness: "codex"))
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
+    assert view |> element("#job-harness") |> render() =~ "Codex"
+  end
+
+  # Criterion 32: the harness is named beside its model, on the page and on the ticket's row, and
+  # the model is the project's for that harness when the job names none.
+  test "a job's row and page say Codex · <model>", %{conn: conn, user: user, project: project} do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    [job] = Jobs.for_ticket(ticket.id)
+
+    Forge.Repo.update!(Ecto.Changeset.change(job, harness: "codex"))
+    Forge.Repo.update!(Ecto.Changeset.change(project, codex_model: "gpt-look-5", model: "opus"))
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
+    assert view |> element("#job-harness") |> render() =~ "Codex · gpt-look-5"
+    refute render(view) =~ "opus"
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+    assert view |> element("#job-#{job.id}-harness") |> render() =~ "Codex · gpt-look-5"
+    refute render(view) =~ "opus"
+  end
+
+  # Criterion 30: a run's detail gives its tokens by kind, and a converted run, which has none,
+  # says where its figure came from instead.
+  test "the job page lists each run with its tokens by kind", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    scenario("success", "refinement.md")
+    job = run_pending(ticket.id)
+
+    Forge.Repo.delete_all(from r in Forge.Jobs.Run, where: r.job_id == ^job.id)
+
+    Forge.ForgeFixtures.run!(Jobs.get!(job.id),
+      usage: 123_456,
+      tokens: %{
+        "input" => 120_000,
+        "cache_write" => 0,
+        "cache_read" => 3_000_000,
+        "output" => 90_000
+      }
+    )
+
+    Forge.ForgeFixtures.run!(Jobs.get!(job.id),
+      usage: 50_000,
+      started_at: DateTime.add(DateTime.utc_now(:second), 60)
+    )
+    |> Ecto.Changeset.change(converted: true)
+    |> Forge.Repo.update!()
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
+    runs = view |> element("#job-runs") |> render()
+    assert runs =~ "120k fresh input · 0 cache write · 3M cache read · 90k output"
+    assert runs =~ "123,456 weighted tokens"
+    assert runs =~ "converted from dollars"
+    assert length(Regex.scan(~r/converted from dollars/, runs)) == 1
   end
 
   test "the job page shows the pinned manifest and harness events", %{

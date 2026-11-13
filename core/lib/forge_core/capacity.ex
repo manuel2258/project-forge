@@ -6,22 +6,25 @@ defmodule ForgeCore.Capacity do
   significant figures. This is the unit that stays true when a ticket's work spans four windows
   and a week, which a percentage cannot.
 
-  The conversion from what the harness reports (a client-side cost estimate) to windows needs
-  one calibration constant, the cost of a whole window. The provider reports window *utilization*
+  The conversion from a run's usage (weighted tokens, `ForgeCore.Usage`) to windows needs one
+  calibration constant, the weighted tokens of a whole window. The provider reports window *utilization*
   but never a per-job share, so this is the only bridge. It is uncalibrated until dogfooding sets
   it — see `docs/design/capacity.md`. Nothing schedules, caps or refuses on it; it is display only.
   """
 
   @doc """
-  Windows consumed by `cost`, given the cost of one whole window.
+  Windows consumed by `tokens` weighted tokens, given the weighted tokens of one whole window.
 
-  A window cost of zero or less means the constant is not configured, in which case there is no
+  A window size of zero or less means the constant is not configured, in which case there is no
   honest conversion and the answer is `nil` rather than a guess.
   """
   @spec windows(number() | nil, number()) :: float() | nil
-  def windows(nil, _window_cost), do: nil
-  def windows(_cost, window_cost) when not is_number(window_cost) or window_cost <= 0, do: nil
-  def windows(cost, window_cost) when is_number(cost), do: cost / window_cost
+  def windows(nil, _window_tokens), do: nil
+
+  def windows(_tokens, window_tokens) when not is_number(window_tokens) or window_tokens <= 0,
+    do: nil
+
+  def windows(tokens, window_tokens) when is_number(tokens), do: tokens / window_tokens
 
   @doc """
   A window count at two significant figures: `1.4 windows`, `0.67 windows`, `12 windows`.

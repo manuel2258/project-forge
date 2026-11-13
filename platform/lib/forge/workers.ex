@@ -473,11 +473,21 @@ defmodule Forge.Workers do
   # them from nil, and nil is ungated, so filling them can narrow what the machine holds and never
   # widen it. The protocol is written at the join, before the `ready` (`admit/2`), which is the
   # gap `docs/design/credentials.md` § How a job picks records.
-  defp gate_offer(%Worker{memory_budget: memory, harness: harness}),
-    do: {memory, Map.take(harness || %{}, ["driver", "credential"])}
+  defp gate_offer(%Worker{memory_budget: memory, harness: harness, harnesses: harnesses}),
+    do: {memory, Map.take(harness || %{}, ["driver", "credential"]), offered_drivers(harnesses)}
+
+  defp offered_drivers(nil), do: nil
+
+  defp offered_drivers(harnesses),
+    do: Enum.map(harnesses, &Map.take(&1, ["driver", "credential"]))
+
+  # What the report's list must be to be kept: a list of maps. Anything else is not an offer, and
+  # the machine is left as it was.
+  defp offers_list?(harnesses), do: is_list(harnesses) and Enum.all?(harnesses, &is_map/1)
 
   defp record_ready(worker, report) do
     harness = report["harness"]
+    harnesses = report["harnesses"]
     memory_budget = report["memory_budget"] || 0
     cores = report["cores"]
     accepts = accepts_from(report["accepts"])
@@ -499,8 +509,10 @@ defmodule Forge.Workers do
     template_back? =
       is_nil(worker.last_seen_at) and Provisioning.succeeded(worker.template_id, worker.image)
 
-    with {:ok, readied} <-
-           update(worker, if(is_map(harness), do: Map.put(attrs, :harness, harness), else: attrs)) do
+    attrs = if is_map(harness), do: Map.put(attrs, :harness, harness), else: attrs
+    attrs = if offers_list?(harnesses), do: Map.put(attrs, :harnesses, harnesses), else: attrs
+
+    with {:ok, readied} <- update(worker, attrs) do
       Log.record(readied.id, "ready", :info, offers(readied))
 
       # **An arrival is a template back in service, or a machine whose offer to the gate changed**
@@ -586,6 +598,7 @@ defmodule Forge.Workers do
   @spec offered(String.t() | nil) :: %{
           aliases: [String.t()],
           efforts: [String.t()],
+          codex_efforts: [String.t()],
           models: [%{id: String.t(), name: String.t()}]
         }
   def offered(project_id) do
@@ -599,8 +612,24 @@ defmodule Forge.Workers do
     %{
       aliases: union(harnesses, "aliases"),
       efforts: union(harnesses, "efforts"),
+      codex_efforts: codex_efforts(),
       models: Forge.Credentials.models(project_id)
     }
+  end
+
+  # Codex's own levels, from the machines that offer Codex: `harness` is the one a worker is
+  # configured to run (Claude Code's) and Codex is in `harnesses`, an entry of its own that a
+  # machine with no `codex` leaves without levels or leaves out.
+  defp codex_efforts do
+    Repo.all(
+      from w in Worker,
+        where: w.status in [:ready, :busy, :idle] and not is_nil(w.harnesses),
+        select: w.harnesses
+    )
+    |> Enum.flat_map(fn offers ->
+      for %{"driver" => "codex"} = offer <- offers, do: offer
+    end)
+    |> union("efforts")
   end
 
   # What a worker reports is whatever it sent, so a value that is not a list counts as nothing and
@@ -998,6 +1027,11 @@ defmodule Forge.Workers do
   """
   @spec runs?(Worker.t(), String.t() | nil) :: boolean()
   def runs?(%Worker{}, nil), do: true
+
+  # A machine that lists what it offers is believed about each of them; one that does not offers
+  # the single harness it always sent.
+  def runs?(%Worker{harnesses: [_ | _] = harnesses}, harness),
+    do: Enum.any?(harnesses, &(&1["driver"] == harness and &1["credential"] == "per_job"))
 
   def runs?(%Worker{harness: %{"driver" => harness, "credential" => "per_job"}}, harness),
     do: true

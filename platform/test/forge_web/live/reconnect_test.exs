@@ -180,11 +180,11 @@ defmodule ForgeWeb.ReconnectTest do
                 releasing:
                   prompt: agents/release.md
                   produces: [release-notes.md]
-                  budget: { turns: 5, cost: 1.00 }
+                  budget: { turns: 5, tokens: 200k }
                 published: {}
               transitions:
                 - { from: releasing, to: published }
-              limits: { ticket_cost: 5.00 }
+              limits: { ticket_tokens: 1M }
               """
             })
         },
@@ -335,7 +335,12 @@ defmodule ForgeWeb.ReconnectTest do
       {:ok, _chat} =
         Conversations.record_turn(chat, %{
           "turn" => 1,
-          "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"}
+          "harness" => %{
+            "turns" => 1,
+            "usage" => 2_000,
+            "cost_usd" => 0.01,
+            "subtype" => "success"
+          }
         })
     end
 
@@ -645,6 +650,10 @@ defmodule ForgeWeb.ReconnectTest do
       {"live/project_settings_live.ex", "set-secret"} => "a secret's name and its value",
       {"live/project_settings_live.ex", "add-mirror"} => "a mirror's url, user and token",
       {"live/workers_live.ex", "save"} => "a worker's memory and cores",
+      {"live/project_settings_live.ex", "harness"} =>
+        "a harness select, which a rejoin puts back to what is saved",
+      {"live/project_settings_live.ex", "codex"} =>
+        "Codex's model and effort, typed, as the model and the effort above are",
       {"live/project_settings_live.ex", "model"} => "a model name, while no worker is connected",
       {"live/project_settings_live.ex", "effort"} =>
         "an effort level, while no worker offers one",

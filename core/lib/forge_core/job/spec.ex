@@ -167,10 +167,10 @@ defmodule ForgeCore.Job.Spec do
           commit: String.t(),
           branch: String.t(),
           # At run time also `ticket_left` and `ticket_limit`, and `declared` and `lowered_by`
-          # when the cost is less than the state declared.
+          # when the tokens are fewer than the state declared.
           budget: %{
             required(:turns) => pos_integer(),
-            required(:cost) => number(),
+            required(:tokens) => non_neg_integer(),
             optional(atom()) => term()
           },
           preamble_hash: String.t() | nil,
@@ -394,18 +394,34 @@ defmodule ForgeCore.Job.Spec do
 
   defp budget_from_map(nil), do: nil
 
-  # `turns` and `cost` always; the rest only when the platform added them at run time — the
-  # ticket's allowance, and what a lowered cost was lowered from and by — so a budget stated on its
-  # own keeps the shape it always had.
+  # `turns` and `tokens` always; the rest only when the platform added them at run time — the
+  # ticket's allowance, and what a lowered budget was lowered from and by — so a budget stated on
+  # its own keeps the shape it always had. A spec stored before budgets were counted in tokens
+  # carries `cost` in dollars (and `declared` and `ticket_*` in dollars with it): every one of those
+  # is converted at `ForgeCore.Usage.per_dollar/0`, so a job already pending runs on.
   defp budget_from_map(map) do
+    legacy? = nested(map, :tokens) == nil and nested(map, :cost) != nil
+
+    # `lowered_by` is the *name* of the limit that bound (a string), and `dollars/1` hands a
+    # non-number back as it was, so exempting it here is an **equivalent mutant**: removing
+    # `key != :lowered_by` changes nothing observable. Kept so the intent is written down.
+    convert = fn key, value ->
+      if legacy? and key != :lowered_by, do: dollars(value), else: value
+    end
+
+    tokens = if legacy?, do: dollars(nested(map, :cost)), else: nested(map, :tokens)
+
     [:ticket_left, :ticket_limit, :declared, :lowered_by]
-    |> Enum.reduce(%{turns: nested(map, :turns), cost: nested(map, :cost)}, fn key, budget ->
+    |> Enum.reduce(%{turns: nested(map, :turns), tokens: tokens}, fn key, budget ->
       case nested(map, key) do
         nil -> budget
-        value -> Map.put(budget, key, value)
+        value -> Map.put(budget, key, convert.(key, value))
       end
     end)
   end
+
+  defp dollars(value) when is_number(value), do: ForgeCore.Usage.from_dollars(value)
+  defp dollars(value), do: value
 
   # Named rather than converted, and a kind nobody knows is refused as `Result` refuses a status it
   # does not know: a spec whose kind is guessed runs the wrong job.

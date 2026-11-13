@@ -39,7 +39,7 @@ defmodule ForgeCore.Workflow.CommandsTest do
       may_invoke:
         build: { max: 40 }
         test: { max: 20, concurrent: 4 }
-      budget: { turns: 10, cost: 1 }
+      budget: { turns: 10, tokens: 200k }
     checking:
       invoke: [build, [test, --all, --jobs, 4]]
       exit: { 0: done, 2: flaky, "*": checks_failed }
@@ -51,7 +51,7 @@ defmodule ForgeCore.Workflow.CommandsTest do
     - { from: checking, to: implementing, when: checks_failed, max: 3 }
     - { from: checking, to: checking, when: flaky, max: 1 }
   limits:
-    ticket_cost: 5
+    ticket_tokens: 1M
   """
 
   defp base_map do
@@ -567,10 +567,11 @@ defmodule ForgeCore.Workflow.CommandsTest do
             "env" => "build",
             "model" => "opus",
             "effort" => "high",
+            "harness" => "codex",
             "inputs" => ["ticket"],
             "produces" => ["x.md"],
             "outcomes" => ["done"],
-            "budget" => %{"turns" => 1, "cost" => 1}
+            "budget" => %{"turns" => 1, "tokens" => 200_000}
           })
         end)
 
@@ -578,6 +579,7 @@ defmodule ForgeCore.Workflow.CommandsTest do
                {"states.checking.budget", "not allowed on a command state"},
                {"states.checking.effort", "not allowed on a command state"},
                {"states.checking.env", "not allowed on a command state"},
+               {"states.checking.harness", "not allowed on a command state"},
                {"states.checking.inputs", "not allowed on a command state"},
                {"states.checking.model", "not allowed on a command state"},
                {"states.checking.outcomes", "not allowed on a command state"},

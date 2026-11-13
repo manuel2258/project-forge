@@ -111,18 +111,15 @@ defmodule ForgeCore.Job.Correction do
   end
 
   @doc """
-  What is left of `spec`'s budget once `spent` has gone — turns and cost — or `:exhausted` when
+  What is left of `spec`'s budget once `spent` has gone — turns and weighted tokens — or `:exhausted` when
   too little remains for a correction to be worth starting.
   """
-  @spec remaining(Spec.t(), %{turns: non_neg_integer(), cost: number()}) ::
-          {:ok, %{turns: pos_integer(), cost: number()}} | :exhausted
-  def remaining(%Spec{budget: %{turns: turns, cost: cost}}, %{turns: used, cost: spent}) do
-    # Whole cents, rounded down: the harness is handed the figure to two places, and rounding
-    # $0.996 to `1.00` would let a correction spend past what the job was given, while $0.004
-    # would reach it as `0.00`.
-    left = %{turns: turns - used, cost: Float.floor((cost - spent) * 1.0, 2)}
+  @spec remaining(Spec.t(), %{turns: non_neg_integer(), tokens: non_neg_integer()}) ::
+          {:ok, %{turns: pos_integer(), tokens: pos_integer()}} | :exhausted
+  def remaining(%Spec{budget: %{turns: turns, tokens: tokens}}, %{turns: used, tokens: spent}) do
+    left = %{turns: turns - used, tokens: tokens - spent}
 
-    if left.turns >= 1 and left.cost >= 0.01, do: {:ok, left}, else: :exhausted
+    if left.turns >= 1 and left.tokens >= 1, do: {:ok, left}, else: :exhausted
   end
 
   def remaining(%Spec{}, _spent), do: :exhausted

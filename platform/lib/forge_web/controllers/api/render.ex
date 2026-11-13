@@ -28,7 +28,7 @@ defmodule ForgeWeb.Api.Render do
       body: t.body,
       state: t.state,
       status: t.status,
-      cost_usd: Decimal.to_string(t.cost_usd),
+      usage: t.usage,
       branch: t.branch,
       base_commit: t.base_commit,
       workflow_commit: t.workflow_commit,
@@ -53,7 +53,7 @@ defmodule ForgeWeb.Api.Render do
       # is the whole of it (`docs/design/capacity.md` § Four exhaustions, three treatments).
       exhausted: j.exhausted,
       turns: j.turns,
-      cost_usd: Decimal.to_string(j.cost_usd),
+      usage: j.usage,
       harness_session_id: j.harness_session_id,
       started_at: j.started_at,
       finished_at: j.finished_at,
@@ -232,7 +232,7 @@ defmodule ForgeWeb.Api.Render do
       documents: review_artifacts(ticket, :document),
       presentations: review_artifacts(ticket, :presentation),
       answers: review_answers(ticket),
-      cost_usd: Decimal.to_string(ticket.cost_usd)
+      usage: ticket.usage
     }
   end
 

@@ -26,24 +26,24 @@ defmodule Forge.LoopBackTest do
       prompt: agents/refine.md
       inputs: [ticket]
       produces: [refinement.md]
-      budget: { turns: 20, cost: 0.50 }
+      budget: { turns: 20, tokens: 100k }
     planning:
       prompt: agents/plan.md
       inputs: [ticket, refinement.md, implementation.md]
       produces: [plan.md]
-      budget: { turns: 40, cost: 2.00 }
+      budget: { turns: 40, tokens: 400k }
     implementing:
       prompt: agents/implement.md
       inputs: [plan.md, review.md, test-report.md]
       produces: [implementation.md, changeset]
       outcomes: [done, plan_invalid]
-      budget: { turns: 200, cost: 10.00 }
+      budget: { turns: 200, tokens: 2M }
     reviewing:
       prompt: agents/review.md
       inputs: [plan.md, implementation.md, changeset]
       produces: [review.md, commit-message]
       outcomes: [done, changes_requested]
-      budget: { turns: 60, cost: 3.00 }
+      budget: { turns: 60, tokens: 600k }
     human_testing:
       produces: [test-report.md]
     merged:
@@ -58,7 +58,7 @@ defmodule Forge.LoopBackTest do
     - { from: human_testing, to: merged,       approve: [changeset] }
     - { from: human_testing, to: implementing }
   limits:
-    ticket_cost: 25.00
+    ticket_tokens: 5M
   """
 
   setup do

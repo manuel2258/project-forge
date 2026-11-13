@@ -230,12 +230,12 @@ defmodule Forge.GitFixtures do
                prompt: agents/integrate.md
                inputs: [changeset]
                produces: [changeset]
-               budget: { turns: 10, cost: 1.00 }
+               budget: { turns: 10, tokens: 200k }
              reviewing:
                prompt: agents/integrate.md
                inputs: [changeset]
                produces: [review.md]
-               budget: { turns: 10, cost: 1.00 }
+               budget: { turns: 10, tokens: 200k }
            """,
            "  - { from: integrating, to: reviewing }\n  - { from: reviewing, to: review_ready }\n",
            ""}
@@ -249,7 +249,7 @@ defmodule Forge.GitFixtures do
                prompt: agents/integrate.md
                inputs: [changeset]
                produces: [changeset]
-               budget: { turns: 10, cost: 1.00 }
+               budget: { turns: 10, tokens: 200k }
            """, "  - { from: integrating, to: #{to} }\n", ""}
       end
 
@@ -261,7 +261,7 @@ defmodule Forge.GitFixtures do
         prompt: agents/implement.md
         produces: [implementation.md, changeset, commit-message]
         outcomes: [done, engine_merges]
-        budget: { turns: 10, cost: 1.00 }
+        budget: { turns: 10, tokens: 200k }
       review_ready: {}
       merged:
         on_enter: merge
@@ -269,7 +269,7 @@ defmodule Forge.GitFixtures do
       - { from: implementing, to: review_ready }
       - { from: review_ready, to: merged, approve: [changeset] }
     #{back}#{engine}limits:
-      ticket_cost: 25.00
+      ticket_tokens: 5M
     """
   end
 

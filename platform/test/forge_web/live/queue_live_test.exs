@@ -734,7 +734,7 @@ defmodule ForgeWeb.QueueLiveTest do
     {:ok, _chat} =
       Forge.Conversations.record_turn(chat, %{
         "turn" => 1,
-        "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"}
+        "harness" => %{"turns" => 1, "usage" => 2_000, "cost_usd" => 0.01, "subtype" => "success"}
       })
 
     {:ok, view, _html} = live(conn, ~p"/")
@@ -1063,7 +1063,7 @@ defmodule ForgeWeb.QueueLiveTest do
       assert has_element?(view, "#queue-under-way")
 
       previous = Application.get_env(:forge, Forge.Spend, [])
-      Application.put_env(:forge, Forge.Spend, daily_cost_usd: 0.0)
+      Application.put_env(:forge, Forge.Spend, daily_tokens: 0)
       on_exit(fn -> Application.put_env(:forge, Forge.Spend, previous) end)
 
       {:ok, view, _html} = live(conn, ~p"/")

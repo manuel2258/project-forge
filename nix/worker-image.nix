@@ -34,6 +34,24 @@ let
   claudeExecutable = "${claudeHome}/bin/claude";
   claudeInstaller = "https://claude.ai/install.sh";
 
+
+  # Codex CLI, installed the way Claude Code is and for the same reason: nixpkgs' copy sits
+  # read-only in the store, so nothing could replace it. OpenAI publishes a static (musl) build of
+  # each release, so it needs no loader of the `environment.ldso` kind and lands in the same
+  # `claudeHome/bin` the worker's PATH already carries. x86_64 only, as this image is. The unit does
+  # not use a `codex update` of its own: it fetches the latest release each boot and replaces the
+  # binary, and the outcome is `skipped` when the version it ends with is the one it began with.
+  codexExecutable = "${claudeHome}/bin/codex";
+  codexAsset = "codex-x86_64-unknown-linux-musl";
+  codexReleaseUrl = "https://github.com/openai/codex/releases/latest/download/${codexAsset}.tar.gz";
+  codexUpdateStatus = "${root}/codex-update.json";
+
+  # The same three bounds, and the unit's own computed from them: a probe before, a fetch, a probe
+  # after.
+  codexFetchTimeout = 120;
+  codexUnitTimeout =
+    2 * (claudeProbeTimeout + claudeKill) + (codexFetchTimeout + claudeKill) + 30;
+
   # What goes on a `systemd.services.<name>.path`, which is **not** a list of directories: NixOS
   # runs it through `makeBinPath`, so each entry gets `/bin` and `/sbin` appended. A literal
   # `${root}/.local/bin` there becomes `${root}/.local/bin/bin` and the install is not on the
@@ -560,6 +578,104 @@ in
     '';
   };
 
+  # Install or update Codex once, before the worker can report `ready`: `claude-code-update`'s
+  # twin, ordered and bounded the same way, and writing `codex-update.json` for
+  # `ForgeWorker.ClaudeUpdate.status/2` to read (docs/design/codex.md § On the image). Wanted and
+  # not required, for that unit's reason: a worker with no Codex runs Claude Code jobs, and the
+  # workers page says why it takes no Codex ones.
+  systemd.services.codex-update = {
+    description = "Install or update this worker's Codex CLI";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "forge-worker.service" ];
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
+
+    path = [
+      pkgs.bash
+      pkgs.coreutils
+      pkgs.curl
+      pkgs.gnugrep
+      pkgs.gnutar
+      pkgs.gzip
+      pkgs.jq
+    ];
+
+    environment = {
+      HOME = root;
+      SSL_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt";
+    };
+
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      TimeoutStartSec = "${toString codexUnitTimeout}s";
+    };
+
+    script = ''
+      set +e
+      set -uo pipefail
+      umask 022
+
+      rm -f ${codexUpdateStatus}
+
+      installed() {
+        [ -x ${codexExecutable} ] || return 0
+        timeout -k ${toString claudeKill} ${toString claudeProbeTimeout} \
+          ${codexExecutable} --version 2> /dev/null | head -1 || true
+      }
+
+      log=$(mktemp)
+      dir=$(mktemp -d)
+      before=$(installed)
+      status=0
+
+      echo "codex-update: fetching ${codexReleaseUrl}"
+      # Fetched and unpacked into a directory of its own, and moved over the binary only when the
+      # whole of it arrived: a fetch that dies half way leaves the installed binary as it was.
+      timeout -k ${toString claudeKill} ${toString codexFetchTimeout} bash -c \
+        'curl -fsSL --proto "=https" --proto-redir "=https" --max-time 100 "$1" | tar -xz -C "$2"' \
+        bash ${codexReleaseUrl} "$dir" > "$log" 2>&1 || status=$?
+
+      if [ "$status" -eq 0 ]; then
+        if [ -f "$dir/${codexAsset}" ]; then
+          mkdir -p ${claudeHome}/bin
+          chmod 755 "$dir/${codexAsset}"
+          mv -f "$dir/${codexAsset}" ${codexExecutable} > "$log" 2>&1 || status=$?
+        else
+          echo "the release held no ${codexAsset}" > "$log"
+          status=1
+        fi
+      fi
+
+      after=$(installed)
+
+      if [ -z "$after" ] || [ "$status" -ne 0 ]; then
+        outcome=failed
+      elif [ "$after" != "$before" ]; then
+        outcome=succeeded
+      else
+        outcome=skipped
+      fi
+
+      error=""
+      if [ "$outcome" = failed ]; then
+        error=$(grep -v '^[[:space:]]*$' "$log" | tail -3 | tr '\n' ' ' | cut -c 1-400 || true)
+        [ -n "$error" ] || error="exit status $status, and it said nothing"
+      fi
+
+      if jq -n --arg outcome "$outcome" --arg version "$after" --arg error "$error" \
+        '{ outcome: $outcome }
+           + (if $version == "" then {} else { version: $version } end)
+           + (if $error == "" then {} else { error: $error } end)' > "$log.json"; then
+        mv "$log.json" ${codexUpdateStatus}
+      fi
+
+      rm -rf "$log" "$log.json" "$dir"
+      echo "codex-update: $outcome ''${after:-none}"
+      exit 0
+    '';
+  };
+
   # -- the release ----------------------------------------------------------------------------
 
   # Modelled on nix/module.nix's systemd.services.forge. It is ordered after the unit that
@@ -576,13 +692,14 @@ in
       "nix-store-register.service"
       "forge-worker-config.service"
       "claude-code-update.service"
+      "codex-update.service"
     ];
 
     # `wants` rather than `requires` for the update, so the pairing is this unit's own and does
     # not rest on both happening to be `wantedBy = multi-user.target`: `Wants=` pulls it in and
     # ignores how it ends, `After=` orders behind it. A restart pulls in a unit that
     # `RemainAfterExit` has left active, which is a no-op — criterion 7.
-    wants = [ "network-online.target" "claude-code-update.service" ];
+    wants = [ "network-online.target" "claude-code-update.service" "codex-update.service" ];
 
     # claude-code-update.service is in `after` and `wants` above and deliberately *not* here: the ordering is
     # what withholds `ready` until the attempt has finished, and a `Requires=` on it would let a
@@ -619,6 +736,7 @@ in
       FORGE_ARCHIVE = "9p";
       FORGE_NIX_ENV = "1";
       FORGE_CLAUDE_EXECUTABLE = claudeExecutable;
+      FORGE_CODEX_EXECUTABLE = codexExecutable;
       # **This covers the worker's own invocations and nothing else.** `ForgeWorker.Job.Exec`
       # composes a job's environment from an allowlist and `env -i`, so nothing set here reaches a
       # job — an earlier attempt's comment claimed it did, and it did not. What a job gets is set

@@ -16,7 +16,7 @@ defmodule ForgeCore.Fixtures do
       env: "implement",
       commit: String.duplicate("a", 40),
       branch: "ticket/7",
-      budget: %{turns: 40, cost: 2.0},
+      budget: %{turns: 40, tokens: 400_000},
       preamble_hash: "sha256:x",
       inputs: [
         %Input{name: "ticket", version: 1, content: "Scores vanish."},

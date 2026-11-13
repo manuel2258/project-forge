@@ -99,11 +99,11 @@ defmodule ForgeWeb.ProjectLiveTest do
           prompt: agents/survey.md
           inputs: [ticket]
           produces: [survey.md]
-          budget: { turns: 5, cost: 0.10 }
+          budget: { turns: 5, tokens: 20k }
         done_state: {}
       transitions:
         - { from: surveying, to: done_state }
-      limits: { ticket_cost: 1.00 }
+      limits: { ticket_tokens: 200k }
       """
     })
   end

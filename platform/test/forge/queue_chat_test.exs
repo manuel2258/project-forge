@@ -35,7 +35,7 @@ defmodule Forge.QueueChatTest do
     {:ok, chat} =
       Conversations.record_turn(chat, %{
         "turn" => System.unique_integer([:positive]),
-        "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"}
+        "harness" => %{"turns" => 1, "usage" => 2_000, "cost_usd" => 0.01, "subtype" => "success"}
       })
 
     chat
@@ -193,7 +193,12 @@ defmodule Forge.QueueChatTest do
         Conversations.record_turn(chat, %{
           "turn" => 1,
           "interrupted" => true,
-          "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "error_during_execution"}
+          "harness" => %{
+            "turns" => 1,
+            "usage" => 2_000,
+            "cost_usd" => 0.01,
+            "subtype" => "error_during_execution"
+          }
         })
 
       refute_receive {:push, _endpoint, _payload, _opts}, 300

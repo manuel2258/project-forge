@@ -234,7 +234,7 @@ defmodule Forge.EffortTest do
     # would never get to look at the field they are about.
     @spec_with_budget %{
       "prompt" => "agents/refine.md",
-      "budget" => %{"turns" => 10, "cost" => 1.0}
+      "budget" => %{"turns" => 10, "tokens" => 200_000}
     }
 
     setup %{project: project} do

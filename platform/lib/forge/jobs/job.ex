@@ -17,7 +17,7 @@ defmodule Forge.Jobs.Job do
   # Which ceiling a `budget_exhausted` job ran out of. Not an outcome of its own: the engine
   # routes on the outcome, and a workflow naming `budget_exhausted` must keep working whichever
   # ceiling bound (`docs/design/capacity.md` § Four exhaustions, three treatments).
-  @ceilings [:turns, :cost, :wall_clock]
+  @ceilings [:turns, :tokens, :wall_clock]
   @kinds [:workflow, :chat, :command]
 
   @primary_key {:id, :binary_id, autogenerate: true}
@@ -30,6 +30,9 @@ defmodule Forge.Jobs.Job do
     # A conversation's effort, chosen with its model and fixed the same way. A workflow job has
     # none, for the same reason: its effort is its state's.
     field :effort, :string
+    # Which harness runs it, fixed when the job is made: its state's, else its project's, else
+    # Claude Code (`Forge.Jobs.resolve_harness/2`). Nil for a command, which runs none.
+    field :harness, :string
     field :state, :string
     field :attempt, :integer
     field :spec, :map
@@ -47,14 +50,15 @@ defmodule Forge.Jobs.Job do
     field :status, Ecto.Enum, values: @statuses, default: :pending
     field :outcome, Ecto.Enum, values: @outcomes
     field :declared_outcome, :string
-    # What a `budget_exhausted` job ran out of: its turn ceiling, its cost ceiling, or the
+    # What a `budget_exhausted` job ran out of: its turn ceiling, its token ceiling, or the
     # driver's wall clock. Null for every other job — and for one recorded before the column
     # existed, or by a worker too old to send it, where nothing on the row can say.
     field :exhausted, Ecto.Enum, values: @ceilings
     # A command's exit status; nil for every other kind, and for a command that ended without one.
     field :exit_status, :integer
     field :turns, :integer, default: 0
-    field :cost_usd, :decimal, default: Decimal.new(0)
+    field :usage, :integer, default: 0
+    field :usage_converted, :boolean, default: false
     field :harness_session_id, :string
     # The latest session file the worker uploaded — `%{"key", "version"}` — which a resume on
     # another machine puts back (`docs/design/claude-code-events.md` § Resume).
@@ -115,6 +119,7 @@ defmodule Forge.Jobs.Job do
       :worker_id,
       :model,
       :effort,
+      :harness,
       :memory_max,
       :cores,
       :secret_names
@@ -172,7 +177,7 @@ defmodule Forge.Jobs.Job do
       :declared_outcome,
       :exhausted,
       :turns,
-      :cost_usd,
+      :usage,
       :harness_session_id,
       :session_blob,
       :resume_from_id,
@@ -184,7 +189,7 @@ defmodule Forge.Jobs.Job do
     ])
     |> validate_required([:status])
     |> validate_number(:turns, greater_than_or_equal_to: 0)
-    |> validate_number(:cost_usd, greater_than_or_equal_to: 0)
+    |> validate_number(:usage, greater_than_or_equal_to: 0)
     |> validate_outcome_only_when_finished()
     |> validate_ceiling_only_when_exhausted()
   end

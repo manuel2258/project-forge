@@ -13,13 +13,125 @@ defmodule ForgeCore.Workflow.ParserTest do
     %{yaml: yaml, map: map}
   end
 
+  @tokens_message "must be a number of weighted tokens such as 800k, 4M or 84.2M"
+
+  describe "weighted token budgets" do
+    test "read the notation", %{map: map} do
+      map = put_in(map, ["states", "refining", "budget"], %{"turns" => 5, "tokens" => "800k"})
+      map = Map.put(map, "limits", %{"ticket_tokens" => "84.2M"})
+
+      assert {:ok, workflow} = Parser.from_map(map)
+      assert workflow.states["refining"].budget.tokens == 800_000
+      assert workflow.limits.ticket_tokens == 84_200_000
+      assert Workflow.legacy_keys(workflow) == []
+    end
+
+    test "the dollar keys are converted at the rate and remembered", %{map: map} do
+      map = put_in(map, ["states", "refining", "budget"], %{"turns" => 5, "cost" => 4.0})
+      map = Map.put(map, "limits", %{"ticket_cost" => 421})
+
+      assert {:ok, workflow} = Parser.from_map(map)
+      assert workflow.states["refining"].budget.tokens == 800_000
+      assert workflow.limits.ticket_tokens == 84_200_000
+
+      assert Workflow.legacy_keys(workflow) ==
+               ["states.refining.budget.cost", "limits.ticket_cost"]
+
+      assert Workflow.replacement("states.refining.budget.cost") =~
+               "`states.refining.budget.tokens`"
+
+      assert Workflow.replacement("limits.ticket_cost") =~ "`limits.ticket_tokens`"
+    end
+
+    test "a negative dollar key is refused, and so is one that is not a number", %{map: map} do
+      for bad <- [-1, "a lot"] do
+        budgeted = put_in(map, ["states", "refining", "budget"], %{"turns" => 5, "cost" => bad})
+        assert {:error, errors} = Parser.from_map(budgeted)
+        assert Enum.any?(errors, &(&1.path == "states.refining.budget.cost"))
+
+        limited = Map.put(map, "limits", %{"ticket_cost" => bad})
+        assert {:error, errors} = Parser.from_map(limited)
+        assert Enum.any?(errors, &(&1.path == "limits.ticket_cost"))
+      end
+    end
+
+    # `load/2` is what reading a workflow to admit a ticket goes through; the pinned workflow of a
+    # ticket already admitted is read by `from_pinned/1` and never refused.
+    test "admission refuses the dollar keys and names what replaces them" do
+      yaml = """
+      version: 1
+      initial: a
+      states:
+        a: {prompt: p.md, produces: [a.md], outcomes: [done], budget: {turns: 1, cost: 1}}
+      transitions: []
+      limits: {ticket_cost: 5}
+      """
+
+      assert {:error, errors} = Parser.load(yaml)
+
+      assert {"states.a.budget.cost", Workflow.replacement("states.a.budget.cost")} in Enum.map(
+               errors,
+               &{&1.path, &1.message}
+             )
+
+      assert {"limits.ticket_cost", Workflow.replacement("limits.ticket_cost")} in Enum.map(
+               errors,
+               &{&1.path, &1.message}
+             )
+
+      tokens =
+        String.replace(yaml, "cost: 1", "tokens: 200k")
+        |> String.replace("ticket_cost: 5", "ticket_tokens: 1M")
+
+      assert {:ok, %Workflow{}, _flat} = Parser.load(tokens)
+    end
+
+    test "a pinned workflow with the dollar keys is not refused" do
+      pinned = %{
+        "version" => 1,
+        "initial" => "a",
+        "states" => %{
+          "a" => %{
+            "prompt" => "p.md",
+            "produces" => ["a.md"],
+            "outcomes" => ["done"],
+            "budget" => %{"turns" => 1, "cost" => 1}
+          }
+        },
+        "transitions" => [],
+        "limits" => %{"ticket_cost" => 5}
+      }
+
+      assert {:ok, workflow} = Parser.from_pinned(pinned)
+      assert workflow.states["a"].budget.tokens == 200_000
+      assert workflow.limits.ticket_tokens == 1_000_000
+    end
+
+    test "one of the two keys, not both", %{map: map} do
+      map =
+        put_in(map, ["states", "refining", "budget"], %{"turns" => 5, "tokens" => 1, "cost" => 1})
+
+      assert messages(map) == [
+               {"states.refining.budget.cost", "is replaced by tokens; give one, not both"}
+             ]
+    end
+
+    test "a dollar key with a bad value is refused as before", %{map: map} do
+      map = put_in(map, ["states", "refining", "budget"], %{"turns" => 5, "cost" => "cheap"})
+
+      assert messages(map) == [
+               {"states.refining.budget.cost", "must be a non-negative number"}
+             ]
+    end
+  end
+
   describe "parse/2 on the grammar example" do
     test "returns a workflow with every state, transition and limit", %{yaml: yaml} do
       assert {:ok, %Workflow{} = workflow} = Parser.parse(yaml)
 
       assert workflow.version == 1
       assert workflow.initial == "refining"
-      assert workflow.limits.ticket_cost == 25.0
+      assert workflow.limits.ticket_tokens == 5_000_000
       assert map_size(workflow.states) == 6
       assert length(workflow.transitions) == 7
 
@@ -31,7 +143,7 @@ defmodule ForgeCore.Workflow.ParserTest do
                inputs: ["plan.md"],
                produces: ["implementation.md", "changeset", "commit-message"],
                outcomes: ["done", "plan_invalid"],
-               budget: %Budget{turns: 200, cost: 10.0}
+               budget: %Budget{turns: 200, tokens: 2_000_000}
              } = workflow.states["implementing"]
 
       # A state that names neither says nothing, rather than saying "the default": what fills the
@@ -110,7 +222,7 @@ defmodule ForgeCore.Workflow.ParserTest do
 
     test "parse!/2 raises with every error listed" do
       assert_raise ArgumentError, ~r/initial: is required.*version: is required/s, fn ->
-        Parser.parse!("states: {a: {}}\ntransitions: []\nlimits: {ticket_cost: 1}\n")
+        Parser.parse!("states: {a: {}}\ntransitions: []\nlimits: {ticket_tokens: 1}\n")
       end
     end
   end
@@ -154,40 +266,40 @@ defmodule ForgeCore.Workflow.ParserTest do
     end
 
     test "budget fields are typed", %{map: map} do
-      map = put_in(map, ["states", "refining", "budget"], %{"turns" => 0, "cost" => "cheap"})
+      map = put_in(map, ["states", "refining", "budget"], %{"turns" => 0, "tokens" => "cheap"})
 
       assert messages(map) == [
-               {"states.refining.budget.cost", "must be a non-negative number"},
+               {"states.refining.budget.tokens", @tokens_message},
                {"states.refining.budget.turns", "must be a positive integer"}
              ]
     end
 
     # The test above feeds only a wrong *type*, so the sign half of "non-negative" and the sign
-    # half of "positive" were never exercised. A negative cost budget reaches the harness as
-    # `--max-budget-usd -5`, and a negative `ticket_cost` makes `Engine.within_ticket_budget?/2`
+    # half of "positive" were never exercised. A negative token budget stops a run before its first
+    # call, and a negative `ticket_tokens` makes `Engine.within_ticket_budget?/2`
     # false for every ticket from its very first job — the ticket sticks before any work is done.
     test "budget numbers must have the right sign, not merely the right type", %{map: map} do
-      map = put_in(map, ["states", "refining", "budget"], %{"turns" => -1, "cost" => -5})
+      map = put_in(map, ["states", "refining", "budget"], %{"turns" => -1, "tokens" => -5})
 
       assert messages(map) == [
-               {"states.refining.budget.cost", "must be a non-negative number"},
+               {"states.refining.budget.tokens", @tokens_message},
                {"states.refining.budget.turns", "must be a positive integer"}
              ]
     end
 
     test "a ticket allowance must not be negative", %{map: map} do
-      assert messages(Map.put(map, "limits", %{"ticket_cost" => -1})) == [
-               {"limits.ticket_cost", "must be a non-negative number"}
+      assert messages(Map.put(map, "limits", %{"ticket_tokens" => -1})) == [
+               {"limits.ticket_tokens", @tokens_message}
              ]
     end
 
     # Zero is a real allowance — "this state may spend nothing" — and must not be swept up with
     # the negatives it sits next to.
     test "zero is an allowance, not an error", %{map: map} do
-      map = put_in(map, ["states", "refining", "budget", "cost"], 0)
+      map = put_in(map, ["states", "refining", "budget", "tokens"], 0)
 
       assert {:ok, workflow} = Parser.from_map(map)
-      assert workflow.states["refining"].budget.cost == 0
+      assert workflow.states["refining"].budget.tokens == 0
     end
 
     test "lists must hold non-empty strings", %{map: map} do
@@ -230,6 +342,29 @@ defmodule ForgeCore.Workflow.ParserTest do
     # `docs/design/workflow-grammar-v1.md` § Effort states the same rule for the second dial, and
     # for a stronger reason: the levels are the harness's, and `effort` is meant to reach
     # harnesses this platform does not know. Emptiness is all it checks.
+    # `docs/design/workflow-grammar-v1.md` § Harness. Unlike a model or an effort, a harness is
+    # named against the registry: one that is misspelt would otherwise run on the project's.
+    test "a state names a harness the registry knows, or none", %{map: map} do
+      for name <- ForgeCore.Harness.names() do
+        assert {:ok, workflow} =
+                 Parser.from_map(put_in(map, ["states", "refining", "harness"], name))
+
+        assert workflow.states["refining"].harness == name
+      end
+
+      assert {:ok, workflow} = Parser.from_map(map)
+      assert workflow.states["refining"].harness == nil
+    end
+
+    test "a harness no registry knows is refused, naming the ones it does", %{map: map} do
+      for bad <- ["codx", "", 3] do
+        assert [{"states.refining.harness", message}] =
+                 messages(put_in(map, ["states", "refining", "harness"], bad))
+
+        assert message =~ "must be one of claude_code, codex"
+      end
+    end
+
     test "an effort, where present, may not be empty", %{map: map} do
       assert messages(put_in(map, ["states", "refining", "effort"], "")) == [
                {"states.refining.effort", "must be a non-empty string"}
@@ -245,10 +380,10 @@ defmodule ForgeCore.Workflow.ParserTest do
 
     test "limits are required", %{map: map} do
       assert messages(Map.delete(map, "limits")) == [
-               {"limits", "must be a mapping with ticket_cost"}
+               {"limits", "must be a mapping with ticket_tokens"}
              ]
 
-      assert messages(Map.put(map, "limits", %{})) == [{"limits.ticket_cost", "is required"}]
+      assert messages(Map.put(map, "limits", %{})) == [{"limits.ticket_tokens", "is required"}]
     end
 
     test "states must be a non-empty mapping and each state a mapping", %{map: map} do

@@ -472,10 +472,13 @@ defmodule ForgeWeb.ChatLive do
         </:header>
 
         <:strip>
-          <span>chat/{String.slice(@chat.id, 0, 8)}</span>
+          <%!-- Not on a phone: the id is for finding the branch, and the strip has one line, which
+                the harness and its model are worth more than an id of. --%>
+          <span class="hidden sm:inline">chat/{String.slice(@chat.id, 0, 8)}</span>
+          <span id="chat-harness">{Forge.Jobs.harness_line(@chat, @project)}</span>
           <Diff.stat diff={@diff} />
           <span>{@chat.turns} {if @chat.turns == 1, do: "turn", else: "turns"}</span>
-          <span>{Format.windows(@chat.cost_usd) || "—"}</span>
+          <span>{Format.windows(@chat.usage) || "—"}</span>
           <%!-- Only when memory was the trouble (`docs/design/capacity.md` § Memory, which a job
                 holds rather than spends). --%>
           <span :if={@memory} id="chat-memory" class="text-warning">
@@ -704,10 +707,11 @@ defmodule ForgeWeb.ChatLive do
     <dl class="mt-3 flex flex-col gap-2 text-[12.5px]">
       <.fact label="project" value={@project.name} />
       <.fact :if={@ticket} label="ticket" value={"##{@ticket.number} #{@ticket.title}"} />
+      <.fact label="harness" value={Forge.Harness.label(Jobs.harness(@chat))} />
       <.fact label="model" value={Jobs.model_for(@chat) || "the platform's"} />
       <.fact label="effort" value={Jobs.effort_for(@chat) || "the platform's"} />
       <.fact label="turns" value={to_string(@chat.turns)} />
-      <.fact label="spent" value={Format.windows(@chat.cost_usd) || "—"} />
+      <.fact label="spent" value={Format.windows(@chat.usage) || "—"} />
       <.fact label="branch" value={"chat/" <> @chat.id} />
     </dl>
 

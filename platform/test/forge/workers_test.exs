@@ -2774,6 +2774,35 @@ defmodule Forge.WorkersTest do
       assert Workers.offered(nil).efforts == ~w(low medium high xhigh max)
     end
 
+    # Codex's levels are Codex's: a machine's `harnesses` entry for it, from a live machine, and
+    # never the ones Claude Code's entry holds (`harness`), which is the other way round.
+    test "Codex's levels are read from the machines that offer Codex, and are not Claude Code's" do
+      {:ok, live, _t} = Workers.create(%{provider: "fake"})
+      {:ok, gone, _t} = Workers.create(%{provider: "fake"})
+      claude = %{"driver" => "claude_code", "efforts" => ~w(low max)}
+      codex = %{"driver" => "codex", "efforts" => ~w(low medium high)}
+
+      {:ok, _} =
+        Workers.ready(live, %{
+          "memory_budget" => 8_000,
+          "harness" => claude,
+          "harnesses" => [claude, codex]
+        })
+
+      {:ok, gone} =
+        Workers.ready(gone, %{
+          "memory_budget" => 8_000,
+          "harness" => claude,
+          "harnesses" => [claude, %{codex | "efforts" => ~w(dead)}]
+        })
+
+      {:ok, _} = Workers.status(gone, :destroyed)
+
+      offered = Workers.offered(nil)
+      assert offered.codex_efforts == ~w(low medium high)
+      assert offered.efforts == ~w(low max)
+    end
+
     # A build older than this change reports aliases and no levels. That is a worker offering
     # none, not an error.
     test "a worker that reports no levels offers none" do

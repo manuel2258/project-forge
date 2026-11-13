@@ -47,7 +47,7 @@ archive/<n>/<group>/<file>       # a `name/*` member: the artifact name's `/` is
   (documents, files and versions, which counts every version of both) — and says when it was taken. A ticket still in flight shows the
   versions that exist when its folder was last listed; the ticket the job belongs to is in it.
 - `jobs.tsv` columns: `ticket state attempt kind outcome status started_at finished_at turns
-  cost_usd model effort memory_max cores runs`. `runs` counts `job_runs`. Where the platform
+  usage model effort memory_max cores runs`. `runs` counts `job_runs`. Where the platform
   recorded nothing (an old row, a job that never started) the field is `n/a`, not omitted. **No
   credential, no machine, no owner**: the file says what ran and not who paid (the person's answer
   on ticket 24).
@@ -168,3 +168,7 @@ run** in the environment this was built in; the gate covers the 9P server and th
 kernel's client. The modules are on the image (`9p.ko` and `9pnet_fd.ko` are in the kernel's module
 tree on a running worker, 6.18.50); `trans=unix` is an option of `9pnet_fd` and has not been tried
 with a mount.
+
+## `jobs.tsv` in usage (ticket 43)
+
+The `cost_usd` column becomes `usage`, weighted tokens.

@@ -25,56 +25,64 @@ states:
     invoke: [check]
     exit: { 0: done, 2: gate_unavailable, "*": checks_failed }
 
-  # **The cost is sized for a review that fans out, not for one top-level agent.**
-  # `agents/review.md` runs the `review` skill, which dispatches a subagent per lens, and the
-  # budget is checked between the top-level agent's turns — so a whole fan-out lands inside one
-  # turn and the cap is seen only after it. At $15 that cap was crossed by five reviews on
-  # 2026-10-20 (forge#6 ×2, forge#7 ×3) between one and eight top-level turns in, each having
-  # spent its $15 almost exactly, while the two that did report cost $9.70 and $19.53 — one of
-  # them over the cap and allowed through only because nothing looks until the turn ends. $35 was
-  # above the one measured converging run that exceeded $15, with room for the mutation lens.
+  # **Weighted tokens, converted from the dollars this file was first written in at
+  # `ForgeCore.Usage.per_dollar/0` (200,000 to the dollar), so $40 is 8M.** Every figure below was
+  # redone in tokens; the rate is a placeholder (`docs/design/capacity.md`).
   #
-  # **$40 now, an estimate and not a measurement, and so is `implementing`'s $20 beside it.** The
+  # **The budget is sized for a review that fans out, not for one top-level agent.**
+  # `agents/review.md` runs the `review` skill, which dispatches a subagent per lens. **The worker
+  # now counts every model call as it streams, subagents' included, and stops the run past its
+  # budget (`ForgeWorker.Job.Meter`, `docs/design/capacity.md` § Stopping a job already running),
+  # so a fan-out no longer lands inside one turn unseen**; the 8M below was sized when the cap was
+  # seen only between the top-level agent's turns, and is kept as it was: a fan-out is still the
+  # biggest spender of the five lenses, and a smaller figure is a change to make with a measured
+  # round. At 3M that cap was crossed by five reviews on
+  # 2026-10-20 (forge#6 ×2, forge#7 ×3) between one and eight top-level turns in, each having
+  # spent its 3M almost exactly, while the two that did report cost 1.9M and 3.9M — one of
+  # them over the cap and allowed through only because nothing looked until the turn ended. 7M was
+  # above the one measured converging run that exceeded 3M, with room for the mutation lens.
+  #
+  # **8M now, an estimate and not a measurement, and so is `implementing`'s 4M beside it.** The
   # fifth lens (`agents/review.md` § The lenses, *Screenshots*) reads pictures on `sonnet` and is
-  # the cheapest of the five, so $5 is a guess at a round that runs it, not a figure from one that
+  # the cheapest of the five, so 1M is a guess at a round that runs it, not a figure from one that
   # did. No review has run it yet: the `reviewing` rows of the archive's `jobs.tsv` after this
   # lands are what to correct this with.
   # Turns stay at 120: not one of the five exhausted runs came near them, so they were never the
   # binding limit.
   #
-  # **Raising this means raising `limits.ticket_cost` in each workflow that has a `reviewing`
+  # **Raising this means raising `limits.ticket_tokens` in each workflow that has a `reviewing`
   # state**, because the cap is checked before each job starts against what the ticket has spent
   # already — so what has to fit under it is every running total, not the finished total. Both
-  # workflows cost the same on the way in: the refinement conversation, then $24 of jobs (the state
-  # that plans or diagnoses $4, implementing $20) with `checking` free because a command buys no
+  # workflows cost the same on the way in: the refinement conversation, then 4.8M of jobs (the state
+  # that plans or diagnoses 800k, implementing 4M) with `checking` free because a command buys no
   # inference.
   #
   # **The conversation has no budget, and the cap still has to leave it room.** A chat step cannot
   # declare one (`docs/design/workflow-grammar-v1.md` § Chat steps), but every turn adds to the
-  # ticket's spend and every later job is checked against that. $30 is an allowance and a guess,
-  # not a measurement: the ticket conversations this project has had cost $2.45 to $13.49 and its
-  # longest conversation of any kind $20.44 (the `chat` rows of the archive's `jobs.tsv`), and a
+  # ticket's spend and every later job is checked against that. 6M is an allowance and a guess,
+  # not a measurement: the ticket conversations this project has had cost 0.49M to 2.7M and its
+  # longest conversation of any kind 4.1M (the `chat` rows of the archive's `jobs.tsv`), and a
   # refinement that grills through five phases is the long kind. What one actually costs is on the
   # ticket afterwards, which is the figure to correct this with.
   #
   # So the journey these workflows declare prices out the same in both:
   #
-  #     30                             =  30    the refinement conversation, an allowance
-  #     (4 + 20) + 40                  =  64    the jobs on the way in, then the first review
-  #     5 × (20 + 0 + 40)              = 300    five `issues_found` round-trips at `max: 5`
-  #     3                              =   3    `presenting`, once, on the way out
-  #     3 × 8                          =  24    `rebasing`, as often as the queue sends it round
+  #     6M                             =   6M   the refinement conversation, an allowance
+  #     (0.8 + 4) + 8                  = 12.8M  the jobs on the way in, then the first review
+  #     5 × (4 + 0 + 8)                =  60M   five `issues_found` round-trips at `max: 5`
+  #     0.6                            = 0.6M   `presenting`, once, on the way out
+  #     3 × 1.6                        = 4.8M   `rebasing`, as often as the queue sends it round
   #                                      ---
-  #                                      421    of which 413 is spent before the last job starts
+  #                                    84.2M   of which 82.6M is spent before the last job starts
   #
   # Three rebases because the engine sends a ticket down `on_conflict` by itself at most three times
   # in a row (`ForgeCore.Engine.conflict/5`), and once a ticket is approved every conflict it meets
   # is the engine's: both edges into `merged` queue, so the merge queue's runner is what checks it.
   #
-  # At a $120 cap and a $35 review the third round-trip stopped mid-loop, after $15 of implementing
+  # At a 24M cap and a 7M review the third round-trip stopped mid-loop, after 3M of implementing
   # that was then never checked or reviewed, and `max: 3` on `reviewing → implementing` could not
-  # be reached at all. $421 clears the journey as it now stands, the $354 before the last review,
-  # the $394 before the presentation and the $413 before the third rebase included — the cap is
+  # be reached at all. 84.2M clears the journey as it now stands, the 70.8M before the last review,
+  # the 78.8M before the presentation and the 82.6M before the third rebase included — the cap is
   # read before a job starts, against what is spent already, so a journey whose total is the cap
   # exactly still runs to the end.
   #
@@ -84,7 +92,7 @@ states:
   # to move by hand rather than going forward — which is the right backstop for a review that will
   # not converge and the wrong one for a review that was still converging.
   #
-  # Two more rounds cost $100 of ceiling, which is a ceiling and not a spend: what makes a later
+  # Two more rounds cost 20M of ceiling, which is a ceiling and not a spend: what makes a later
   # round cheap is that it is scoped to what changed (`agents/review.md` § A later round is not
   # the first round again) and that its bar rises each time (§ The bar rises each round), so the
   # rounds this bound adds are the cheap ones. If three was being reached on findings that the
@@ -97,10 +105,10 @@ states:
   # now carries `max: 2` in both workflows (`plan_invalid` in `dev.yml`, `diagnosis_invalid` in
   # `bug.yml`), so `planning` and `implementing` can no longer alternate without bound. What that
   # buys is not a smaller cap: it is a ticket that sticks after two re-plans, for a person who can
-  # see that the plan and the code disagree, instead of one that quietly spends $24 a lap until
+  # see that the plan and the code disagree, instead of one that quietly spends 4.8M a lap until
   # the cap stops it with nothing to show.
   #
-  # The cap still binds, and is still the outer backstop. The journey above prices at $421, which
+  # The cap still binds, and is still the outer backstop. The journey above prices at 84.2M, which
   # is the cap exactly; the worst journey is that *plus* two re-plan laps, every `budget_exhausted`
   # and `did_not_converge` retry, a refinement that talked past its allowance and a `needs_review`
   # rebase that sends the ticket round the review loop again, so it is strictly greater and the
@@ -130,11 +138,11 @@ states:
     # result stays on the larger one: cutting the writer and the reader in the same edit is not a
     # cost cut, it is a quality cut with a cost cut's arithmetic. The round count out of this
     # state is also the meter for that change — rounds of `issues_found` staying at zero or one
-    # says the cheaper `implementing` held, and rounds climbing says it did not, at $40 each.
+    # says the cheaper `implementing` held, and rounds climbing says it did not, at 8M each.
     effort: high
     produces: [report.md]
     outcomes: [done, issues_found]
-    budget: { turns: 120, cost: 40.00 }
+    budget: { turns: 120, tokens: 8M }
 
   # A presentation (`produces: [presentation.md!]`): prose for the person deciding, drawn above
   # the diff on the review page with the source it quotes inline, read by no later state and
@@ -174,7 +182,7 @@ states:
     # cost ceiling is the one that should bind. Ticket 7's `planning` died at turn 51 of 50 with
     # $1.11 of its $4.00 unspent, and one of its four refinements — a job then, a conversation now
     # — used 36 of 40.
-    budget: { turns: 60, cost: 3.00 }
+    budget: { turns: 60, tokens: 600k }
 
   # Every edge into it queues (`queue: true` in each workflow's transitions), so an approval puts
   # the ticket in the project's line and the merge queue's runner merges the line one ticket at a
@@ -213,4 +221,4 @@ states:
       check: { max: 3 }
     produces: [rebase.md, changeset]
     outcomes: [done, needs_review]
-    budget: { turns: 100, cost: 8.00 }
+    budget: { turns: 100, tokens: 1.6M }

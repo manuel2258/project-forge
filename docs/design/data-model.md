@@ -20,7 +20,7 @@ only git config. See `design/git-hosting.md`.
 **ticket** — `project_id`, `number` (per project, human-facing, allocated under a lock on
 the project row), `title`, `body`, `base_commit`, `branch` (`ticket/<number>`), `workflow`
 (parsed definition, JSON), `workflow_commit`, `state` (a state name from the pinned
-workflow), `status` (`active | stuck | done | cancelled`), `cost_usd` (denormalised sum
+workflow), `status` (`active | stuck | done | cancelled`), `usage` (denormalised sum
 over jobs), `pending_transition` (set while a transition waits for approval).
 
 **job** — one execution of one job state, one command invocation, or one conversation. `kind`
@@ -37,7 +37,7 @@ command's, null for every other kind and for a command that ended without one),
 finished), `declared_outcome` (the workflow outcome the agent selected, null unless converged),
 `exhausted` (`turns | cost | wall_clock` — which ceiling stopped a `budget_exhausted` job, null
 for every other and for one whose worker was too old to say; `design/capacity.md` § Four
-exhaustions, three treatments), `turns`, `cost_usd` (what the job has used and what
+exhaustions, three treatments), `turns`, `usage` (what the job has used and what
 its runs have cost between them — a conversation's read from them with `Runs.total/1`, a workflow
 job's added up as each run reports; see **job_run** — and both running totals over every
 invocation the job has had, so neither is commensurate with `spec.budget`, which is one
@@ -158,7 +158,7 @@ may run its jobs on, assigned by the machine's owner; one the platform made reac
 through its template instead. `design/identity.md` § Workers.
 
 **credential** — `user_id`, `name`, `harness`, `kind` (the harness's kinds of secret — for Claude
-Code `oauth` or `api_key`), `secret` (encrypted, never selected by default), `daily_limit_usd`,
+Code `oauth` or `api_key`), `secret` (encrypted, never selected by default), `daily_limit`,
 `models` (what the check on save found it may use), `checked_at`, `check_error`, `revoked_at`. An
 inference credential: what an agent authenticates with, owned by a user and never by a machine.
 Revoked rather than deleted, because spend stays attributed to it. `design/credentials.md`.
@@ -180,7 +180,7 @@ commit a taken name points at, or the reason a tag was not made), `inserted_at`.
 release ticket ends `done` and never updated, so it has no `updated_at`; releases concluded before it
 existed have none. `design/ticket-types.md` § The record, the tag, the history.
 
-**job_run** — `job_id`, `credential_id`, `worker_id`, `started_at`, `finished_at`, `cost_usd`. One
+**job_run** — `job_id`, `credential_id`, `worker_id`, `started_at`, `finished_at`, `usage`, `tokens`. One
 process of a job: a resume, a requeue or a reopened conversation is a new run. Spend is recorded
 here per credential, set from the harness's running total for that process, less what a session it resumed had already
 spent (`Forge.Jobs.Runs`).
@@ -253,3 +253,12 @@ run rebuilds from the branch and the manifest.
 `parent_job_id` and `spec.permitted_children` carry subagents. `worker_id` carried the
 worker tier, which has since arrived. `role` was to carry multi-user; it was dropped for
 `node_admin` and `project_members` when multi-user arrived.
+
+## Usage and harnesses (ticket 43)
+
+`job_runs`, `jobs` and `tickets` carry `usage` (bigint, weighted tokens) where `cost_usd` was;
+`jobs` and `tickets` also `usage_converted`; `job_runs` also `tokens` (jsonb by kind), `claude_cost_usd` and
+`converted` (all true only where the figure was converted from dollars at the migration); `credentials.daily_limit_usd` is `daily_limit`.
+Also built: `jobs.harness` (null for a command), `projects.harness` / `codex_model` /
+`codex_effort`, `workers.harnesses`, and for Codex credentials `account_id`, `plan`, `expires_on`,
+`renewed_at` and `job_runs.exclusive` with a partial unique index on live exclusive runs.

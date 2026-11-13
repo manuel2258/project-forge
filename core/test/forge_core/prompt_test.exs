@@ -44,7 +44,7 @@ defmodule ForgeCore.PromptTest do
     assert manifest =~ "- `plan.md` -> `/var/forge/jobs/job-1/out/plan.md` (carries the outcome)"
     assert manifest =~ "- `changeset`: the diff of your commits on `ticket/7`; no file to write"
     assert manifest =~ "`done`, `plan_invalid`, or `did_not_converge`"
-    assert manifest =~ "- Turns: 40\n- Cost: 2.0 USD"
+    assert manifest =~ "- Turns: 40\n- Weighted tokens: 400k"
   end
 
   # `docs/design/secrets.md` § Delivery: a job is told which variables it holds — by name, never
@@ -413,26 +413,28 @@ defmodule ForgeCore.PromptTest do
   # what, and the ticket's allowance is named beside the job's own budget.
   describe "the budget" do
     test "names what the ticket has left" do
-      budget = %{turns: 20, cost: 30, ticket_left: 96.2, ticket_limit: 140}
+      budget = %{turns: 20, tokens: 6_000_000, ticket_left: 19_200_000, ticket_limit: 28_000_000}
       manifest = Prompt.manifest(%{spec() | budget: budget}, "/j")
 
-      assert manifest =~ "- Cost: 30 USD\n"
-      assert manifest =~ "- The ticket: 96.20 of 140 USD left for every job still to run on it"
+      assert manifest =~ "- Weighted tokens: 6M\n"
+
+      assert manifest =~
+               "- The ticket: 19.2M of 28M weighted tokens left for every job still to run on it"
     end
 
-    test "says what a lowered cost was lowered from, and by which cap" do
+    test "says what a lowered budget was lowered from, and by which cap" do
       for {by, left} <- [{"ticket", "what the ticket has left"}, {"day", "what the day has left"}] do
-        budget = %{turns: 20, cost: 3.5, declared: 30, lowered_by: by}
+        budget = %{turns: 20, tokens: 700_000, declared: 6_000_000, lowered_by: by}
         manifest = Prompt.manifest(%{spec() | budget: budget}, "/j")
 
-        assert manifest =~ "- Cost: 3.5 USD — lowered from the state's 30 USD to #{left}"
+        assert manifest =~ "- Weighted tokens: 700k — lowered from the state's 6M to #{left}"
       end
     end
 
     test "a budget stated alone says only itself" do
-      manifest = Prompt.manifest(%{spec() | budget: %{turns: 20, cost: 30}}, "/j")
+      manifest = Prompt.manifest(%{spec() | budget: %{turns: 20, tokens: 6_000_000}}, "/j")
 
-      assert manifest =~ "- Cost: 30 USD\n"
+      assert manifest =~ "- Weighted tokens: 6M\n"
       refute manifest =~ "lowered"
       refute manifest =~ "The ticket:"
     end
@@ -440,11 +442,11 @@ defmodule ForgeCore.PromptTest do
     test "survives the wire with what the platform added" do
       budget = %{
         turns: 20,
-        cost: 3.5,
-        declared: 30,
+        tokens: 700_000,
+        declared: 6_000_000,
         lowered_by: "ticket",
-        ticket_left: 3.5,
-        ticket_limit: 140
+        ticket_left: 700_000,
+        ticket_limit: 28_000_000
       }
 
       spec = %{spec() | budget: budget}
@@ -1078,13 +1080,13 @@ defmodule ForgeCore.PromptTest do
     # The manifest is whole and last, because it is what may have moved: the answers are now an
     # input, and the budget is the one this run was assigned.
     test "ends with the manifest as it stands, answers among the inputs" do
-      spec = %{resumed_spec() | budget: %{turns: 40, cost: 0.75}}
+      spec = %{resumed_spec() | budget: %{turns: 40, tokens: 150_000}}
       prompt = Prompt.continuation(spec, "/var/forge/jobs/job-1", "c0ffee")
 
       assert [_changes, manifest] = String.split(prompt, "\n---\n\n")
       assert manifest == Prompt.manifest(spec, "/var/forge/jobs/job-1")
       assert manifest =~ "- `answers.md` version 3 -> `/var/forge/jobs/job-1/inputs/answers.md`"
-      assert manifest =~ "- Cost: 0.75 USD"
+      assert manifest =~ "- Weighted tokens: 150k"
     end
 
     # No path resumes a session without an answer today — only a run that stopped to ask records

@@ -102,12 +102,12 @@ defmodule ForgeCore.EngineTest do
       version: 1
       initial: a
       states:
-        a: {prompt: p.md, produces: [a.md], outcomes: [done, again], budget: {turns: 1, cost: 1}}
+        a: {prompt: p.md, produces: [a.md], outcomes: [done, again], budget: {turns: 1, tokens: 200k}}
         b: {}
       transitions:
         #{first_edge}
         - {from: a, to: b, when: again}
-      limits: {ticket_cost: 1}
+      limits: {ticket_tokens: 200k}
       """)
     end
   end
@@ -123,8 +123,8 @@ defmodule ForgeCore.EngineTest do
              Engine.step(workflow, "verifying", "tests_failed", Engine.record(counts, retry))
   end
 
-  test "within_ticket_budget?/2 compares against limits.ticket_cost", %{workflow: workflow} do
-    assert Engine.within_ticket_budget?(workflow, 24.99)
-    refute Engine.within_ticket_budget?(workflow, 25.0)
+  test "within_ticket_budget?/2 compares against limits.ticket_tokens", %{workflow: workflow} do
+    assert Engine.within_ticket_budget?(workflow, 4_999_999)
+    refute Engine.within_ticket_budget?(workflow, 5_000_000)
   end
 end

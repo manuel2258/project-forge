@@ -22,13 +22,13 @@ defmodule Forge.SessionCarryTest do
       prompt: agents/implement.md
       inputs: [ticket, review.md]
       produces: [implementation.md, changeset]
-      budget: { turns: 200, cost: 10.00 }
+      budget: { turns: 200, tokens: 2M }
     reviewing:
       prompt: agents/review.md
       inputs: [implementation.md, changeset]
       produces: [review.md]
       outcomes: [done, changes_requested]
-      budget: { turns: 60, cost: 3.00 }
+      budget: { turns: 60, tokens: 600k }
     review_ready: {}
   transitions:
     - { from: implementing,  to: reviewing }
@@ -37,7 +37,7 @@ defmodule Forge.SessionCarryTest do
     - { from: implementing,  to: implementing, when: budget_exhausted,   max: 1 }
     - { from: implementing,  to: implementing, when: did_not_converge,   max: 1 }
   limits:
-    ticket_cost: 25.00
+    ticket_tokens: 5M
   """
 
   setup do
@@ -129,12 +129,19 @@ defmodule Forge.SessionCarryTest do
     test "the session's running total is kept with it, and the job is charged the run's own",
          context do
       assignment = context.ticket |> pending() |> FakeWorker.assign(context.worker)
-      harness = Map.merge(uploaded(assignment), %{"cost_usd" => 0.4, "session_cost_usd" => 9.48})
+
+      harness =
+        Map.merge(uploaded(assignment), %{
+          "usage" => 80_000,
+          "cost_usd" => 0.4,
+          "session_cost_usd" => 9.48
+        })
+
       {:ok, job} = FakeWorker.finish(assignment, "success", harness: harness)
 
       job = Jobs.get!(job.id)
       assert job.session_blob["cost_usd"] == 9.48
-      assert Decimal.equal?(job.cost_usd, Decimal.from_float(0.4))
+      assert job.usage == 80_000
     end
 
     # A worker from before the total was reported sends the raw total as `cost_usd`.
@@ -185,27 +192,31 @@ defmodule Forge.SessionCarryTest do
     defp spent(run_or_job_id), do: Forge.Jobs.Runs.total(run_or_job_id)
 
     defp reports(assignment),
-      do: Map.merge(uploaded(assignment), %{"cost_usd" => 0.4, "session_cost_usd" => 9.48})
+      do:
+        Map.merge(uploaded(assignment), %{
+          "usage" => 80_000,
+          "cost_usd" => 0.4,
+          "session_cost_usd" => 9.48
+        })
 
-    defp assert_charged(job_id, ticket_id, cost) do
-      expected = Decimal.from_float(cost)
-      assert Decimal.equal?(Jobs.get!(job_id).cost_usd, expected)
-      assert Decimal.equal?(spent(job_id), expected)
-      assert Decimal.equal?(Tickets.get!(ticket_id).cost_usd, expected)
+    defp assert_charged(job_id, ticket_id, usage) do
+      assert Jobs.get!(job_id).usage == usage
+      assert spent(job_id) == usage
+      assert Tickets.get!(ticket_id).usage == usage
     end
 
     test "a finished run is charged what it spent, on its run, job and ticket", context do
       assignment = context.ticket |> pending() |> FakeWorker.assign(context.worker)
       {:ok, job} = FakeWorker.finish(assignment, "success", harness: reports(assignment))
 
-      assert_charged(job.id, context.ticket.id, 0.4)
+      assert_charged(job.id, context.ticket.id, 80_000)
     end
 
     test "a parked run is charged what it spent", context do
       assignment = context.ticket |> pending() |> FakeWorker.assign(context.worker)
       {:ok, job} = FakeWorker.park(assignment, [], harness: reports(assignment))
 
-      assert_charged(job.id, context.ticket.id, 0.4)
+      assert_charged(job.id, context.ticket.id, 80_000)
     end
 
     test "a run stopped by its account's limit is charged what it spent", context do
@@ -217,7 +228,7 @@ defmodule Forge.SessionCarryTest do
           harness: reports(assignment)
         )
 
-      assert_charged(job.id, context.ticket.id, 0.4)
+      assert_charged(job.id, context.ticket.id, 80_000)
     end
 
     # A cancel's late report sets the run's cost rather than adding to it (`Jobs.settled/2`).
@@ -228,7 +239,7 @@ defmodule Forge.SessionCarryTest do
       {:ok, _job} =
         Jobs.hibernate(assignment["job_id"], nil, "cancelled", %{"harness" => reports(assignment)})
 
-      assert_charged(assignment["job_id"], context.ticket.id, 0.4)
+      assert_charged(assignment["job_id"], context.ticket.id, 80_000)
     end
   end
 
@@ -589,6 +600,7 @@ defmodule Forge.SessionCarryTest do
           "session_id" => "s1",
           "session_blob" => key,
           "version" => "2.1.284",
+          "usage" => 2_000,
           "cost_usd" => 0.01,
           "session_cost_usd" => 0.51
         })

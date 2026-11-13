@@ -338,8 +338,8 @@ defmodule Forge.ConversationsTest do
           put_in(turn(1, 0.01), ["harness", "session_cost_usd"], 0.51)
         )
 
-      assert Decimal.equal?(Forge.Jobs.Runs.total(chat.id), Decimal.from_float(0.01))
-      assert Decimal.equal?(Forge.Jobs.get!(chat.id).cost_usd, Decimal.from_float(0.01))
+      assert Forge.Jobs.Runs.total(chat.id) == 2_000
+      assert Forge.Jobs.get!(chat.id).usage == 2_000
     end
 
     # The harness reports total_cost_usd cumulatively across the session and num_turns per turn —
@@ -347,17 +347,17 @@ defmodule Forge.ConversationsTest do
     # one's in every later turn: by turn five the conversation reports several times what it
     # spent, and the daily cap trips early on money nobody spent. The figures stay plausible and
     # monotonic the whole way, which is exactly why this is pinned.
-    test "cost is set from the cumulative figure, and turns accumulate", %{chat: chat} do
+    test "usage is set from the cumulative figure, and turns accumulate", %{chat: chat} do
       {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.01))
-      assert Decimal.equal?(chat.cost_usd, Decimal.from_float(0.01))
+      assert chat.usage == 2_000
       assert chat.turns == 1
 
       {:ok, chat} = Conversations.record_turn(chat, turn(2, 0.02))
-      assert Decimal.equal?(chat.cost_usd, Decimal.from_float(0.02))
+      assert chat.usage == 4_000
       assert chat.turns == 2
 
       {:ok, chat} = Conversations.record_turn(chat, turn(3, 0.03))
-      assert Decimal.equal?(chat.cost_usd, Decimal.from_float(0.03))
+      assert chat.usage == 6_000
       assert chat.turns == 3
     end
 
@@ -372,7 +372,7 @@ defmodule Forge.ConversationsTest do
       before = Spend.day_total()
       {:ok, _chat} = Conversations.record_turn(chat, turn(1, 0.25))
 
-      assert Decimal.compare(Spend.day_total(), before) == :gt
+      assert Spend.day_total() > before
     end
 
     # A reopened conversation is a new process, whose running total starts again from nothing. Its
@@ -386,18 +386,17 @@ defmodule Forge.ConversationsTest do
         set: [started_at: DateTime.add(current.started_at, 60)]
       )
 
-      run!(chat, cost: "0.30", started_at: earlier, finished_at: earlier)
+      run!(chat, usage: 60_000, started_at: earlier, finished_at: earlier)
 
       {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.1))
-      assert Decimal.equal?(chat.cost_usd, Decimal.new("0.4"))
+      assert chat.usage == 80_000
 
       assert Repo.all(
                from r in Forge.Jobs.Run,
                  where: r.job_id == ^chat.id,
                  order_by: r.started_at,
-                 select: r.cost_usd
-             )
-             |> Enum.map(&Decimal.to_float/1) == [0.3, 0.1]
+                 select: r.usage
+             ) == [60_000, 20_000]
     end
 
     # Its run ends with it, whichever way it ended; a reopening is a new run.
@@ -409,42 +408,60 @@ defmodule Forge.ConversationsTest do
                Repo.all(from r in Forge.Jobs.Run, where: r.job_id == ^chat.id)
     end
 
-    # A reopened conversation is a new process: its turns are numbered from one again. Keyed on
-    # the turn alone, the new session's first turns read as re-sends of the old one's and were
-    # dropped — commit, proposals and push with them. What they cost is the run's
-    # (`Forge.Jobs.Runs`), which the test above pins.
-    test "a new session's turns are its own, and a re-send is still one", %{chat: chat} do
+    # A reopened conversation is a new process: its turns are numbered from one again, and its run
+    # is a new one. Keyed on the turn alone, the new process's first turns read as re-sends of the
+    # old one's and were dropped — commit, proposals and push with them. **Keyed on the session as
+    # well, it still failed for Codex**, which resumes the same thread on a reopen: the session is
+    # the same and the turns are not repeats. What they cost is the run's (`Forge.Jobs.Runs`),
+    # which the test above pins.
+    test "a new process's turns are its own, even on the same session, and a re-send is one",
+         %{chat: chat} do
       {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.10))
       {:ok, chat} = Conversations.record_turn(chat, turn(2, 0.30))
 
-      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.05, "sess-2"))
-      {:ok, chat} = Conversations.record_turn(chat, turn(2, 0.08, "sess-2"))
+      reopen!(chat)
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.05))
+      {:ok, chat} = Conversations.record_turn(chat, turn(2, 0.08))
       assert chat.turns == 4
 
-      # A re-send within the new session is still recorded once.
-      {:ok, chat} = Conversations.record_turn(chat, turn(2, 0.08, "sess-2"))
+      # A re-send within the new process is still recorded once.
+      {:ok, chat} = Conversations.record_turn(chat, turn(2, 0.08))
       assert chat.turns == 4
 
       turns = chat.id |> Events.for_job() |> Enum.count(&(&1.type == "chat.turn"))
       assert turns == 4
     end
 
-    # A harness that reports no session is one session as far as this can tell: its re-sent
-    # turn is recorded once, and the first session that does report is another one.
-    test "turns with no session are one session", %{chat: chat} do
+    # A re-sent turn is a repeat whatever session it reports, as long as it is the same process's.
+    test "turns with no session are one process's", %{chat: chat} do
       {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.10, nil))
       {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.10, nil))
       assert chat.turns == 1
 
+      reopen!(chat)
       {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.05, "sess-2"))
       assert chat.turns == 2
     end
 
     test "a session that reported no cost adds nothing, and breaks nothing", %{chat: chat} do
       {:ok, chat} = Conversations.record_turn(chat, turn(1, nil))
+      reopen!(chat)
       {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.05, "sess-2"))
 
-      assert Decimal.equal?(chat.cost_usd, Decimal.new("0.05"))
+      assert chat.usage == 10_000
+    end
+
+    # A new process: a run that started after the last, which is what a reopen's `Runs.open` makes.
+    defp reopen!(chat) do
+      latest =
+        Repo.one!(
+          from r in Forge.Jobs.Run,
+            where: r.job_id == ^chat.id,
+            order_by: [desc: r.started_at],
+            limit: 1
+        )
+
+      run!(chat, started_at: DateTime.add(latest.started_at, 60))
     end
 
     # The worker re-sends a turn until it is acked, so the same one can arrive twice.
@@ -3108,7 +3125,7 @@ defmodule Forge.ConversationsTest do
       |> Forge.Tickets.Ticket.progress_changeset(%{
         state: ticket.state,
         status: :active,
-        cost_usd: ticket.cost_usd,
+        usage: ticket.usage,
         pending_transition: %{
           "from" => "refining",
           "to" => "planning",
@@ -3176,6 +3193,7 @@ defmodule Forge.ConversationsTest do
       "commit" => String.duplicate("a", 40),
       "harness" => %{
         "turns" => 1,
+        "usage" => cost && round(cost * 200_000),
         "cost_usd" => cost,
         "session_id" => session,
         "subtype" => "success"

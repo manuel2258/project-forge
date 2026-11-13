@@ -72,4 +72,16 @@ defmodule ForgeWorker.ClaudeUpdateTest do
 
     assert ClaudeUpdate.status(root) == nil
   end
+
+  # One reader for both harnesses' units: each driver has a file of its own, and a driver with no
+  # unit has none.
+  test "Codex's report is read from its own file, and not from Claude Code's", %{root: root} do
+    write(root, ~s|{"outcome":"failed"}|)
+    File.write!(Path.join(root, "codex-update.json"), ~s|{"outcome":"succeeded","version":"1"}|)
+
+    assert ClaudeUpdate.status(root, "codex") == %{"outcome" => "succeeded", "version" => "1"}
+    assert ClaudeUpdate.status(root, "claude_code") == %{"outcome" => "failed"}
+    assert ClaudeUpdate.status(root) == %{"outcome" => "failed"}
+    assert ClaudeUpdate.status(root, "no_such_driver") == nil
+  end
 end

@@ -24,11 +24,11 @@ defmodule ForgeWeb.ReleasesLiveTest do
     releasing:
       prompt: agents/release.md
       produces: [release-notes.md]
-      budget: { turns: 10, cost: 1.00 }
+      budget: { turns: 10, tokens: 200k }
     published: {}
   transitions:
     - { from: releasing, to: published }
-  limits: { ticket_cost: 5.00 }
+  limits: { ticket_tokens: 1M }
   """
 
   @dev """
@@ -39,11 +39,11 @@ defmodule ForgeWeb.ReleasesLiveTest do
     implementing:
       prompt: agents/implement.md
       produces: [implementation.md]
-      budget: { turns: 10, cost: 1.00 }
+      budget: { turns: 10, tokens: 200k }
     review_ready: {}
   transitions:
     - { from: implementing, to: review_ready }
-  limits: { ticket_cost: 5.00 }
+  limits: { ticket_tokens: 1M }
   """
 
   setup :register_and_log_in_user

@@ -27,7 +27,7 @@ defmodule ForgeWeb.CommandsLiveTest do
       produces: [implementation.md, changeset]
       may_invoke:
         build: { max: 3 }
-      budget: { turns: 20, cost: 2.00 }
+      budget: { turns: 20, tokens: 400k }
     checking:
       invoke: [[build, --all, "a b"]]
       exit: { 0: done, "*": failed }
@@ -37,7 +37,7 @@ defmodule ForgeWeb.CommandsLiveTest do
     - { from: checking, to: review_ready }
     - { from: checking, to: implementing, when: failed }
   limits:
-    ticket_cost: 25.00
+    ticket_tokens: 5M
   """
 
   setup :register_and_log_in_user

@@ -47,8 +47,12 @@ defmodule ForgeCore.Job.Credential do
 
   def token_hash(_token), do: :error
 
-  @typedoc "What a seal is for: a job's inference credential, or its project secrets."
-  @type purpose :: :credential | :secrets
+  @typedoc """
+  What a seal is for: a job's inference credential, its project secrets, or the credential a run
+  hands back changed (`docs/design/codex.md` § Credentials) — the last under a purpose of its own,
+  so a returned login cannot be replayed as a delivered one.
+  """
+  @type purpose :: :credential | :secrets | :return
 
   @doc """
   Seals `secret` for the worker whose token hashes to `token_hash`, for `job_id` only, and for
@@ -110,4 +114,5 @@ defmodule ForgeCore.Job.Credential do
   # other purpose's carries its name, so no two purposes share associated data for one job.
   defp aad(:credential, job_id), do: job_id
   defp aad(:secrets, job_id), do: "secrets:" <> job_id
+  defp aad(:return, job_id), do: "return:" <> job_id
 end

@@ -72,11 +72,29 @@ defmodule Forge.Credentials do
     harness = Ecto.Changeset.get_field(changeset, :harness)
     kind = Ecto.Changeset.get_field(changeset, :kind)
     {:ok, driver} = Harness.driver(harness)
+    secret = %{"token" => String.trim(secret)}
 
-    case driver.check(kind, %{"token" => String.trim(secret)}) do
-      {:ok, models} ->
+    case {driver.check(kind, secret), driver.traits(kind).checked} do
+      {{:ok, models}, :provider} ->
         {:ok, Ecto.Changeset.change(changeset, models: models, checked_at: now())}
 
+      # A shape check is not a check with the provider: nothing was asked of it, so no models are
+      # known and no `checked_at` is claimed, and the row says so (`credentials.md` § Checked on
+      # save). What the secret says of itself — a login's account — is kept beside it.
+      {{:ok, _no_models}, :shape} ->
+        {:ok, Ecto.Changeset.change(changeset, Harness.attributes(driver, kind, secret))}
+
+      {{:error, {:malformed, phrase}}, _checked} ->
+        {:error,
+         changeset |> Ecto.Changeset.add_error(:secret, phrase) |> Map.put(:action, :insert)}
+
+      {other, _checked} ->
+        refused_or_unreachable(changeset, other)
+    end
+  end
+
+  defp refused_or_unreachable(changeset, result) do
+    case result do
       {:error, :refused} ->
         {:error,
          changeset
@@ -109,9 +127,15 @@ defmodule Forge.Credentials do
   @spec recheck(User.t(), String.t()) :: {:ok, Credential.t()} | {:error, :not_found}
   def recheck(%User{} = user, id) do
     with {:ok, credential, sealed} <- live_with_secret(user, id) do
-      credential
-      |> Ecto.Changeset.change(recheck_attrs(credential, sealed))
-      |> Repo.update()
+      # A kind checked by its shape has nothing to ask the provider: it is returned as it is, and
+      # its first job is the check.
+      if Harness.traits(credential.harness, credential.kind).checked == :shape do
+        {:ok, credential}
+      else
+        credential
+        |> Ecto.Changeset.change(recheck_attrs(credential, sealed))
+        |> Repo.update()
+      end
     end
   end
 
@@ -298,7 +322,7 @@ defmodule Forge.Credentials do
   The credential `job` runs on (`docs/design/credentials.md` § How a job picks).
 
   **At a job's first start**, from its project's pool: drop the credentials that are rate-limited
-  now, and of the rest take the one that has spent least today — the oldest on a tie, which is
+  now, and of the rest take the one that has used least today — the oldest on a tie, which is
   the pool's order. Everything limited is `{:limited, until}`, the earliest reset: the job waits,
   and nobody is being asked to do anything.
 
@@ -311,49 +335,136 @@ defmodule Forge.Credentials do
   """
   @spec for_job(Job.t(), DateTime.t()) ::
           {:ok, Credential.t()}
-          | {:error, {:no_credential, :none_assigned} | {:limited, DateTime.t()}}
+          | {:error,
+             {:no_credential, :none_assigned} | {:limited, DateTime.t()} | {:held, atom()}}
   def for_job(%Job{} = job, now \\ DateTime.utc_now()) do
-    pool = pool(job.project_id, Forge.Jobs.harness(job))
-    limited = limited(Enum.map(pool, & &1.id), now)
+    harness = Forge.Jobs.harness(job)
+    pool = pool(job.project_id, harness)
+    ids = Enum.map(pool, & &1.id)
+    limited = limited(ids, now)
+    held = held(ids, job.id)
 
-    case Enum.find(pool, &(&1.id == job.credential_id)) do
-      %Credential{id: id} = kept when not is_map_key(limited, id) -> {:ok, kept}
-      _limited_or_unusable -> pick(pool, limited, DateTime.to_date(now))
+    kept = Enum.find(pool, &(&1.id == job.credential_id))
+
+    if kept != nil and not is_map_key(limited, kept.id) and kept.id not in held do
+      {:ok, kept}
+    else
+      pick(pool, limited, held, DateTime.to_date(now), harness)
     end
   end
 
-  defp pick([], _limited, _today), do: {:error, {:no_credential, :none_assigned}}
+  # **A credential is held while another run of an exclusive kind is live on it** — a ChatGPT
+  # login, which rotates and so runs one job at a time across every machine and project it is
+  # assigned to (`docs/design/credentials.md` § Holding a login). The job's own runs are not
+  # another's: it restarts on the login it already holds.
+  @spec held([String.t()], String.t()) :: [String.t()]
+  def held([], _job_id), do: []
 
-  defp pick(pool, limited, today) do
-    case Enum.reject(pool, &Map.has_key?(limited, &1.id)) do
+  def held(ids, job_id) do
+    query =
+      from r in Run,
+        where: r.credential_id in ^ids and is_nil(r.finished_at) and r.exclusive,
+        select: r.credential_id
+
+    # A job with no id yet has no runs of its own to leave out.
+    query = if job_id, do: from(r in query, where: r.job_id != ^job_id), else: query
+    Repo.all(query)
+  end
+
+  @doc """
+  Which of these credentials a live run holds *now*, by anyone: what an owner's page says of a
+  ChatGPT login (*in use* or *free*). The owner's alone to see — nobody else reads this page, and
+  the waiting sentence a job gets names nothing (`docs/design/credentials.md` § Holding a login).
+  """
+  @spec in_use([String.t()]) :: MapSet.t(String.t())
+  def in_use([]), do: MapSet.new()
+
+  def in_use(ids) do
+    from(r in Run,
+      where: r.credential_id in ^ids and is_nil(r.finished_at) and r.exclusive,
+      select: r.credential_id
+    )
+    |> Repo.all()
+    |> MapSet.new()
+  end
+
+  defp pick([], _limited, _held, _today, _harness),
+    do: {:error, {:no_credential, :none_assigned}}
+
+  defp pick(pool, limited, held, today, harness) do
+    case Enum.reject(pool, &(Map.has_key?(limited, &1.id) or &1.id in held)) do
       [] ->
-        {:error, {:limited, limited |> Map.values() |> Enum.min(DateTime)}}
+        # **Busy is not stuck**, and a limit is time's to resolve where a hold is a run's: when
+        # nothing is merely limited the job waits on the holds, and when something is, on the
+        # earliest reset, as an all-limited pool always did.
+        if map_size(limited) == 0,
+          do: {:error, {:held, String.to_existing_atom(harness)}},
+          else: {:error, {:limited, limited |> Map.values() |> Enum.min(DateTime)}}
 
       free ->
-        spent = spent_today(Enum.map(free, & &1.id), today)
-        {:ok, Enum.min_by(free, &Map.get(spent, &1.id, Decimal.new(0)), Decimal)}
+        used = used_today(Enum.map(free, & &1.id), today)
+        {:ok, Enum.min_by(free, &Map.get(used, &1.id, 0))}
     end
   end
 
   @doc """
-  What each of these credentials has spent today, in UTC, by id: the sum of `cost_usd` over the
-  runs that spent it and *started* today (`docs/design/credentials.md` § Spend). Over runs and not
-  jobs, because a job may move between credentials and each run spent only its own.
+  What each of these credentials has used today, in UTC, by id, in weighted tokens: the sum of
+  `usage` over the runs that used it and *started* today (`docs/design/credentials.md` § Spend). Over runs and not
+  jobs, because a job may move between credentials and each run used only its own.
 
   The day and the rows are `Forge.Spend.day_total/1`'s, so a credential's figure and the node's
-  add up. A credential that has spent nothing is absent rather than zero.
+  add up. A credential that has used nothing is absent rather than zero.
   """
-  @spec spent_today([String.t()], Date.t()) :: %{String.t() => Decimal.t()}
-  def spent_today(ids, date \\ Date.utc_today()) do
+  @spec used_today([String.t()], Date.t()) :: %{String.t() => non_neg_integer()}
+  def used_today(ids, date \\ Date.utc_today()) do
     {from_time, until} = Spend.day(date)
 
     Repo.all(
       from r in Run,
         where: r.credential_id in ^ids and r.started_at >= ^from_time and r.started_at < ^until,
         group_by: r.credential_id,
-        select: {r.credential_id, sum(r.cost_usd)}
+        select: {r.credential_id, type(sum(r.usage), :integer)}
     )
     |> Map.new()
+  end
+
+  @doc """
+  What each of these credentials used today beyond the one figure: the tokens by kind behind it, and
+  Claude Code's own dollar figure, summed over the same runs as `used_today/2`
+  (`docs/design/credentials.md` § Spend). A run converted from dollars has no kinds and adds none; a
+  harness with no dollar figure adds none. A credential with no run today is absent.
+  """
+  @spec detail_today([String.t()], Date.t()) :: %{
+          String.t() => %{
+            tokens: %{atom() => non_neg_integer()},
+            claude_cost_usd: Decimal.t() | nil
+          }
+        }
+  def detail_today(ids, date \\ Date.utc_today()) do
+    {from_time, until} = Spend.day(date)
+
+    Repo.all(
+      from r in Run,
+        where: r.credential_id in ^ids and r.started_at >= ^from_time and r.started_at < ^until,
+        select: {r.credential_id, r.tokens, r.claude_cost_usd}
+    )
+    |> Enum.group_by(&elem(&1, 0))
+    |> Map.new(fn {id, rows} ->
+      {id,
+       %{
+         tokens: Enum.reduce(rows, ForgeCore.Usage.empty(), &add_tokens(&1, &2)),
+         claude_cost_usd:
+           rows
+           |> Enum.map(&elem(&1, 2))
+           |> Enum.reject(&is_nil/1)
+           |> Enum.reduce(nil, fn cost, sum -> Decimal.add(sum || 0, cost) end)
+       }}
+    end)
+  end
+
+  defp add_tokens({_id, tokens, _cost}, acc) do
+    counted = ForgeCore.Usage.normalize(tokens)
+    Map.new(acc, fn {kind, n} -> {kind, n + Map.fetch!(counted, kind)} end)
   end
 
   @doc """
@@ -675,6 +786,148 @@ defmodule Forge.Credentials do
   end
 
   defp at(_absent), do: nil
+
+  # -- what a run hands back ---------------------------------------------------------------------
+
+  @doc """
+  Adds to the caller's transaction the acceptance, or the refusal, of the credential a run hands
+  back changed (`docs/design/credentials.md` § A login comes back). **It runs before the run
+  closes**, in the result's own transaction or the chat turn's: the run is live while it is
+  asked, and a return that arrives after its run ended is the stale one the rule exists to refuse.
+
+  Accepted only when **every** condition holds, each refused with a fixed reason and recorded as
+  `credential.renewal_refused`: the job has a live run, on the worker the job is on, on a credential
+  of a kind that comes back; the return opens under that worker's key *for this job* (so it is
+  sealed by the worker holding the job); it passes the shape check; and it names **the same
+  account** as the stored one, so a job cannot change whose account every later job on the
+  credential sends its work to. An accepted return replaces the stored login, sealed with the
+  Vault again, and is recorded as `credential.renewed`.
+
+  **Neither outcome touches the job's own**: a refusal is a recorded answer and not an error, it
+  keeps the stored login, and the events name the credential and the job and never the content.
+  """
+  @revoked "the credential was revoked"
+
+  @spec put_renew(Multi.t(), Job.t(), term()) :: Multi.t()
+  def put_renew(multi, %Job{} = job, sealed) when is_binary(sealed) do
+    Multi.run(multi, :renewal, fn _repo, _changes -> {:ok, renew(job, sealed)} end)
+  end
+
+  def put_renew(multi, _job, _nothing_returned), do: multi
+
+  defp renew(job, sealed) do
+    case judge(job, sealed) do
+      {:ok, credential, login} ->
+        now = now()
+
+        # Not on a revoked row, which has had its secret erased: the check in `judge/2` is on a
+        # read, and a revoke can land between that and this write. **The condition here is an
+        # equivalent mutant in every sequential test** — `not_revoked/1` has refused first, so
+        # removing either one alone fails nothing (both were removed and watched failing the test
+        # that revokes first); it is for a revoke that commits between the two statements.
+        {written, _} =
+          Repo.update_all(
+            from(c in Credential, where: c.id == ^credential.id and is_nil(c.revoked_at)),
+            set: [secret: Credential.seal(login), renewed_at: now, updated_at: now]
+          )
+
+        if written == 1 do
+          renewal_event("credential.renewed", job, credential.id, nil)
+          :accepted
+        else
+          renewal_event("credential.renewal_refused", job, credential.id, @revoked)
+          {:refused, @revoked}
+        end
+
+      {:refused, credential_id, reason} ->
+        renewal_event("credential.renewal_refused", job, credential_id, reason)
+        {:refused, reason}
+    end
+  end
+
+  defp judge(job, sealed) do
+    with {:ok, run, credential} <- live_run(job),
+         :ok <- on_this_worker(run, job),
+         :ok <- comes_back(credential),
+         :ok <- not_revoked(credential),
+         {:ok, login} <- open_return(job, sealed),
+         :ok <- shaped(credential, login),
+         :ok <- same_account(credential, login) do
+      {:ok, credential, login}
+    else
+      {:refused, reason} -> {:refused, nil, reason}
+      {:refused, credential_id, reason} -> {:refused, credential_id, reason}
+    end
+  end
+
+  # Not the latest run of the job but the live one: a run that has ended is no one's to renew.
+  defp live_run(job) do
+    case Repo.one(
+           from r in Run,
+             join: c in Credential,
+             on: c.id == r.credential_id,
+             where: r.job_id == ^job.id and is_nil(r.finished_at),
+             order_by: [desc: r.started_at, desc: r.inserted_at],
+             limit: 1,
+             select: {r, c}
+         ) do
+      {run, credential} -> {:ok, run, credential}
+      nil -> {:refused, "the job has no live run on a credential"}
+    end
+  end
+
+  defp on_this_worker(%Run{worker_id: worker_id}, %Job{worker_id: worker_id})
+       when is_binary(worker_id),
+       do: :ok
+
+  defp on_this_worker(_run, _job), do: {:refused, "the run is not on the job's worker"}
+
+  # A revoke erases the secret, and a run that was holding the login when it happened must not put
+  # a live one back: the owner took it away.
+  defp not_revoked(%Credential{revoked_at: nil}), do: :ok
+  defp not_revoked(credential), do: {:refused, credential.id, @revoked}
+
+  defp comes_back(credential) do
+    if Harness.traits(credential.harness, credential.kind).returns,
+      do: :ok,
+      else: {:refused, credential.id, "this kind of credential does not come back"}
+  end
+
+  defp open_return(%Job{worker_id: worker_id, id: job_id}, sealed) do
+    with %Worker{token_hash: hash} when is_binary(hash) <- Repo.get(Worker, worker_id),
+         {:ok, login} <- ForgeCore.Job.Credential.open(sealed, hash, job_id, :return) do
+      {:ok, login}
+    else
+      _unopenable -> {:refused, "not sealed by the job's worker for this job"}
+    end
+  end
+
+  defp shaped(credential, login) do
+    {:ok, driver} = Harness.driver(credential.harness)
+
+    case driver.check(credential.kind, %{"token" => login}) do
+      {:ok, _} -> :ok
+      {:error, _fixed_phrase} -> {:refused, credential.id, "not a login of the right shape"}
+    end
+  end
+
+  defp same_account(credential, login) do
+    stored = Repo.one(from c in Credential, where: c.id == ^credential.id, select: c.account_id)
+    {:ok, driver} = Harness.driver(credential.harness)
+    returned = Harness.attributes(driver, credential.kind, %{"token" => login})[:account_id]
+
+    if is_binary(stored) and stored == returned,
+      do: :ok,
+      else: {:refused, credential.id, "names a different account"}
+  end
+
+  defp renewal_event(type, job, credential_id, reason) do
+    payload = %{"credential_id" => credential_id, "job_id" => job.id}
+    payload = if reason, do: Map.put(payload, "reason", reason), else: payload
+
+    {:ok, _event} =
+      Events.append(type, :system, %{ticket_id: job.ticket_id, job_id: job.id, payload: payload})
+  end
 
   @doc """
   The credential as the worker receives it: harness, kind, and the secret sealed for that worker

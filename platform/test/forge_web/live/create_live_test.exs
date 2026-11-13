@@ -234,12 +234,12 @@ defmodule ForgeWeb.CreateLiveTest do
         inputs: [ticket]
         produces: [out.md]
         outcomes: [done, retry]
-        budget: { turns: 3, cost: 0.10 }
+        budget: { turns: 3, tokens: 20k }
       done_state: {}
     transitions:
       - { from: looping, to: looping, when: retry, max: 1 }
       - { from: looping, to: done_state, when: done }
-    limits: { ticket_cost: 0.50 }
+    limits: { ticket_tokens: 100k }
     """
   end
 

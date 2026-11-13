@@ -4,6 +4,7 @@ defmodule ForgeWeb.UserLive.Settings do
   on_mount {ForgeWeb.UserAuth, :require_sudo_mode}
 
   alias Forge.{Accounts, Credentials, Harness, Projects}
+  alias ForgeWeb.Format
 
   @impl true
   def render(assigns) do
@@ -72,6 +73,8 @@ defmodule ForgeWeb.UserLive.Settings do
         credentials={@credentials}
         funds={@funds}
         spent={@spent}
+        detail={@detail}
+        in_use={@in_use}
         windows={@windows}
         projects={@projects}
         form={@credential_form}
@@ -135,8 +138,10 @@ defmodule ForgeWeb.UserLive.Settings do
     assign(socket,
       credentials: credentials,
       funds: Map.new(credentials, &{&1.id, Credentials.projects(&1)}),
-      spent: Credentials.spent_today(ids),
+      spent: Credentials.used_today(ids),
+      detail: Credentials.detail_today(ids),
       windows: Credentials.windows(ids),
+      in_use: Credentials.in_use(ids),
       projects: Projects.list(user)
     )
   end
@@ -217,7 +222,8 @@ defmodule ForgeWeb.UserLive.Settings do
       harness: params["harness"],
       kind: params["kind"],
       secret: params["secret"],
-      daily_limit_usd: blank(params["daily_limit_usd"])
+      daily_limit: limit(blank(params["daily_limit"])),
+      expires_on: blank(params["expires_on"])
     }
 
     case Credentials.create(socket.assigns.current_scope.user, attrs) do
@@ -283,18 +289,35 @@ defmodule ForgeWeb.UserLive.Settings do
     if List.keymember?(kinds, kind, 0), do: kind, else: kinds |> List.first() |> elem(0)
   end
 
-  # Dollars, the one exception to `capacity.md`'s recommendation that they leave the operator's
-  # surfaces: a credential is somebody's money, an API key is billed in dollars and has no window
-  # to count in, and the limit beside it was typed in dollars (`docs/design/ui.md` § Account
-  # settings). The day is `Forge.Spend.day/1`'s, in UTC.
-  defp spend(spent, limit) do
-    today = "$#{Decimal.round(spent || Decimal.new(0), 2)} today"
+  # What the credential used today, in windows with the weighted tokens counted behind them, and
+  # its daily limit in the same unit, which is shown and never enforced. The day is
+  # `Forge.Spend.day/1`'s, in UTC. (A Claude API key's dollar figure and the tokens by kind are drawn beside it.)
+  defp spend(used, limit) do
+    used = used || 0
+    windows = Format.windows(used)
+    counted = "#{ForgeCore.Usage.format(used)} weighted tokens"
+    today = if windows, do: "#{windows} today (#{counted})", else: "#{counted} today"
 
     case limit do
       nil -> today
-      limit -> "#{today} of $#{limit}/day, not enforced"
+      limit -> "#{today} of #{ForgeCore.Usage.format(limit)}/day, not enforced"
     end
   end
+
+  # The tokens counted behind today's figure, by kind, when any run had them.
+  defp kinds_line(%{tokens: tokens}) do
+    if line = Format.kinds(tokens), do: "by kind: " <> line
+  end
+
+  defp kinds_line(_none), do: nil
+
+  # Only a Claude API key is billed in dollars, so only its row carries the figure.
+  defp dollars_line(%{kind: "api_key", harness: "claude_code"}, %{
+         claude_cost_usd: %Decimal{} = cost
+       }),
+       do: "Claude Code's figure: $#{Decimal.round(cost, 2)} today"
+
+  defp dollars_line(_credential, _detail), do: nil
 
   # Five-hour, then the week, then anything else the provider names, as it names it.
   defp ordered(windows) do
@@ -319,6 +342,17 @@ defmodule ForgeWeb.UserLive.Settings do
       else: Calendar.strftime(at, "%a %H:%M UTC")
   end
 
+  # A limit typed as `4M` or `800k` is read as `ForgeCore.Usage.parse/1` reads a budget; what does
+  # not parse is passed on as typed, so the changeset refuses it as an invalid number.
+  defp limit(nil), do: nil
+
+  defp limit(text) do
+    case ForgeCore.Usage.parse(text) do
+      {:ok, tokens} -> tokens
+      {:error, _} -> text
+    end
+  end
+
   defp blank(nil), do: nil
   defp blank(value), do: if(String.trim(value) == "", do: nil, else: String.trim(value))
 
@@ -333,7 +367,9 @@ defmodule ForgeWeb.UserLive.Settings do
   attr :credentials, :list, required: true
   attr :funds, :map, required: true
   attr :spent, :map, required: true
+  attr :detail, :map, default: %{}
   attr :windows, :map, required: true
+  attr :in_use, :any, required: true
   attr :projects, :list, required: true
   attr :form, :any, required: true
   attr :seq, :integer, required: true
@@ -346,8 +382,8 @@ defmodule ForgeWeb.UserLive.Settings do
       <p class="mt-1 text-sm/[1.55] opacity-60">
         The tokens your agents authenticate with. Yours and nobody else's: a job spends one only
         when you have assigned it to that job's project, and a project with several picks between
-        them per job. Each is tried against the provider when you add it; the token is never shown
-        again.
+        them per job. Each is tried against the provider when you add it — a Codex credential only
+        for its shape, its first job being the check — and the token is never shown again.
       </p>
 
       <%!-- Rows separated by a rule, not boxed: a row is not something to tap, and § The
@@ -361,7 +397,11 @@ defmodule ForgeWeb.UserLive.Settings do
             Credentials.revoked?(credential) && "opacity-50"
           ]}
         >
-          <span class="text-sm font-medium">{credential.name}</span>
+          <%!-- Cut to the row, whole in its title, as names are everywhere else (`ui.md`): the name
+                is the owner's and as long as they typed. --%>
+          <span class="max-w-full truncate text-sm font-medium" title={credential.name}>
+            {credential.name}
+          </span>
           <span class="font-mono text-[12.5px] opacity-60">
             {Harness.label(credential.harness)} · {Harness.kind_label(
               credential.harness,
@@ -369,8 +409,32 @@ defmodule ForgeWeb.UserLive.Settings do
             )}
           </span>
           <span class="font-mono text-[12.5px] opacity-60">{status(credential)}</span>
+          <span
+            :if={detail(credential, @in_use)}
+            class={[
+              "font-mono text-[12.5px]",
+              if(expiring?(credential), do: "text-warning", else: "opacity-60")
+            ]}
+          >
+            {detail(credential, @in_use)}
+          </span>
           <span class="font-mono text-[12.5px] opacity-60">
-            {spend(Map.get(@spent, credential.id), credential.daily_limit_usd)}
+            {spend(Map.get(@spent, credential.id), credential.daily_limit)}
+          </span>
+          <span
+            :if={kinds_line(Map.get(@detail, credential.id))}
+            id={"credential-#{credential.id}-tokens"}
+            class="font-mono text-[12.5px] opacity-60"
+          >
+            {kinds_line(Map.get(@detail, credential.id))}
+          </span>
+          <%!-- Claude Code's own dollar figure, for the one kind billed in dollars; read by no cap. --%>
+          <span
+            :if={dollars_line(credential, Map.get(@detail, credential.id))}
+            id={"credential-#{credential.id}-dollars"}
+            class="font-mono text-[12.5px] opacity-60"
+          >
+            {dollars_line(credential, Map.get(@detail, credential.id))}
           </span>
           <%!-- One line per window the provider has reported, drawn by capacity.md's rules: a
                 figure only when one was given, the reset always, warning colour only while it
@@ -387,6 +451,7 @@ defmodule ForgeWeb.UserLive.Settings do
           </span>
           <div :if={not Credentials.revoked?(credential)} class="ml-auto flex items-center gap-4">
             <button
+              :if={not checked_by_shape?(credential)}
               type="button"
               phx-click="check-credential"
               phx-value-id={credential.id}
@@ -438,12 +503,50 @@ defmodule ForgeWeb.UserLive.Settings do
           label="Kind"
           options={for {kind, label} <- Harness.kinds(@form.params["harness"]), do: {label, kind}}
         />
+        <p
+          :if={@form.params["kind"] == "chatgpt_login"}
+          id="login-howto"
+          class="text-sm/[1.55] opacity-70"
+        >
+          Make one for forge alone: <code class="font-mono">CODEX_HOME=$(mktemp -d) codex login --device-auth</code>,
+          then paste that folder's <code class="font-mono">auth.json</code>. It must be a login made
+          for forge alone: Codex renews a login by itself, and a copy that something else renewed
+          first stops working. A job that takes it can keep using the account until you sign that
+          login out at OpenAI; revoking it here only stops forge using it.
+        </p>
+        <p
+          :if={@form.params["kind"] == "access_token"}
+          id="token-howto"
+          class="text-sm/[1.55] opacity-70"
+        >
+          Created in your workspace's settings by an admin of the workspace: a fixed token with an
+          expiry its creator chose.
+        </p>
         <%!-- Written out rather than `<.input>`, which renders the field's value into the page:
-              this one never has a value on the server to render, and must not grow one. --%>
-        <div class="fieldset mb-2" id={"credential-secret-#{@seq}"} phx-update="ignore">
+              this one never has a value on the server to render, and must not grow one. A login
+              is pasted into a box of several lines, so that a phone can add one. **The kind is in
+              the id**: an ignored element is never patched, so the box for another kind has to be
+              another element. --%>
+        <div
+          class="fieldset mb-2"
+          id={"credential-secret-#{@seq}-#{@form.params["kind"]}"}
+          phx-update="ignore"
+        >
           <label for={"credential-secret-input-#{@seq}"}>
-            <span class="label mb-1">Token</span>
+            <span class="label mb-1">
+              {if @form.params["kind"] == "chatgpt_login", do: "Login (auth.json)", else: "Token"}
+            </span>
+            <textarea
+              :if={@form.params["kind"] == "chatgpt_login"}
+              name="credential[secret]"
+              id={"credential-secret-input-#{@seq}"}
+              rows="6"
+              autocomplete="off"
+              spellcheck="false"
+              class="w-full textarea font-mono text-xs"
+            ></textarea>
             <input
+              :if={@form.params["kind"] != "chatgpt_login"}
               type="password"
               name="credential[secret]"
               id={"credential-secret-input-#{@seq}"}
@@ -453,9 +556,16 @@ defmodule ForgeWeb.UserLive.Settings do
           </label>
         </div>
         <.input
-          field={@form[:daily_limit_usd]}
+          :if={@form.params["kind"] == "access_token"}
+          field={@form[:expires_on]}
+          type="date"
+          label="Expires on (optional: warned about, never enforced)"
+        />
+        <.input
+          field={@form[:daily_limit]}
           type="text"
-          label="Daily limit in USD (optional, shown and not enforced)"
+          label="Daily limit, weighted tokens (optional, not enforced)"
+          placeholder="4M"
           autocomplete="off"
         />
         <.button variant="primary" phx-disable-with="Checking...">Add credential</.button>
@@ -516,7 +626,43 @@ defmodule ForgeWeb.UserLive.Settings do
     cond do
       Credentials.revoked?(credential) -> "revoked"
       credential.check_error -> "not checked: #{credential.check_error}"
+      checked_by_shape?(credential) -> "not checked with OpenAI: the first job is the check"
       true -> "#{length(credential.models || [])} models"
     end
   end
+
+  # A Codex credential is checked by its shape alone, so there is nothing to check again and nothing
+  # the provider said (`docs/design/credentials.md` § Checked on save).
+  defp checked_by_shape?(credential),
+    do: Forge.Harness.traits(credential.harness, credential.kind).checked == :shape
+
+  # What this kind of credential says of itself, as much as there is: a login's account and plan,
+  # when Codex last renewed it, and whether a job holds it now; a token's expiry.
+  defp detail(%{kind: "chatgpt_login"} = credential, in_use) do
+    [
+      credential.account_id && "account #{credential.account_id}",
+      credential.plan && "#{credential.plan} plan",
+      credential.renewed_at && "renewed #{Calendar.strftime(credential.renewed_at, "%Y-%m-%d")}",
+      if(MapSet.member?(in_use, credential.id), do: "in use", else: "free")
+    ]
+    |> Enum.filter(& &1)
+    |> Enum.join(" · ")
+  end
+
+  defp detail(%{kind: "access_token", expires_on: %Date{} = on}, _in_use) do
+    case Date.diff(on, Date.utc_today()) do
+      days when days < 0 -> "expired"
+      0 -> "expires today"
+      1 -> "1 day left"
+      days -> "#{days} days left"
+    end
+  end
+
+  defp detail(_credential, _in_use), do: nil
+
+  # In the last seven days, and after: the only warning there is, since nothing is enforced.
+  defp expiring?(%{kind: "access_token", expires_on: %Date{} = on}),
+    do: Date.diff(on, Date.utc_today()) <= 7
+
+  defp expiring?(_credential), do: false
 end

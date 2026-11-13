@@ -28,10 +28,10 @@ defmodule Forge.SchemasTest do
       assert %{project_id: ["has already been taken"]} = errors_on(changeset)
     end
 
-    test "default to active with zero cost" do
+    test "default to active with zero usage" do
       ticket = ticket_fixture()
       assert ticket.status == :active
-      assert Decimal.equal?(ticket.cost_usd, 0)
+      assert ticket.usage == 0
     end
   end
 
@@ -110,12 +110,12 @@ defmodule Forge.SchemasTest do
                  })
                )
 
-      assert {:ok, %Job{exhausted: :cost}} =
+      assert {:ok, %Job{exhausted: :tokens}} =
                Repo.update(
                  Job.progress_changeset(job, %{
                    status: :finished,
                    outcome: :budget_exhausted,
-                   exhausted: :cost
+                   exhausted: :tokens
                  })
                )
 

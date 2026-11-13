@@ -21,7 +21,7 @@ states:
     # its own. `high` and not `xhigh` because a person waits for every turn.
     #
     # **No `budget`, and the validator refuses one**: a chat step has no ceiling, and its spend is
-    # added to the ticket's. `.forge/common.yml` derives the $30 of `limits.ticket_cost` it leaves
+    # added to the ticket's. `.forge/common.yml` derives the 6M of `limits.ticket_tokens` it leaves
     # the conversation, and why that is a guess.
     model: opus
     effort: high
@@ -45,7 +45,7 @@ states:
     effort: xhigh
     inputs: [ticket, refinement.md, implementation.md]
     produces: [plan.md]
-    budget: { turns: 80, cost: 4.00 }
+    budget: { turns: 80, tokens: 800k }
 
   implementing:
     prompt: agents/implement.md
@@ -88,7 +88,7 @@ states:
     # 1280 MiB. Measured on 2026-11-08 with `/proc/<pid>/smaps_rollup` every 200 ms; the default
     # is above that figure, so nothing is declared. A page much heavier than the shipped setup's
     # would move it, and the figure to correct this with is a look killed at 137.
-    budget: { turns: 300, cost: 20.00 }
+    budget: { turns: 300, tokens: 4M }
 
   checking:
     extends: checking
@@ -151,8 +151,8 @@ transitions:
   - { from: presenting,   to: presenting,   when: did_not_converge,  max: 1 }
 
 limits:
-  # $421 and not $120 because `reviewing` costs $40 and its loop runs five times, and because the
+  # 84.2M and not 24M because `reviewing` costs 8M and its loop runs five times, and because the
   # refinement conversation and the rebases after the approval spend under the same cap:
   # `.forge/common.yml` derives the figure beside the review budget and the bounds it follows from.
   # `project_workflows_test.exs` computes it from this file rather than trusting the comment.
-  ticket_cost: 421.00
+  ticket_tokens: 84.2M

@@ -121,6 +121,42 @@ defmodule ForgeCore.Job.SpecTest do
       refute is_map(decoded.budget)
     end
 
+    # A job pending when the platform moved to weighted tokens carries a budget in dollars. It runs
+    # on the conversion rather than failing to start (`docs/design/capacity.md`).
+    test "a stored budget in dollars is converted at the rate" do
+      stored =
+        spec()
+        |> Spec.to_json()
+        |> Jason.decode!()
+        |> Map.put("budget", %{
+          "turns" => 20,
+          "cost" => 4.0,
+          "declared" => 30,
+          "lowered_by" => "day",
+          "ticket_left" => 96.0,
+          "ticket_limit" => 140
+        })
+
+      assert Spec.from_map(stored).budget == %{
+               turns: 20,
+               tokens: 800_000,
+               declared: 6_000_000,
+               lowered_by: "day",
+               ticket_left: 19_200_000,
+               ticket_limit: 28_000_000
+             }
+    end
+
+    test "a budget already in tokens is not converted again" do
+      stored =
+        spec()
+        |> Spec.to_json()
+        |> Jason.decode!()
+        |> Map.put("budget", %{"turns" => 20, "tokens" => 800_000})
+
+      assert Spec.from_map(stored).budget == %{turns: 20, tokens: 800_000}
+    end
+
     test "builds from a map with string keys, as stored on the job row" do
       map = chat_spec() |> Spec.to_json() |> Jason.decode!()
 

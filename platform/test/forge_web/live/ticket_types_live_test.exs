@@ -22,11 +22,11 @@ defmodule ForgeWeb.TicketTypesLiveTest do
       prompt: agents/implement.md
       inputs: [ticket]
       produces: [changeset]
-      budget: { turns: 5, cost: 1.00 }
+      budget: { turns: 5, tokens: 200k }
     review_ready: {}
   transitions:
     - { from: INITIAL, to: review_ready }
-  limits: { ticket_cost: 5.00 }
+  limits: { ticket_tokens: 1M }
   """
 
   defp workflow(initial, description) do

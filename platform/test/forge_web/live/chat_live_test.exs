@@ -68,7 +68,7 @@ defmodule ForgeWeb.ChatLiveTest do
     {:ok, _chat} =
       Conversations.record_turn(chat, %{
         "turn" => index,
-        "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"}
+        "harness" => %{"turns" => 1, "usage" => 2_000, "cost_usd" => 0.01, "subtype" => "success"}
       })
   end
 
@@ -251,7 +251,7 @@ defmodule ForgeWeb.ChatLiveTest do
         "turn" => 1,
         "commit" => nil,
         "uncommitted" => %{"reason" => "merge_unresolved", "paths" => ["README.md"]},
-        "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"}
+        "harness" => %{"turns" => 1, "usage" => 2_000, "cost_usd" => 0.01, "subtype" => "success"}
       })
 
     {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
@@ -283,6 +283,16 @@ defmodule ForgeWeb.ChatLiveTest do
 
     assert html =~ "Persist scores"
     assert html =~ "About this ticket"
+  end
+
+  test "the conversation's strip says the harness and its model", %{conn: conn, chat: chat} do
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    assert view |> element("#chat-harness") |> render() =~ "Claude Code"
+
+    Forge.Repo.update!(Ecto.Changeset.change(chat, harness: "codex", model: "gpt-look-5"))
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    assert view |> element("#chat-harness") |> render() =~ "Codex · gpt-look-5"
   end
 
   # A conversation nothing can place yet says why, where the reply will appear, and a page that
@@ -853,7 +863,12 @@ defmodule ForgeWeb.ChatLiveTest do
     {:ok, _chat} =
       Conversations.record_turn(chat, %{
         "turn" => index,
-        "harness" => %{"turns" => 1, "cost_usd" => 0.01 * index, "subtype" => "success"},
+        "harness" => %{
+          "turns" => 1,
+          "usage" => 2_000 * index,
+          "cost_usd" => 0.01 * index,
+          "subtype" => "success"
+        },
         "documents" => documents
       })
   end
@@ -904,7 +919,7 @@ defmodule ForgeWeb.ChatLiveTest do
     {:ok, _chat} =
       Conversations.record_turn(chat, %{
         "turn" => 1,
-        "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"},
+        "harness" => %{"turns" => 1, "usage" => 2_000, "cost_usd" => 0.01, "subtype" => "success"},
         "proposals" => %{
           "later.md" => %{
             "title" => "Do it later",

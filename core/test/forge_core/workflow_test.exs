@@ -272,7 +272,7 @@ defmodule ForgeCore.WorkflowTest do
         workflow: %Workflow{
           initial: "a",
           transitions: [],
-          limits: %Limits{ticket_cost: 1},
+          limits: %Limits{ticket_tokens: 1},
           defaults: %Defaults{resources: %Resources{memory: 100, cpu: 1}},
           states: %{
             "both" => %State{name: "both", resources: %Resources{memory: 900, cpu: 9}},
@@ -311,7 +311,7 @@ defmodule ForgeCore.WorkflowTest do
       workflow = %Workflow{
         initial: "a",
         transitions: [],
-        limits: %Limits{ticket_cost: 1},
+        limits: %Limits{ticket_tokens: 1},
         states: %{"a" => %State{name: "a"}}
       }
 
@@ -359,24 +359,24 @@ defmodule ForgeCore.WorkflowTest do
           prompt: r.md
           inputs: [ticket]
           produces: [refinement.md]
-          budget: { turns: 1, cost: 1 }
+          budget: { turns: 1, tokens: 200k }
         planning:
           prompt: p.md
           inputs: [ticket, refinement.md, implementation.md]
           produces: [plan.md]
-          budget: { turns: 1, cost: 1 }
+          budget: { turns: 1, tokens: 200k }
         implementing:
           prompt: i.md
           inputs: [plan.md, review.md, test-report.md]
           produces: [implementation.md, changeset]
           outcomes: [done, plan_invalid]
-          budget: { turns: 1, cost: 1 }
+          budget: { turns: 1, tokens: 200k }
         reviewing:
           prompt: v.md
           inputs: [plan.md, implementation.md, changeset]
           produces: [review.md, commit-message]
           outcomes: [done, changes_requested]
-          budget: { turns: 1, cost: 1 }
+          budget: { turns: 1, tokens: 200k }
         human_testing:
           produces: [test-report.md]
         merged:
@@ -391,7 +391,7 @@ defmodule ForgeCore.WorkflowTest do
         - { from: human_testing, to: merged, approve: [changeset] }
         - { from: human_testing, to: implementing }
       limits:
-        ticket_cost: 10
+        ticket_tokens: 2M
       """
 
       %{workflow: ForgeCore.Workflow.Parser.parse!(yaml)}
@@ -430,18 +430,18 @@ defmodule ForgeCore.WorkflowTest do
       states:
         a:
           prompt: a.md
-          budget: { turns: 1, cost: 1 }
+          budget: { turns: 1, tokens: 200k }
         h:
           produces: [note.md]
         c:
           prompt: c.md
           inputs: [note.md]
-          budget: { turns: 1, cost: 1 }
+          budget: { turns: 1, tokens: 200k }
       transitions:
         - { from: a, to: h }
         - { from: h, to: c }
       limits:
-        ticket_cost: 1
+        ticket_tokens: 200k
       """
 
       refute yaml
@@ -461,15 +461,15 @@ defmodule ForgeCore.WorkflowTest do
           prompt: i.md
           produces: [implementation.md]
           outcomes: [done, stuck]
-          budget: { turns: 1, cost: 1 }
+          budget: { turns: 1, tokens: 200k }
         triage:
           prompt: t.md
           inputs: [implementation.md]
-          budget: { turns: 1, cost: 1 }
+          budget: { turns: 1, tokens: 200k }
         after_stuck:
           prompt: s.md
           inputs: [implementation.md]
-          budget: { turns: 1, cost: 1 }
+          budget: { turns: 1, tokens: 200k }
         done: {}
       transitions:
         - { from: implementing, to: triage, when: error }
@@ -478,7 +478,7 @@ defmodule ForgeCore.WorkflowTest do
         - { from: triage, to: done }
         - { from: after_stuck, to: done }
       limits:
-        ticket_cost: 1
+        ticket_tokens: 200k
       """
 
       workflow = ForgeCore.Workflow.Parser.parse!(yaml)
@@ -499,13 +499,13 @@ defmodule ForgeCore.WorkflowTest do
           inputs: [notes.md]
           produces: [notes.md]
           outcomes: [done, again]
-          budget: { turns: 1, cost: 1 }
+          budget: { turns: 1, tokens: 200k }
         b: {}
       transitions:
         - { from: a, to: b }
         - { from: a, to: a, when: again }
       limits:
-        ticket_cost: 1
+        ticket_tokens: 200k
       """
 
       refute yaml
@@ -523,21 +523,21 @@ defmodule ForgeCore.WorkflowTest do
           prompt: a.md
           produces: [x.md]
           outcomes: [done, skip]
-          budget: { turns: 1, cost: 1 }
+          budget: { turns: 1, tokens: 200k }
         b:
           prompt: b.md
           produces: [y.md]
-          budget: { turns: 1, cost: 1 }
+          budget: { turns: 1, tokens: 200k }
         c:
           prompt: c.md
           inputs: [y.md]
-          budget: { turns: 1, cost: 1 }
+          budget: { turns: 1, tokens: 200k }
       transitions:
         - { from: a, to: b }
         - { from: a, to: c, when: skip }
         - { from: b, to: c }
       limits:
-        ticket_cost: 1
+        ticket_tokens: 200k
       """
 
       workflow = ForgeCore.Workflow.Parser.parse!(yaml)

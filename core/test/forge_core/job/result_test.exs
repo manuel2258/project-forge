@@ -195,8 +195,18 @@ defmodule ForgeCore.Job.ResultTest do
   # built before it sends none: nil, which the row draws as nothing rather than guessing one of
   # the three — and not a bump, because an addition the other side may ignore is not a breaking
   # change (`ForgeCore.WorkerProtocol`).
+  test "a ceiling a worker or row named cost is the token ceiling" do
+    for value <- ["cost", :cost] do
+      map =
+        Result.to_map(%Result{status: :finished, outcome: :budget_exhausted})
+        |> Map.put("exhausted", value)
+
+      assert Result.from_map(map).exhausted == :tokens
+    end
+  end
+
   test "carries which ceiling stopped the run, and its absence from an older worker" do
-    for ceiling <- [:turns, :cost, :wall_clock] do
+    for ceiling <- [:turns, :tokens, :wall_clock] do
       stopped = %Result{status: :finished, outcome: :budget_exhausted, exhausted: ceiling}
 
       assert ^stopped =

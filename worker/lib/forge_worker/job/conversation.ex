@@ -117,7 +117,7 @@ defmodule ForgeWorker.Job.Conversation do
   end
 
   # Sealed, from the assignment, every time: the state keeps nothing it does not already keep.
-  defp secrets(state), do: Secrets.from_assignment(state.assignment)
+  defp secrets(state), do: Secrets.from_assignment(state.assignment, job_dir(state))
 
   # Its own rescue, so that what raises here stops a conversation that has a user to remove —
   # `terminate/2` removes it — rather than one the clause above only knows without.
@@ -258,15 +258,16 @@ defmodule ForgeWorker.Job.Conversation do
     slice = assignment["slice"] || %{}
     spec = ForgeCore.Job.Spec.from_map(assignment["spec"])
 
-    harness = ForgeWorker.Link.harness()
+    harness = ForgeWorker.Link.harness(assignment)
 
     # A reopened conversation resumes its session as a fork, when one was carried and passes its
     # check, and starts cold with the replay otherwise (`docs/design/conversations.md` § Lifetime).
     {harness_opts, session} =
       Application.get_env(:forge_worker, :harness_opts, [])
+      |> ForgeWorker.Harness.machine_opts(harness)
       |> Keyword.put(:mode, :streaming)
       |> Keyword.merge(ForgeWorker.Link.resume_opts(assignment))
-      |> put_max_cost(assignment)
+      |> put_max_tokens(assignment)
       |> put_model(spec)
       |> put_effort(spec)
       |> then(&Session.restore(assignment, job_dir(state), state.worktree, &1, harness))
@@ -274,7 +275,7 @@ defmodule ForgeWorker.Job.Conversation do
     harness_opts = ForgeWorker.Job.Credential.put(harness_opts, assignment, harness.driver())
 
     [
-      harness: ForgeWorker.Link.harness(),
+      harness: harness,
       spec: spec,
       root: Path.join(state.root, "jobs"),
       worktree: state.worktree,
@@ -300,12 +301,12 @@ defmodule ForgeWorker.Job.Conversation do
     ]
   end
 
-  # What is left of the day, decided by the platform and passed through. A turn is refused by
-  # the harness at this ceiling rather than by us afterwards — see § Spend.
-  defp put_max_cost(opts, %{"max_cost_usd" => cost}) when is_number(cost),
-    do: Keyword.put(opts, :max_cost, cost)
+  # What is left of the day, decided by the platform and passed through. Not given to the harness:
+  # the runner counts the process's weighted tokens and stops it past this (`ForgeWorker.Job.Meter`).
+  defp put_max_tokens(opts, %{"max_tokens" => tokens}) when is_integer(tokens),
+    do: Keyword.put(opts, :max_tokens, tokens)
 
-  defp put_max_cost(opts, _assignment), do: opts
+  defp put_max_tokens(opts, _assignment), do: opts
 
   # The model the conversation was opened with, or the project's — resolved by the platform,
   # which knows both. A spec that names none leaves the machine's alone.
@@ -401,7 +402,14 @@ defmodule ForgeWorker.Job.Conversation do
 
     # After every turn and not at the end, because a conversation's end may be its machine's: it
     # goes dormant when its worker is lost, and a reopen resumes what the last turn left.
-    session = Session.upload(job_dir(state), event.payload[:session_id], state.assignment, index)
+    session =
+      Session.upload(
+        job_dir(state),
+        event.payload[:session_id],
+        state.assignment,
+        index,
+        ForgeWorker.Link.harness(state.assignment)
+      )
 
     send(
       state.link,
@@ -601,7 +609,7 @@ defmodule ForgeWorker.Job.Conversation do
   # there. The same trap `harness_summary/3` already carries a comment about.
   #
   # `cost_usd` is the turn's total less what the resumed session had already spent, so it is the
-  # process's own running total; the platform sets it on the run (`Forge.Jobs.Runs.cost/3`) and
+  # process's own running total; the platform sets it on the run (`Forge.Jobs.Runs.record/3`) and
   # the next reopen's baseline is `session_cost_usd`, the harness's total as it came.
   defp turn_summary(event, session, state) do
     payload = event.payload
@@ -617,7 +625,13 @@ defmodule ForgeWorker.Job.Conversation do
       "cost_usd" => Session.own_cost(total, state.baseline, state.job_id),
       "session_cost_usd" => total,
       "duration_ms" => payload[:duration_ms],
-      "usage" => payload[:usage],
+      # The process's running totals, counted by the worker call by call: the platform sets them
+      # on the run and does not add them (`Forge.Jobs.Runs.record/3`).
+      "usage" => payload[:usage_total] || 0,
+      "tokens" => payload[:tokens_total],
+      "claude_usage" => payload[:claude_usage],
+      # A login Codex rewrote this turn, sealed for this job (`Runner`); nothing otherwise.
+      "credential_return" => payload[:credential_return],
       "result" => payload[:result],
       # The job's memory as the turn ended (`docs/design/claude-code-events.md` § Memory).
       "memory" => payload[:memory]

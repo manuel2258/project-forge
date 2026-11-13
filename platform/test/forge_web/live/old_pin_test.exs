@@ -337,7 +337,12 @@ defmodule ForgeWeb.OldPinTest do
       {:ok, _chat} =
         Conversations.record_turn(chat, %{
           "turn" => 1,
-          "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"},
+          "harness" => %{
+            "turns" => 1,
+            "usage" => 2_000,
+            "cost_usd" => 0.01,
+            "subtype" => "success"
+          },
           "documents" => %{"refinement.md" => "# Refined\n"}
         })
 

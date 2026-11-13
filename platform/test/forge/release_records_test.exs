@@ -41,17 +41,17 @@ defmodule Forge.ReleaseRecordsTest do
     building:
       prompt: agents/release.md
       produces: [build.md, "dist/*", "shots/*"]
-      budget: { turns: 10, cost: 1.00 }
+      budget: { turns: 10, tokens: 200k }
     releasing:
       prompt: agents/release.md
       produces: [release-notes.md, changeset, commit-message]
-      budget: { turns: 10, cost: 1.00 }
+      budget: { turns: 10, tokens: 200k }
     merged:
       on_enter: merge
   transitions:
     - { from: building, to: releasing }
     - { from: releasing, to: merged }
-  limits: { ticket_cost: 5.00 }
+  limits: { ticket_tokens: 1M }
   """
 
   @no_keys @release
@@ -68,11 +68,11 @@ defmodule Forge.ReleaseRecordsTest do
     releasing:
       prompt: agents/release.md
       produces: [release-notes.md]
-      budget: { turns: 10, cost: 1.00 }
+      budget: { turns: 10, tokens: 200k }
     shipped: {}
   transitions:
     - { from: releasing, to: shipped }
-  limits: { ticket_cost: 5.00 }
+  limits: { ticket_tokens: 1M }
   """
 
   @dev """
@@ -83,12 +83,12 @@ defmodule Forge.ReleaseRecordsTest do
     implementing:
       prompt: agents/implement.md
       produces: [implementation.md, changeset, commit-message]
-      budget: { turns: 10, cost: 1.00 }
+      budget: { turns: 10, tokens: 200k }
     merged:
       on_enter: merge
   transitions:
     - { from: implementing, to: merged }
-  limits: { ticket_cost: 5.00 }
+  limits: { ticket_tokens: 1M }
   """
 
   setup do

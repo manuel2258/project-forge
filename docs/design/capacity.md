@@ -5,9 +5,46 @@ money**: one unit is one percent of a five-hour window, and quantities are state
 two significant figures (`1.4 windows`). This survives work that spans four windows and a week,
 which a percentage cannot, and it replaces `$0.15562769999999998` on every operator surface.
 
-`cost_usd` stays on jobs and tickets. It is what the harness reports, the PoC's definition of
-usable asks for a total per ticket, and a spend cap is enforced against it. It simply stops being
-something the operator is shown.
+**What a run used is weighted tokens, for every harness** (§ Usage in weighted tokens). It stays on
+jobs and tickets as `usage`, the PoC's definition of usable asks for a total per ticket, and a
+usage cap is enforced against it. It is not something the operator is shown directly: windows are.
+Claude Code's own dollar figure is kept per run as information (`claude_cost_usd`), read by no cap
+and no pick.
+
+## Usage in weighted tokens
+
+Codex reports no dollars, and forge must run a model released after its last release without
+learning its price. So a run's usage is its tokens weighted by kind, the same weights for every
+model and harness, **written here and nowhere else** (`ForgeCore.Usage` holds them):
+
+| kind | weight |
+|---|---|
+| fresh input | 1 |
+| cache write | 1.25 |
+| cache read | 0.1 |
+| output, reasoning included | 5 |
+
+Held in hundredths (100, 125, 10, 500) so the arithmetic is integer; a run's usage is
+`div(sum + 50, 100)`, an integer number of **weighted tokens**. These are Anthropic's price ratios,
+so a large model's token counts as a small one's: the figure measures work done, not exactly
+window consumed, which is the price of needing nothing per model. Output alone was declined: it
+was a fifth of the weighted total on the figures of the conversation that settled this, and blind to the reading that dominates an agent's
+work.
+
+**Each model call is counted once.** Claude Code's stream repeats one call across several
+`assistant` lines, so the worker's meter (`ForgeWorker.Job.Meter`) keeps a map of `message.id` to what has been counted and a
+repeated line adds only its increase. A subagent's calls (lines with `parent_tool_use_id`) count
+the same. A resumed run's usage is its own: only this run's calls are summed, never its session's
+running total (ticket 36).
+
+**Notation.** An integer, or a number with `k` or `M`: `800k`, `4M`, `84.2M`
+(`ForgeCore.Usage.parse/1`, shown the same way). Workflows write `budget: { turns: 80, tokens:
+800k }` and `limits: { ticket_tokens: 84.2M }`; the node sets `FORGE_DAILY_TOKENS`.
+
+**The dollar rate is a placeholder.** `ForgeCore.Usage.per_dollar/0` is 200,000 weighted tokens to
+the dollar — $5 per million fresh input tokens, an Opus-class price, with the weights above being
+price ratios. It converts old dollar figures once (the migration, a pending job's `cost` budget)
+and nothing else; fitting it to recorded runs is later work, like `window_tokens`.
 
 ## What the provider reports
 
@@ -52,15 +89,15 @@ to draw (`docs/design/credentials.md` § Rate limits are per credential).
 ## Two objects, never drawn the same way
 
 **Usage** is absolute and never resets: a job's usage, a timeline step's sum, a ticket's total
-against its allowance. It is derived from `cost_usd` through a single configured constant,
-`config :forge, :capacity, window_cost_usd:` — the cost of one whole five-hour window. The
+against its allowance. It is derived from `usage` through a single configured constant,
+`config :forge, :capacity, window_tokens:` — the weighted tokens of one whole five-hour window,
+1,000,000 to begin with (the old 5.0 dollars at the rate above). The
 provider gives no per-job window share, so this constant is the only bridge from what the harness
 reports to the unit the operator reads. **It is a placeholder until dogfooding calibrates it**, and
 it is the one number in this note that is not evidence.
 
 Drawn as a figure plus a 5px meter filled accent, against the ticket allowance. The allowance is
-the existing `limits.ticket_cost` from the workflow grammar, displayed in windows; the grammar does
-not change. A ticket allowance stays absolute — a cap expressed as a share of a refilling pool
+`limits.ticket_tokens` from the workflow grammar (the old `ticket_cost` converted), displayed in windows. A ticket allowance stays absolute — a cap expressed as a share of a refilling pool
 would mean something different on Monday than on Friday.
 
 **Capacity** is a live shared pool that refills, and it comes from `rate_limit_event` rather than
@@ -96,7 +133,7 @@ Only one of them is the operator's.
 
 | Exhausted | Resolved by | Treatment |
 |---|---|---|
-| A job's own budget | **the workflow** — a retry, or an edge onward to a person | outcome `budget_exhausted` on the job row with `· turns`, `· cost` or `· wall clock` beside it, nowhere else |
+| A job's own budget | **the workflow** — a retry, or an edge onward to a person | outcome `budget_exhausted` on the job row with `· turns`, `· tokens` or `· wall clock` beside it, nowhere else |
 | Ticket allowance | **a human** — raise it or reroute | sticks the ticket, enters the queue, drawn in accent |
 | Daily spend cap | **time**, or the operator raising it | `PAUSED · SPEND 6h 12m`, neutral, on the ticket; the board and the project page draw `PAUSED · SPEND` without the countdown. **Never in the queue** |
 | Window capacity | **time** | `PAUSED · CAPACITY 1h 12m`, neutral, on the board and the ticket, **never in the queue**. Not built (§ Engine support) |
@@ -129,9 +166,9 @@ draws the ceiling as *per run*, and what actually ended the job is the word abov
 from the handoff's "turns always against budget" (`ui/README.md`), deliberately and for that
 reason.
 
-**The cost ceiling overshoots, and that is the mechanism working.** The provider streams no
-per-turn cost, so the harness stops after the turn that crosses the line: `$5.07 of $5.00` and
-`$9.16 of $8.00` are a cap doing its job, not failing at it. Nothing rounds them down or hides
+**The usage ceiling overshoots, and that is the mechanism working.** Forge counts after each model
+call and stops the run after the call that crosses the line: `810k of 800k` is a cap doing its job,
+not failing at it. Nothing rounds them down or hides
 the overshoot — a figure the operator cannot reconcile against the run is worse than one that
 reads a few cents over.
 
@@ -143,7 +180,8 @@ drawn the same way. The countdown is to the next UTC midnight.
 
 ## Spend caps
 
-`cost_usd` is what a cap is enforced against, even though it is not what the operator is shown.
+`usage` is what a cap is enforced against, even though it is not what the operator is shown. (The
+caps are *usage caps*: they count weighted tokens, not money.)
 Both caps live in `Forge.Spend` and are asked in `Forge.Jobs.assign/2` (its `spend_gate`), which
 every billed invocation passes through: a job reaches a machine only by being assigned to one, so
 a ticket over its allowance is stuck before a worker is spoken to. It was `start/1` while the
@@ -151,20 +189,22 @@ platform ran jobs itself. A conversation has no ticket allowance and meets the d
 ticket over its allowance is stuck, which also drops it out of `Forge.Jobs.pending/2` so the
 scheduler stops retrying it every tick.
 
-**The day's total** is the sum of the costs of the runs that *started* in that UTC day — each start
+**The day's total** is the sum of the usage of the runs that *started* in that UTC day — each start
 of a job is a run (`docs/design/credentials.md` § Spend) — monotonic, and it matches what the
-operator watched happen. A job in flight has recorded nothing — cost lands
-at completion — so the figure the gate reads adds the budgeted cost of every live job to what is
+operator watched happen. A job in flight has recorded nothing — usage lands
+at completion — so the figure the gate reads adds the budgeted tokens of every live job to what is
 already spent. Without that, several concurrent jobs each pass the gate on their own and together
 walk straight through the cap.
 
-**Stopping a job already running** is the harness's, because the provider streams no per-turn
-cost and the platform therefore has no meter to watch. What the platform does instead is hand the
-harness a smaller budget: the effective cost budget of a job is the least of what its state
-declared, what the ticket has left and what the day has left, so the existing `--max-budget-usd`
-enforcement stops a runaway job at whichever cap binds. The stored spec is not touched — a job's
-budget is written once — and the difference is recorded as `job.budget_lowered`, without which a
-job stopping at a tenth of its declared budget is inexplicable to anyone reading the log later.
+**Stopping a job already running** is forge's own, during the run, for both harnesses. The driver
+emits a `usage` event per model call; the runner (and a chat's process) keeps the weighted sum and,
+once it passes the effective budget, stops the process through the wall-clock path and the run ends
+`budget_exhausted`, stopped `:tokens`. The effective token budget of a job is the least of what its
+state declared, what the ticket has left and what the day has left; a conversation's is what is
+left of the day. The stored spec is not touched — a job's budget is written once — and the
+difference is recorded as `job.budget_lowered`, without which a job stopping at a tenth of its
+declared budget is inexplicable to anyone reading the log later. Claude Code is no longer given
+`--max-budget-usd`. This is what a worker needs protocol 11 for.
 
 **The job is told as well.** The manifest's budget says what a lowered cost was lowered from and
 by which cap, and names what the ticket has left of its allowance for every job still to run on
@@ -250,7 +290,7 @@ the worker sent that is not a whole number of bytes is left out of the line rath
 
 ## Open
 
-- **`window_cost_usd` is uncalibrated.** Every absolute usage figure is wrong by whatever factor it
+- **`window_tokens` is uncalibrated.** Every absolute usage figure is wrong by whatever factor it
   is wrong by until dogfooding sets it. It is a display constant only: nothing schedules, caps or
   refuses on it.
 - **A report whose own type is the week is unobserved.** The week has been seen only in
@@ -266,10 +306,10 @@ the worker sent that is not a whole number of bytes is left out of the line rath
 - **Whether dollars survive anywhere.** The recommendation is that they leave every operator
   surface and stay in the API, the Mix tasks and the event log. A number the operator cannot act on
   is noise; capacity is one they can act on. One exception is deliberate: a credential's spend on
-  `/users/settings` is in dollars, beside a daily limit typed in dollars, because an API key is
+  `/users/settings` was in dollars, beside a daily limit typed in dollars, because an API key is
   billed in them and has no window (`ui.md` § Account settings).
 - **Machine spend is a third kind of cost and this note has no place for it.** Everything here is
-  inference: a refilling window, and usage derived from `cost_usd`. `docs/design/provisioning.md`
+  inference: a refilling window, and usage in weighted tokens. `docs/design/provisioning.md`
   adds an hourly bill for machines, which refills nothing, accrues with no job running, and is
   bounded by a count — `max_workers` per template — rather than by money. It is also the one
   figure an operator can act on immediately, which by this note's own test earns it a surface.

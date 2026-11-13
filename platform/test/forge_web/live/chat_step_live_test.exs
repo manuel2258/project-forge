@@ -30,13 +30,13 @@ defmodule ForgeWeb.ChatStepLiveTest do
       prompt: agents/plan.md
       inputs: [refinement.md]
       produces: [plan.md]
-      budget: { turns: 5, cost: 1 }
+      budget: { turns: 5, tokens: 200k }
     review_ready: {}
   transitions:
     - { from: refining, to: planning, approve: [refinement.md] }
     - { from: refining, to: review_ready, when: needs_more }
     - { from: planning, to: review_ready }
-  limits: { ticket_cost: 25 }
+  limits: { ticket_tokens: 5M }
   """
 
   setup %{user: user} do
@@ -63,7 +63,12 @@ defmodule ForgeWeb.ChatStepLiveTest do
         "turn" => index,
         "commit" => String.duplicate("a", 40),
         "documents" => documents,
-        "harness" => %{"turns" => 1, "cost_usd" => 0.01 * index, "session_id" => "s"}
+        "harness" => %{
+          "turns" => 1,
+          "usage" => 2_000 * index,
+          "cost_usd" => 0.01 * index,
+          "session_id" => "s"
+        }
       })
 
     chat
@@ -231,7 +236,7 @@ defmodule ForgeWeb.ChatStepLiveTest do
         "turn" => 2,
         "commit" => String.duplicate("a", 40),
         "documents" => %{"refinement.md" => "# Two\n"},
-        "harness" => %{"turns" => 1, "cost_usd" => 0.02, "session_id" => "s"}
+        "harness" => %{"turns" => 1, "usage" => 4_000, "cost_usd" => 0.02, "session_id" => "s"}
       })
 
     # The press carries the version the person's screen showed. The page has since been told of
@@ -305,7 +310,7 @@ defmodule ForgeWeb.ChatStepLiveTest do
     transitions:
       - { from: refining, to: review_ready, max: 1 }
       - { from: review_ready, to: refining }
-    limits: { ticket_cost: 25 }
+    limits: { ticket_tokens: 5M }
     """
 
     {:ok, project} =
@@ -358,13 +363,13 @@ defmodule ForgeWeb.ChatStepLiveTest do
       drafting:
         prompt: agents/plan.md
         produces: [refinement.md]
-        budget: { turns: 5, cost: 1 }
+        budget: { turns: 5, tokens: 200k }
       finished: {}
     transitions:
       - { from: refining, to: finished, approve: [refinement.md] }
       - { from: finished, to: drafting }
       - { from: drafting, to: refining }
-    limits: { ticket_cost: 25 }
+    limits: { ticket_tokens: 5M }
     """
 
     {:ok, project} =

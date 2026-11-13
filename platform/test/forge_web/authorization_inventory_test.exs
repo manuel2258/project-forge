@@ -171,6 +171,8 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"project_settings_live.ex", "revoke"} => :manage,
     {"project_settings_live.ex", "model"} => :manage,
     {"project_settings_live.ex", "effort"} => :manage,
+    {"project_settings_live.ex", "harness"} => :manage,
+    {"project_settings_live.ex", "codex"} => :manage,
     {"project_settings_live.ex", "add-member"} => :manage,
     {"project_settings_live.ex", "remove-member"} => :manage,
     # Same check as `issue`/`revoke`/`model`/`effort`/`add-member`/`remove-member` above:

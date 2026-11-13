@@ -122,7 +122,7 @@ defmodule Forge.ArchiveTest do
 
       ran =
         job_fixture(%{ticket: ticket, attempt: 2, status: :running})
-        |> Ecto.Changeset.change(started_at: started, turns: 12, cost_usd: Decimal.new("1.50"))
+        |> Ecto.Changeset.change(started_at: started, turns: 12, usage: 300_000)
         |> Repo.update!()
 
       run!(ran)
@@ -139,7 +139,7 @@ defmodule Forge.ArchiveTest do
       [header | rows] = String.split(all, "\n", trim: true)
 
       assert header ==
-               "ticket\tstate\tattempt\tkind\toutcome\tstatus\tstarted_at\tfinished_at\tturns\tcost_usd\tmodel\teffort\tmemory_max\tcores\truns"
+               "ticket\tstate\tattempt\tkind\toutcome\tstatus\tstarted_at\tfinished_at\tturns\tusage\tmodel\teffort\tmemory_max\tcores\truns"
 
       assert length(rows) == 3
       fields = Enum.map(rows, &String.split(&1, "\t"))
@@ -160,7 +160,7 @@ defmodule Forge.ArchiveTest do
       assert Enum.at(ran_row, 5) == "running"
       assert Enum.at(ran_row, 6) == "2026-03-04T05:06:07Z"
       assert Enum.at(ran_row, 8) == "12"
-      assert Enum.at(ran_row, 9) == "1.50"
+      assert Enum.at(ran_row, 9) == "300000"
       assert Enum.at(ran_row, 14) == "2"
       assert Enum.at(ran_row, 12) == Integer.to_string(never.memory_max)
 

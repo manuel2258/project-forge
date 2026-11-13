@@ -49,7 +49,7 @@ defmodule Forge.CLI do
   def show(%Ticket{} = ticket) do
     lines = [
       "#{label(ticket)}  #{ticket.title}",
-      "state: #{ticket.state}  status: #{ticket.status}  cost: $#{ticket.cost_usd}  branch: #{ticket.branch}",
+      "state: #{ticket.state}  status: #{ticket.status}  usage: #{ForgeCore.Usage.format(ticket.usage)}  branch: #{ticket.branch}",
       pending_line(ticket),
       "",
       "jobs:"
@@ -57,7 +57,7 @@ defmodule Forge.CLI do
 
     jobs =
       Enum.map(Jobs.for_ticket(ticket.id), fn job ->
-        "  #{job.state} ##{job.attempt}  #{job.status}  #{job.outcome || "-"}#{if job.declared_outcome, do: " (#{job.declared_outcome})", else: ""}  turns=#{job.turns} cost=$#{job.cost_usd}"
+        "  #{job.state} ##{job.attempt}  #{job.status}  #{job.outcome || "-"}#{if job.declared_outcome, do: " (#{job.declared_outcome})", else: ""}  turns=#{job.turns} usage=#{ForgeCore.Usage.format(job.usage)}"
       end)
 
     artifacts =

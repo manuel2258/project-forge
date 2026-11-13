@@ -393,7 +393,7 @@ defmodule Forge.Archive do
 
   # -- the jobs ledger ----------------------------------------------------------------------------
 
-  @header ~w(ticket state attempt kind outcome status started_at finished_at turns cost_usd model effort memory_max cores runs)
+  @header ~w(ticket state attempt kind outcome status started_at finished_at turns usage model effort memory_max cores runs)
 
   # Every job of the project, or of one ticket (`ticket_id` set). A field the platform did not
   # record is `n/a` and the line is kept: a job that never started is still a job that ran here.
@@ -428,7 +428,7 @@ defmodule Forge.Archive do
           j.started_at,
           j.finished_at,
           j.turns,
-          j.cost_usd,
+          j.usage,
           fragment("coalesce(?, ?->>'model')", j.model, j.spec),
           fragment("coalesce(?, ?->>'effort')", j.effort, j.spec),
           j.memory_max,

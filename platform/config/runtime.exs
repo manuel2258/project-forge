@@ -78,10 +78,29 @@ if public = System.get_env("FORGE_VAPID_PUBLIC_KEY") do
     vapid_subject: System.get_env("FORGE_VAPID_SUBJECT") || "mailto:operator@localhost"
 end
 
-if cap = System.get_env("FORGE_DAILY_COST_USD") do
-  case Float.parse(cap) do
-    {value, ""} when value > 0 -> config :forge, Forge.Spend, daily_cost_usd: value
-    _ -> raise "FORGE_DAILY_COST_USD must be a positive number, got #{inspect(cap)}"
+# Counted in weighted tokens since ticket 43 (`docs/design/capacity.md` § Usage in weighted
+# tokens). The dollar variable is refused rather than converted: the rate from dollars is a guess,
+# fine for finishing what is running and not for governing the node silently.
+if System.get_env("FORGE_DAILY_COST_USD") do
+  raise "FORGE_DAILY_COST_USD is replaced by FORGE_DAILY_TOKENS, in weighted tokens (such as 4M)"
+end
+
+if cap = System.get_env("FORGE_DAILY_TOKENS") do
+  # The notation of `ForgeCore.Usage.parse/1` (`800k`, `4M`, `84.2M`, a whole number), written out
+  # because runtime config runs before any application's modules can be relied on. **Two
+  # differences, on purpose**: a cap of nothing is no cap at all, so this wants a positive figure
+  # where `parse/1` accepts 0; and the same upper bound (`ForgeCore.Usage.max/0`, repeated here),
+  # checked before the multiplication as `parse/1` does, since `1e308M` raises in it.
+  multiplier = %{"" => 1, "k" => 1_000, "M" => 1_000_000}
+
+  with {number, suffix} <- Float.parse(String.trim(cap)),
+       {:ok, factor} <- Map.fetch(multiplier, suffix),
+       true <- number <= 1_000_000_000_000_000 / factor,
+       value when value > 0 <- round(number * factor) do
+    config :forge, Forge.Spend, daily_tokens: value
+  else
+    _ ->
+      raise "FORGE_DAILY_TOKENS must be a positive number of weighted tokens such as 4M, got #{inspect(cap)}"
   end
 end
 

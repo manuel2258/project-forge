@@ -161,7 +161,11 @@ defmodule ForgeWorker.Link do
       "memory_budget" => Config.memory_budget(),
       "seeds" => Seed.present(socket.assigns.root),
       "root" => socket.assigns.root,
-      "harness" => harness_offer(socket.assigns.root)
+      "harness" => harness_offer(socket.assigns.root),
+      # Every harness this machine can run, each with its version (`docs/design/worker-channel.md`
+      # § Protocol 11). `harness` above is the first of them, which a platform from before this key
+      # reads.
+      "harnesses" => harness_offers(socket.assigns.root)
     }
     |> put_unless_nil("cores", Config.cores())
     |> put_unless_nil("accepts", Config.accepts())
@@ -649,7 +653,11 @@ defmodule ForgeWorker.Link do
           attempt: 1,
           kind: :chat,
           # Sealed, as the assignment carried them: what its ending is masked with.
-          secrets: Secrets.from_assignment(assignment),
+          secrets:
+            Secrets.from_assignment(
+              assignment,
+              job_dir(socket.assigns.root, assignment["job_id"])
+            ),
           started: System.monotonic_time(:millisecond)
         })
 
@@ -680,7 +688,7 @@ defmodule ForgeWorker.Link do
       runner: nil,
       attempt: assignment["spec"]["attempt"],
       kind: if(assignment["kind"] == "command", do: :command, else: :workflow),
-      secrets: Secrets.from_assignment(assignment),
+      secrets: Secrets.from_assignment(assignment, job_dir(root, assignment["job_id"])),
       started: System.monotonic_time(:millisecond)
     })
   end
@@ -884,7 +892,10 @@ defmodule ForgeWorker.Link do
     # template, which must not belong to a uid the next `useradd` may hand to another job.
     Slice.leave(user, job_paths(assignment, root))
 
-    Secrets.mask_file(Secrets.from_assignment(assignment), result.transcript_path)
+    Secrets.mask_file(
+      Secrets.from_assignment(assignment, job_dir(root, job_id)),
+      result.transcript_path
+    )
 
     terminal =
       {:ok,
@@ -1039,23 +1050,26 @@ defmodule ForgeWorker.Link do
     job_id = assignment["job_id"]
     spec = ForgeCore.Job.Spec.from_map(assignment["spec"])
 
+    harness = harness(assignment)
+
     harness_opts =
       Application.get_env(:forge_worker, :harness_opts, [])
+      |> ForgeWorker.Harness.machine_opts(harness)
       |> Keyword.merge(resume_opts(assignment))
       |> put_model(spec)
       |> put_effort(spec)
 
     # Before the credential goes in: the check asks the harness its version, and that needs none.
     {harness_opts, session} =
-      Session.restore(assignment, job_dir(root, job_id), worktree, harness_opts, harness())
+      Session.restore(assignment, job_dir(root, job_id), worktree, harness_opts, harness)
 
-    harness_opts = Credential.put(harness_opts, assignment, harness().driver())
+    harness_opts = Credential.put(harness_opts, assignment, harness.driver())
     secrets = Secrets.from_assignment(assignment)
 
     slice = assignment["slice"] || %{}
 
     Runner.start_link(
-      harness: harness(),
+      harness: harness,
       spec: spec,
       root: Path.join(root, "jobs"),
       worktree: worktree,
@@ -1147,7 +1161,7 @@ defmodule ForgeWorker.Link do
   # harness summary, beside the session id and the version that wrote it, which is what the
   # platform records it with.
   defp upload_session(%Result{harness: harness} = result, assignment, job_dir) do
-    case Session.upload(job_dir, harness["session_id"], assignment, 1) do
+    case Session.upload(job_dir, harness["session_id"], assignment, 1, harness(assignment)) do
       nil -> result
       key -> %{result | harness: Map.put(harness, "session_blob", key)}
     end
@@ -1228,9 +1242,60 @@ defmodule ForgeWorker.Link do
     |> put_unless_nil("update", ClaudeUpdate.status(root))
   end
 
+  # The configured harness always, as it was; and Codex when this machine has it installed — a
+  # harness is offered when its binary answers `--version`, which is what keeps a job for a harness
+  # off a machine that cannot run it. A probe that fails offers nothing rather than guessing.
+  defp harness_offers(root) do
+    primary = harness_offer(root)
+
+    extra =
+      for {name, module} <- Enum.sort(ForgeWorker.Harness.drivers()),
+          name != primary["driver"],
+          offer = extra_offer(module, root),
+          do: offer
+
+    [primary | extra]
+  end
+
+  defp extra_offer(module, root) do
+    offer =
+      module.probe(
+        ForgeWorker.Harness.machine_opts(
+          Application.get_env(:forge_worker, :harness_opts, []),
+          module
+        )
+      )
+
+    update = ClaudeUpdate.status(root, offer.driver)
+
+    cond do
+      offer.version ->
+        offer
+        |> Map.merge(%{capabilities: module.capabilities(), credential: "per_job"})
+        |> Map.new(fn {key, value} -> {Atom.to_string(key), encode_offer(value)} end)
+        |> put_unless_nil("update", update)
+
+      # Not runnable, so **no `credential` key**: the platform offers a job only to a harness
+      # that names one (`Forge.Workers.runs?/2`). The entry exists so the operator reads why there
+      # is no version, as for Claude Code (`docs/design/codex.md` § On the image).
+      update ->
+        %{"driver" => offer.driver, "name" => offer.name, "update" => update}
+
+      true ->
+        nil
+    end
+  rescue
+    _error -> nil
+  end
+
   defp probed_offer do
     harness = harness()
-    opts = Application.get_env(:forge_worker, :harness_opts, [])
+
+    opts =
+      ForgeWorker.Harness.machine_opts(
+        Application.get_env(:forge_worker, :harness_opts, []),
+        harness
+      )
 
     offer = harness.probe(opts)
     Logger.info("harness #{offer.name} #{offer.version || "?"}")
@@ -1247,6 +1312,27 @@ defmodule ForgeWorker.Link do
   @doc "The harness this machine runs jobs with: `ForgeWorker.Harness.ClaudeCode` unless configured."
   @spec harness() :: module()
   def harness, do: Application.get_env(:forge_worker, :harness, ForgeWorker.Harness.ClaudeCode)
+
+  @doc """
+  The driver an assignment asks for (`ForgeWorker.Harness.for_assignment/2`): the harness it names,
+  else this machine's own. A configured harness overrides the registry, as it always did — the
+  suite's fake is what runs when a test says so — so only an assignment naming a harness other
+  than the configured driver's is looked up.
+  """
+  @spec harness(map()) :: module()
+  def harness(assignment) do
+    configured = harness()
+
+    case assignment do
+      %{"harness" => name} when is_binary(name) ->
+        if configured.driver() == name,
+          do: configured,
+          else: ForgeWorker.Harness.for_assignment(assignment, configured) || configured
+
+      _unnamed ->
+        configured
+    end
+  end
 
   defp encode_offer(value) when is_atom(value) and not is_boolean(value) and not is_nil(value),
     do: Atom.to_string(value)

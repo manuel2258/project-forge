@@ -197,16 +197,16 @@ defmodule Forge.CancelTest do
     assert Forge.Workers.get!(worker.id).status == :busy
 
     {:ok, _cancelled} = Engine.cancel(Tickets.get!(ticket.id), user.id)
-    report = %{"harness" => %{"cost_usd" => 0.25}}
+    report = %{"harness" => %{"usage" => 50_000, "cost_usd" => 0.25}}
 
     for _twice <- 1..2 do
       {:ok, _job} = Jobs.hibernate(job.id, nil, "cancelled", report)
     end
 
     assert Forge.Workers.get!(worker.id).status == :idle
-    assert Decimal.equal?(Jobs.get!(job.id).cost_usd, Decimal.from_float(0.25))
-    assert Decimal.equal?(Tickets.get!(ticket.id).cost_usd, Decimal.from_float(0.25))
-    assert Decimal.equal?(Forge.Jobs.Runs.total(job.id), Decimal.from_float(0.25))
+    assert Jobs.get!(job.id).usage == 50_000
+    assert Tickets.get!(ticket.id).usage == 50_000
+    assert Forge.Jobs.Runs.total(job.id) == 50_000
   end
 
   # A command, or an agent that ended with a result rather than hibernating, reports a result.
@@ -222,13 +222,13 @@ defmodule Forge.CancelTest do
     result = %ForgeCore.Job.Result{
       status: :finished,
       outcome: :error,
-      harness: %{"cost_usd" => 0.5}
+      harness: %{"usage" => 100_000, "cost_usd" => 0.5}
     }
 
     assert {:error, :already_recorded} = Jobs.complete(job.id, result)
 
     assert Forge.Workers.get!(worker.id).status == :idle
-    assert Decimal.equal?(Jobs.get!(job.id).cost_usd, Decimal.from_float(0.5))
+    assert Jobs.get!(job.id).usage == 100_000
   end
 
   # The scheduler decides to stick from a ticket it read earlier. One cancelled since stays so.

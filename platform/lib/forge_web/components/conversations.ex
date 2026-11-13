@@ -249,7 +249,7 @@ defmodule ForgeWeb.Conversations do
 
           <div class="font-mono text-[11px] opacity-50">
             {summary.chat.turns} {noun(summary.chat.turns, "turn")} · {Format.windows(
-              summary.chat.cost_usd
+              summary.chat.usage
             ) || "—"}
           </div>
         </.link>

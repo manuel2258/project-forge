@@ -48,7 +48,7 @@ credentials
   harness          "claude_code" | ...        which driver it authenticates
   kind             "api_key" | "oauth" | ...  what the harness calls it
   secret           sealed, never loaded by an ordinary query
-  daily_limit_usd  nullable; recorded, never enforced
+  daily_limit      nullable, in weighted tokens; recorded, never enforced
   models           what the provider said it may use, at the last check
   checked_at       when that was
   revoked_at       set once, never cleared
@@ -332,7 +332,7 @@ job_runs
   credential_id  what this run spent; nullable only for runs from before credentials
   worker_id      where it ran
   started_at     when this run started
-  cost_usd       what it cost, recorded when it reports
+  usage          what it used, in weighted tokens, recorded as it reports (`tokens` by kind, and Claude Code's own `claude_cost_usd`)
   finished_at    set when it reports
 ```
 
@@ -348,10 +348,10 @@ also put a job that resumed the next day wholly on the day it first started; per
 has what was spent in it. The migration writes one run per job that ever started, with its
 credential and its whole cost at its first start — exactly what both figures said before it.
 
-`daily_limit_usd` is shown beside it and **enforced nowhere**, as `identity.md` § Credentials
+`daily_limit` is shown beside it and **enforced nowhere**, as `identity.md` § Credentials
 decided. The ticket allowance and the node-wide daily cap keep enforcing exactly as before. The
 pick does read spend, but only to prefer a credential; a credential over its limit is still
-picked when it is the only one. `Forge.Credentials.spent_today/2` is the query.
+picked when it is the only one. `Forge.Credentials.used_today/2` is the query.
 
 Each row on `/users/settings` says what the credential spent today, the limit beside it with
 *not enforced* written out, and *rate-limited until* the reset when it is (`ui.md` § Account
@@ -457,7 +457,7 @@ a permanent one needs `bin/worker-update`.
 
 ## Deliberately not here
 
-- **Enforcing `daily_limit_usd`.** `identity.md` § Credentials decided it is tracking.
+- **Enforcing `daily_limit`.** `identity.md` § Credentials decided it is tracking.
 - **Holding a machine through a wait.** A job waiting for a reset lets its machine go, and its
   session goes with the job rather than the machine (`claude-code-events.md` § Resume). Holding
   the machine would save a download at the price of an idle machine billing for up to a week.
@@ -553,3 +553,42 @@ a permanent one needs `bin/worker-update`.
     the gauge in the top bar — `Forge.Credentials.gauge/2` for the figure, `ForgeWeb.Capacity`
     for whose credentials, mounted on every approved page and switched to the project's pool by
     the six pages about one, after each has allowed the viewer.
+
+## Codex kinds, holds and returns (ticket 43)
+
+Built (ticket 43, phases 2–5 in part); `docs/design/codex.md` has the harness and what has not been
+run against OpenAI.
+
+**One mechanism, differences declared per kind.** Every job holds its credential the same way; a
+kind declares `exclusive` (at most one live run holds it, across machines and projects) and
+`returns` (a run hands back a changed copy), and how it is `checked` on save. Claude tokens and
+keys: not exclusive, not returned, checked against the provider. A Codex `chatgpt_login`:
+exclusive, returned, checked by shape only. A Codex `access_token`: neither, shape only. Making
+Claude tokens one-at-a-time was declined: they do not rotate.
+
+**How a job picks** gains *and not held*: the pick passes over rate-limited credentials and over
+exclusive ones with a live run, and prefers the one that has **used** least today (weighted
+tokens; § Spend below moves to them). When nothing is free and nothing is merely limited the job
+stays pending with *Waiting for a Codex login: all in this project's pool are in use*, out of the
+queue; a project with no Codex credential at all sticks as an empty pool does.
+
+**Checked on save.** The rule that a credential is tried before it is kept does not hold for
+Codex kinds, whose check is a shape check: nothing is sent to OpenAI, and a row says *not checked
+with OpenAI: the first job is the check*. A refused Codex credential fails jobs like a dead
+Claude token; nothing marks or skips it.
+
+**Holding a login.** A hold is a live run (`job_runs.exclusive` and a partial unique index), so it
+ends however the run ends — result, cancel, lost machine, platform restart, a chat going dormant
+or closed. A conversation holds its login from process start to end, not only while answering.
+
+**A login comes back.** `Credentials.renew/3`, inside the result's transaction before the run
+closes, keeps a returned login only from the holder's worker, while live, for a `returns` kind,
+and naming the same account as the stored one; otherwise the stored login is kept and
+`credential.renewal_refused` records a fixed reason.
+
+**Spend becomes usage.** `daily_limit_usd` is `daily_limit` in weighted tokens, tracked and never
+enforced; `spent_today` is `used_today`; the run ledger's `cost_usd` is `usage`, `tokens` by kind
+and, for Claude, `claude_cost_usd`, shown only for an API key.
+
+**What a worker offers** gains `harnesses`, each with its version, and protocol 11 is needed for
+usage counting during the run, for every kind of job.

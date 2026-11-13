@@ -81,19 +81,59 @@ defmodule ForgeWeb.Format do
   end
 
   @doc """
-  A cost rendered as the capacity it consumed, or `nil` when the calibration constant is not
-  configured. Dollars do not appear on an operator surface.
+  Usage in weighted tokens rendered as the capacity it consumed, or `nil` when the calibration
+  constant is not configured. Dollars do not appear on an operator surface.
   """
-  @spec windows(number() | Decimal.t() | nil) :: String.t() | nil
-  def windows(%Decimal{} = cost), do: cost |> Decimal.to_float() |> windows()
-
-  def windows(cost) do
-    cost |> Capacity.windows(window_cost()) |> Capacity.format()
+  @spec windows(number() | nil) :: String.t() | nil
+  def windows(tokens) do
+    tokens |> Capacity.windows(window_tokens()) |> Capacity.format()
   end
 
-  @doc "The configured cost of one five-hour window. See `docs/design/capacity.md`."
-  @spec window_cost() :: number()
-  def window_cost do
-    :forge |> Application.get_env(:capacity, []) |> Keyword.get(:window_cost_usd, 0)
+  @doc """
+  The exact weighted tokens behind a figure, for a title: `1,234,567 weighted tokens`. The windows
+  are an estimate on a placeholder constant; this is what was counted.
+  """
+  @spec exact(integer() | nil) :: String.t() | nil
+  def exact(nil), do: nil
+
+  def exact(tokens) when is_integer(tokens) do
+    digits =
+      tokens
+      |> Integer.to_string()
+      |> String.reverse()
+      |> String.replace(~r/(\d{3})(?=\d)/, "\\1,")
+
+    "#{String.reverse(digits)} weighted tokens"
+  end
+
+  @kind_labels [
+    input: "fresh input",
+    cache_write: "cache write",
+    cache_read: "cache read",
+    output: "output"
+  ]
+
+  @doc """
+  A run's or a day's tokens by kind, `120k fresh input · 0 cache write · 3M cache read · 90k
+  output`, or `nil` when none were counted (a converted run has none: only its dollars were kept).
+  Takes the map as stored (string keys) or as summed (atoms).
+  """
+  @spec kinds(map() | nil) :: String.t() | nil
+  def kinds(tokens) when is_map(tokens) do
+    counted = ForgeCore.Usage.normalize(tokens)
+
+    if Enum.any?(counted, fn {_kind, n} -> n > 0 end) do
+      Enum.map_join(@kind_labels, " · ", fn {kind, label} ->
+        "#{ForgeCore.Usage.format(Map.fetch!(counted, kind))} #{label}"
+      end)
+    end
+  end
+
+  def kinds(_none), do: nil
+
+  @doc "The configured weighted tokens of one five-hour window. See `docs/design/capacity.md`."
+  @spec window_tokens() :: number()
+  def window_tokens do
+    :forge |> Application.get_env(:capacity, []) |> Keyword.get(:window_tokens, 0)
   end
 end

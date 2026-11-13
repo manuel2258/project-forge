@@ -71,6 +71,11 @@ defmodule ForgeWeb.ProjectSettingsLive do
     assign(socket,
       model_form: to_form(%{"model" => project.model || ""}, as: :project),
       effort_form: to_form(%{"effort" => project.effort || ""}, as: :project),
+      harness_form: to_form(%{"harness" => project.harness}, as: :project),
+      codex_form:
+        to_form(%{"model" => project.codex_model || "", "effort" => project.codex_effort || ""},
+          as: :codex
+        ),
       offered: Workers.offered(project.id),
       tokens: Enum.map(tokens, &decorate(&1, now)),
       live_count: Enum.count(tokens, &Tokens.live?(&1, now)),
@@ -171,6 +176,31 @@ defmodule ForgeWeb.ProjectSettingsLive do
         {:noreply, socket |> assign(project: project) |> put_flash(:info, "Saved.") |> load()}
 
       {:error, _changeset} ->
+        {:noreply, put_flash(socket, :error, "Could not save that.")}
+    end
+  end
+
+  # The project's default harness: what a state naming none, and a conversation opened with the
+  # form's own choice left at its default, runs on. `Operator.set_harness/3` is the guard.
+  def handle_event("harness", %{"project" => %{"harness" => harness}}, socket) do
+    case Operator.set_harness(socket.assigns.project, socket.assigns.current_scope.user, harness) do
+      {:ok, project} ->
+        {:noreply, socket |> assign(project: project) |> put_flash(:info, "Saved.") |> load()}
+
+      {:error, _changeset_or_forbidden} ->
+        {:noreply, put_flash(socket, :error, "Could not save that.")}
+    end
+  end
+
+  # Codex's own model and effort, the project's per-harness dials: the two above are Claude Code's.
+  def handle_event("codex", %{"codex" => %{"model" => model, "effort" => effort}}, socket) do
+    %{project: project, current_scope: %{user: user}} = socket.assigns
+
+    with {:ok, project} <- Operator.set_codex_model(project, user, model),
+         {:ok, project} <- Operator.set_codex_effort(project, user, effort) do
+      {:noreply, socket |> assign(project: project) |> put_flash(:info, "Saved.") |> load()}
+    else
+      {:error, _changeset_or_forbidden} ->
         {:noreply, put_flash(socket, :error, "Could not save that.")}
     end
   end
@@ -706,7 +736,9 @@ defmodule ForgeWeb.ProjectSettingsLive do
       <%!-- Behind `@manage` like every other form here: `Operator.set_model/3` refuses a plain
             member, and a form the context refuses is one that answers "Could not save that." --%>
       <section :if={@manage} class="mt-10">
-        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Model</h2>
+        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
+          Model · Claude Code
+        </h2>
         <p class="mt-2 text-sm/[1.55] opacity-70">
           What this project's work runs on when a workflow state does not name one of its own.
           Left empty, it is the machine's — the platform-wide setting.
@@ -732,7 +764,9 @@ defmodule ForgeWeb.ProjectSettingsLive do
             refuses a plain member. A dropdown of the levels the connected workers offer, and a box
             while none does, as the model field beside it is. --%>
       <section :if={@manage} class="mt-10">
-        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Effort</h2>
+        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
+          Effort · Claude Code
+        </h2>
         <p class="mt-2 text-sm/[1.55] opacity-70">
           How hard this project's work thinks when a workflow state does not name an effort of its
           own. Left empty, it is the machine's — the platform-wide setting.
@@ -755,6 +789,60 @@ defmodule ForgeWeb.ProjectSettingsLive do
             class="min-h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
           >
             Save it
+          </button>
+        </.form>
+      </section>
+
+      <%!-- Which harness runs this project's work, and Codex's own model and effort. Behind
+            `@manage` for the same reason: `Operator.set_harness/3` and the two Codex setters refuse
+            a plain member. The Model and Effort above are Claude Code's. --%>
+      <section :if={@manage} class="mt-10" id="harness">
+        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Harness</h2>
+        <p class="mt-2 text-sm/[1.55] opacity-70">
+          What this project's work runs on when a workflow state does not name a harness, and what
+          a new conversation starts on. The Model and Effort above are Claude Code's; Codex has
+          its own below, left empty for Codex's default.
+        </p>
+
+        <.form
+          for={@harness_form}
+          id="harness-form"
+          phx-submit="harness"
+          class="mt-4 flex flex-col gap-4"
+        >
+          <.input
+            field={@harness_form[:harness]}
+            type="select"
+            label="Default harness"
+            options={for h <- Forge.Harness.names(), do: {Forge.Harness.label(h), h}}
+          />
+          <button
+            type="submit"
+            class="min-h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
+          >
+            Save it
+          </button>
+        </.form>
+
+        <.form for={@codex_form} id="codex-form" phx-submit="codex" class="mt-6 flex flex-col gap-4">
+          <.input
+            field={@codex_form[:model]}
+            type="text"
+            label="Codex model"
+            placeholder="Codex's own default"
+            autocomplete="off"
+          />
+          <ForgeWeb.Operator.Components.effort_field
+            offered={%{@offered | efforts: @offered.codex_efforts}}
+            field={@codex_form[:effort]}
+            label="Codex effort"
+            fallback="Codex's own default"
+          />
+          <button
+            type="submit"
+            class="min-h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
+          >
+            Save Codex's
           </button>
         </.form>
       </section>

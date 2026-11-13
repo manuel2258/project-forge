@@ -529,7 +529,7 @@ defmodule ForgeWeb.MembershipScopingTest do
         Forge.Tickets.Ticket.progress_changeset(ticket, %{
           state: ticket.state,
           status: :stuck,
-          cost_usd: ticket.cost_usd
+          usage: ticket.usage
         })
       )
 
@@ -557,7 +557,7 @@ defmodule ForgeWeb.MembershipScopingTest do
     {:ok, _chat} =
       Forge.Conversations.record_turn(chat, %{
         "turn" => 1,
-        "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"}
+        "harness" => %{"turns" => 1, "usage" => 2_000, "cost_usd" => 0.01, "subtype" => "success"}
       })
 
     chat.id |> Forge.Conversations.messages() |> Forge.Conversations.reply_ref()

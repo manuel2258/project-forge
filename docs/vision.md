@@ -98,7 +98,7 @@ states:
     env: refine                    # devshell name from the project's flake
     inputs: [ticket]
     produces: refinement.md
-    budget: { turns: 20, cost: 0.50 }
+    budget: { turns: 20, tokens: 100k }
 
   planning:
     prompt: agents/plan.md

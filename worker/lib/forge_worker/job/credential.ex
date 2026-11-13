@@ -22,7 +22,12 @@ defmodule ForgeWorker.Job.Credential do
 
   # What the platform calls a kind, and what `ForgeWorker.Harness.ClaudeCode` is handed. A map and
   # not `String.to_existing_atom/1`: the wire says which of these it is, and nothing else.
-  @kinds %{"api_key" => :api_key, "oauth" => :oauth}
+  @kinds %{
+    "api_key" => :api_key,
+    "oauth" => :oauth,
+    "chatgpt_login" => :chatgpt_login,
+    "access_token" => :access_token
+  }
 
   @doc """
   `harness_opts` with the job's credential in it, for a harness whose driver is `driver`: a

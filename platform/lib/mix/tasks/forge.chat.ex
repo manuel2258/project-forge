@@ -92,7 +92,10 @@ defmodule Mix.Tasks.Forge.Chat do
     %{project: project, ticket: ticket} = Conversations.context(chat)
 
     Mix.shell().info("#{chat.id} — #{project.name}#{about(ticket)} — #{chat.status}")
-    Mix.shell().info("#{chat.turns} turn(s), $#{chat.cost_usd}\n")
+
+    Mix.shell().info(
+      "#{chat.turns} turn(s), #{ForgeCore.Usage.format(chat.usage)} weighted tokens\n"
+    )
 
     Enum.each(Conversations.messages(chat.id), fn message ->
       Mix.shell().info("#{marker(message)} #{message.text}\n")

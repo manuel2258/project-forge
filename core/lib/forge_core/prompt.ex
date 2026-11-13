@@ -5,6 +5,7 @@ defmodule ForgeCore.Prompt do
   """
 
   alias ForgeCore.Job.Spec
+  alias ForgeCore.Usage
   alias ForgeCore.Workflow
 
   @preamble_path Path.join(:code.priv_dir(:forge_core), "preamble.md")
@@ -513,7 +514,7 @@ defmodule ForgeCore.Prompt do
     ## Budget
 
     - Turns: #{spec.budget.turns}
-    - Cost: #{spec.budget.cost} USD#{lowered(spec.budget)}#{allowance(spec.budget)}
+    - Weighted tokens: #{Usage.format(spec.budget.tokens)}#{lowered(spec.budget)}#{allowance(spec.budget)}
     """
   end
 
@@ -521,19 +522,16 @@ defmodule ForgeCore.Prompt do
   # budget, or saving a round it had plenty for, needs the figure that decided it.
   defp lowered(%{declared: declared, lowered_by: by}) do
     left = if by == "day", do: "what the day has left", else: "what the ticket has left"
-    " — lowered from the state's #{declared} USD to #{left}"
+    " — lowered from the state's #{Usage.format(declared)} to #{left}"
   end
 
   defp lowered(_budget), do: ""
 
   defp allowance(%{ticket_left: left, ticket_limit: limit}),
     do:
-      "\n- The ticket: #{format_usd(left)} of #{format_usd(limit)} USD left for every job still to run on it"
+      "\n- The ticket: #{Usage.format(left)} of #{Usage.format(limit)} weighted tokens left for every job still to run on it"
 
   defp allowance(_budget), do: ""
-
-  defp format_usd(value) when is_float(value), do: :erlang.float_to_binary(value, decimals: 2)
-  defp format_usd(value), do: to_string(value)
 
   defp inputs(%Spec{inputs: []}, _job_dir), do: "- none"
 

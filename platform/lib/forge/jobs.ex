@@ -54,6 +54,12 @@ defmodule Forge.Jobs do
   @optional_outputs_protocol 7
   @merge_protocol 8
   @archive_protocol 9
+
+  # A worker counts weighted tokens during the run and reports `usage`, which the platform now
+  # records instead of a dollar figure; one that does not would run a job uncapped. Every kind of
+  # job needs it, commands included, so a protocol-10 worker takes nothing
+  # (`docs/design/worker-channel.md` § Protocol 11).
+  @usage_protocol 11
   @step_protocol 10
 
   # How many of the merges that landed on the default branch since a ticket's base an integrating
@@ -117,6 +123,8 @@ defmodule Forge.Jobs do
             project_id: ticket.project_id,
             state: state_name,
             attempt: spec.attempt,
+            harness:
+              resolve_harness(Workflow.state(workflow, state_name).harness, ticket.project_id),
             resume_from_id:
               if(Keyword.get(opts, :came_back, false),
                 do: forkable(repo, ticket.id, state_name, spec)
@@ -166,6 +174,7 @@ defmodule Forge.Jobs do
           attempt: next_visit(repo, ticket.id, state_name),
           model: state.model,
           effort: state.effort,
+          harness: resolve_harness(state.harness, ticket.project_id),
           memory_max: resources.memory,
           cores: resources.cores,
           secret_names: state.secrets
@@ -308,7 +317,7 @@ defmodule Forge.Jobs do
          effort: state.effort,
          commit: ticket.workflow_commit,
          branch: ticket.branch,
-         budget: %{turns: state.budget.turns, cost: state.budget.cost},
+         budget: %{turns: state.budget.turns, tokens: state.budget.tokens},
          preamble_hash: Prompt.preamble_hash(),
          inputs: inputs,
          absent_inputs: absent,
@@ -827,15 +836,30 @@ defmodule Forge.Jobs do
   end
 
   @doc """
-  The harness a job runs, and so the harness its credential has to be for.
-
-  `claude_code` for both kinds that exist. The workflow grammar has no field for it yet; when it
-  does, this is where it is read and nothing downstream changes (`docs/design/credentials.md`
-  § What a worker offers now).
+  The harness a job runs, and so the harness its credential has to be for: the one it was made
+  with (`resolve_harness/2`), `claude_code` for a row made before the column existed, and none for
+  a command (`docs/design/credentials.md` § What a worker offers now).
   """
   @spec harness(Job.t()) :: String.t() | nil
   def harness(%Job{kind: :command}), do: nil
-  def harness(%Job{}), do: "claude_code"
+  def harness(%Job{harness: harness}) when is_binary(harness), do: harness
+  def harness(%Job{}), do: ForgeCore.Harness.default()
+
+  @doc """
+  The harness a new job in `project_id` runs: the one asked for (its state's, or the one a
+  conversation was opened with), else the project's, else Claude Code. A project naming nothing,
+  and a workflow naming nothing, behave exactly as before.
+  """
+  @spec resolve_harness(String.t() | nil, String.t() | nil) :: String.t()
+  def resolve_harness(asked, project_id) do
+    asked || project_harness(project_id) || ForgeCore.Harness.default()
+  end
+
+  defp project_harness(nil), do: nil
+
+  defp project_harness(project_id) do
+    Repo.one(from p in Projects.Project, where: p.id == ^project_id, select: p.harness)
+  end
 
   @doc """
   The worker protocol a job needs, or 0 for any.
@@ -880,6 +904,13 @@ defmodule Forge.Jobs do
   def protocol(%Job{} = job), do: job |> protocol_needs() |> Keyword.values() |> Enum.max()
 
   @doc """
+  The protocol a worker must speak to count a run's tokens as it goes, which every job of every
+  kind needs (`docs/design/worker-channel.md` § Versions). A machine below it takes no job at all.
+  """
+  @spec usage_protocol() :: pos_integer()
+  def usage_protocol, do: @usage_protocol
+
+  @doc """
   What `protocol/1` is the largest of, by reason. The maximum hides which reason set it, and a
   newer reason is always the larger: a test of an older one would otherwise pass whatever it did.
   """
@@ -889,7 +920,8 @@ defmodule Forge.Jobs do
       kind: kind_protocol(job),
       secrets: secrets_protocol(job),
       outputs: outputs_protocol(job),
-      archive: archive_protocol(job)
+      archive: archive_protocol(job),
+      usage: @usage_protocol
     ]
 
   defp archive_protocol(%Job{kind: kind}) when kind in [:workflow, :chat], do: @archive_protocol
@@ -963,6 +995,9 @@ defmodule Forge.Jobs do
     %{
       "job_id" => job.id,
       "kind" => Atom.to_string(job.kind),
+      # Which driver runs it; nil for a command, which has none. A worker from before a job had a
+      # harness reads no such key, and runs its own.
+      "harness" => harness(job),
       "spec" => job |> runtime_spec(ticket) |> Spec.to_json() |> Jason.decode!(),
       "git" =>
         %{
@@ -1154,13 +1189,14 @@ defmodule Forge.Jobs do
   # the key would get the same answer rather than a token that lapses mid-preparation.
   def preparation_margin_ms, do: config(:preparation_margin_ms, :timer.hours(1))
 
-  # What only a conversation carries. `max_cost_usd` is what is left of the day, passed to the
-  # harness as its per-turn ceiling: a chat has no budget to take from a state, and the daily cap
-  # is the only one there is (`docs/design/conversations.md` § Spend).
+  # What only a conversation carries. `max_tokens` is what is left of the day, in weighted tokens,
+  # which the worker counts a turn's calls against and stops the process past: a chat has no budget
+  # to take from a state, and the daily cap is the only one there is
+  # (`docs/design/conversations.md` § Spend).
   defp chat_assignment(%Job{kind: :chat} = job) do
     %{
       "idle_ms" => config(:chat_idle_ms, :timer.minutes(30)),
-      "max_cost_usd" => remaining_today(),
+      "max_tokens" => remaining_today(),
       # What already ran on this ticket. Metadata inline because it is small; transcripts as a
       # key and a token, because they are not (`Conversations.history/1`).
       "history" => job.ticket_id |> ticket_of() |> Conversations.history()
@@ -1175,7 +1211,7 @@ defmodule Forge.Jobs do
   defp remaining_today do
     case Spend.day_remaining() do
       :unlimited -> nil
-      remaining -> Decimal.to_float(remaining)
+      remaining -> remaining
     end
   end
 
@@ -1468,14 +1504,48 @@ defmodule Forge.Jobs do
   knows the state and the project, and a machine knows neither.
   """
   @spec model_for(Job.t()) :: String.t() | nil
-  def model_for(%Job{kind: :chat} = job), do: job.model || project_model(job.project_id)
+  def model_for(%Job{kind: :chat} = job), do: job.model || project_dial(job, :model)
 
-  def model_for(%Job{} = job), do: spec(job).model || project_model(job.project_id)
+  def model_for(%Job{} = job), do: spec(job).model || project_dial(job, :model)
 
-  defp project_model(nil), do: nil
+  @doc """
+  What ran, or will, as a row says it: the harness and its model, `Codex · gpt-5`. The model is the
+  job's own, else the `project`'s for the job's harness; a job with none says only the harness. A
+  command runs no harness and has no line. Takes the project the page already holds, since a row
+  is drawn per job and the chain's own lookup (`model_for/1`) reads the project each time.
+  """
+  @spec harness_line(Job.t(), Forge.Projects.Project.t()) :: String.t() | nil
+  def harness_line(%Job{kind: :command}, _project), do: nil
 
-  defp project_model(project_id) do
-    Repo.one(from p in Projects.Project, where: p.id == ^project_id, select: p.model)
+  def harness_line(%Job{} = job, project) do
+    harness = harness(job)
+    own = if job.kind == :chat, do: job.model, else: spec(job).model
+
+    fallback =
+      case harness do
+        "codex" -> project.codex_model
+        _claude -> project.model
+      end
+
+    [Forge.Harness.label(harness), own || fallback]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join(" · ")
+  end
+
+  # **The project's setting for the job's own harness**, which is where the chains part: Claude
+  # Code's are the project's `model` and `effort` and Codex's are its `codex_model` and
+  # `codex_effort`, so a project that sets one harness's dials never changes the other's job.
+  defp project_dial(%Job{project_id: nil}, _dial), do: nil
+
+  defp project_dial(%Job{project_id: project_id} = job, dial) do
+    field =
+      case {harness(job), dial} do
+        {"codex", :model} -> :codex_model
+        {"codex", :effort} -> :codex_effort
+        {_claude, dial} -> dial
+      end
+
+    Repo.one(from p in Projects.Project, where: p.id == ^project_id, select: field(p, ^field))
   end
 
   @doc """
@@ -1489,15 +1559,9 @@ defmodule Forge.Jobs do
   project, and a machine knows neither.
   """
   @spec effort_for(Job.t()) :: String.t() | nil
-  def effort_for(%Job{kind: :chat} = job), do: job.effort || project_effort(job.project_id)
+  def effort_for(%Job{kind: :chat} = job), do: job.effort || project_dial(job, :effort)
 
-  def effort_for(%Job{} = job), do: spec(job).effort || project_effort(job.project_id)
-
-  defp project_effort(nil), do: nil
-
-  defp project_effort(project_id) do
-    Repo.one(from p in Projects.Project, where: p.id == ^project_id, select: p.effort)
-  end
+  def effort_for(%Job{} = job), do: spec(job).effort || project_dial(job, :effort)
 
   # A ticket chat gets every document on the ticket, which is more than any one of its jobs is
   # handed and is the point: it is for asking about, or fixing, the work in flight. A project chat
@@ -1545,26 +1609,26 @@ defmodule Forge.Jobs do
   # without which a job stopping at a tenth of its declared budget is inexplicable later.
   defp lower_budget(spec, %Job{} = job, %Ticket{} = ticket) do
     workflow = Tickets.workflow(ticket)
-    {cost, binding} = Spend.effective_cost(spec.budget.cost, ticket, workflow)
+    {tokens, binding} = Spend.effective_tokens(spec.budget.tokens, ticket, workflow)
     spec = put_allowance(spec, ticket, workflow)
 
-    if binding == :state or cost >= spec.budget.cost do
+    if binding == :state or tokens >= spec.budget.tokens do
       spec
     else
       Events.append("job.budget_lowered", :system, %{
         ticket_id: ticket.id,
         job_id: job.id,
         payload: %{
-          "spec_cost" => spec.budget.cost,
-          "effective_cost" => cost,
+          "spec_tokens" => spec.budget.tokens,
+          "effective_tokens" => tokens,
           "binding" => Atom.to_string(binding)
         }
       })
 
       budget =
         Map.merge(spec.budget, %{
-          cost: cost,
-          declared: spec.budget.cost,
+          tokens: tokens,
+          declared: spec.budget.tokens,
           lowered_by: Atom.to_string(binding)
         })
 
@@ -1627,9 +1691,9 @@ defmodule Forge.Jobs do
   # What the ticket has left of its allowance, beside the job's own budget: a job weighing whether
   # another round is worth it was left to guess at the one figure that decides it
   # (`docs/design/capacity.md` § Spend caps).
-  defp put_allowance(spec, ticket, %Workflow{limits: %{ticket_cost: cap}} = workflow)
-       when is_number(cap) do
-    left = ticket |> Spend.ticket_remaining(workflow) |> Decimal.to_float()
+  defp put_allowance(spec, ticket, %Workflow{limits: %{ticket_tokens: cap}} = workflow)
+       when is_integer(cap) do
+    left = Spend.ticket_remaining(ticket, workflow)
     %{spec | budget: Map.merge(spec.budget, %{ticket_left: left, ticket_limit: cap})}
   end
 
@@ -1817,12 +1881,19 @@ defmodule Forge.Jobs do
       {:error, :row, changed, _changes} ->
         {:error, changed}
 
+      # The index on live exclusive runs said no: another run took the login between the pick and
+      # this insert. It is the same answer as a pick that found it held, and the job waits.
+      {:error, :run, %Ecto.Changeset{}, _changes} ->
+        {:error, {:held, held_harness(credential)}}
+
       # `Repo.transaction/1` reports a Multi failure as a four-tuple, which callers are not
       # promised and `Forge.Jobs.Scheduler` does not match.
       {:error, failed, reason, _changes} ->
         {:error, {failed, reason}}
     end
   end
+
+  defp held_harness(%{harness: harness}), do: String.to_existing_atom(harness)
 
   # **The row is still pending, whatever the struct says.** A pass holds the rows `pending/2` gave
   # it for as long as the pass takes, and a conversation can be closed in the meantime; writing
@@ -1906,7 +1977,7 @@ defmodule Forge.Jobs do
   # whether it moves to a free credential or waits for the reset.
   defp requeue_limited(job, ticket, result) do
     report = result.harness["rate_limit"]
-    cost = decimal(result.harness["cost_usd"])
+    figure = Runs.figure(result.harness)
 
     Multi.new()
     |> put_transcript(ticket, job, result)
@@ -1914,8 +1985,9 @@ defmodule Forge.Jobs do
       :job,
       Job.progress_changeset(job, Map.put(accounting(job, result), :status, :pending))
     )
-    |> Runs.close(job.id, DateTime.utc_now(:second), cost)
-    |> Tickets.put_progress(:ticket_cost, ticket, %{cost_usd: Decimal.add(ticket.cost_usd, cost)})
+    |> Credentials.put_renew(job, result.harness["credential_return"])
+    |> Runs.close(job.id, DateTime.utc_now(:second), figure)
+    |> Tickets.put_progress(:ticket_cost, ticket, %{usage: ticket.usage + figure.usage})
     |> Events.log(:event, "job.rate_limited", {:job, job.id}, %{
       ticket_id: ticket.id,
       job_id: job.id,
@@ -1972,6 +2044,9 @@ defmodule Forge.Jobs do
         resume_from_id: nil
       })
     )
+    # Codex may refresh its login on start-up, before it fails to find the session: "never got
+    # going" is not a safe reading of a run that held one (`Forge.Credentials.put_renew/3`).
+    |> Credentials.put_renew(job, result.harness["credential_return"])
     |> Runs.close(job.id, DateTime.utc_now(:second))
     |> Events.log(:event, "job.resume_failed", {:job, job.id}, %{
       ticket_id: ticket.id,
@@ -2001,7 +2076,7 @@ defmodule Forge.Jobs do
     decided = Commands.decide(job, spec(job), workflow, result)
     runs? = Enum.any?(decided, &match?({:run, _invocation}, &1))
     batch = Ecto.UUID.generate()
-    cost = decimal(result.harness["cost_usd"])
+    figure = Runs.figure(result.harness)
 
     with {:ok, at} <- parked_at(ticket, result) do
       # Once per run, under the row's lock: a parked result re-sent after its ack was lost would
@@ -2017,10 +2092,9 @@ defmodule Forge.Jobs do
           Map.put(accounting(job, result), :status, if(runs?, do: :parked, else: :pending))
         )
       )
-      |> Runs.close(job.id, DateTime.utc_now(:second), cost)
-      |> Tickets.put_progress(:ticket_cost, ticket, %{
-        cost_usd: Decimal.add(ticket.cost_usd, cost)
-      })
+      |> Credentials.put_renew(job, result.harness["credential_return"])
+      |> Runs.close(job.id, DateTime.utc_now(:second), figure)
+      |> Tickets.put_progress(:ticket_cost, ticket, %{usage: ticket.usage + figure.usage})
       |> Commands.put_invoked(ticket, workflow, job, decided, at, batch)
       |> Events.log(:event, "job.parked", {:job, job.id}, fn changes ->
         %{
@@ -2151,9 +2225,10 @@ defmodule Forge.Jobs do
     |> put_transcript(ticket, job, result)
     |> put_changeset(ticket, job, result)
     |> Multi.update(:job, Job.progress_changeset(job, progress_attrs(job, result)))
-    |> Runs.close(job.id, DateTime.utc_now(:second), decimal(result.harness["cost_usd"]))
+    |> Credentials.put_renew(job, result.harness["credential_return"])
+    |> Runs.close(job.id, DateTime.utc_now(:second), Runs.figure(result.harness))
     |> Tickets.put_progress(:ticket_cost, ticket, %{
-      cost_usd: Decimal.add(ticket.cost_usd, decimal(result.harness["cost_usd"]))
+      usage: ticket.usage + Runs.figure(result.harness).usage
     })
     |> Events.log(:event, "job.#{result.status}", {:job, job.id}, %{
       ticket_id: ticket.id,
@@ -2174,23 +2249,19 @@ defmodule Forge.Jobs do
   # not added, and the job and ticket move by the difference. Any other finished job's report is a
   # re-send, and changes nothing.
   defp settled(%Job{status: :finished, outcome: :cancelled} = job, harness) do
-    cost = decimal((harness || %{})["cost_usd"])
-    before = latest_run_cost(job.id)
-    delta = Decimal.sub(cost, before)
+    figure = Runs.figure(harness)
+    delta = figure.usage - latest_run_usage(job.id)
     ticket = job.ticket_id && Tickets.get!(job.ticket_id)
 
     Multi.new()
-    |> Runs.cost(job.id, cost)
+    |> Runs.record(job.id, figure)
     |> Multi.update(
       :job,
-      Job.progress_changeset(job, %{cost_usd: Decimal.add(job.cost_usd, delta)})
+      Job.progress_changeset(job, %{usage: job.usage + delta})
     )
     |> then(fn multi ->
       if ticket,
-        do:
-          Tickets.put_progress(multi, :ticket_cost, ticket, %{
-            cost_usd: Decimal.add(ticket.cost_usd, delta)
-          }),
+        do: Tickets.put_progress(multi, :ticket_cost, ticket, %{usage: ticket.usage + delta}),
         else: multi
     end)
     |> Repo.transaction()
@@ -2201,14 +2272,14 @@ defmodule Forge.Jobs do
 
   defp settled(%Job{}, _harness), do: {:error, :already_recorded}
 
-  defp latest_run_cost(job_id) do
+  defp latest_run_usage(job_id) do
     Repo.one(
       from r in Forge.Jobs.Run,
         where: r.job_id == ^job_id,
         order_by: [desc: r.started_at, desc: r.inserted_at],
         limit: 1,
-        select: r.cost_usd
-    ) || Decimal.new(0)
+        select: r.usage
+    ) || 0
   end
 
   defp follow_up(ticket, job, %Result{} = result) do
@@ -2412,7 +2483,7 @@ defmodule Forge.Jobs do
   defp accounting(job, %Result{} = result) do
     %{
       turns: job.turns + (result.harness["turns"] || 0),
-      cost_usd: Decimal.add(job.cost_usd, decimal(result.harness["cost_usd"])),
+      usage: job.usage + Runs.figure(result.harness).usage,
       harness_session_id: result.harness["session_id"] || job.harness_session_id,
       session_blob: session_blob(job, result.harness) || job.session_blob
     }
@@ -2476,7 +2547,11 @@ defmodule Forge.Jobs do
       "killed" => result.killed,
       "exit_status" => result.exit_status,
       "questions" => Enum.map(result.questions, & &1.key),
-      "harness" => json_safe(result.harness),
+      # **Without `credential_return`**: that is a login Codex refreshed, sealed under a key derived
+      # from the worker's token hash, which is in this database. `Forge.Credentials.put_renew/3`
+      # re-seals it with the Vault; an event payload, which the API serves to members and a backup
+      # keeps, must not be where a live refresh token outlives it.
+      "harness" => result.harness |> Map.delete("credential_return") |> json_safe(),
       "invalid_blobs" => result.invalid_blobs,
       # What was wrong with each document that did not parse, as text. The reason names them in
       # one line; this keeps each one's errors whole (`claude-code-events.md` § Naming the failure).
@@ -2550,7 +2625,7 @@ defmodule Forge.Jobs do
         {:ok, job}
 
       true ->
-        hibernate_running(job, commit, reason)
+        hibernate_running(job, commit, reason, result)
     end
   end
 
@@ -2561,9 +2636,15 @@ defmodule Forge.Jobs do
   # A workflow job used to be set `hibernated` too, and nothing ever moved one on — the scheduler
   # places only `pending` jobs — so its ticket sat with no job running and nothing in the queue
   # saying so (`docs/design/worker-tier.md` § Hibernation and resume).
-  defp hibernate_running(job, commit, reason) do
+  defp hibernate_running(job, commit, reason, result) do
+    # A login this run refreshed comes back with the report that ends it, as it does with a result
+    # (`Forge.Credentials.put_renew/3`): a run that stops here and drops it leaves the next job a
+    # refresh token that no longer works.
+    returned = get_in(result || %{}, ["harness", "credential_return"])
+
     Multi.new()
     |> Multi.update(:job, Job.progress_changeset(job, %{status: interrupted_status(job)}))
+    |> Credentials.put_renew(job, returned)
     |> Runs.close(job.id, DateTime.utc_now(:second))
     |> Events.log(:event, "job.hibernated", {:job, job.id}, %{
       ticket_id: job.ticket_id,
@@ -2690,10 +2771,6 @@ defmodule Forge.Jobs do
   # job directory root the platform still uses for its own scratch space.
   @spec data_dir() :: String.t()
   def data_dir, do: Path.expand(config(:data_dir, "tmp/forge"))
-
-  defp decimal(nil), do: Decimal.new(0)
-  defp decimal(number) when is_float(number), do: Decimal.from_float(number)
-  defp decimal(number) when is_integer(number), do: Decimal.new(number)
 
   @doc false
   def config(key, default),

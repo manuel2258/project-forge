@@ -24,7 +24,7 @@ defmodule Forge.RepinTest do
     implementing:
       prompt: agents/implement.md
       produces: [implementation.md, changeset]
-      budget: { turns: 20, cost: 2.00 }
+      budget: { turns: 20, tokens: 400k }
     packaging:
       invoke: [build]
       exit: { 0: done, "*": build_failed }
@@ -33,7 +33,7 @@ defmodule Forge.RepinTest do
     - { from: implementing, to: packaging }
     - { from: packaging, to: human_testing }
   limits:
-    ticket_cost: 25.00
+    ticket_tokens: 5M
   """
 
   @broken ~S"""

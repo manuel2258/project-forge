@@ -99,7 +99,7 @@ defmodule ForgeWeb.WorkerChannelTest do
       ref = push(socket, "turn", %{"job_id" => chat.id, "turn" => 1, "cost_usd" => 1_000_000.0})
       assert_reply ref, :error, %{reason: _}
 
-      assert Decimal.equal?(Jobs.get!(chat.id).cost_usd, Decimal.new(0))
+      assert Jobs.get!(chat.id).usage == 0
     end
 
     test "its own job it may still write", %{socket: socket, worker: worker} do
@@ -583,7 +583,7 @@ defmodule ForgeWeb.WorkerChannelTest do
           status: :finished,
           outcome: :converged,
           declared_outcome: "done",
-          harness: %{"session_id" => "sess-1", "turns" => 2, "cost_usd" => 0.01},
+          harness: %{"session_id" => "sess-1", "turns" => 2, "usage" => 2_000, "cost_usd" => 0.01},
           documents: %{
             "refinement.md" => ForgeCore.Document.parse!("---\noutcome: done\n---\nRefined.\n")
           }
@@ -655,11 +655,11 @@ defmodule ForgeWeb.WorkerChannelTest do
           "job_id" => job.id,
           "commit" => nil,
           "reason" => "cancelled",
-          "result" => %{"harness" => %{"cost_usd" => 0.25}}
+          "result" => %{"harness" => %{"usage" => 50_000, "cost_usd" => 0.25}}
         })
 
       assert_reply ref, :ok
-      assert Decimal.equal?(Jobs.get!(job.id).cost_usd, Decimal.new("0.25"))
+      assert Jobs.get!(job.id).usage == 50_000
     end
 
     # `docs/design/worker-channel.md` § Delivery: the end of a run the platform has given up on —

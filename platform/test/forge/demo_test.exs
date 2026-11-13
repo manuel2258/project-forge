@@ -177,7 +177,7 @@ defmodule Forge.DemoTest do
     types = ticket.id |> Events.for_ticket() |> Enum.map(& &1.type)
     assert "ticket.merged" in types
     assert "ticket.done" in types
-    assert Decimal.compare(ticket.cost_usd, 0) == :gt
+    assert ticket.usage > 0
   end
 
   # Runs the one job the ticket is waiting on, the way the scheduler would: assign it to the

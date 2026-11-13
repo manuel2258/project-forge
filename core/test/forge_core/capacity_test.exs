@@ -14,13 +14,13 @@ defmodule ForgeCore.CapacityTest do
   alias ForgeCore.Capacity
 
   describe "windows/2" do
-    test "is the cost as a share of one whole window" do
+    test "is the usage as a share of one whole window" do
       assert Capacity.windows(1.0, 4.0) == 0.25
       assert Capacity.windows(4.0, 4.0) == 1.0
       assert Capacity.windows(8.0, 4.0) == 2.0
     end
 
-    # The note calls `window_cost_usd` "the one number in this note that is not evidence" and says
+    # The note calls `window_tokens` "the one number in this note that is not evidence" and says
     # it is a placeholder until dogfooding calibrates it. Until then it is zero, and zero must not
     # divide: the answer is nothing to say, not an ArithmeticError raised inside a LiveView render.
     test "an unconfigured window cost has no honest answer, and says nothing rather than guessing" do

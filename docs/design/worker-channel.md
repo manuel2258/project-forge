@@ -123,7 +123,7 @@ Platform → worker:
 
 | Message | Payload | Meaning |
 |---|---|---|
-| `assign` | `job_id`, `kind`, spec JSON, slice limits (`memory_max`, `cpu_weight`), git endpoint + per-job token + branch + base, transcript key + token, a prefix and `put` token for the harness session's uploads, seed key + token, the backlog, the project changelog (`changelog`: the text of `platform/priv/changelog.md`, written to `platform/changelog.md`; not a bump, because an older worker drops the field and its absence already means "write nothing", `changelog.md` § Delivery), `resume_session` (nil when there is nothing to resume), `fork_session`, the session file to restore (`session`: key, `get` token, id, the version that wrote it, what the session had spent), wall clock, the job's inference credential sealed for this worker (`credentials.md` § Delivery to the machine); a chat adds `idle_ms`, `max_cost_usd` and `history` and a longer wall clock, and its spec a `replay` once it has been reopened | Run this job. |
+| `assign` | `job_id`, `kind`, spec JSON, slice limits (`memory_max`, `cpu_weight`), git endpoint + per-job token + branch + base, transcript key + token, a prefix and `put` token for the harness session's uploads, seed key + token, the backlog, the project changelog (`changelog`: the text of `platform/priv/changelog.md`, written to `platform/changelog.md`; not a bump, because an older worker drops the field and its absence already means "write nothing", `changelog.md` § Delivery), `resume_session` (nil when there is nothing to resume), `fork_session`, the session file to restore (`session`: key, `get` token, id, the version that wrote it, what the session had spent), wall clock, the job's inference credential sealed for this worker (`credentials.md` § Delivery to the machine); a chat adds `idle_ms`, `max_tokens` and `history` and a longer wall clock, and its spec a `replay` once it has been reopened | Run this job. |
 | `assign` for a command | `job_id`, `kind: "command"`, its spec (the script's text, argv, commit, env, timeout), slice limits, git endpoint + a read-only per-job token + branch + base, the log's store key + `put` token, seed key + token, wall clock | Run this command (`docs/design/commands.md`). No credential, no backlog, no session. |
 | — and for either, when it declares a group of files | `outputs`: a store prefix and a `put` token scoped to it (`docs/design/storage.md` § Serving) | Where the group's files go. |
 | — and for any of the three, when the job names project secrets | `secrets`: one JSON object of name to value, sealed for this worker, this job and the purpose `secrets` (`docs/design/secrets.md` § Delivery); its spec's `secrets` names them | Put these in the process's environment, and mask them in what leaves (§ Masking there). |
@@ -166,7 +166,7 @@ it is refused too, since the job row's changeset refuses the same, so this is fo
 than the worker.
 
 The conversation rows are `docs/design/conversations.md`'s — § The wire for the four messages, §
-Context for `history`, § Lifetime for `idle_ms` and the `replay`, and § Spend for `max_cost_usd` —
+Context for `history`, § Lifetime for `idle_ms` and the `replay`, and § Spend for `max_tokens` —
 and the backlog is `docs/design/ticket-proposals.md` § Reading the backlog.
 `Forge.Jobs.assignment/4` builds what `assign` carries, and `Forge.Jobs.assign/2` adds the sealed
 credential and secrets to it.
@@ -833,3 +833,19 @@ already has the framework for.
   fail on a network blip, and the probe no longer makes a request. A worker reporting no harness
   is now a release too old to take a job's credential, and it takes no inference job
   (`credentials.md` § What a worker offers now).
+
+## Protocol 11 (ticket 43)
+
+Protocol 10 → 11. A worker counts weighted tokens during the run and stops it past its budget
+(`capacity.md` § Stopping a job already running) and reports `usage` and `tokens` in its result.
+`Jobs.protocol_needs/1` gains `usage: 11` for **every** kind, commands included, so a protocol-10
+worker takes nothing and the scheduler's *Waiting for a newer worker image* reason and the
+workers page say why.
+
+A worker announces `harnesses` in `ready`, each with its version: the configured harness always
+and Codex when its binary answers `--version` (the old single `harness` map stays, and is the first
+of them; a row from before reads as the one harness it sent). The platform matches a job's harness
+against the list (`Forge.Workers.runs?/2`). An assignment carries `harness`, and a result or a chat
+turn report may carry `credential_return` in its harness map: a login Codex rewrote, sealed to the
+job's worker and the job under the `:return` purpose of `ForgeCore.Job.Credential` (`codex.md`
+§ Credentials).

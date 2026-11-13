@@ -22,7 +22,7 @@ defmodule ForgeCore.Workflow.ReleaseKeysTest do
     building:
       prompt: agents/build.md
       produces: ["images/*", notes.md, deck.md!, changeset]
-      budget: { turns: 5, cost: 1 }
+      budget: { turns: 5, tokens: 200k }
     discussing:
       chat: true
       prompt: agents/talk.md
@@ -31,7 +31,7 @@ defmodule ForgeCore.Workflow.ReleaseKeysTest do
   transitions:
     - { from: building, to: discussing }
     - { from: discussing, to: done_state }
-  limits: { ticket_cost: 5 }
+  limits: { ticket_tokens: 1M }
   """
 
   defp map(changes \\ %{}) do

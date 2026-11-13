@@ -76,7 +76,7 @@ Three orthogonal axes must never render as three colours of one badge. They get 
 | job outcome | bare mono, coloured, at type scale | The **declared** outcome is the largest thing on the job page. The engine outcome is demoted to smaller mono beside it, with a caption naming which is which. |
 | worker reachability | a dot and a word, beside the status | Whether the platform is holding a channel to the machine *now*. Orthogonal to `status`, which is what the database last recorded — a `ready` row that is not connected is the interesting case, not a contradiction. |
 
-**`budget_exhausted` is followed by what ran out**: `· turns`, `· cost` or `· wall clock`,
+**`budget_exhausted` is followed by what ran out**: `· turns`, `· tokens` or `· wall clock`,
 beside the outcome and nowhere else, because the three want different responses from whoever
 reads the row (`capacity.md` § Four exhaustions, three treatments). Not a second badge — two
 marks of equal weight read as two outcomes — so it is mono at a lower opacity than any outcome
@@ -1228,10 +1228,10 @@ has reported, five-hour and weekly: its utilization when one was given, its rese
 **Revoke**. The limit says *not
 enforced* in the row itself, because it is not, and a figure next to a limit reads as a cap.
 
-**Spend is in dollars here**, an exception to `capacity.md`'s recommendation that dollars leave
-the operator's surfaces, and recorded there as one. A credential is its owner's money, an API key
-is billed in dollars and has no window to count in, and the limit beside the figure was typed in
-dollars. The figures are as of the page's last action, not live. Beneath it, **Funds**: the
+**Usage is in weighted tokens here** (it was dollars, the one exception to `capacity.md`'s
+recommendation that dollars leave the operator's surfaces): windows with the weighted tokens counted
+behind them, and the limit typed in the same notation (`4M`). A Claude API key's dollar figure is
+kept per run (`claude_cost_usd`) and drawn on that credential's row only when it is an API key (`Claude Code's figure: $6.25 today`). The figures are as of the page's last action, not live. Beneath it, **Funds**: the
 projects whose pool it is in, each with an `×`, and a select of the viewer's own projects to add
 one — the same shape as a template's projects on `/templates`, because it is the same decision
 about whose money reaches which project. Rows are separated by a rule,
@@ -1779,3 +1779,15 @@ Named so their absence is a decision rather than an oversight. Each is specified
   key per answer. Until it lands, a send is confirmed by the flash the framework already shows.
 - Document-with-margin-questions at laptop width.
 - The `/tickets` finder. Until it exists neither the laptop row nor the phone bar has Tickets.
+
+## Account settings, Codex credentials (ticket 43)
+
+**Built:** the harness select, the login box and the expiry date, and a row's account, plan, last renewal, *in use* / *free* and days left; project settings' harness select and Codex's model and effort; the new-conversation form's harness select with a box for Codex's model and, for its effort, a select of the levels the connected machines offer (a box when none does); the harness named with its model, `Codex · gpt-5`, on a job's row, a job's page and a chat's strip; the tokens by kind on a credential row and on each run of a job's page; and a Claude API key's dollar figure. A machine below protocol 11 is said to take no job, and why. **Not built:** a picture of a refused login (it is covered by `settings_codex_test.exs`, not photographed).
+
+The credential form on `/users/settings` gains a harness select; Codex offers *ChatGPT login (Plus
+or Pro)* — pasted into a multi-line box that is never given a value by the server and emptied after
+a successful add — and *Codex access token (Business or Enterprise)* with an optional expiry date.
+A row shows its harness and kind, usage today in windows with weighted tokens and tokens by kind in
+the title, its daily limit (*not enforced*), its windows when reported, and for a login the account,
+plan, when it was last renewed and *in use* / *free* to its owner only. Usage is drawn where cost
+was, in windows (`capacity.md`).

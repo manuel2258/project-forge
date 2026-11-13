@@ -191,7 +191,7 @@ defmodule ForgeWeb.CapacityGaugeTest do
     job =
       job_fixture(%{
         ticket: ticket,
-        spec: %{"prompt" => "agents/refine.md", "budget" => %{"turns" => 20, "cost" => 0.5}}
+        spec: %{"prompt" => "agents/refine.md", "budget" => %{"turns" => 20, "tokens" => 100_000}}
       })
 
     chat = chat_fixture(%{project: project})

@@ -23,13 +23,13 @@ defmodule Forge.ArtifactsTest do
           planning:
             prompt: agents/plan.md
             produces: [plan.md, changeset]
-            budget: { turns: 1, cost: 0.1 }
+            budget: { turns: 1, tokens: 20k }
           review_ready: {}
           merged: {}
         transitions:
           - { from: planning, to: review_ready, approve: [plan.md] }
           - { from: review_ready, to: merged, approve: [changeset] }
-        limits: { ticket_cost: 1.0 }
+        limits: { ticket_tokens: 200k }
         """)
 
       assert Artifacts.approvable(workflow) == MapSet.new(["plan.md", "changeset"])
@@ -47,12 +47,12 @@ defmodule Forge.ArtifactsTest do
             prompt: agents/loop.md
             produces: [out.md]
             outcomes: [done, retry]
-            budget: { turns: 3, cost: 0.1 }
+            budget: { turns: 3, tokens: 20k }
           done_state: {}
         transitions:
           - { from: looping, to: looping, when: retry, max: 1 }
           - { from: looping, to: done_state, when: done }
-        limits: { ticket_cost: 0.5 }
+        limits: { ticket_tokens: 100k }
         """)
 
       assert Artifacts.approvable(workflow) == MapSet.new()

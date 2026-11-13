@@ -84,7 +84,7 @@ defmodule Forge.Engine do
       ) do
     workflow = Tickets.workflow(ticket)
 
-    if Core.within_ticket_budget?(workflow, Decimal.to_float(ticket.cost_usd)) do
+    if Core.within_ticket_budget?(workflow, ticket.usage) do
       case Core.step(workflow, job.state, outcome, counts(ticket.id)) do
         {:transition, transition} ->
           put_engine_transition(multi, ticket, workflow, transition, outcome)
@@ -99,7 +99,7 @@ defmodule Forge.Engine do
           put_stuck(multi, ticket, inspect(reason))
       end
     else
-      put_stuck(multi, ticket, "ticket cost cap reached")
+      put_stuck(multi, ticket, "ticket usage cap reached")
     end
   end
 
@@ -166,7 +166,7 @@ defmodule Forge.Engine do
       state: transition.to,
       status: if(terminal, do: :done, else: :active),
       pending_transition: nil,
-      cost_usd: ticket.cost_usd
+      usage: ticket.usage
     })
     |> Events.log(:transition_event, "transition.taken", actor, %{
       ticket_id: ticket.id,
@@ -316,7 +316,7 @@ defmodule Forge.Engine do
     |> Tickets.put_progress(:ticket, ticket, %{
       state: ticket.state,
       status: :active,
-      cost_usd: ticket.cost_usd,
+      usage: ticket.usage,
       pending_transition: pending
     })
     |> Events.log(:approval_event, "approval.requested", :system, %{
@@ -339,7 +339,7 @@ defmodule Forge.Engine do
     |> Tickets.put_progress(:ticket, ticket, %{
       state: ticket.state,
       status: :stuck,
-      cost_usd: ticket.cost_usd,
+      usage: ticket.usage,
       pending_transition: nil
     })
     |> Events.log(:stuck_event, "ticket.stuck", :system, %{
@@ -418,7 +418,7 @@ defmodule Forge.Engine do
       |> Tickets.put_progress(:ticket, stuck, %{
         state: stuck.state,
         status: :active,
-        cost_usd: stuck.cost_usd,
+        usage: stuck.usage,
         pending_transition: nil
       })
       |> Events.log(:event, "ticket.unstuck", actor, %{
@@ -667,7 +667,7 @@ defmodule Forge.Engine do
       |> Tickets.put_progress(:ticket, locked, %{
         state: locked.state,
         status: :cancelled,
-        cost_usd: locked.cost_usd,
+        usage: locked.usage,
         pending_transition: nil
       })
       |> Multi.update_all(:ended, from(j in Job, where: j.id in ^ids),
@@ -750,7 +750,7 @@ defmodule Forge.Engine do
     |> Tickets.put_progress(:ticket, ticket, %{
       state: ticket.state,
       status: :stuck,
-      cost_usd: ticket.cost_usd,
+      usage: ticket.usage,
       pending_transition: nil
     })
     |> Events.log(:restore_event, "ticket.restored", actor(user_id), %{
@@ -792,7 +792,7 @@ defmodule Forge.Engine do
       |> Tickets.put_progress(:ticket, ticket, %{
         state: ticket.state,
         status: :active,
-        cost_usd: ticket.cost_usd,
+        usage: ticket.usage,
         pending_transition: nil
       })
       |> Events.log(:retry_event, "ticket.retried", actor(user_id), %{
@@ -1551,7 +1551,7 @@ defmodule Forge.Engine do
           state: ticket.state,
           status: :active,
           pending_transition: nil,
-          cost_usd: ticket.cost_usd
+          usage: ticket.usage
         })
         |> Repo.transaction()
         |> case do

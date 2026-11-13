@@ -99,7 +99,7 @@ These decisions are settled. They are not to be reopened.
 
 ## Security and users
 
-- Proportionate and well designed: sessions, second factor available but not mandatory, all mutations audited into the event log, provider tokens confined to the orchestrator, short-lived scoped credentials per job, spend caps.
+- Proportionate and well designed: sessions, second factor available but not mandatory, all mutations audited into the event log, provider tokens confined to the orchestrator, short-lived scoped credentials per job, usage caps (weighted tokens, `design/capacity.md`).
 - Single operator today, but users and roles are in the data model from the start so team use is an expansion rather than a rewrite.
 - **Authentication is local accounts and OIDC, both first class.** More than one issuer may be
   configured. A local account is also the recovery path: a self-hosted platform whose only door
@@ -147,7 +147,7 @@ These decisions are settled. They are not to be reopened.
   they are a member of; nobody else can. The node's own `ANTHROPIC_API_KEY` and
   `CLAUDE_CODE_OAUTH_TOKEN` stop being read — neither fallback nor seed. See
   `design/credentials.md`.
-- **A job picks the credential that has spent least today among those not rate-limited, and keeps
+- **A job picks the credential that has used least today (weighted tokens) among those not rate-limited and not held by their kind's limit of jobs, and keeps
   it while it is not limited.** The oldest wins a tie. A job whose own credential is limited moves
   to a free one; a pool that is all limited leaves the job pending and the ticket active until the
   earliest reset, because time resolves it and nobody is being asked for anything.
@@ -174,6 +174,8 @@ See `design/identity.md`.
 
 - Claude Code is the first execution harness, not an assumption. Agent events are normalised into the platform's own schema at the driver boundary.
 - Capabilities that differ between harnesses — conversation resumption, permission prompting — are declared, and both are already optional in the design.
+- Codex CLI is the second (`design/codex.md`), on a ChatGPT login or a Codex access token; no OpenAI API key. A credential kind declares how many jobs may hold it at once and whether a run hands it back changed. A job's harness is its state's, else its project's, else Claude Code.
+- A run's usage is its tokens weighted by kind (input 1, cache write 1.25, cache read 0.1, output 5), the same for every model and harness, counted during the run; forge stops a run itself. Dollars are kept for information only (`design/capacity.md` § Usage in weighted tokens).
 
 ## Analysis
 

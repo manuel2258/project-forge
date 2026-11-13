@@ -480,11 +480,11 @@ defmodule Forge.CredentialsTest do
     job
   end
 
-  # A run in `project` on `credential`, started at `started_at`, that cost `cost`.
-  defp spent!(project, credential, cost, started_at) do
+  # A run in `project` on `credential`, started at `started_at`, that used `usage`.
+  defp spent!(project, credential, usage, started_at) do
     run!(chat_fixture(%{project: project}),
       credential: credential,
-      cost: cost,
+      usage: usage,
       started_at: started_at
     )
   end
@@ -567,14 +567,14 @@ defmodule Forge.CredentialsTest do
     # Least spent *today*: three credentials whose figures disagree about which that is by every
     # other measure. Oldest first says `a`, most spent today says `a`, least spent ever says `c`;
     # only today's figure says `b`.
-    test "a job that has not started takes the one that has spent least today",
+    test "a job that has not started takes the one that has used least today",
          %{user: user, project: project} do
       [a, b, c] = pool_in_order!(project, user, 3)
 
-      spent!(project, a, "3.00", @now)
-      spent!(project, b, "10.00", DateTime.add(@now, -1, :day))
-      spent!(project, b, "1.00", @now)
-      spent!(project, c, "2.00", @now)
+      spent!(project, a, 600_000, @now)
+      spent!(project, b, 2_000_000, DateTime.add(@now, -1, :day))
+      spent!(project, b, 200_000, @now)
+      spent!(project, c, 400_000, @now)
 
       assert {:ok, %{id: id}} = Credentials.for_job(job_in(project), @now)
       assert id == b.id
@@ -583,7 +583,7 @@ defmodule Forge.CredentialsTest do
     test "a rate-limited credential is passed over, however little it has spent",
          %{user: user, project: project} do
       [limited, free] = pool_in_order!(project, user, 2)
-      spent!(project, free, "5.00", @now)
+      spent!(project, free, 1_000_000, @now)
       reports!(project, limited, "rejected", DateTime.add(@now, 3600))
 
       assert {:ok, %{id: id}} = Credentials.for_job(job_in(project), @now)
@@ -636,27 +636,27 @@ defmodule Forge.CredentialsTest do
 
     # `Forge.Spend.day/1`'s day, so the edges are exact: the last second of the day before and
     # the first of the day after are both outside it.
-    test "is the cost of the jobs that started on it that day, per credential",
+    test "is the usage of the runs that started on it that day, per credential",
          %{user: user, project: project} do
       [a, b, idle] = pool_in_order!(project, user, 3)
       day = DateTime.to_date(@now)
       {midnight, next} = Forge.Spend.day(day)
 
-      spent!(project, a, "1.25", midnight)
-      spent!(project, a, "0.50", DateTime.add(next, -1))
-      spent!(project, a, "9.00", DateTime.add(midnight, -1))
-      spent!(project, a, "7.00", next)
-      spent!(project, b, "2.00", @now)
+      spent!(project, a, 250_000, midnight)
+      spent!(project, a, 100_000, DateTime.add(next, -1))
+      spent!(project, a, 1_800_000, DateTime.add(midnight, -1))
+      spent!(project, a, 1_400_000, next)
+      spent!(project, b, 400_000, @now)
       # What no credential paid for — every job before credentials existed — is nobody's.
-      spent!(project, nil, "4.00", @now)
+      spent!(project, nil, 800_000, @now)
 
-      assert Credentials.spent_today([a.id, b.id, idle.id], day) == %{
-               a.id => Decimal.new("1.75"),
-               b.id => Decimal.new("2.00")
+      assert Credentials.used_today([a.id, b.id, idle.id], day) == %{
+               a.id => 350_000,
+               b.id => 400_000
              }
 
-      assert Credentials.spent_today([a.id], Date.add(day, -1)) == %{a.id => Decimal.new("9.00")}
-      assert Credentials.spent_today([b.id], day) == %{b.id => Decimal.new("2.00")}
+      assert Credentials.used_today([a.id], Date.add(day, -1)) == %{a.id => 1_800_000}
+      assert Credentials.used_today([b.id], day) == %{b.id => 400_000}
     end
   end
 

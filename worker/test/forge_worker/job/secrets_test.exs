@@ -41,6 +41,140 @@ defmodule ForgeWorker.Job.SecretsTest do
     assert Secrets.from_assignment(%{"job_id" => "j", "secrets" => nil}) == nil
   end
 
+  describe "the job's own credential" do
+    # Masked as a project's secrets are, Claude's as well as Codex's (`docs/design/secrets.md`
+    # § Masking a job's own credential): the exact value and its JSON-escaped form, against
+    # accidents and not an agent that means it.
+    defp with_credential(secret, hash, job_id \\ "job-1"),
+      do: %Secrets{job_id: "job-1", credential: Credential.seal(secret, hash, job_id)}
+
+    test "an assignment carrying only a credential still masks", %{hash: hash} do
+      sealed = Credential.seal("sk-ant-oat01-abcdef", hash, "job-1")
+
+      assert %Secrets{credential: ^sealed, sealed: nil} =
+               Secrets.from_assignment(%{
+                 "job_id" => "job-1",
+                 "credential" => %{"sealed" => sealed}
+               })
+
+      assert Secrets.from_assignment(%{"job_id" => "job-1", "credential" => nil}) == nil
+    end
+
+    test "a token or key is masked in events and files, and is not an environment variable",
+         %{hash: hash} do
+      secrets = with_credential("sk-ant-oat01-abcdef", hash)
+
+      assert Secrets.mask(secrets, "the key is sk-ant-oat01-abcdef ok") ==
+               "the key is [secret credential] ok"
+
+      event = %{type: "job.harness.text", payload: %{text: "sk-ant-oat01-abcdef"}}
+      assert Secrets.mask_event(secrets, event).payload.text == "[secret credential]"
+
+      # Its delivery is its driver's; this module sets nothing in a process's environment for it.
+      assert Secrets.env(secrets) == []
+      assert Secrets.check(secrets) == :ok
+    end
+
+    # Codex refreshes the login by itself, so the tokens in `auth.json` are not the sealed ones:
+    # they are read as the file is when something is masked.
+    test "a login Codex rewrote is masked by its new tokens too", %{hash: hash} do
+      job_dir = Path.join(System.tmp_dir!(), "secrets-auth-#{System.unique_integer([:positive])}")
+      codex = Path.join([job_dir, "home", ".codex"])
+      File.mkdir_p!(codex)
+      on_exit(fn -> File.rm_rf!(job_dir) end)
+
+      delivered = Jason.encode!(%{"tokens" => %{"refresh_token" => "old-refresh-value"}})
+      sealed = Credential.seal(delivered, hash, "job-1")
+      secrets = %Secrets{job_id: "job-1", credential: sealed, job_dir: job_dir}
+
+      text = "old=old-refresh-value new=new-refresh-value"
+      assert Secrets.mask(secrets, text) == "old=[secret credential] new=new-refresh-value"
+
+      File.write!(
+        Path.join(codex, "auth.json"),
+        Jason.encode!(%{"tokens" => %{"refresh_token" => "new-refresh-value"}})
+      )
+
+      assert Secrets.mask(secrets, text) == "old=[secret credential] new=[secret credential]"
+
+      # Not read through a link standing in for the file.
+      File.rm!(Path.join(codex, "auth.json"))
+      elsewhere = Path.join(job_dir, "elsewhere.json")
+
+      File.write!(
+        elsewhere,
+        Jason.encode!(%{"tokens" => %{"refresh_token" => "new-refresh-value"}})
+      )
+
+      File.ln_s!(elsewhere, Path.join(codex, "auth.json"))
+      assert Secrets.mask(secrets, text) == "old=[secret credential] new=new-refresh-value"
+
+      # And an assignment names the directory to look in.
+      assert %Secrets{job_dir: "/jobs/x"} =
+               Secrets.from_assignment(
+                 %{"job_id" => "job-1", "credential" => %{"sealed" => sealed}},
+                 "/jobs/x"
+               )
+    end
+
+    test "a ChatGPT login is masked whole and by each of its three tokens", %{hash: hash} do
+      login =
+        Jason.encode!(%{
+          "tokens" => %{
+            "id_token" => "id-token-value",
+            "access_token" => "access-token-value",
+            "refresh_token" => "refresh-token-value",
+            "account_id" => "acct-1"
+          }
+        })
+
+      secrets = with_credential(login, hash)
+      text = "r=refresh-token-value a=access-token-value i=id-token-value acct-1"
+
+      assert Secrets.mask(secrets, text) ==
+               "r=[secret credential] a=[secret credential] i=[secret credential] acct-1"
+
+      assert Secrets.mask(secrets, "file: " <> login) == "file: [secret credential]"
+      # Its JSON-escaped form, as a transcript line holds a value with a quote in it.
+      assert Secrets.mask(with_credential(~s(ab"cd-token-1), hash), ~s(x "ab\\"cd-token-1" y)) =~
+               "[secret credential]"
+    end
+
+    test "an API key the login file also holds is masked on its own", %{hash: hash} do
+      login =
+        Jason.encode!(%{
+          "OPENAI_API_KEY" => "sk-the-key-in-the-file",
+          "tokens" => %{"refresh_token" => "refresh-token-value"}
+        })
+
+      secrets = with_credential(login, hash)
+
+      assert Secrets.mask(secrets, "k=sk-the-key-in-the-file") == "k=[secret credential]"
+    end
+
+    # An empty value would be an empty pattern, which cannot be compiled: it is skipped, and the
+    # others are still masked.
+    test "an empty secret value is not a pattern", %{hash: hash} do
+      secrets = %{sealed(%{"EMPTY" => "", "KEY_A" => "value-a1"}, hash) | credential: nil}
+
+      assert Secrets.mask(secrets, "value-a1 and nothing else") ==
+               "[secret KEY_A] and nothing else"
+    end
+
+    test "one that will not open masks nothing, and a project's secrets still do", %{hash: hash} do
+      other_job = %{with_credential("sk-ant-oat01-abcdef", hash, "job-2") | sealed: nil}
+      assert Secrets.mask(other_job, "sk-ant-oat01-abcdef") == "sk-ant-oat01-abcdef"
+
+      both = %{
+        sealed(%{"KEY_A" => "value-a1"}, hash)
+        | credential: Credential.seal("tok-123456", hash, "job-1")
+      }
+
+      assert Secrets.mask(both, "value-a1 tok-123456") == "[secret KEY_A] [secret credential]"
+      assert Secrets.env(both) == [{"KEY_A", {:secret, "value-a1"}}]
+    end
+  end
+
   test "they open only for this job, this purpose and this machine", %{hash: hash} do
     assert Secrets.open(sealed(%{"KEY_A" => "value-a1"}, hash)) == {:ok, %{"KEY_A" => "value-a1"}}
     assert Secrets.open(nil) == {:ok, %{}}

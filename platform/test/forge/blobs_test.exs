@@ -26,7 +26,7 @@ defmodule Forge.BlobsTest do
     implementing:
       prompt: agents/implement.md
       produces: [implementation.md, changeset, commit-message, shots/*]
-      budget: { turns: 20, cost: 2.00 }
+      budget: { turns: 20, tokens: 400k }
     packaging:
       invoke: [package]
       exit: { 0: done, "*": build_failed }
@@ -41,7 +41,7 @@ defmodule Forge.BlobsTest do
     - { from: human_testing, to: merged, approve: [changeset] }
     - { from: human_testing, to: implementing }
   limits:
-    ticket_cost: 25.00
+    ticket_tokens: 5M
   """
 
   setup do

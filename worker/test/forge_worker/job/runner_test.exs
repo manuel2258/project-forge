@@ -210,14 +210,18 @@ defmodule ForgeWorker.Job.RunnerTest do
              "model" => "fake-model",
              "turns" => 3,
              "cost_usd" => 0.0421,
+             # One model call across two lines is counted once, and the subagent's call beside it
+             # counts: 3000 + 150 (see `test/support/fake_claude.sh`).
+             "usage" => 3150,
+             "tokens" => %{input: 1100, cache_write: 400, cache_read: 5000, output: 210},
              "subtype" => "success"
            } = result.harness
 
     assert Enum.map(events(), & &1.type) ==
-             ~w(job.harness.started job.harness.text job.harness.tool_use job.harness.tool_result job.harness.finished)
+             ~w(job.harness.started job.harness.text job.harness.tool_use job.harness.text job.harness.tool_result job.harness.finished)
 
     assert result.transcript_path |> File.read!() |> String.split("\n", trim: true) |> length() ==
-             5
+             7
 
     assert File.read!(result.stderr_path) =~ "diagnostics on stderr"
 
@@ -241,7 +245,10 @@ defmodule ForgeWorker.Job.RunnerTest do
              "ANTHROPIC_API_KEY=secret-key\nCLAUDE_CODE_OAUTH_TOKEN=unset\n"
 
     assert File.read!(Path.join(job_dir, "fake-args.txt")) =~
-             "--max-turns 40 --max-budget-usd 2.00"
+             "--max-turns 40"
+
+    # Forge counts and stops the run itself; the harness is given no money ceiling.
+    refute File.read!(Path.join(job_dir, "fake-args.txt")) =~ "max-budget"
   end
 
   test "the harness sees an allowlisted environment, a private HOME and no worker secrets",
@@ -349,6 +356,33 @@ defmodule ForgeWorker.Job.RunnerTest do
     assert result.harness["cost_usd"] == 1.5
   end
 
+  # **Forge stops the run itself, during the run** (`docs/design/capacity.md` § Stopping a job
+  # already running): the fake never reaches its result and spends 50,000 a call, so only the
+  # meter can end it, and it ends it once the budget has been passed, not before.
+  test "a run past its token budget is stopped before its result", context do
+    spec = %{spec() | budget: %{turns: 40, tokens: 120_000}}
+    {:ok, result} = context |> run("runaway", spec: spec) |> Runner.await(10_000)
+
+    assert result.killed == :tokens
+    assert result.outcome == :budget_exhausted
+    assert result.exhausted == :tokens
+    assert result.reason == "token budget reached"
+
+    # The call that crossed the line was paid for: the 3,150 every run starts with and then calls of
+    # 50,000, the third of which is the first to pass 120,000.
+    assert result.harness["usage"] == 153_150
+    assert result.harness["subtype"] == nil
+  end
+
+  test "a run exactly at its budget is not over it", context do
+    spec = %{spec() | budget: %{turns: 40, tokens: 3150}}
+    {:ok, result} = context |> run("success", spec: spec) |> Runner.await(5_000)
+
+    assert result.killed == nil
+    assert result.outcome == :converged
+    assert result.harness["usage"] == 3150
+  end
+
   # **And the result says which ceiling it was**, because the outcome cannot
   # (`docs/design/capacity.md` § Four exhaustions, three treatments). The two scenarios end in
   # the same outcome from the same code path, so without this the whole distinction could be
@@ -359,7 +393,7 @@ defmodule ForgeWorker.Job.RunnerTest do
 
     {:ok, cost} = context |> run("max_budget") |> Runner.await(5_000)
     assert cost.outcome == :budget_exhausted
-    assert cost.exhausted == :cost
+    assert cost.exhausted == :tokens
 
     {:ok, converged} = context |> run("success") |> Runner.await(5_000)
     assert converged.outcome == :converged
@@ -1065,7 +1099,7 @@ defmodule ForgeWorker.Job.RunnerTest do
     # The fake spends three turns a run. A budget of three leaves nothing for a correction to
     # start with, so none is started — the budget is the job's, not each process's.
     test "a correction is not started on a spent budget", context do
-      spec = %{spec() | budget: %{turns: 3, cost: 2.0}}
+      spec = %{spec() | budget: %{turns: 3, tokens: 400_000}}
       {:ok, result} = context |> run("invalid_document", spec: spec) |> Runner.await(5_000)
 
       assert result.outcome == :error
@@ -1152,8 +1186,8 @@ defmodule ForgeWorker.Job.RunnerTest do
     end
 
     # A fork whose session already holds more than the job's whole budget is still corrected:
-    # the harness is not charged the carry (`docs/measurements.md`), and neither is the budget.
-    test "a correction is given what the job's own spend leaves of its budget", context do
+    # usage is counted from this process's own calls, so the session's past is not in it.
+    test "a correction is not charged the session it resumed", context do
       {:ok, result} =
         context
         |> run("invalid_document",
@@ -1163,17 +1197,30 @@ defmodule ForgeWorker.Job.RunnerTest do
         |> Runner.await(5_000)
 
       assert result.harness["corrections"] == 2
-      # Two rounds in, 0.0842 of the 2.0 has gone, rounded down to the cent.
-      assert File.read!(Path.join(job_dir(result), "fake-args.txt")) =~
-               "--max-budget-usd 1.91"
+      assert result.harness["usage"] == 3 * 3150
+      assert result.killed == nil
     end
 
+    # Each correction round is a new process with a new meter, and is given what the rounds before
+    # it left of the job's budget — 7,000 less the 3,150 of one round leaves 3,850, and less two
+    # leaves 700, which the third round passes on its first call. Given the whole 7,000 it would
+    # not have been stopped.
     test "a correction is given what is left of the budget, not the whole of it", context do
+      spec = %{spec() | budget: %{turns: 40, tokens: 7_000}}
+      {:ok, result} = context |> run("invalid_document", spec: spec) |> Runner.await(5_000)
+
+      assert result.harness["corrections"] == 2
+      assert result.killed == :tokens
+      assert result.outcome == :budget_exhausted
+    end
+
+    # The correction's turns are still what is left: the harness is given `--max-turns` for them.
+    test "a correction is given the turns that are left", context do
       {:ok, result} = context |> run("fixes_when_resumed") |> Runner.await(5_000)
       args = File.read!(Path.join(job_dir(result), "fake-args.txt"))
 
       assert args =~ "--max-turns 37"
-      assert args =~ "--max-budget-usd 1.95"
+      refute args =~ "max-budget"
     end
 
     # The cancel arrives after the harness printed its result and before it exited. It is a

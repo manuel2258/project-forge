@@ -39,7 +39,7 @@ defmodule Forge.CommandsTest do
       may_invoke:
         build: { max: 2 }
         test: { max: 2, concurrent: 1 }
-      budget: { turns: 20, cost: 2.00 }
+      budget: { turns: 20, tokens: 400k }
     checking:
       invoke: [build, [test, --all]]
       exit: { 0: done, "*": checks_failed }
@@ -49,7 +49,7 @@ defmodule Forge.CommandsTest do
     - { from: checking, to: review_ready }
     - { from: checking, to: implementing, when: checks_failed, max: 3 }
   limits:
-    ticket_cost: 25.00
+    ticket_tokens: 5M
   """
 
   @build "#!/bin/sh\nexec make \"$@\"\n"
@@ -169,7 +169,7 @@ defmodule Forge.CommandsTest do
     %ForgeCore.Job.Result{
       status: :parked,
       invocations: invocations,
-      harness: %{"session_id" => "sess-42", "turns" => 3, "cost_usd" => 0.5}
+      harness: %{"session_id" => "sess-42", "turns" => 3, "usage" => 100_000, "cost_usd" => 0.5}
     }
   end
 
@@ -642,12 +642,12 @@ defmodule Forge.CommandsTest do
       %{assignment: assignment, job: job} = context
       invocations = [%{"command" => "build", "args" => []}]
       {:ok, _parked} = FakeWorker.park(assignment, invocations)
-      cost = Tickets.get!(context.ticket.id).cost_usd
+      cost = Tickets.get!(context.ticket.id).usage
 
       assert {:error, :already_recorded} = Jobs.complete(job.id, parked_again(invocations))
 
       assert [_one] = pending(context.ticket, :command)
-      assert Tickets.get!(context.ticket.id).cost_usd == cost
+      assert Tickets.get!(context.ticket.id).usage == cost
       assert 1 == job.id |> Events.for_job() |> Enum.count(&(&1.type == "job.parked"))
     end
 
@@ -656,10 +656,10 @@ defmodule Forge.CommandsTest do
       %{assignment: assignment, job: job} = context
       {:ok, back} = FakeWorker.park(assignment, [], invocation_error: "not JSON")
       assert back.status == :pending
-      cost = Tickets.get!(context.ticket.id).cost_usd
+      cost = Tickets.get!(context.ticket.id).usage
 
       assert {:error, :already_recorded} = Jobs.complete(job.id, parked_again([]))
-      assert Tickets.get!(context.ticket.id).cost_usd == cost
+      assert Tickets.get!(context.ticket.id).usage == cost
     end
 
     # A later run parks again, and is heard.
@@ -765,7 +765,7 @@ defmodule Forge.CommandsTest do
 
       ticket = implement(context)
       [build | _] = pending(ticket, :command)
-      assert Jobs.protocol(build) == 2
+      assert protocol_before_usage(build) == 2
       assert Jobs.harness(build) == nil
 
       assert Jobs.protocol_needs(%Job{kind: :chat})[:kind] == 8
@@ -776,8 +776,8 @@ defmodule Forge.CommandsTest do
     test "asks a workflow job and a conversation for protocol 9, and a command for nothing of it",
          context do
       [job] = pending(context.ticket)
-      assert Jobs.protocol(job) == 9
-      assert Jobs.protocol(%Job{kind: :chat}) == 9
+      assert protocol_before_usage(job) == 9
+      assert protocol_before_usage(%Job{kind: :chat}) == 9
       assert Jobs.protocol_needs(job)[:archive] == 9
 
       [build | _] = pending(implement(context), :command)
@@ -807,16 +807,28 @@ defmodule Forge.CommandsTest do
       assert Jobs.get!(job.id).status == :pending
     end
 
-    test "a worker of protocol 2 is not given an agent, and still is given a command", context do
+    # Protocol 11 counts usage during the run, which every kind of job needs: a worker below it is
+    # given a command no more than an agent (`docs/design/worker-channel.md` § Protocol 11).
+    test "a worker of protocol 2 is given neither an agent nor a command", context do
       [job] = pending(context.ticket)
+
+      # Every kind of job needs protocol 11, for the reason alone: it is the largest of a command's
+      # needs and a chat's alike, and it is what the scheduler's and the workers page's sentence
+      # reads from.
+      for each <- [job, %Job{kind: :command}, %Job{kind: :chat}] do
+        assert Jobs.protocol_needs(each)[:usage] == 11
+        assert Jobs.protocol(each) == 11
+      end
+
       old = Workers.get!(FakeWorker.connect(protocol: 2, project: context.project).id)
-      new = Workers.get!(FakeWorker.connect(protocol: 9, project: context.project).id)
+      new = Workers.get!(FakeWorker.connect(protocol: 11, project: context.project).id)
       agent = %{kind: :workflow, memory: 1, cores: 1, project_id: context.project.id}
       agent = Map.put(agent, :protocol, Jobs.protocol(job))
 
       refute Workers.fits?(old, agent)
       assert Workers.fits?(new, agent)
-      assert Workers.fits?(old, %{agent | kind: :command, protocol: 2})
+      refute Workers.fits?(old, %{agent | kind: :command, protocol: 11})
+      assert Workers.fits?(new, %{agent | kind: :command, protocol: 11})
     end
 
     # The scheduler's own demand, not one built by hand: an older release serving the project is

@@ -345,7 +345,7 @@ The IdP says who arrived. Forge says what they may do, in a row, with an event n
 Capacity and funding stop being node configuration and become things a user owns.
 
 **credential** — `user_id`, `name`, `harness`, `kind` (`api_key | oauth` for Claude Code), the
-secret, and `daily_limit_usd` (nullable). Revoked rather than deleted, because jobs reference it.
+secret, and `daily_limit` (nullable, in weighted tokens). Revoked rather than deleted, because jobs reference it.
 `docs/design/credentials.md` is the standard for it: what it is, how it is checked, how a job
 picks one and how it reaches a machine.
 
@@ -392,7 +392,7 @@ provider_credentials
 to: *a credential's spend is a query over the jobs that used it* — over their runs, since a job may
 move between credentials (`credentials.md` § Spend). **Machine spend is not a query over jobs.** It
 is hours times a rate and it accrues with nothing running. One table would make every existing
-spend query carry a filter to stay correct, and would leave `daily_limit_usd` meaning two different
+spend query carry a filter to stay correct, and would leave `daily_limit` meaning two different
 things on one row.
 
 The secret is a map because providers disagree about how many fields they need — one token, a key

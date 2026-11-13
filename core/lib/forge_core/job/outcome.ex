@@ -23,7 +23,7 @@ defmodule ForgeCore.Job.Outcome do
     * `undeclared` - files written that were not declared.
   """
   @type run :: %{
-          killed: nil | :operator | :wall_clock,
+          killed: nil | :operator | :wall_clock | :tokens,
           exit_status: integer() | nil,
           result: %{subtype: String.t() | nil, is_error: boolean(), text: String.t() | nil} | nil,
           documents: %{String.t() => Document.t()},
@@ -35,11 +35,11 @@ defmodule ForgeCore.Job.Outcome do
   @type outcome :: :converged | :did_not_converge | :budget_exhausted | :error | :cancelled
 
   @typedoc """
-  Which ceiling stopped a run: the harness's turn ceiling, its cost ceiling, or the driver's
+  Which ceiling stopped a run: the harness's turn ceiling, forge's own token ceiling, or the driver's
   wall clock. The one thing `:budget_exhausted` alone cannot say, and the three want different
   responses from whoever reads the job row (`docs/design/capacity.md` § Four exhaustions).
   """
-  @type ceiling :: :turns | :cost | :wall_clock
+  @type ceiling :: :turns | :tokens | :wall_clock
 
   @type decision ::
           {:waiting, [Question.t()]}
@@ -75,6 +75,9 @@ defmodule ForgeCore.Job.Outcome do
 
   defp finished(_spec, %{killed: :wall_clock}),
     do: {:budget_exhausted, nil, "wall-clock limit reached"}
+
+  defp finished(_spec, %{killed: :tokens}),
+    do: {:budget_exhausted, nil, "token budget reached"}
 
   defp finished(_spec, %{result: nil}), do: {:error, nil, "harness produced no result message"}
 
@@ -158,17 +161,19 @@ defmodule ForgeCore.Job.Outcome do
   """
   @spec exhausted(run()) :: ceiling() | nil
   def exhausted(%{killed: :wall_clock}), do: :wall_clock
+  def exhausted(%{killed: :tokens}), do: :tokens
   def exhausted(%{killed: killed}) when killed != nil, do: nil
   def exhausted(%{result: nil}), do: nil
   def exhausted(%{result: result} = run), do: ceiling(result, run.exit_status)
 
-  # Exit status 2 is documented as the cost ceiling. It does not also cover an authentication
+  # Exit status 2 was documented as the cost ceiling of `--max-budget-usd`, which forge no longer
+  # passes; a harness that still reports it is read as the token ceiling. It does not also cover an authentication
   # failure: that exits 1 and does produce a result message, so it never reaches here.
   defp ceiling(%{subtype: subtype, is_error: is_error}, exit_status) do
     cond do
       subtype == "error_max_turns" -> :turns
-      String.starts_with?(subtype || "", "error_max_budget") -> :cost
-      exit_status == 2 and is_error -> :cost
+      String.starts_with?(subtype || "", "error_max_budget") -> :tokens
+      exit_status == 2 and is_error -> :tokens
       true -> nil
     end
   end

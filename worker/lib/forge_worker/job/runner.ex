@@ -59,7 +59,8 @@ defmodule ForgeWorker.Job.Runner do
 
   alias ForgeCore.Job.{Correction, Outcome, Result, Spec}
   alias ForgeCore.Prompt
-  alias ForgeWorker.Job.{Dir, Exec, Memory, Session}
+  alias ForgeCore.Usage
+  alias ForgeWorker.Job.{Dir, Exec, Memory, Meter, Session}
   alias ForgeWorker.Log
 
   require Logger
@@ -202,6 +203,16 @@ defmodule ForgeWorker.Job.Runner do
       # What the rounds before this one spent, once a correction has run: the result reports the
       # whole job, not its last process.
       prior: nil,
+      # What this process has used, counted call by call, and the weighted tokens it may use
+      # before forge stops it: a workflow job's budget, or a conversation's `:max_tokens` — what is
+      # left of the day (`docs/design/capacity.md` § Stopping a job already running). A correction
+      # round starts a new process, so a new meter and what is left of the job's budget.
+      meter: Meter.new(),
+      harness_state: nil,
+      # The digest of the login delivered at spawn, when the credential is one that comes back:
+      # the hash and not the value, kept to tell whether Codex rewrote it (`credential_return/1`).
+      credential_hash: nil,
+      budget_tokens: token_budget(mode, spec, opts),
       # What the session this run resumes had already spent, which the harness's total starts
       # from (`Session.baseline/1`). Every round of a job resumes the same session, so each
       # round's total still starts from it and it stays the same for the whole job.
@@ -305,7 +316,16 @@ defmodule ForgeWorker.Job.Runner do
         {executable, args} = slice.wrap(executable, args, context)
 
         {:noreply,
-         with_archive(state, opts, fn -> spawn_harness(state, opts, executable, args, plain) end)}
+         with_archive(state, opts, fn ->
+           spawn_harness(
+             state,
+             opts,
+             Keyword.get(opts, :harness_opts, []),
+             executable,
+             args,
+             plain
+           )
+         end)}
 
       {:error, reason} ->
         {:noreply, conclude_without_starting(state, reason)}
@@ -362,7 +382,7 @@ defmodule ForgeWorker.Job.Runner do
     state
   end
 
-  defp spawn_harness(state, opts, executable, args, plain) do
+  defp spawn_harness(state, opts, harness_opts, executable, args, plain) do
     job_dir = state.job_dir
     assignments = Enum.map(plain, fn {k, v} -> "#{k}=#{v}" end)
 
@@ -375,7 +395,7 @@ defmodule ForgeWorker.Job.Runner do
         {:args,
          [
            "-c",
-           wrapper(state.mode),
+           wrapper(wrapper_kind(state)),
            "forge-job",
            state.prompt_path,
            Dir.stderr_path(job_dir)
@@ -383,19 +403,103 @@ defmodule ForgeWorker.Job.Runner do
         {:cd, Keyword.fetch!(opts, :worktree)}
       ])
 
-    state = %{state | port: port}
+    # A driver that keeps a conversation of its own says what to write first (`initialize`, for
+    # Codex), and that conversation starts again with each process, a correction's included.
+    {first, harness_state} = ForgeWorker.Harness.init(state.harness, harness_opts)
+
+    state = %{
+      state
+      | port: port,
+        harness_state: harness_state,
+        # Kept across a correction's new process: the login is compared with what this *run* was
+        # given, and a round two that started from a refreshed one must not forget round one's.
+        credential_hash: state.credential_hash || delivered_hash(harness_opts)
+    }
+
+    _ = if IO.iodata_length(first) > 0, do: write(state, first)
 
     # Read while the process lives, and only then: from its spawn, and from each round's own.
     Process.send_after(self(), {:sample, state.corrections}, state.memory_sample_ms)
 
     # The prompt is composed the same way for both modes and written to the same file; in
     # streaming mode it goes down the pipe as the first message instead of being redirected in.
-    case state.mode do
-      :streaming when state.hold -> state
-      :streaming -> state |> deliver(File.read!(Dir.prompt_path(job_dir))) |> watch_start()
-      :prompt -> watch_start(state)
+    case {state.mode, stateful?(state)} do
+      {:streaming, _} when state.hold -> state
+      {:streaming, _} -> state |> deliver(File.read!(Dir.prompt_path(job_dir))) |> watch_start()
+      # A job on a driver with a conversation of its own is told its prompt as a first message, as
+      # a conversation is: there is no stdin redirect to read it from.
+      {:prompt, true} -> state |> deliver(File.read!(state.prompt_path)) |> watch_start()
+      {:prompt, false} -> watch_start(state)
     end
   end
+
+  defp stateful?(state), do: ForgeWorker.Harness.stateful?(state.harness)
+
+  # -- the login a run hands back ------------------------------------------------------------------
+  #
+  # Codex refreshes its login by itself and writes the new tokens back to `auth.json`, and a copy
+  # another run refreshed first stops working (`docs/design/codex.md` § Credentials). So what a run
+  # leaves of the login it was given comes back: after the process exits, and at the end of every
+  # turn of a conversation, `auth.json` is read, and if its digest is not the delivered one it is
+  # sealed to this machine's token and this job under a purpose of its own and put in the result or
+  # the turn report. The platform decides whether to keep it (`Forge.Credentials.put_renew/3`).
+
+  defp delivered_hash(harness_opts) do
+    case harness_opts |> Keyword.get(:credential) |> resolve_credential() do
+      {:chatgpt_login, json} when is_binary(json) -> :crypto.hash(:sha256, json)
+      _no_login -> nil
+    end
+  end
+
+  defp resolve_credential(fun) when is_function(fun, 0), do: fun.()
+  defp resolve_credential(credential), do: credential
+
+  # Nothing for a run that was not given a login, and nothing for one whose file is as it was left.
+  #
+  # **One read decides and seals and names the new baseline**: a second read for the baseline could
+  # see a file Codex rewrote in between, and the next turn would then compare against a login that
+  # was never handed back.
+  defp credential_return(%{credential_hash: nil}), do: nil
+
+  defp credential_return(%{credential_hash: delivered} = state) do
+    with {:ok, text} <- Dir.read_auth(state.job_dir),
+         hash = :crypto.hash(:sha256, text),
+         true <- hash != delivered,
+         {:ok, token_hash} <- ForgeCore.Job.Credential.token_hash(ForgeWorker.Config.token()) do
+      {ForgeCore.Job.Credential.seal(text, token_hash, state.spec.job_id, :return), hash}
+    else
+      _unchanged_or_unreadable -> nil
+    end
+  end
+
+  # Once per change: what a turn has handed back is what the next is compared against.
+  defp credential_return_once(state) do
+    case credential_return(state) do
+      nil -> {nil, state}
+      {sealed, hash} -> {sealed, %{state | credential_hash: hash}}
+    end
+  end
+
+  # A correction's process starts from the login the last one left, not the one the run began with:
+  # the shell prefix writes whatever it is given over `auth.json`, and a refresh token Codex has
+  # already spent is not one it can use again.
+  defp carry_login(harness_opts, %{credential_hash: hash} = state) when is_binary(hash) do
+    with {:ok, text} <- Dir.read_auth(state.job_dir),
+         true <- :crypto.hash(:sha256, text) != hash do
+      Keyword.put(harness_opts, :credential, {:chatgpt_login, text})
+    else
+      _unchanged_or_unreadable -> harness_opts
+    end
+  end
+
+  defp carry_login(harness_opts, _state), do: harness_opts
+
+  defp put_return(harness, nil), do: harness
+  defp put_return(harness, {sealed, _hash}), do: Map.put(harness, "credential_return", sealed)
+
+  # The relay that keeps stdin open is what lets a process be written to after it starts; a job
+  # whose driver has a conversation of its own needs it as a conversation does.
+  defp wrapper_kind(state), do: if(stateful?(state), do: :streaming, else: state.mode)
 
   # The shell reads the prompt into stdin, sends stderr to its file, and `exec`s `env -i`
   # with only the assignments we pass as arguments: none of them a secret, which the process
@@ -507,22 +611,34 @@ defmodule ForgeWorker.Job.Runner do
     prompt = prompt(%{state.spec | prompt: text}, state.job_dir, state.resume, state.prompt_opts)
     Dir.write_new!(Dir.prompt_path(state.job_dir), prompt)
 
-    case write(state, state.harness.encode_message(prompt)) do
-      :ok -> {:reply, :ok, watch_start(%{state | hold: false})}
-      error -> {:reply, error, state}
+    case send_text(state, prompt) do
+      {:ok, state} -> {:reply, :ok, watch_start(%{state | hold: false})}
+      {error, state} -> {:reply, error, state}
     end
   end
 
   def handle_call({:send_message, text}, _from, state) do
-    {:reply, write(state, state.harness.encode_message(text)), state}
+    {reply, state} = send_text(state, text)
+    {:reply, reply, state}
   end
 
   def handle_call(:interrupt, _from, state) do
     request_id = "forge-" <> Integer.to_string(state.turns + 1)
 
-    case write(state, state.harness.encode_interrupt(request_id)) do
-      :ok -> {:reply, :ok, %{state | interrupting: request_id}}
-      error -> {:reply, error, state}
+    {bytes, harness_state} =
+      ForgeWorker.Harness.interrupt(state.harness, request_id, state.harness_state)
+
+    state = %{state | harness_state: harness_state}
+
+    # A driver with nothing to interrupt writes nothing, and then there is no interrupt to label
+    # the next turn with: the turn that follows is an ordinary one.
+    if IO.iodata_length(bytes) == 0 do
+      {:reply, :ok, state}
+    else
+      case write(state, bytes) do
+        :ok -> {:reply, :ok, %{state | interrupting: request_id}}
+        error -> {:reply, error, state}
+      end
     end
   end
 
@@ -836,7 +952,13 @@ defmodule ForgeWorker.Job.Runner do
     Dir.write_new!(path, text)
 
     opts = state.spawn_opts.()
-    harness_opts = opts |> Keyword.get(:harness_opts, []) |> Keyword.put(:resume_session, session)
+
+    harness_opts =
+      opts
+      |> Keyword.get(:harness_opts, [])
+      |> Keyword.put(:resume_session, session)
+      |> carry_login(state)
+
     spec = %{state.spec | budget: budget}
 
     {executable, args, env} = state.harness.command(spec, state.job_dir, harness_opts)
@@ -855,6 +977,8 @@ defmodule ForgeWorker.Job.Runner do
       state
       | corrections: round,
         memory: Memory.new_round(state.memory),
+        meter: Meter.new(),
+        budget_tokens: budget.tokens,
         prior: add_up(state.prior, harness),
         prompt_path: path,
         port: nil,
@@ -865,29 +989,38 @@ defmodule ForgeWorker.Job.Runner do
         finished_event: nil
     }
 
-    spawn_harness(state, opts, executable, args, plain)
+    spawn_harness(state, opts, harness_opts, executable, args, plain)
   end
 
-  # Turns and cost so far: every earlier round's, and this one's.
+  # Turns and weighted tokens so far: every earlier round's, and this one's. Each round's usage is
+  # rounded on its own (`Usage.weigh/1` over that process's tokens), so the sum can differ from
+  # weighing the summed tokens by up to one per round.
   defp spent(state, harness) do
     total = add_up(state.prior, harness)
-    %{turns: total["turns"], cost: total["cost_usd"]}
+    %{turns: total["turns"], tokens: total["usage"]}
   end
 
-  @summed ~w(turns duration_ms)
+  defp token_budget(:prompt, %Spec{budget: %{tokens: tokens}}, _opts), do: tokens
+  defp token_budget(:streaming, _spec, opts), do: Keyword.get(opts, :max_tokens)
+  defp token_budget(_mode, _spec, _opts), do: nil
 
-  # Turns and time are each round's own and are summed. **Cost is not**: every round resumes the
+  @summed ~w(turns duration_ms usage)
+
+  # Turns, time and usage are each round's own and are summed: usage is counted by this process's
+  # own calls (`ForgeWorker.Job.Meter`), so a round's figure never holds the rounds before it.
+  # **Cost is not**: every round resumes the
   # session the one before it ended, so a round's total already holds the rounds before it, and
   # what `harness_summary/6` reports as its `cost_usd` is the whole job's own spend so far. The
   # latest round's figure is the job's, and a round that reported none leaves the one before.
   # `duration_ms` is summed on the assumption, not measured, that a resume does not carry it as
   # it carries the cost; nothing on the platform reads it.
   defp add_up(nil, harness),
-    do: add_up(%{"turns" => 0, "duration_ms" => 0, "cost_usd" => 0}, harness)
+    do: add_up(%{"turns" => 0, "duration_ms" => 0, "usage" => 0, "cost_usd" => 0}, harness)
 
   defp add_up(prior, harness) do
     @summed
     |> Map.new(fn key -> {key, (prior[key] || 0) + (harness[key] || 0)} end)
+    |> Map.put("tokens", Usage.add(prior["tokens"] || %{}, harness["tokens"] || %{}))
     |> Map.put("cost_usd", harness["cost_usd"] || prior["cost_usd"] || 0)
     |> Map.put("session_cost_usd", harness["session_cost_usd"] || prior["session_cost_usd"])
   end
@@ -933,8 +1066,18 @@ defmodule ForgeWorker.Job.Runner do
   defp write(_state, _iodata), do: {:error, :closed}
 
   defp deliver(state, text) do
-    write(state, state.harness.encode_message(text))
+    {_reply, state} = send_text(state, text)
     state
+  end
+
+  # A message through the driver, which may hold it (Codex, while a turn is running) and so writes
+  # nothing now: the reply is then `:ok` all the same, since it was taken.
+  defp send_text(state, text) do
+    {bytes, harness_state} =
+      ForgeWorker.Harness.send_message(state.harness, text, state.harness_state)
+
+    state = %{state | harness_state: harness_state}
+    {if(IO.iodata_length(bytes) > 0, do: write(state, bytes), else: :ok), state}
   end
 
   defp close_stdin(port) do
@@ -960,8 +1103,30 @@ defmodule ForgeWorker.Job.Runner do
 
   defp handle_line(line, state) do
     IO.binwrite(state.transcript, [line, "\n"])
-    Enum.reduce(state.harness.parse_line(line), state, &emit/2)
+
+    {events, bytes, harness_state} =
+      ForgeWorker.Harness.handle_line(state.harness, line, state.harness_state)
+
+    state = %{state | harness_state: harness_state}
+    _ = if IO.iodata_length(bytes) > 0, do: write(state, bytes)
+    state = Enum.reduce(events, state, &emit/2)
+    stop_if_over(state)
   end
+
+  # Forge's own stop, during the run: once usage has passed the budget the process is stopped
+  # through the same path as the wall clock, and the run ends `budget_exhausted`, stopped
+  # `:tokens`. Asked after every line; the process ends on a signal, so a run overshoots by what
+  # streams before then (`ForgeWorker.Job.Meter`).
+  defp stop_if_over(%{killed: nil, kill_requested: nil} = state) do
+    if Meter.over?(state.meter, state.budget_tokens), do: kill(state, :tokens), else: state
+  end
+
+  defp stop_if_over(state), do: state
+
+  # A model call's usage is the meter's and no one else's: the timeline already has a line for
+  # each thing the call said.
+  defp emit(%{type: "usage", payload: payload}, state),
+    do: %{state | meter: Meter.observe(state.meter, payload)}
 
   # A failing sink must not take the job down with it.
   defp emit(%{type: type, payload: payload} = event, state) do
@@ -1008,9 +1173,25 @@ defmodule ForgeWorker.Job.Runner do
       # reports a summary per turn, and this is its memory's (§ Memory).
       state = observe(state, reading(state))
       event = put_in(event.payload[:memory], Memory.summary(state.memory))
+
+      # The process's running total so far, which the platform sets on the run
+      # (`Forge.Jobs.Runs.record/3`) and does not add: every turn carries the whole.
+      {returned, state} = credential_return_once(state)
+
+      event =
+        update_in(event.payload, fn payload ->
+          payload
+          |> Map.put(:usage_total, Meter.usage(state.meter))
+          |> Map.put(:tokens_total, Meter.tokens(state.meter))
+          |> Map.put(:credential_return, returned)
+        end)
+
       notify(state, {:turn, state.spec.job_id, state.turns, label(state, event)})
       %{state | interrupting: nil}
     else
+      # A job on a driver with a conversation of its own is one turn, and that turn's end is the
+      # job's: closing stdin is how the process is told, as it is for a conversation.
+      if stateful?(state) and is_port(state.port), do: close_stdin(state.port)
       state
     end
   end
@@ -1083,8 +1264,10 @@ defmodule ForgeWorker.Job.Runner do
           state.exit_status,
           state.rate_limit,
           Memory.summary(state.memory),
-          {state.baseline, state.spec.job_id}
+          {state.baseline, state.spec.job_id},
+          state.meter
         )
+        |> put_return(credential_return(state))
     }
 
     decide(state, spec, run, base)
@@ -1105,6 +1288,13 @@ defmodule ForgeWorker.Job.Runner do
   # from the last turn's document and hand the engine something to act on — see
   # `docs/design/conversations.md` § Shape, where the guard against exactly that is described as
   # belonging at the one place jobs complete.
+  #
+  # **Except to say why a conversation was stopped for its tokens**: the process was killed past
+  # `:max_tokens`, what was left of the day, and the platform records the reason as how the
+  # conversation ended (the conversation's finish reads it). It is reopened like any hibernated one.
+  defp decide(%{mode: :streaming}, _spec, %{killed: :tokens}, base),
+    do: %{base | reason: "token budget reached"}
+
   defp decide(%{mode: :streaming}, _spec, _run, base), do: base
 
   # A run that asked for commands is parked, not finished: nothing it wrote is collected as
@@ -1163,7 +1353,15 @@ defmodule ForgeWorker.Job.Runner do
   #
   # `memory` is the ceiling, the peak and the OOM kills — the unit's own last reading where there is
   # one (§ Memory in `docs/design/claude-code-events.md`) — and nil where nothing was read.
-  defp harness_summary(started, finished, exit_status, rate_limit, memory, {baseline, job_id}) do
+  defp harness_summary(
+         started,
+         finished,
+         exit_status,
+         rate_limit,
+         memory,
+         {baseline, job_id},
+         meter
+       ) do
     started = started || %{}
     finished = finished || %{}
     total = Map.get(finished, :total_cost_usd)
@@ -1185,7 +1383,11 @@ defmodule ForgeWorker.Job.Runner do
       "cost_usd" => Session.own_cost(total, baseline, job_id),
       "session_cost_usd" => total,
       "duration_ms" => Map.get(finished, :duration_ms),
-      "usage" => Map.get(finished, :usage),
+      # Weighted tokens and the tokens by kind behind them, counted from this process's own calls
+      # (`ForgeWorker.Job.Meter`); the harness's own summary of its usage is kept beside them.
+      "usage" => Meter.usage(meter),
+      "tokens" => Meter.tokens(meter),
+      "claude_usage" => Map.get(finished, :claude_usage),
       "exit_status" => exit_status,
       "rate_limit" => rate_limit && window_report(rate_limit),
       "memory" => memory

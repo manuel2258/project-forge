@@ -24,7 +24,7 @@ defmodule ForgeWorker.RuntimeConfigTest do
   # reads — and all three are what is under test.
   # `FORGE_VOLUME` is here because the same file *raises* on a value it does not know, so an
   # operator with a typo'd one exported fails all three of these from inside the config.
-  @cleared ~w(FORGE_CLAUDE_EXECUTABLE FORGE_CLAUDE_MODEL FORGE_CLAUDE_EFFORT
+  @cleared ~w(FORGE_CLAUDE_EXECUTABLE FORGE_CODEX_EXECUTABLE FORGE_CLAUDE_MODEL FORGE_CLAUDE_EFFORT
               FORGE_NIX_ENV FORGE_SLICE FORGE_VOLUME
               ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN)
 
@@ -50,12 +50,14 @@ defmodule ForgeWorker.RuntimeConfigTest do
 
   test "a harness variable set to nothing configures nothing" do
     System.put_env("FORGE_CLAUDE_EXECUTABLE", "")
+    System.put_env("FORGE_CODEX_EXECUTABLE", "")
     System.put_env("FORGE_CLAUDE_MODEL", "")
     System.put_env("FORGE_CLAUDE_EFFORT", "")
 
     opts = harness_opts()
 
     refute Keyword.has_key?(opts, :executable)
+    refute Keyword.has_key?(opts, :codex_executable)
     refute Keyword.has_key?(opts, :model)
     refute Keyword.has_key?(opts, :effort)
 
@@ -66,10 +68,13 @@ defmodule ForgeWorker.RuntimeConfigTest do
 
   test "a harness variable that names something is configured" do
     System.put_env("FORGE_CLAUDE_EXECUTABLE", "/bin/claude")
+    System.put_env("FORGE_CODEX_EXECUTABLE", "/bin/codex")
     System.put_env("FORGE_CLAUDE_MODEL", "opus")
     System.put_env("FORGE_CLAUDE_EFFORT", "high")
 
     opts = harness_opts()
+
+    assert opts[:codex_executable] == "/bin/codex"
 
     assert opts[:executable] == "/bin/claude"
     assert opts[:model] == "opus"

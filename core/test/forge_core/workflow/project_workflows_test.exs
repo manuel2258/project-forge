@@ -8,7 +8,7 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
   What it asserts beyond "it parses" is the behaviour of `reviewing`, whose budget and edges are
   ticket 13's: an exhausted review goes to `review_ready` and not round again, its
   `did_not_converge` retry survives that edit, its budget is the figure the comment in
-  `common.yml` derives, the review round-trips it declares fit inside `limits.ticket_cost`, and
+  `common.yml` derives, the review round-trips it declares fit inside `limits.ticket_tokens`, and
   every state a person may be offered can actually be moved to by hand. Each of those is config,
   which is where ticket 13's failure lived and which nothing here read before.
 
@@ -132,13 +132,13 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
   # Pinned to the figure a person chose, not to a floor: `common.yml`'s comment derives $40 as an
   # estimate and not a measurement (it was $35, from the production runs), and a floor of "above
   # the $19.53 that did report" would let a regression to $20 through while that comment still
-  # said $35. Changing it means changing both, and the
+  # said 7M. Changing it means changing both, and the
   # ticket cap below.
   test "reviewing's cost budget is the figure common.yml derives" do
     for {name, workflow} <- reviewing_workflows() do
       budget = Workflow.state(workflow, "reviewing").budget
 
-      assert budget.cost == 40.00, "#{name}: reviewing has #{budget.cost}"
+      assert budget.tokens == 8_000_000, "#{name}: reviewing has #{budget.tokens}"
       assert budget.turns == 120, "#{name}: reviewing has #{budget.turns} turns"
     end
   end
@@ -162,7 +162,7 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
   end
 
   # **Every cycle carries a `max` somewhere, which is what makes a ticket's cost finite.**
-  # `limits.ticket_cost` is the outer backstop and not the only one: a loop with no bound spends
+  # `limits.ticket_tokens` is the outer backstop and not the only one: a loop with no bound spends
   # to the cap and stops there with nothing to show, which is what `implementing → planning` on
   # `plan_invalid` did until it was given `max: 2`. The property is per *cycle* and not per edge —
   # one bounded edge is enough, and `planning → implementing` is deliberately unbounded — so what
@@ -245,12 +245,12 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
       jobs = journey(workflow, loop)
       costs = Enum.map(jobs, &cost(workflow, &1))
 
-      spent_before = [0.0 | Enum.drop(Enum.scan(costs, &(&1 + &2)), -1)]
+      spent_before = [0 | Enum.drop(Enum.scan(costs, &(&1 + &2)), -1)]
 
       stopped =
         for {state, spent} <- Enum.zip(jobs, spent_before),
             not Engine.within_ticket_budget?(workflow, spent),
-            do: "#{state} at $#{spent}"
+            do: "#{state} at #{spent}"
 
       assert stopped == [], "#{name}: the cap stops the journey at #{Enum.join(stopped, ", ")}"
     end
@@ -313,13 +313,13 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
   # chat step costs whatever the conversation does and may declare no budget either, so it is
   # priced at what `.forge/common.yml` allows it — a figure that file states and this one repeats,
   # because nothing in the workflow can carry it.
-  @chat_allowance 30.00
+  @chat_allowance 6_000_000
 
   defp cost(workflow, state) do
     case Workflow.state(workflow, state) do
       %State{chat: true} -> @chat_allowance
-      %State{budget: nil} -> 0.0
-      %State{budget: %{cost: cost}} -> cost
+      %State{budget: nil} -> 0
+      %State{budget: %{tokens: tokens}} -> tokens
     end
   end
 
@@ -381,15 +381,15 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
     budgets =
       for path <- workflow_files(),
           workflow = load!(path),
-          {state, %State{budget: %{cost: cost, turns: turns}} = declared} <- workflow.states,
+          {state, %State{budget: %{tokens: tokens, turns: turns}} = declared} <- workflow.states,
           State.job?(declared),
-          cost <= 5.00,
-          do: {Path.basename(path), state, cost, turns}
+          tokens <= 1_000_000,
+          do: {Path.basename(path), state, tokens, turns}
 
     assert budgets != [], "no cheap job state found: the filter no longer matches the workflows"
 
-    for {name, state, cost, turns} <- budgets do
-      assert turns >= 60, "#{name}: #{state} costs $#{cost} but gives only #{turns} turns"
+    for {name, state, tokens, turns} <- budgets do
+      assert turns >= 60, "#{name}: #{state} costs #{tokens} but gives only #{turns} turns"
     end
   end
 

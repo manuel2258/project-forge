@@ -27,6 +27,11 @@ defmodule Forge.Harness.ClaudeCode do
   @impl true
   def kinds, do: [{"api_key", "API key"}, {"oauth", "Subscription token (claude setup-token)"}]
 
+  # Claude tokens do not rotate, so any number of jobs may hold one, and nothing comes back changed:
+  # the declared difference from a ChatGPT login (`docs/design/credentials.md`).
+  @impl true
+  def traits(_kind), do: %{exclusive: false, returns: false, checked: :provider}
+
   @impl true
   def check(kind, %{"token" => token}) when is_binary(token) and kind in ["api_key", "oauth"] do
     [

@@ -52,7 +52,8 @@ defmodule ForgeWeb.JobLive do
       written: written,
       written_names: MapSet.new(written, fn {artifact, _v} -> artifact.name end),
       refusals: Jobs.refusals(job),
-      archive_reads: Archive.reads(job.id)
+      archive_reads: Archive.reads(job.id),
+      runs: Forge.Jobs.Runs.for_job(job.id)
     )
     |> assign(events: events, memory: Memory.trouble(events), held: held(events))
   end
@@ -295,13 +296,46 @@ defmodule ForgeWeb.JobLive do
             </div>
             <div class="min-w-0">
               <dt class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">Usage</dt>
-              <dd class="mt-1 font-mono text-[17px]">{Format.windows(@job.cost_usd) || "—"}</dd>
+              <dd id="job-usage" class="mt-1 font-mono text-[17px]" title={Format.exact(@job.usage)}>
+                {Format.windows(@job.usage) || "—"}
+              </dd>
+              <dd :if={@job.usage_converted} class="font-mono text-[11px] opacity-50">
+                converted from dollars
+              </dd>
             </div>
             <div class="min-w-0">
               <dt class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">Duration</dt>
               <dd class="mt-1 font-mono text-[17px]">{Format.duration(@job)}</dd>
             </div>
           </dl>
+
+          <%!-- A run's detail (criterion 30 of ticket 43): what each process used, in windows with
+                the exact figure in its title, and its tokens by kind — a converted run has none,
+                only the dollars the migration read, and says so. --%>
+          <section :if={@runs != []} id="job-runs" class="mt-8">
+            <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
+              {if length(@runs) == 1, do: "Run", else: "Runs"}
+            </h2>
+            <ol class="mt-2 flex flex-col">
+              <li
+                :for={{run, n} <- Enum.with_index(@runs, 1)}
+                id={"run-#{run.id}"}
+                class="flex min-w-0 flex-col gap-0.5 border-b border-base-300/60 py-2 text-[12.5px]"
+              >
+                <span class="flex min-w-0 justify-between gap-3 font-mono">
+                  <span>run {n}</span>
+                  <span title={Format.exact(run.usage)}>{Format.windows(run.usage) || "—"}</span>
+                </span>
+                <span
+                  :if={Format.kinds(run.tokens)}
+                  class="font-mono opacity-60 [overflow-wrap:anywhere]"
+                >
+                  {Format.kinds(run.tokens)}
+                </span>
+                <span :if={run.converted} class="font-mono opacity-60">converted from dollars</span>
+              </li>
+            </ol>
+          </section>
 
           <section class="mt-8">
             <%!-- Tool calls as the action lines a conversation draws them with, and notices
@@ -337,6 +371,14 @@ defmodule ForgeWeb.JobLive do
               <dt class="opacity-50">commit</dt>
               <dd class="truncate font-mono">{String.slice(@spec.commit || "", 0, 12)}</dd>
             </div>
+            <div
+              :if={@job.kind != :command}
+              id="job-harness"
+              class="flex min-w-0 justify-between gap-3"
+            >
+              <dt class="opacity-50">harness</dt>
+              <dd class="min-w-0 truncate font-mono">{Forge.Jobs.harness_line(@job, @project)}</dd>
+            </div>
             <div class="flex min-w-0 justify-between gap-3">
               <dt class="opacity-50">environment</dt>
               <dd class="font-mono">{@spec.env || "none"}</dd>
@@ -348,7 +390,7 @@ defmodule ForgeWeb.JobLive do
             <div class="flex min-w-0 justify-between gap-3">
               <dt class="opacity-50">budget</dt>
               <dd class="font-mono">
-                {@spec.budget.turns} turns per run · {Format.windows(@spec.budget.cost) || "—"}
+                {@spec.budget.turns} turns per run · {Format.windows(@spec.budget.tokens) || "—"}
               </dd>
             </div>
             <div :if={@job.harness_session_id} class="flex min-w-0 justify-between gap-3">

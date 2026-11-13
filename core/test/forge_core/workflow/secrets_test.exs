@@ -22,7 +22,7 @@ defmodule ForgeCore.Workflow.SecretsTest do
       produces: [changeset]
       may_invoke:
         publish: { max: 1 }
-      budget: { turns: 10, cost: 1 }
+      budget: { turns: 10, tokens: 200k }
       secrets: [STRIPE_TEST_KEY, SENTRY_TOKEN]
     publishing:
       invoke: [publish]
@@ -33,7 +33,7 @@ defmodule ForgeCore.Workflow.SecretsTest do
     - { from: publishing, to: done }
     - { from: publishing, to: implementing, when: failed }
   limits:
-    ticket_cost: 5
+    ticket_tokens: 1M
   """
 
   defp base_map do

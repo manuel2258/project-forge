@@ -52,7 +52,10 @@ defmodule ForgeWeb.ChatNewLive do
              "project" => project && project.name,
              "text" => text(params["text"]),
              "model" => "",
-             "effort" => ""
+             "effort" => "",
+             # What the project runs on, which is what leaving it alone means; the select offers
+             # the other (`docs/design/conversations.md` § What it asks for).
+             "harness" => (project && project.harness) || ForgeCore.Harness.default()
            },
            as: :chat
          )
@@ -126,7 +129,8 @@ defmodule ForgeWeb.ChatNewLive do
          {:ok, cores} <- cores(params["cores"]) do
       start(socket, project, ticket, String.trim(params["text"]), memory, cores,
         model: params["model"],
-        effort: params["effort"]
+        effort: params["effort"],
+        harness: params["harness"]
       )
     else
       {:error, message} -> {:noreply, assign(socket, error: message)}
@@ -138,6 +142,7 @@ defmodule ForgeWeb.ChatNewLive do
            ticket: ticket,
            model: chosen[:model],
            effort: chosen[:effort],
+           harness: chosen[:harness],
            memory: memory,
            cores: cores,
            secrets: picked(socket.assigns.form.params["secrets"])
@@ -278,19 +283,48 @@ defmodule ForgeWeb.ChatNewLive do
           label="First thing to say"
         />
 
+        <%!-- The harness is chosen here, like the model and the effort, and fixed when its process
+              starts. It defaults to the project's. --%>
+        <.input
+          field={@form[:harness]}
+          type="select"
+          label="Harness"
+          options={for h <- Forge.Harness.names(), do: {Forge.Harness.label(h), h}}
+        />
+
         <%!-- Both optional, and only here: the model and the effort are fixed when the harness
               process starts, so a conversation that wants different ones is one you close and
-              open again. --%>
+              open again. Claude Code's are offered from what the workers and credentials say;
+              nothing lists Codex's models, so Codex's are typed, and empty is Codex's own. --%>
         <ForgeWeb.Operator.Components.model_field
+          :if={@form[:harness].value != "codex"}
           field={@form[:model]}
           offered={@offered}
           fallback={(@project && @project.model) || "the platform's"}
         />
 
         <ForgeWeb.Operator.Components.effort_field
+          :if={@form[:harness].value != "codex"}
           field={@form[:effort]}
           offered={@offered}
           fallback={(@project && @project.effort) || "the platform's"}
+        />
+
+        <.input
+          :if={@form[:harness].value == "codex"}
+          field={@form[:model]}
+          type="text"
+          label="Model"
+          placeholder={(@project && @project.codex_model) || "Codex's own default"}
+          autocomplete="off"
+        />
+
+        <ForgeWeb.Operator.Components.effort_field
+          :if={@form[:harness].value == "codex"}
+          offered={%{@offered | efforts: @offered.codex_efforts}}
+          field={@form[:effort]}
+          label="Effort"
+          fallback={(@project && @project.codex_effort) || "Codex's own default"}
         />
 
         <%!-- What the gate reserves for it, and what its slice is capped at. Blank is the

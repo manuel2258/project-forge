@@ -498,6 +498,27 @@ defmodule Forge.Projects do
     set_dial(project, :effort, effort, "project.effort_set", by)
   end
 
+  @doc """
+  Sets the project's default harness, which a state naming none runs on. Refused for a name
+  `ForgeCore.Harness.names/0` does not list. Same guard and transaction as the dials.
+  """
+  @spec set_harness(Project.t(), String.t(), User.t() | :system) ::
+          {:ok, Project.t()} | {:error, term()}
+  def set_harness(%Project{} = project, harness, by \\ :system),
+    do: set_dial(project, :harness, harness, "project.harness_set", by)
+
+  @doc "Sets Codex's default model for the project, or clears it (Codex's own default then)."
+  @spec set_codex_model(Project.t(), String.t() | nil, User.t() | :system) ::
+          {:ok, Project.t()} | {:error, term()}
+  def set_codex_model(%Project{} = project, model, by \\ :system),
+    do: set_dial(project, :codex_model, model, "project.codex_model_set", by)
+
+  @doc "Sets Codex's default effort for the project, or clears it."
+  @spec set_codex_effort(Project.t(), String.t() | nil, User.t() | :system) ::
+          {:ok, Project.t()} | {:error, term()}
+  def set_codex_effort(%Project{} = project, effort, by \\ :system),
+    do: set_dial(project, :codex_effort, effort, "project.codex_effort_set", by)
+
   # One shape for both dials: update the column and log who did it, or do neither. The payload
   # reads the *updated* row, so it says what the setting became rather than what was asked for —
   # a blank value, which the changeset stores as nil, is logged as nil.

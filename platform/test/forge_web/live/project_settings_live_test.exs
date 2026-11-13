@@ -566,4 +566,45 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
     assert {:error, {:redirect, %{to: "/users/log-in"}}} =
              live(build_conn(), ~p"/projects/#{project.name}/settings")
   end
+
+  # `docs/design/codex.md`: the project's default harness, and Codex's own model and effort. The
+  # Model and Effort sections above stay Claude Code's.
+  describe "the harness" do
+    test "an admin sets the project's harness and Codex's dials, and clears them", ctx do
+      %{conn: conn, project: project} = ctx
+      {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/settings")
+      assert html =~ "Default harness"
+      assert has_element?(view, ~s(select#project_harness option[value="claude_code"][selected]))
+
+      view |> form("#harness-form", %{"project" => %{"harness" => "codex"}}) |> render_submit()
+      assert Projects.get!(project.id).harness == "codex"
+
+      view
+      |> form("#codex-form", %{"codex" => %{"model" => "gpt-x", "effort" => "high"}})
+      |> render_submit()
+
+      assert %{codex_model: "gpt-x", codex_effort: "high", model: nil, effort: nil} =
+               Projects.get!(project.id)
+
+      view
+      |> form("#codex-form", %{"codex" => %{"model" => "", "effort" => ""}})
+      |> render_submit()
+
+      assert %{codex_model: nil, codex_effort: nil} = Projects.get!(project.id)
+    end
+
+    test "a plain member is not shown the forms, and the context refuses them", ctx do
+      %{conn: conn, project: project} = ctx
+      member = Forge.AccountsFixtures.user_fixture()
+      Forge.ForgeFixtures.join!(project, member, :member)
+      conn = log_in_user(build_conn(), member)
+
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+      refute has_element?(view, "#harness-form")
+      refute has_element?(view, "#codex-form")
+
+      assert {:error, :forbidden} = Forge.Operator.set_harness(project, member, "codex")
+      assert Projects.get!(project.id).harness == "claude_code"
+    end
+  end
 end

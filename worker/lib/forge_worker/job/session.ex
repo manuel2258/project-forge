@@ -35,6 +35,16 @@ defmodule ForgeWorker.Job.Session do
   @spec restore(map(), String.t(), String.t(), keyword(), module()) ::
           {keyword(), map() | nil}
   def restore(assignment, job_dir, worktree, harness_opts, harness) do
+    if Map.get(harness.capabilities(), :resume, true) do
+      restore_session(assignment, job_dir, worktree, harness_opts, harness)
+    else
+      # A harness that cannot resume starts cold whatever the assignment says, and the prompt is
+      # composed from `resume_session` being absent, so the two stay one value.
+      {Keyword.drop(harness_opts, [:resume_session, :fork_session]), nil}
+    end
+  end
+
+  defp restore_session(assignment, job_dir, worktree, harness_opts, harness) do
     case assignment["session"] do
       %{"key" => key, "token" => token, "id" => id} = session ->
         # In the worker's own directory, which the job's user cannot reach.
@@ -65,7 +75,7 @@ defmodule ForgeWorker.Job.Session do
           "it was written by #{version || "?"} and this machine runs #{local || "?"}"
         )
 
-      not Dir.session_file?(path, id) ->
+      not Dir.session_file?(path, id, layout(harness)) ->
         cold(harness_opts, assignment, "the file is not session #{id}'s own")
 
       true ->
@@ -73,7 +83,8 @@ defmodule ForgeWorker.Job.Session do
         # total (`docs/measurements.md` § Session resume). Only here, beside the file it
         # describes: a resume that is dropped, or that finds whatever the machine holds, has no
         # figure to subtract, and `cold/3` drops it with the resume.
-        {put_baseline(harness_opts, session["cost_usd"]), %{id: id, source: path, cwd: worktree}}
+        {put_baseline(harness_opts, session["cost_usd"]),
+         %{id: id, source: path, cwd: worktree, layout: layout(harness)}}
     end
   end
 
@@ -158,27 +169,33 @@ defmodule ForgeWorker.Job.Session do
     {harness_opts, nil}
   end
 
+  # Where a harness keeps its session: `:projects` is Claude Code's, `:rollout` Codex's.
+  defp layout(harness), do: Map.get(harness.capabilities(), :session_layout, :projects)
+
   @doc """
   Uploads session `session_id` from the job's `HOME` as the `n`th upload of this assignment, and
   returns its key, or nil when there is none to upload or nowhere to put it. Never fails the run:
   a session that did not leave the machine costs a later resume its warmth and nothing else.
+  `harness` is the driver module, which says where its session is kept.
   """
-  @spec upload(String.t(), String.t() | nil, map(), pos_integer()) :: String.t() | nil
-  def upload(_job_dir, nil, _assignment, _n), do: nil
+  @spec upload(String.t(), String.t() | nil, map(), pos_integer(), module()) :: String.t() | nil
+  def upload(job_dir, session_id, assignment, n, harness \\ ForgeWorker.Harness.ClaudeCode)
 
-  def upload(job_dir, session_id, assignment, n) do
+  def upload(_job_dir, nil, _assignment, _n, _harness), do: nil
+
+  def upload(job_dir, session_id, assignment, n, harness) do
     store = assignment["store"] || %{}
     Dir.worker_dir!(job_dir)
     staged = Path.join(Dir.session_dir(job_dir), "upload-#{n}.jsonl")
 
     with prefix when is_binary(prefix) <- store["session_prefix"],
          url when is_binary(url) <- Config.platform_url(),
-         :ok <- Dir.stage_session(job_dir, session_id, staged),
+         :ok <- Dir.stage_session(job_dir, session_id, staged, layout: layout(harness)),
          # The staged copy, and not the session the harness resumes from on this machine: what
          # leaves is masked (`docs/design/secrets.md` § Masking), what stays is the agent's own.
          :ok <-
            ForgeWorker.Job.Secrets.mask_file(
-             ForgeWorker.Job.Secrets.from_assignment(assignment),
+             ForgeWorker.Job.Secrets.from_assignment(assignment, job_dir),
              staged
            ),
          key = prefix <> "#{n}.jsonl",

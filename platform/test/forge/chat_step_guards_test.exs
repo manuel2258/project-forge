@@ -27,14 +27,14 @@ defmodule Forge.ChatStepGuardsTest do
     drafting:
       prompt: agents/plan.md
       produces: [refinement.md]
-      budget: { turns: 5, cost: 1 }
+      budget: { turns: 5, tokens: 200k }
     finished: {}
   transitions:
     - { from: scoping, to: finished, approve: [notes.md, refinement.md] }
     - { from: finished, to: drafting }
     - { from: finished, to: scoping, approve: [refinement.md] }
     - { from: drafting, to: scoping }
-  limits: { ticket_cost: 25 }
+  limits: { ticket_tokens: 5M }
   """
 
   # The same step with two ways out, one of them back through `drafting` and into the step again.
@@ -83,7 +83,12 @@ defmodule Forge.ChatStepGuardsTest do
       "turn" => index,
       "commit" => String.duplicate("a", 40),
       "documents" => documents,
-      "harness" => %{"turns" => 1, "cost_usd" => 0.01 * index, "session_id" => "s"}
+      "harness" => %{
+        "turns" => 1,
+        "usage" => 2_000 * index,
+        "cost_usd" => 0.01 * index,
+        "session_id" => "s"
+      }
     }
   end
 
@@ -350,13 +355,13 @@ defmodule Forge.ChatStepGuardsTest do
         coding:
           prompt: agents/plan.md
           produces: [changeset, commit-message]
-          budget: { turns: 5, cost: 1 }
+          budget: { turns: 5, tokens: 200k }
         merged: { on_enter: [merge] }
       transitions:
         - { from: scoping, to: merged, approve: [changeset] }
         - { from: merged, to: coding }
         - { from: coding, to: scoping }
-      limits: { ticket_cost: 25 }
+      limits: { ticket_tokens: 5M }
       """
 
       {:ok, project} =

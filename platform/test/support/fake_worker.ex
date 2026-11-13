@@ -29,7 +29,10 @@ defmodule Forge.FakeWorker do
     "turns" => 3,
     "cost_usd" => 0.0421,
     "duration_ms" => 1234,
-    "usage" => %{"input_tokens" => 10, "output_tokens" => 20},
+    # What the worker counts (`ForgeWorker.Job.Meter`): weighted tokens, and the tokens by kind.
+    "usage" => 3150,
+    "tokens" => %{"input" => 1100, "cache_write" => 400, "cache_read" => 5000, "output" => 210},
+    "claude_usage" => %{"input_tokens" => 10, "output_tokens" => 20},
     "exit_status" => 0
   }
 
@@ -52,7 +55,10 @@ defmodule Forge.FakeWorker do
         # A current release: it runs Claude Code and takes each job's credential from the
         # assignment, which is what the gate asks before it gives it an agent job
         # (`Workers.runs?/2`).
-        "harness" => %{"driver" => "claude_code", "credential" => "per_job"}
+        "harness" => %{
+          "driver" => Keyword.get(opts, :harness, "claude_code"),
+          "credential" => "per_job"
+        }
       })
 
     # What a current release says at its join: the gate gives commands, and jobs that may invoke
@@ -310,7 +316,9 @@ defmodule Forge.FakeWorker do
       "turns" => nil,
       "cost_usd" => nil,
       "duration_ms" => nil,
-      "usage" => nil,
+      "usage" => 0,
+      "tokens" => nil,
+      "claude_usage" => nil,
       "exit_status" => 1
     }
 
@@ -322,6 +330,7 @@ defmodule Forge.FakeWorker do
       Map.merge(@harness, %{
         "is_error" => true,
         "turns" => 2,
+        "usage" => 40_000,
         "cost_usd" => 0.2,
         "exit_status" => 1,
         "rate_limit" => %{

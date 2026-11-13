@@ -16,7 +16,9 @@ defmodule ForgeWorker.ClaudeUpdate do
   `ForgeWorker.Job.Seed` for a seed that could not be fetched.
   """
 
-  @status_file "claude-code-update.json"
+  # One reader for both harnesses' units (`codex-update.service` writes the second). A driver that
+  # has no unit has no file, and reads as nothing to say.
+  @status_files %{"claude_code" => "claude-code-update.json", "codex" => "codex-update.json"}
 
   @doc """
   The attempt's status under `root`, or `nil` when there is nothing well-formed to report.
@@ -25,9 +27,10 @@ defmodule ForgeWorker.ClaudeUpdate do
   as it was written, because what the operator is shown is drawn from it directly and this is
   not the place that decides what is worth drawing.
   """
-  @spec status(Path.t()) :: map() | nil
-  def status(root) do
-    with {:ok, body} <- File.read(Path.join(root, @status_file)),
+  @spec status(Path.t(), String.t()) :: map() | nil
+  def status(root, driver \\ "claude_code") do
+    with file when is_binary(file) <- Map.get(@status_files, driver),
+         {:ok, body} <- File.read(Path.join(root, file)),
          {:ok, %{"outcome" => outcome} = status} when is_binary(outcome) <- Jason.decode(body) do
       status
     else

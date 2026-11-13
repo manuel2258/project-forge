@@ -19,6 +19,11 @@ defmodule Forge.Projects.Project do
     # How hard this project's work thinks when a state does not say. Nil means the machine's, the
     # same bottom of the same chain — `docs/design/workflow-grammar-v1.md` § Effort.
     field :effort, :string
+    # Which harness this project's work runs on when a state does not say, and the second
+    # harness's own model and effort. The two above are Claude Code's.
+    field :harness, :string, default: "claude_code"
+    field :codex_model, :string
+    field :codex_effort, :string
 
     has_many :tickets, Forge.Tickets.Ticket
 
@@ -27,7 +32,17 @@ defmodule Forge.Projects.Project do
 
   def changeset(project, attrs) do
     project
-    |> cast(attrs, [:name, :repo_path, :default_branch, :seed_id, :model, :effort])
+    |> cast(attrs, [
+      :name,
+      :repo_path,
+      :default_branch,
+      :seed_id,
+      :model,
+      :effort,
+      :harness,
+      :codex_model,
+      :codex_effort
+    ])
     |> validate_required([:name, :repo_path, :default_branch])
     |> validate_format(:name, ~r/\A[a-z0-9][a-z0-9_-]*\z/,
       message: "lowercase letters, digits, - or _"
@@ -55,6 +70,11 @@ defmodule Forge.Projects.Project do
     # meant to carry them to harnesses it does not know yet (§ Effort). Emptiness again is the
     # only thing certainly wrong.
     |> update_change(:effort, &blank_to_nil/1)
+    |> update_change(:codex_model, &blank_to_nil/1)
+    |> update_change(:codex_effort, &blank_to_nil/1)
+    # Named against the registry, as a state's `harness` is: a harness this node does not know
+    # would run nothing, and a project's would then stick every ticket in it.
+    |> validate_inclusion(:harness, ForgeCore.Harness.names())
     |> unique_constraint(:name)
   end
 

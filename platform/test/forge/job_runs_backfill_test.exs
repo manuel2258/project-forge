@@ -12,7 +12,7 @@ defmodule Forge.JobRunsBackfillTest do
   use ExUnit.Case, async: false
 
   alias Ecto.Adapters.SQL.Sandbox
-  alias Forge.{Credentials, Migrations, Release, Repo, Spend}
+  alias Forge.{Migrations, Release, Repo}
 
   @version 20_260_925_100_000
   @monday ~U[2026-03-02 10:00:00Z]
@@ -141,10 +141,20 @@ defmodule Forge.JobRunsBackfillTest do
     assert runs(never) == []
 
     # What the old queries read — `jobs.cost_usd` by `jobs.started_at` — is what the new ones do.
-    assert Decimal.equal?(Spend.day_total(~D[2026-03-02]), Decimal.new("2.2"))
+    # Read with SQL of that day's schema: the current schemas describe a later database.
+    %{rows: [[day_total]]} =
+      Repo.query!(
+        "SELECT sum(cost_usd) FROM job_runs WHERE started_at >= $1 AND started_at < $2",
+        [~U[2026-03-02 00:00:00Z], ~U[2026-03-03 00:00:00Z]]
+      )
 
-    assert Credentials.spent_today([credential], ~D[2026-03-02]) == %{
-             credential => Decimal.new("1.5")
-           }
+    assert Decimal.equal?(day_total, Decimal.new("2.2"))
+
+    %{rows: [[credential_total]]} =
+      Repo.query!("SELECT sum(cost_usd) FROM job_runs WHERE credential_id = $1", [
+        dump(credential)
+      ])
+
+    assert Decimal.equal?(credential_total, Decimal.new("1.5"))
   end
 end

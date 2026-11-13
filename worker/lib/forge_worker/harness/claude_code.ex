@@ -51,25 +51,18 @@ defmodule ForgeWorker.Harness.ClaudeCode do
   # route to a harness process — a workflow job and a conversation alike — comes through
   # `command/3`. `ForgeCore.Secret` reserves the name, so a project secret cannot set it back.
 
-  # A conversation has no turn ceiling — it ends when a person stops talking — and its cost
-  # ceiling is the day's remaining allowance rather than a state's budget, because a chat has no
-  # state. `--replay-user-messages` is what makes delivery observable: the harness echoes a
+  # A conversation has no turn ceiling — it ends when a person stops talking. **Neither mode is
+  # given a money ceiling**: forge counts weighted tokens as the stream arrives and stops the
+  # process itself (`ForgeWorker.Job.Meter`; `docs/design/claude-code-events.md` § Usage, counted
+  # during the run). `--replay-user-messages` is what makes delivery observable: the harness echoes a
   # message when it takes it, which for a message sent mid-turn is after the current turn ends.
   defp mode_args(%Spec{} = spec, opts) do
     case Keyword.get(opts, :mode, :prompt) do
       :streaming ->
-        ["--input-format", "stream-json", "--replay-user-messages"] ++ max_cost_args(opts)
+        ["--input-format", "stream-json", "--replay-user-messages"]
 
       :prompt ->
-        ["--max-turns", Integer.to_string(spec.budget.turns)] ++
-          ["--max-budget-usd", format_cost(Keyword.get(opts, :max_cost) || spec.budget.cost)]
-    end
-  end
-
-  defp max_cost_args(opts) do
-    case Keyword.get(opts, :max_cost) do
-      nil -> []
-      cost -> ["--max-budget-usd", format_cost(cost)]
+        ["--max-turns", Integer.to_string(spec.budget.turns)]
     end
   end
 
@@ -202,9 +195,6 @@ defmodule ForgeWorker.Harness.ClaudeCode do
     ]
   end
 
-  defp format_cost(cost) when is_integer(cost), do: Integer.to_string(cost)
-  defp format_cost(cost) when is_float(cost), do: :erlang.float_to_binary(cost, decimals: 2)
-
   @impl true
   def parse_line(line) when is_binary(line) do
     case Jason.decode(line) do
@@ -271,25 +261,28 @@ defmodule ForgeWorker.Harness.ClaudeCode do
   defp normalise(%{"type" => "assistant"} = m) do
     parent = m["parent_tool_use_id"]
 
-    m
-    |> content_blocks()
-    |> Enum.flat_map(fn
-      %{"type" => "text", "text" => text} ->
-        [event("text", %{text: text, parent_tool_use_id: parent})]
+    blocks =
+      m
+      |> content_blocks()
+      |> Enum.flat_map(fn
+        %{"type" => "text", "text" => text} ->
+          [event("text", %{text: text, parent_tool_use_id: parent})]
 
-      %{"type" => "tool_use"} = block ->
-        [
-          event("tool_use", %{
-            id: block["id"],
-            name: block["name"],
-            input: block["input"],
-            parent_tool_use_id: parent
-          })
-        ]
+        %{"type" => "tool_use"} = block ->
+          [
+            event("tool_use", %{
+              id: block["id"],
+              name: block["name"],
+              input: block["input"],
+              parent_tool_use_id: parent
+            })
+          ]
 
-      _other ->
-        []
-    end)
+        _other ->
+          []
+      end)
+
+    usage_events(m, parent) ++ blocks
   end
 
   defp normalise(%{"type" => "user"} = m) do
@@ -348,7 +341,7 @@ defmodule ForgeWorker.Harness.ClaudeCode do
         num_turns: m["num_turns"],
         duration_ms: m["duration_ms"],
         total_cost_usd: m["total_cost_usd"],
-        usage: m["usage"],
+        claude_usage: m["usage"],
         result: m["result"],
         session_id: m["session_id"],
         raw: m
@@ -357,6 +350,34 @@ defmodule ForgeWorker.Harness.ClaudeCode do
   end
 
   defp normalise(m), do: [event("unknown", %{type: m["type"], raw: m})]
+
+  # One `usage` event per `assistant` line that carries a call's usage, ahead of the line's
+  # content. The line says which call it belongs to (`message.id`) and the usage as it stood; the
+  # same call repeats across lines, and `ForgeWorker.Job.Meter` counts it once. `ForgeCore.Usage`
+  # kinds: `input_tokens` is fresh input, the two cache fields are the cache's write and read.
+  defp usage_events(m, parent) do
+    case m["message"] do
+      %{"id" => id, "usage" => %{} = usage} when is_binary(id) ->
+        [
+          event("usage", %{
+            message_id: id,
+            parent_tool_use_id: parent,
+            tokens: %{
+              input: whole(usage["input_tokens"]),
+              cache_write: whole(usage["cache_creation_input_tokens"]),
+              cache_read: whole(usage["cache_read_input_tokens"]),
+              output: whole(usage["output_tokens"])
+            }
+          })
+        ]
+
+      _ ->
+        []
+    end
+  end
+
+  defp whole(n) when is_integer(n) and n >= 0, do: n
+  defp whole(_), do: 0
 
   # Truncates on a character boundary so the excerpt stays valid UTF-8 for JSON.
   defp excerpt(content) when byte_size(content) <= @excerpt_bytes, do: content

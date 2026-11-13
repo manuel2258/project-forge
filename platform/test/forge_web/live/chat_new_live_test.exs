@@ -509,4 +509,76 @@ defmodule ForgeWeb.ChatNewLiveTest do
     assert {:error, {:redirect, %{to: "/users/log-in"}}} =
              live(build_conn(), ~p"/chats/new?project=#{project.name}")
   end
+
+  # `docs/design/conversations.md` § What it asks for: the harness is picked when the conversation
+  # is opened, defaulting to the project's, with the model and effort of the one chosen.
+  describe "the harness" do
+    test "defaults to the project's, and the Claude Code model and effort are offered", ctx do
+      %{conn: conn, project: project} = ctx
+      {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
+
+      assert has_element?(view, ~s(select#chat_harness option[value="claude_code"][selected]))
+      assert has_element?(view, "#chat_model")
+
+      {:ok, project} = Projects.set_harness(project, "codex")
+      {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
+      assert has_element?(view, ~s(select#chat_harness option[value="codex"][selected]))
+      assert has_element?(view, ~s(input#chat_model[placeholder="Codex's own default"]))
+    end
+
+    test "choosing Codex swaps the model and effort for boxes Codex's own, and opens on it",
+         ctx do
+      %{conn: conn, project: project} = ctx
+      {:ok, project} = Projects.set_codex_model(project, "gpt-x")
+      {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
+
+      view |> form("#chat-form", %{"chat" => %{"harness" => "codex"}}) |> render_change()
+      assert has_element?(view, ~s(input#chat_model[placeholder="gpt-x"]))
+      assert has_element?(view, "input#chat_effort")
+
+      view
+      |> form("#chat-form", %{
+        "chat" => %{"text" => "hello", "harness" => "codex", "model" => "gpt-y"}
+      })
+      |> render_submit()
+
+      assert [chat] = Jobs.chats_for_project(project.id)
+      assert chat.harness == "codex"
+      assert Jobs.model_for(chat) == "gpt-y"
+    end
+
+    # Codex's levels are declared by the binary and read from the machines that offer it
+    # (criterion 34): a select when any does, the box when none does.
+    test "Codex's effort is a select of the levels its machines offer", ctx do
+      %{conn: conn, project: project} = ctx
+      {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
+      view |> form("#chat-form", %{"chat" => %{"harness" => "codex"}}) |> render_change()
+      assert has_element?(view, "input#chat_effort")
+
+      {:ok, worker, _t} = Forge.Workers.create(%{provider: "fake"})
+      claude = %{"driver" => "claude_code", "efforts" => ~w(low max)}
+      codex = %{"driver" => "codex", "efforts" => ~w(minimal medium)}
+
+      {:ok, _} =
+        Forge.Workers.ready(worker, %{
+          "memory_budget" => 8_000,
+          "harness" => claude,
+          "harnesses" => [claude, codex]
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
+      view |> form("#chat-form", %{"chat" => %{"harness" => "codex"}}) |> render_change()
+      assert has_element?(view, ~s(select#chat_effort option[value="minimal"]))
+      refute has_element?(view, ~s(select#chat_effort option[value="max"]))
+    end
+
+    test "left alone, the conversation is on the project's harness", ctx do
+      %{conn: conn, project: project} = ctx
+      {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
+      view |> form("#chat-form", %{"chat" => %{"text" => "hello"}}) |> render_submit()
+
+      assert [chat] = Jobs.chats_for_project(project.id)
+      assert chat.harness == "claude_code"
+    end
+  end
 end

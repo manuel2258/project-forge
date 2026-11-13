@@ -45,7 +45,7 @@ defmodule Forge.PushTest do
         Forge.Tickets.Ticket.progress_changeset(ticket, %{
           state: ticket.state,
           status: :stuck,
-          cost_usd: ticket.cost_usd
+          usage: ticket.usage
         })
       )
 
@@ -241,7 +241,7 @@ defmodule Forge.PushTest do
       {:ok, _ticket} =
         Repo.update(
           Ecto.Changeset.change(Forge.Tickets.get!(ticket.id),
-            cost_usd: Decimal.new("1.5"),
+            usage: 300_000,
             updated_at: DateTime.add(DateTime.utc_now(:second), 60)
           )
         )
@@ -393,7 +393,12 @@ defmodule Forge.PushTest do
       {:ok, _chat} =
         Forge.Conversations.record_turn(chat, %{
           "turn" => 1,
-          "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"}
+          "harness" => %{
+            "turns" => 1,
+            "usage" => 2_000,
+            "cost_usd" => 0.01,
+            "subtype" => "success"
+          }
         })
 
       assert Enum.any?(Forge.Queue.items(), &(&1.kind == :chat and &1.ticket == nil))
@@ -438,7 +443,7 @@ defmodule Forge.PushTest do
         Forge.Tickets.Ticket.progress_changeset(ticket, %{
           state: ticket.state,
           status: :stuck,
-          cost_usd: ticket.cost_usd
+          usage: ticket.usage
         })
       )
 
@@ -469,7 +474,7 @@ defmodule Forge.PushTest do
         Forge.Tickets.Ticket.progress_changeset(ticket, %{
           state: ticket.state,
           status: :stuck,
-          cost_usd: ticket.cost_usd
+          usage: ticket.usage
         })
       )
 
@@ -609,7 +614,7 @@ defmodule Forge.PushTest do
         Forge.Tickets.Ticket.progress_changeset(ticket, %{
           state: ticket.state,
           status: :stuck,
-          cost_usd: ticket.cost_usd
+          usage: ticket.usage
         })
       )
 
@@ -635,7 +640,7 @@ defmodule Forge.PushTest do
         Forge.Tickets.Ticket.progress_changeset(ticket, %{
           state: ticket.state,
           status: :stuck,
-          cost_usd: ticket.cost_usd
+          usage: ticket.usage
         })
       )
 

@@ -11,7 +11,7 @@ defmodule ForgeWeb.WorkersLiveTest do
 
   import Phoenix.LiveViewTest
 
-  alias Forge.Workers
+  alias Forge.{Jobs, Workers}
 
   setup :register_and_log_in_user
 
@@ -348,6 +348,60 @@ defmodule ForgeWeb.WorkersLiveTest do
     assert line =~ "could not resolve host"
     # The one state here that is a fault, and the only one drawn in error (`ui.md` § Colour).
     assert line =~ "text-error"
+  end
+
+  # Every harness a machine offers is drawn, not only the first: Codex's version and the outcome
+  # of its own update, loud only when it failed, and a machine with none installed says so.
+  test "the other harnesses a machine offers are drawn, with their update outcome", %{
+    conn: conn,
+    user: user
+  } do
+    w = worker(user)
+    claude = %{"driver" => "claude_code", "name" => "Claude Code", "credential" => "per_job"}
+
+    {:ok, _w} =
+      Workers.ready(w, %{
+        "memory_budget" => 8_000,
+        "harness" => claude,
+        "harnesses" => [
+          claude,
+          %{
+            "driver" => "codex",
+            "name" => "Codex",
+            "update" => %{"outcome" => "failed", "error" => "curl: (6) no route"}
+          }
+        ]
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+    line = view |> element("#harness-#{w.id}-codex") |> render()
+
+    assert text(line) =~ "Codex not installed"
+    assert text(line) =~ "update failed: curl: (6) no route"
+    assert line =~ "text-error"
+    refute has_element?(view, "#harness-#{w.id}-claude_code")
+
+    {:ok, _w} =
+      Workers.ready(w, %{
+        "memory_budget" => 8_000,
+        "harness" => claude,
+        "harnesses" => [
+          claude,
+          %{
+            "driver" => "codex",
+            "name" => "Codex",
+            "version" => "0.46.0",
+            "credential" => "per_job",
+            "update" => %{"outcome" => "succeeded"}
+          }
+        ]
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+    line = view |> element("#harness-#{w.id}-codex") |> render()
+
+    assert text(line) == "Codex 0.46.0 · update succeeded"
+    refute line =~ "text-error"
   end
 
   # An attempt that worked is still drawn — the operator asked whether it succeeded, not only
@@ -1333,6 +1387,30 @@ defmodule ForgeWeb.WorkersLiveTest do
     assert text_of(view, "#worker-#{w.id}") =~ "idle now · goes in 34m"
     # The sweep never takes a machine the platform did not make.
     refute text_of(view, "#worker-#{permanent.id}") =~ "goes"
+  end
+
+  # Criterion 24: a machine that predates counting tokens during a run takes no job of any kind,
+  # and the page says why — not the per-job-credentials sentence, which would be the wrong cause.
+  test "a machine on protocol 10 is said to take no job, and why", %{conn: conn, user: user} do
+    old = worker(user)
+    {:ok, old} = Workers.ready(old, %{"memory_budget" => 8_000})
+    current = worker(user)
+    {:ok, current} = Workers.ready(current, %{"memory_budget" => 8_000})
+
+    require Ecto.Query
+
+    for {w, protocol} <- [{old, Jobs.usage_protocol() - 1}, {current, Jobs.usage_protocol()}] do
+      Forge.Repo.update_all(Ecto.Query.from(r in Forge.Workers.Worker, where: r.id == ^w.id),
+        set: [protocol: protocol]
+      )
+    end
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+
+    assert text_of(view, "#worker-#{old.id}-too-old") =~
+             "takes no job: it speaks protocol 10 and counting tokens during a run needs 11; update it"
+
+    refute has_element?(view, "#worker-#{current.id}-too-old")
   end
 
   # `Format.until/2` says "now" for a moment already here, and the row would read "goes in now".

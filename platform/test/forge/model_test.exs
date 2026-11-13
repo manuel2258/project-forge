@@ -112,7 +112,7 @@ defmodule Forge.ModelTest do
     job =
       job_fixture(%{
         ticket: ticket,
-        spec: %{"prompt" => "agents/refine.md", "budget" => %{"turns" => 10, "cost" => 1.0}}
+        spec: %{"prompt" => "agents/refine.md", "budget" => %{"turns" => 10, "tokens" => 200_000}}
       })
 
     {:ok, token, _row} = Forge.Git.Tokens.issue_for_job(job, ticket, project)

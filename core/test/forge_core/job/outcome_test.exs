@@ -55,6 +55,9 @@ defmodule ForgeCore.Job.OutcomeTest do
 
     assert {:finished, :budget_exhausted, nil, "wall-clock limit reached"} =
              Outcome.decide(spec(), run(%{killed: :wall_clock}))
+
+    assert {:finished, :budget_exhausted, nil, "token budget reached"} =
+             Outcome.decide(spec(), run(%{killed: :tokens}))
   end
 
   test "no result message is an error" do
@@ -297,12 +300,12 @@ defmodule ForgeCore.Job.OutcomeTest do
   # (`docs/design/capacity.md` § Four exhaustions, three treatments). Before it, the three were
   # one atom and the distinction survived only inside the free-text reason.
   describe "which ceiling stopped the run" do
-    test "the turn ceiling, the cost ceiling and the wall clock are told apart" do
+    test "the turn ceiling, the token ceiling and the wall clock are told apart" do
       assert Outcome.exhausted(run(%{result: %{subtype: "error_max_turns", is_error: true}})) ==
                :turns
 
       assert Outcome.exhausted(run(%{result: %{subtype: "error_max_budget_usd", is_error: true}})) ==
-               :cost
+               :tokens
 
       # Exit 2 with an error result is the cost ceiling too (`claude-code-events.md` § Outcome
       # mapping, rule 3) — the subtype names no budget at all.
@@ -311,9 +314,10 @@ defmodule ForgeCore.Job.OutcomeTest do
                  exit_status: 2,
                  result: %{subtype: "error_during_execution", is_error: true}
                })
-             ) == :cost
+             ) == :tokens
 
       assert Outcome.exhausted(run(%{killed: :wall_clock})) == :wall_clock
+      assert Outcome.exhausted(run(%{killed: :tokens})) == :tokens
     end
 
     test "no ceiling stopped a run that converged, failed, was cancelled, or never reported" do

@@ -19,7 +19,6 @@ and redirected into stdin, which is therefore at EOF from the start:
 claude -p \
   --output-format stream-json --verbose \
   --max-turns <spec.budget.turns> \
-  --max-budget-usd <spec.budget.cost> \
   --permission-mode bypassPermissions \
   --model <configured> \
   --effort <configured>
@@ -36,15 +35,14 @@ exits on a sentinel line, which the harness sees as EOF (`ForgeWorker.Job.Runner
 claude -p \
   --output-format stream-json --verbose \
   --input-format stream-json --replay-user-messages \
-  --max-budget-usd <assignment.max_cost_usd> \
   --permission-mode bypassPermissions \
   --model <configured> \
   --effort <configured>
 ```
 
-No `--max-turns`: a conversation ends when a person stops talking. `--max-budget-usd` is what was
-left of the day when the conversation was assigned, and is absent when the day has no cap
-(`conversations.md` § Spend). `--replay-user-messages` is what makes delivery observable
+No `--max-turns`: a conversation ends when a person stops talking. There is no `--max-budget-usd` on either invocation: forge counts weighted tokens during the run
+and stops it itself (`capacity.md` § Stopping a job already running), a conversation's ceiling
+being what was left of the day when it was assigned (`conversations.md` § Spend). `--replay-user-messages` is what makes delivery observable
 (`conversations.md` § Turns). A conversation is given `--resume <session_id> --fork-session` only
 once it has been reopened with a session carried (§ Resume).
 
@@ -229,8 +227,9 @@ running total, and a run that resumes a session, forked or not, starts it from w
 session had already spent (measured on 2.1.316, `docs/measurements.md` § Session resume). The
 worker reports a run's own spend as `cost_usd` — the total less the baseline its assignment's
 `session.cost_usd` names — and the total as it came as `session_cost_usd`, which the platform keeps
-with the session file (`jobs.session_blob`) for the next run that resumes it. `--max-budget-usd` is
-not charged the carry, so a resumed run's ceiling is its own.
+with the session file (`jobs.session_blob`) for the next run that resumes it. A resumed run's ceiling is its
+own: the worker counts only that process's calls, so the carry is never charged against it
+(`--max-budget-usd` is no longer passed).
 
 A resume with no baseline to take off — no file was carried (none of the job's uploads succeeded),
 it would not download, or the session was recorded before the total was kept — still reports the
@@ -238,13 +237,25 @@ raw total. A run that reports no total reports none, and the session file it upl
 with no total either, so the next resume of it has no baseline. A total below the baseline is
 recorded as 0, with a line saying so.
 
-So `jobs.turns` and `jobs.cost_usd` are the job's running totals over every invocation it has had,
+### Usage, counted during the run
+
+The figure that governs is **weighted tokens, counted per model call as the stream arrives**
+(`capacity.md` § Usage in weighted tokens). Each `assistant` line carries `message.usage`; the
+driver emits a `usage` event keyed by `message.id`, and the worker's meter
+(`ForgeWorker.Job.Meter`) keeps a map of id to what has been counted, so a
+line that repeats a call adds only its increase and a call is counted once. Lines with
+`parent_tool_use_id` (subagents) count the same. The runner keeps the weighted sum and the result
+carries `usage` and `tokens` (by kind). A resumed run's usage is its own by construction: only
+this run's calls are summed. `total_cost_usd`, baseline-corrected as above, is kept as
+`claude_cost_usd` and is information only, read by no cap and no pick.
+
+So `jobs.turns` and `jobs.usage` are the job's running totals over every invocation it has had,
 and a job the engine resumed after a rate limit has more than one.
 This is why the two are not the same quantity as `spec.budget.turns`, which is one invocation's
 ceiling, and why nothing draws them as a ratio (`capacity.md` § Four exhaustions, three
 treatments). The documentation calls the cost a client-side estimate; it is stored as such and
-reconciled against provider billing later if that ever matters. `--max-turns` and
-`--max-budget-usd` are the harness-side enforcement; the driver additionally enforces a wall-clock limit
+reconciled against provider billing later if that ever matters. `--max-turns` is the
+harness-side enforcement of turns, forge's token count of usage; the driver additionally enforces a wall-clock limit
 (engine default, not in the workflow grammar) and kills the process with SIGTERM, then SIGKILL
 after a grace period. No `finished` event is emitted for that; the run's result records why it
 was killed, and § Outcome mapping reads it as `cancelled` or `budget_exhausted`.

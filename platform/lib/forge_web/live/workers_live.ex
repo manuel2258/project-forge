@@ -349,6 +349,16 @@ defmodule ForgeWeb.WorkersLive do
   defp requeued(1), do: "its 1 running job is requeued"
   defp requeued(jobs), do: "its #{jobs} running jobs are requeued"
 
+  # A machine on a release from before tokens were counted during a run takes no job of any kind
+  # (`Forge.Jobs.protocol_needs/1`), whatever else about it is in order. One this platform still
+  # accepts joins and sits idle, which is the thing to say.
+  defp too_old?(%{status: :destroyed}), do: false
+
+  defp too_old?(%{protocol: protocol}) when is_integer(protocol),
+    do: protocol < Jobs.usage_protocol()
+
+  defp too_old?(_worker), do: false
+
   @doc """
   Why the platform turned this machine away at its last join, or nil when it did not
   (`docs/design/worker-channel.md` § Versions).
@@ -603,6 +613,39 @@ defmodule ForgeWeb.WorkersLive do
 
   defp claude_update(assigns), do: ~H""
 
+  attr :worker, :map, required: true
+
+  # The harnesses a machine offers beyond the one on the line above (`harnesses` is the list its
+  # last `ready` sent; `harness` is the first of it): each with its version, and the outcome of its
+  # own update when it left one, loud only when it failed, like Claude Code's. A row an older
+  # release wrote has no list and draws nothing. Every value goes through `harness_text/1`.
+  defp other_harnesses(%{worker: %{harnesses: [_primary | rest]}} = assigns) do
+    assigns = assign(assigns, others: Enum.filter(rest, &is_map/1))
+
+    ~H"""
+    <div
+      :for={offer <- @others}
+      id={"harness-#{@worker.id}-#{harness_text(offer["driver"])}"}
+      class="font-mono"
+    >
+      <span>{harness_text(offer["name"]) || harness_text(offer["driver"])}</span>
+      <span class="opacity-50">
+        {harness_text(offer["version"]) || "not installed"}
+      </span>
+      <span
+        :if={harness_text(get_in(offer, ["update", "outcome"]))}
+        class={[get_in(offer, ["update", "outcome"]) == "failed" && "text-error"]}
+      >
+        · update {harness_text(get_in(offer, ["update", "outcome"]))}<span :if={
+          harness_text(get_in(offer, ["update", "error"]))
+        }>: {harness_text(get_in(offer, ["update", "error"]))}</span>
+      </span>
+    </div>
+    """
+  end
+
+  defp other_harnesses(assigns), do: ~H""
+
   @doc """
   A string a machine sent about itself, or `nil` for anything that is not one.
 
@@ -817,11 +860,23 @@ defmodule ForgeWeb.WorkersLive do
             login {harness_text(@row.worker.harness["login"])}
           </div>
           <.claude_update worker={@row.worker} />
+          <.other_harnesses worker={@row.worker} />
           <%!-- A release that does not take the job's credential from the assignment is given no
                 inference job at all (`Workers.runs?/2`), so a machine that looks healthy
                 everywhere else takes no work — which is the thing to say. --%>
           <div
-            :if={@row.worker.status != :destroyed and not Workers.runs?(@row.worker, "claude_code")}
+            :if={too_old?(@row.worker)}
+            id={"worker-#{@row.worker.id}-too-old"}
+            class="text-error"
+          >
+            takes no job: it speaks protocol {@row.worker.protocol} and counting tokens during a
+            run needs {Jobs.usage_protocol()}; update it
+          </div>
+          <div
+            :if={
+              @row.worker.status != :destroyed and not too_old?(@row.worker) and
+                not Workers.runs?(@row.worker, "claude_code")
+            }
             class="text-error"
           >
             takes no agent job: its release predates per-job credentials; update it

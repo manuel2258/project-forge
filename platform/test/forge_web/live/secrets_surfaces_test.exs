@@ -30,13 +30,13 @@ defmodule ForgeWeb.SecretsSurfacesTest do
       prompt: agents/refine.md
       inputs: [ticket]
       produces: [refinement.md]
-      budget: { turns: 20, cost: 0.50 }
+      budget: { turns: 20, tokens: 100k }
       secrets: [STRIPE_TEST_KEY]
     done: {}
   transitions:
     - { from: refining, to: done }
   limits:
-    ticket_cost: 5
+    ticket_tokens: 1M
   """
 
   @value "sk_test_51Hx-never-on-a-page"

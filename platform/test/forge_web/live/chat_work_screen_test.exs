@@ -57,7 +57,7 @@ defmodule ForgeWeb.ChatWorkScreenTest do
     {:ok, _chat} =
       Conversations.record_turn(chat, %{
         "turn" => index,
-        "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"}
+        "harness" => %{"turns" => 1, "usage" => 2_000, "cost_usd" => 0.01, "subtype" => "success"}
       })
   end
 
@@ -431,6 +431,7 @@ defmodule ForgeWeb.ChatWorkScreenTest do
         "turn" => 1,
         "harness" => %{
           "turns" => 1,
+          "usage" => 2_000,
           "cost_usd" => 0.01,
           "memory" => %{"ceiling" => 2 * 1024 ** 3, "peak" => 2 * 1024 ** 3, "oom_kills" => 1}
         }
@@ -721,7 +722,12 @@ defmodule ForgeWeb.ChatWorkScreenTest do
       {:ok, _chat} =
         Conversations.record_turn(chat, %{
           "turn" => index,
-          "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"},
+          "harness" => %{
+            "turns" => 1,
+            "usage" => 2_000,
+            "cost_usd" => 0.01,
+            "subtype" => "success"
+          },
           "documents" => documents
         })
     end

@@ -280,7 +280,10 @@ defmodule Forge.BacklogTest do
       job =
         job_fixture(%{
           ticket: ticket,
-          spec: %{"prompt" => "agents/refine.md", "budget" => %{"turns" => 5, "cost" => 1.0}}
+          spec: %{
+            "prompt" => "agents/refine.md",
+            "budget" => %{"turns" => 5, "tokens" => 200_000}
+          }
         })
 
       assignment = Forge.Jobs.assignment(job, ticket, Projects.get!(project.id), "token")
@@ -298,7 +301,10 @@ defmodule Forge.BacklogTest do
       job =
         job_fixture(%{
           ticket: ticket,
-          spec: %{"prompt" => "agents/refine.md", "budget" => %{"turns" => 5, "cost" => 1.0}}
+          spec: %{
+            "prompt" => "agents/refine.md",
+            "budget" => %{"turns" => 5, "tokens" => 200_000}
+          }
         })
 
       chat = chat_fixture(%{project: project})

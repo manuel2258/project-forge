@@ -156,11 +156,20 @@ defmodule Forge.ForgeFixtures do
   end
 
   @doc """
-  A run of `job`: one start of it, on `:credential` if given, started at `:started_at` (now by
-  default), costing `:cost` and closed at `:finished_at` if given.
+  What `job` needs of a worker for every reason but counting usage, which protocol 11 added and
+  every kind of job needs: the figure the older assertions about *why* a job needs a newer worker
+  were written against (`Forge.Jobs.protocol_needs/1`).
+  """
+  def protocol_before_usage(job) do
+    job |> Forge.Jobs.protocol_needs() |> Keyword.delete(:usage) |> Keyword.values() |> Enum.max()
+  end
 
-  Spend is read from runs, never from `jobs.cost_usd` (`docs/design/credentials.md` § Spend), so a
-  test that wants money spent writes a run. `Forge.Jobs.Runs` is the only writer in the product,
+  @doc """
+  A run of `job`: one start of it, on `:credential` if given, started at `:started_at` (now by
+  default), using `:usage` weighted tokens and closed at `:finished_at` if given.
+
+  Spend is read from runs, never from `jobs.usage` (`docs/design/credentials.md` § Spend), so a
+  test that wants tokens used writes a run. `Forge.Jobs.Runs` is the only writer in the product,
   with tests of its own; this is for a test whose subject is what is read back.
   """
   def run!(job, attrs \\ []) do
@@ -171,7 +180,9 @@ defmodule Forge.ForgeFixtures do
       job_id: job.id,
       credential_id: credential && credential.id,
       started_at: Map.get_lazy(attrs, :started_at, fn -> DateTime.utc_now(:second) end),
-      cost_usd: Decimal.new(Map.get(attrs, :cost, "0")),
+      usage: Map.get(attrs, :usage, 0),
+      tokens: Map.get(attrs, :tokens),
+      claude_cost_usd: Map.get(attrs, :claude_cost_usd),
       finished_at: Map.get(attrs, :finished_at)
     })
   end

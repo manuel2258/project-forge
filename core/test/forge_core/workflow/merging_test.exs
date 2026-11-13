@@ -23,7 +23,7 @@ defmodule ForgeCore.Workflow.MergingTest do
         "prompt" => "agents/integrate.md",
         "inputs" => ["plan.md", "changeset"],
         "produces" => ["integration.md", "changeset"],
-        "budget" => %{"turns" => 80, "cost" => 4.0}
+        "budget" => %{"turns" => 80, "tokens" => 800_000}
       })
       |> Map.update!("transitions", &(&1 ++ [%{"from" => "integrating", "to" => "verifying"}]))
 

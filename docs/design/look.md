@@ -71,8 +71,8 @@ is judged by eye:
 A setup is a module with `build/0`, listed in `Forge.Look.Setups`, returning
 `%{users: %{name => user}, paths: %{name => path}}` built from the suite's own fixtures into the
 look's throwaway database. `setups_test.exs` builds every registered one, so a setup that rots
-fails the gate and not the next ticket. One ships — `ticket`: a project, a member, a ticket with a
-document, giving the queue, the project and the ticket pages. The review page needs a git
+fails the gate and not the next ticket. Two ship — `ticket`: a project, a member, a ticket with a
+document, giving the queue, the project and the ticket pages; and `usage`: a ticket with a job counted in weighted tokens and one converted from dollars, and a credential with a day's usage, giving the job, converted-job, ticket and account-settings pages. The review page needs a git
 repository behind its ticket, which the fixtures make (`Forge.GitFixtures`) and this one does not;
 the next ticket that photographs it adds a setup beside this. **Never a project secret's value** in
 a setup: nothing masks a picture (`secrets.md`, which this leaves as written).

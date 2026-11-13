@@ -82,7 +82,7 @@ defmodule Forge.FlowTest do
     assert spec.prompt == "Refine the ticket into a crisp problem statement.\n"
     assert [%{name: "ticket", version: 1}] = spec.inputs
     assert spec.produces == ["refinement.md"]
-    assert spec.budget == %{turns: 20, cost: 0.5}
+    assert spec.budget == %{turns: 20, tokens: 100_000}
 
     assert event_types(ticket) == ~w(ticket.admitted artifact.version_written job.created)
   end
@@ -91,7 +91,7 @@ defmodule Forge.FlowTest do
     repo =
       seeded_repo(%{
         ".forge/workflow.yml" =>
-          "version: 1\ninitial: nowhere\nstates: {a: {}}\ntransitions: []\nlimits: {ticket_cost: 1}\n"
+          "version: 1\ninitial: nowhere\nstates: {a: {}}\ntransitions: []\nlimits: {ticket_tokens: 200k}\n"
       })
 
     {:ok, project} =
@@ -111,7 +111,7 @@ defmodule Forge.FlowTest do
     # refining: converges, transition needs approval of refinement.md
     {:ok, job} = run(only_pending(ticket), worker, "success", "refinement.md")
     assert %Job{status: :finished, outcome: :converged, declared_outcome: "done", turns: 3} = job
-    assert Decimal.equal?(job.cost_usd, Decimal.from_float(0.0421))
+    assert job.usage == 3150
 
     assert %{version: 1, author: %{"kind" => "job"}} =
              Artifacts.latest(ticket.id, "refinement.md")
@@ -125,7 +125,7 @@ defmodule Forge.FlowTest do
     ticket = Tickets.get!(ticket.id)
     assert ticket.state == "refining"
     assert ticket.pending_transition["to"] == "planning"
-    assert Decimal.equal?(ticket.cost_usd, Decimal.from_float(0.0421))
+    assert ticket.usage == 3150
     assert [%{kind: :approval}] = Queue.items()
     assert "job.harness.started" in event_types(ticket)
 
@@ -293,7 +293,7 @@ defmodule Forge.FlowTest do
         Forge.Tickets.Ticket.progress_changeset(ticket, %{
           state: "verifying",
           status: :active,
-          cost_usd: ticket.cost_usd
+          usage: ticket.usage
         })
       )
 
@@ -1360,7 +1360,7 @@ defmodule Forge.FlowTest do
     {:ok, _} =
       FakeWorker.finish(assignment, "blocking",
         doc: "refinement.md",
-        harness: %{"cost_usd" => 0.25}
+        harness: %{"usage" => 50_000, "cost_usd" => 0.25}
       )
 
     {:ok, _} = Jobs.resume(Jobs.get!(job.id))
@@ -1373,17 +1373,17 @@ defmodule Forge.FlowTest do
     {:ok, _} =
       FakeWorker.finish(assignment, "success",
         doc: "refinement.md",
-        harness: %{"cost_usd" => 0.5}
+        harness: %{"usage" => 100_000, "cost_usd" => 0.5}
       )
 
     assert [%{finished_at: %DateTime{}}, %{finished_at: %DateTime{}}] = runs(job)
 
-    assert Forge.Credentials.spent_today([first.id, second.id]) == %{
-             first.id => Decimal.new("0.25"),
-             second.id => Decimal.new("0.5")
+    assert Forge.Credentials.used_today([first.id, second.id]) == %{
+             first.id => 50_000,
+             second.id => 100_000
            }
 
-    assert Decimal.equal?(Jobs.get!(job.id).cost_usd, Decimal.new("0.75"))
+    assert Jobs.get!(job.id).usage == 150_000
   end
 
   # A job has one open run at most, and every way a run can end closes it — a result, a failure,
@@ -1447,7 +1447,7 @@ defmodule Forge.FlowTest do
   } do
     {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
     job = only_job(ticket)
-    left_open = run!(job, cost: "0.7")
+    left_open = run!(job, usage: 140_000)
 
     assignment = FakeWorker.assign(job, worker)
     assert %{finished_at: %DateTime{}} = Repo.get!(Forge.Jobs.Run, left_open.id)
@@ -1456,15 +1456,15 @@ defmodule Forge.FlowTest do
     # Now the other half: the job is running on a run the migration left open.
     {:ok, _} = Jobs.requeue(job.id, :worker_lost)
     {:ok, _} = Repo.update(Job.progress_changeset(Jobs.get!(job.id), %{status: :running}))
-    left_open = run!(job, cost: "0.7")
+    left_open = run!(job, usage: 140_000)
 
     {:ok, _} =
       FakeWorker.finish(assignment, "success",
         doc: "refinement.md",
-        harness: %{"cost_usd" => 0.1}
+        harness: %{"usage" => 20_000, "cost_usd" => 0.1}
       )
 
-    assert Decimal.equal?(Repo.get!(Forge.Jobs.Run, left_open.id).cost_usd, Decimal.new("0.8"))
+    assert Repo.get!(Forge.Jobs.Run, left_open.id).usage == 160_000
   end
 
   # **Stopped by its account's limit, not failed** (`docs/design/credentials.md` § A limit reached
@@ -1485,7 +1485,7 @@ defmodule Forge.FlowTest do
     {:ok, stopped} = FakeWorker.finish(assignment, "rate_limited", doc: "refinement.md")
 
     assert %{status: :pending, outcome: nil, harness_session_id: "sess-42"} = stopped
-    assert Decimal.equal?(stopped.cost_usd, Decimal.new("0.2"))
+    assert stopped.usage == 40_000
     assert [%{finished_at: %DateTime{}}] = runs(job)
     assert Forge.Workers.get!(worker.id).status == :idle
 
@@ -1495,7 +1495,7 @@ defmodule Forge.FlowTest do
     refute "job.finished" in event_types(ticket)
 
     # Recorded like any run: its cost on the ticket, its transcript kept, its git token gone.
-    assert Decimal.equal?(ticket.cost_usd, Decimal.new("0.2"))
+    assert ticket.usage == 40_000
     assert Artifacts.latest(ticket.id, "transcript-refining-1.jsonl")
     assert Forge.Git.Tokens.revoke_for_job(job.id) == 0
 
@@ -1822,7 +1822,7 @@ defmodule Forge.FlowTest do
     job = only_pending(ticket)
 
     {:ok, _over} =
-      ticket |> Ecto.Changeset.change(cost_usd: Decimal.new("25.00")) |> Forge.Repo.update()
+      ticket |> Ecto.Changeset.change(usage: 5_000_000) |> Forge.Repo.update()
 
     start_supervised!(Forge.Jobs.Scheduler)
 
@@ -2294,13 +2294,13 @@ defmodule Forge.FlowTest do
             inputs: [ticket]
             produces: [plan.md]
             outcomes: [done, retry]
-            budget: { turns: 1, cost: 0.01 }
+            budget: { turns: 1, tokens: 2k }
           waiting_room: {}
         transitions:
           - { from: building, to: waiting_room }
           - { from: building, to: waiting_room, when: retry }
         limits:
-          ticket_cost: 1.00
+          ticket_tokens: 200k
         """
       })
 

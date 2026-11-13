@@ -5,6 +5,42 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
 
   alias ForgeWorker.Harness.ClaudeCode
 
+  describe "usage events" do
+    # One per `assistant` line that carries a call's usage, keyed by the call's id: the same call
+    # repeats across lines and `ForgeWorker.Job.Meter` counts it once.
+    test "an assistant line reports its call's usage by kind, ahead of its content" do
+      line =
+        ~s({"type":"assistant","message":{"id":"msg_1","usage":{"input_tokens":3,"cache_creation_input_tokens":4,"cache_read_input_tokens":5,"output_tokens":6},"content":[{"type":"text","text":"hi"}]}})
+
+      assert [
+               %{
+                 type: "usage",
+                 payload: %{
+                   message_id: "msg_1",
+                   parent_tool_use_id: nil,
+                   tokens: %{input: 3, cache_write: 4, cache_read: 5, output: 6}
+                 }
+               },
+               %{type: "text"}
+             ] = ClaudeCode.parse_line(line)
+    end
+
+    test "a subagent's line says so, and a line without a call id or usage says nothing" do
+      sub =
+        ~s({"type":"assistant","parent_tool_use_id":"agent-1","message":{"id":"msg_2","usage":{"output_tokens":9},"content":[]}})
+
+      assert [%{type: "usage", payload: %{parent_tool_use_id: "agent-1", tokens: tokens}}] =
+               ClaudeCode.parse_line(sub)
+
+      assert tokens == %{input: 0, cache_write: 0, cache_read: 0, output: 9}
+
+      no_id = ~s({"type":"assistant","message":{"usage":{"output_tokens":9},"content":[]}})
+      no_usage = ~s({"type":"assistant","message":{"id":"msg_3","content":[]}})
+      assert ClaudeCode.parse_line(no_id) == []
+      assert ClaudeCode.parse_line(no_usage) == []
+    end
+  end
+
   describe "command/3" do
     test "builds the documented headless invocation with budgets from the spec" do
       {exe, args, env} =
@@ -16,7 +52,7 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
       assert exe == "/bin/claude"
 
       assert args ==
-               ~w(-p --output-format stream-json --verbose --max-turns 40 --max-budget-usd 2.00 --permission-mode bypassPermissions)
+               ~w(-p --output-format stream-json --verbose --max-turns 40 --permission-mode bypassPermissions)
 
       assert env == [
                {"FORGE_JOB", "/jobs/j"},
@@ -134,15 +170,14 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
     end
 
     # A conversation has no turn ceiling — it ends when a person stops talking — and no state to
-    # take a cost ceiling from, so the caller passes what is left of the day instead.
+    # take a ceiling from. Nor is any invocation given a money ceiling: forge counts tokens.
     test "streaming mode takes messages on stdin and drops the turn ceiling" do
       {_exe, args, _env} =
-        ClaudeCode.command(spec(), "/jobs/j", mode: :streaming, max_cost: 1.5)
+        ClaudeCode.command(spec(), "/jobs/j", mode: :streaming, max_tokens: 1_500_000)
 
       assert args ==
                ~w(-p --output-format stream-json --verbose --input-format stream-json
-                  --replay-user-messages --max-budget-usd 1.50
-                  --permission-mode bypassPermissions)
+                  --replay-user-messages --permission-mode bypassPermissions)
 
       refute "--max-turns" in args
     end

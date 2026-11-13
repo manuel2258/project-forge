@@ -87,6 +87,20 @@ defmodule ForgeCore.Job.CredentialTest do
     assert Credential.open(secrets, hash(token), "job-2", :secrets) == :error
   end
 
+  # A login a run hands back is sealed for that one purpose: replayed as a delivered credential or
+  # as a project's secrets, or for another job, it does not open.
+  test "a returned credential opens only as a return, for its own job" do
+    token = token()
+    returned = Credential.seal(@secret, hash(token), "job-1", :return)
+    delivered = Credential.seal(@secret, hash(token), "job-1")
+
+    assert Credential.open(returned, hash(token), "job-1", :return) == {:ok, @secret}
+    assert Credential.open(returned, hash(token), "job-1") == :error
+    assert Credential.open(returned, hash(token), "job-1", :secrets) == :error
+    assert Credential.open(returned, hash(token), "job-2", :return) == :error
+    assert Credential.open(delivered, hash(token), "job-1", :return) == :error
+  end
+
   # A protocol 4 worker opens the credential with the job id alone as its associated data, and
   # still must: the purpose did not change the credential's seal.
   test "the credential's seal is the one a worker from before secrets opens" do

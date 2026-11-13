@@ -88,6 +88,33 @@ defmodule ForgeCore.Workflow do
           release_notes: artifact_name() | nil
         }
 
+  @doc """
+  The dollar keys a workflow still names, as `["states.implementing.budget.cost",
+  "limits.ticket_cost"]`: the parser converts them so a stored spec runs on, and admission refuses
+  a workflow that has any, naming `replacement/1` (`docs/design/workflow-grammar-v1.md` § Budget).
+  """
+  @spec legacy_keys(t()) :: [String.t()]
+  def legacy_keys(%__MODULE__{states: states, limits: limits}) do
+    from_states =
+      for {name, %State{budget: %{legacy_cost: cost}}} <- Enum.sort(states),
+          cost != nil,
+          do: "states.#{name}.budget.cost"
+
+    from_limits = if limits && limits.legacy_ticket_cost, do: ["limits.ticket_cost"], else: []
+    from_states ++ from_limits
+  end
+
+  @doc "The key that replaces a legacy one, and what it is counted in."
+  @spec replacement(String.t()) :: String.t()
+  def replacement(key) do
+    new =
+      key
+      |> String.replace_suffix("budget.cost", "budget.tokens")
+      |> String.replace_suffix("ticket_cost", "ticket_tokens")
+
+    "`#{key}` is replaced by `#{new}`, in weighted tokens (such as 800k)"
+  end
+
   @doc "Outcomes every job may end with, whatever its state declares."
   @spec engine_outcomes() :: [outcome()]
   def engine_outcomes, do: @engine_outcomes

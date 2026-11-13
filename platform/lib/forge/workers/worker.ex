@@ -25,6 +25,10 @@ defmodule Forge.Workers.Worker do
     # What the machine said about its harness at `ready`, verbatim. Read only to show and to
     # offer; nothing is scheduled on it. See docs/design/worker-channel.md § What a worker offers.
     field :harness, :map
+    # Every harness the machine offered at `ready`, each as `harness` is: its driver, version and
+    # how it takes its credential. Nil from a machine that sent only `harness`, which is then the
+    # one it offers (`Forge.Workers.runs?/2`).
+    field :harnesses, {:array, :map}
     # What the machine last said about its own budget, cores and kinds, verbatim. Recorded and
     # not scheduled on: the row governs, so an operator's edit to a permanent worker survives a
     # reconnect. A report that disagrees with the row is shown rather than believed.
@@ -91,6 +95,7 @@ defmodule Forge.Workers.Worker do
       :cores,
       :accepts,
       :harness,
+      :harnesses,
       :reported,
       :last_error,
       :last_seen_at,

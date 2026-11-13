@@ -17,6 +17,6 @@ defmodule Forge.Look.SetupsTest do
   test "a setup is found by name, and an unknown one lists the others" do
     assert {:ok, Forge.Look.Setups.Ticket} = Setups.fetch("ticket")
     assert {:error, reason} = Setups.fetch("nope")
-    assert reason =~ "there are: forge_release, templates, ticket"
+    assert reason =~ "there are: codex, forge_release, templates, ticket, usage"
   end
 end

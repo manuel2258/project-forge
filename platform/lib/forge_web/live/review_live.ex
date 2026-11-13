@@ -566,12 +566,12 @@ defmodule ForgeWeb.ReviewLive do
         <aside class="lg:w-[21rem] lg:shrink-0 lg:border-l lg:border-base-300 lg:pl-8">
           <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Usage</h2>
           <div class="mt-3">
-            <div class="font-mono text-[17px]">{Format.windows(@ticket.cost_usd) || "—"}</div>
+            <div class="font-mono text-[17px]">{Format.windows(@ticket.usage) || "—"}</div>
             <div class="mt-2 h-[5px] w-full bg-base-300">
               <div class="h-full bg-accent" style={"width: #{usage_pct(@ticket, @workflow)}%"} />
             </div>
             <div class="mt-1 font-mono text-[11px] opacity-50">
-              allowance {Format.windows(@workflow.limits.ticket_cost) || "—"}
+              allowance {Format.windows(@workflow.limits.ticket_tokens) || "—"}
             </div>
           </div>
 
@@ -600,11 +600,10 @@ defmodule ForgeWeb.ReviewLive do
   defp lines_label(_diff), do: "—"
 
   defp usage_pct(ticket, workflow) do
-    cap = workflow.limits.ticket_cost
+    cap = workflow.limits.ticket_tokens
 
     if is_number(cap) and cap > 0 do
-      ticket.cost_usd
-      |> Decimal.to_float()
+      ticket.usage
       |> Kernel./(cap)
       |> Kernel.*(100)
       |> min(100)

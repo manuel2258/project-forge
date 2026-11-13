@@ -306,6 +306,17 @@ defmodule ForgeWorker.LinkTest do
 
   defp last_push_ref, do: Process.get(:last_push_ref)
 
+  # The request Codex was started with is kept by the stand-in (`test/support/fake_codex.sh`).
+  defp assert_codex_thread_has_no_machine_dials(root, job_id) do
+    request = File.read!(Path.join([root, "jobs", job_id, "fake-thread.json"]))
+    # Both requests are there: the model goes in the first and the effort in the second.
+    assert request =~ ~s("method":"thread/start")
+    assert request =~ ~s("method":"turn/start")
+    refute request =~ "from-the-machine"
+    refute request =~ ~s("model")
+    refute request =~ ~s("effort")
+  end
+
   defp wait_until(fun, attempts \\ 100) do
     cond do
       fun.() -> :ok
@@ -437,6 +448,81 @@ defmodule ForgeWorker.LinkTest do
       assert %{"memory_budget" => 0} = Link.ready_payload(socket)
     end
 
+    # Every harness the machine can run, each with its version: the configured one always, and
+    # Codex when its binary answers (`docs/design/worker-channel.md` § Protocol 11).
+    test "the harnesses it can run are offered, each with its version", %{socket: socket} do
+      previous = Application.get_env(:forge_worker, :harness_opts)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:forge_worker, :harness_opts, previous),
+          else: Application.delete_env(:forge_worker, :harness_opts)
+      end)
+
+      # No `codex` here: the one harness it has is offered alone, and the old key is its first.
+      Application.put_env(:forge_worker, :harness_opts, codex_executable: "/nonexistent/codex")
+      assert %{"harness" => primary, "harnesses" => [offered]} = Link.ready_payload(socket)
+      assert offered == primary
+
+      Application.put_env(:forge_worker, :harness_opts, codex_executable: fake_codex_executable())
+      assert %{"harnesses" => [^primary, codex]} = Link.ready_payload(socket)
+
+      assert %{
+               "driver" => "codex",
+               "name" => "Codex",
+               "version" => "9.9.9",
+               "credential" => "per_job"
+             } = codex
+
+      assert "high" in codex["efforts"]
+
+      # Claude Code's own binary, model and effort are not Codex's: with them configured and no
+      # `codex` of its own, the machine offers no Codex, rather than probing `claude`.
+      Application.put_env(:forge_worker, :harness_opts,
+        executable: fake_codex_executable(),
+        model: "opus",
+        effort: "high"
+      )
+
+      assert %{"harnesses" => [_only]} = Link.ready_payload(socket)
+    end
+
+    # `FORGE_CLAUDE_MODEL` and `FORGE_CLAUDE_EFFORT` are Claude Code's dials. A Codex job whose spec
+    # names neither is to get Codex's own default (`docs/design/codex.md`), and every site that
+    # builds a driver's options goes through `Harness.machine_opts/2` to get that: a workflow job
+    # (`Link.start_runner/6`) and a chat (`Conversation.runner_opts/1`) take their own routes.
+    test "a Codex job is not given the machine's Claude model or effort", %{
+      client: client,
+      origin: origin,
+      root: root
+    } do
+      previous = Application.get_env(:forge_worker, :harness_opts)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:forge_worker, :harness_opts, previous),
+          else: Application.delete_env(:forge_worker, :harness_opts)
+
+        Application.delete_env(:forge_worker, :extra_env)
+      end)
+
+      Application.put_env(:forge_worker, :harness_opts,
+        codex_executable: fake_codex_executable(),
+        model: "opus-from-the-machine",
+        effort: "effort-from-the-machine"
+      )
+
+      Application.put_env(:forge_worker, :extra_env, [{"FAKE_CODEX_SCENARIO", "success"}])
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      workflow = Map.put(assignment(origin), "harness", "codex")
+      push(client, @topic, "assign", workflow)
+      {%{"result" => _result}, _events} = take_push("result")
+
+      assert_codex_thread_has_no_machine_dials(root, workflow["spec"]["job_id"])
+    end
+
     # The machine's Claude Code install-or-update attempt rides the harness map, which is the
     # whole of what reaches the operator: nothing else on the wire carries it
     # (`docs/design/worker-tier.md` § Updating a worker).
@@ -448,6 +534,40 @@ defmodule ForgeWorker.LinkTest do
 
       assert %{"harness" => %{"update" => update}} = Link.ready_payload(socket)
       assert update == %{"outcome" => "failed", "error" => "curl: (6) could not resolve host"}
+    end
+
+    # `codex-update.service`'s report rides Codex's own entry: with its version when it is installed,
+    # and alone — without a `credential`, so that the platform gives it no job — when the install
+    # failed and there is no binary to answer (`docs/design/codex.md` § On the image).
+    test "Codex's update attempt rides its own offer", %{socket: socket, root: root} do
+      previous = Application.get_env(:forge_worker, :harness_opts)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:forge_worker, :harness_opts, previous),
+          else: Application.delete_env(:forge_worker, :harness_opts)
+      end)
+
+      File.write!(
+        Path.join(root, "codex-update.json"),
+        ~s|{"outcome":"failed","error":"curl: (6) could not resolve host"}|
+      )
+
+      Application.put_env(:forge_worker, :harness_opts, codex_executable: "/nonexistent/codex")
+      assert %{"harnesses" => [primary, failed]} = Link.ready_payload(socket)
+      refute Map.has_key?(primary, "update")
+
+      assert failed == %{
+               "driver" => "codex",
+               "name" => "Codex",
+               "update" => %{"outcome" => "failed", "error" => "curl: (6) could not resolve host"}
+             }
+
+      File.write!(Path.join(root, "codex-update.json"), ~s|{"outcome":"succeeded"}|)
+      Application.put_env(:forge_worker, :harness_opts, codex_executable: fake_codex_executable())
+      assert %{"harnesses" => [_primary, codex]} = Link.ready_payload(socket)
+      assert codex["update"] == %{"outcome" => "succeeded"}
+      assert codex["credential"] == "per_job"
     end
 
     # Absent, not null, exactly as `accepts` is: an image older than the unit attempted no update
@@ -3811,18 +3931,18 @@ defmodule ForgeWorker.LinkTest do
     # docs/design/conversations.md § Spend has the cap enforced twice — by the harness, per
     # turn, and by the node once the day is gone. A conversation that dropped this on the floor
     # enforces it once, after the fact, which is the half that cannot stop a turn.
-    test "the day's remaining allowance becomes the harness's ceiling", context do
+    test "the day's remaining allowance is counted, and the harness is given no ceiling",
+         context do
       %{client: client, origin: origin, root: root} = context
       connect_and_assert_join(client, @topic, %{}, :ok)
       assert_push(@topic, "ready", %{})
 
-      job = chat(origin) |> Map.put("max_cost_usd", 1.5)
+      job = chat(origin) |> Map.put("max_tokens", 1_500_000)
       job_id = job["job_id"]
       push(client, @topic, "assign", job)
       {%{"turn" => 1}, _} = take_push("turn")
 
-      assert File.read!(Path.join([root, "jobs", job_id, "fake-args.txt"])) =~
-               "--max-budget-usd 1.50"
+      refute File.read!(Path.join([root, "jobs", job_id, "fake-args.txt"])) =~ "max-budget"
     end
 
     # The transcript leaves the machine and the result carries the *key*, not the bytes. A
@@ -3867,6 +3987,35 @@ defmodule ForgeWorker.LinkTest do
 
       assert_receive {:slice, slice}
       assert {"DISABLE_AUTOUPDATER", "1"} in slice.env
+    end
+
+    test "a Codex chat is not given the machine's Claude model or effort either", context do
+      %{client: client, origin: origin, root: root} = context
+      previous = Application.get_env(:forge_worker, :harness_opts)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:forge_worker, :harness_opts, previous),
+          else: Application.delete_env(:forge_worker, :harness_opts)
+
+        Application.delete_env(:forge_worker, :extra_env)
+      end)
+
+      Application.put_env(:forge_worker, :harness_opts,
+        codex_executable: fake_codex_executable(),
+        model: "opus-from-the-machine",
+        effort: "effort-from-the-machine"
+      )
+
+      job = origin |> chat() |> Map.put("harness", "codex")
+      Application.put_env(:forge_worker, :extra_env, [{"FAKE_CODEX_SCENARIO", "success"}])
+
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      assert_codex_thread_has_no_machine_dials(root, job["job_id"])
     end
 
     # The second of the two places the push credential is marked `{:secret, _}`. A conversation

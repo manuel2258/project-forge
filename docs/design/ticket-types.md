@@ -45,7 +45,7 @@ The product calls it a *ticket type*. Code calls it `ticket_type`, never a bare 
 validated on its own. The grammar, the validator, the reachability rule for inputs and the
 pinning are unchanged, because each file is exactly what `.forge/workflow.yml` is now. This is
 GitHub Actions' layout, which the vision already borrows from: one file per workflow, in one
-directory, reviewed like any other change. Its `limits.ticket_cost` and `defaults` therefore are
+directory, reviewed like any other change. Its `limits.ticket_tokens` and `defaults` therefore are
 per type for free — a spike capped at a dollar and a feature at twenty-five is two files saying
 so.
 
@@ -93,7 +93,7 @@ states:
     env: implement
     may_invoke: { build: { max: 40 }, test: { max: 20 } }
     produces: [implementation.md, changeset]
-    budget: { turns: 200, cost: 10.00 }
+    budget: { turns: 200, tokens: 2M }
 ```
 
 ```yaml
@@ -110,7 +110,7 @@ states:
     may_invoke: { test: { max: 10 } }
     inputs: [ticket]
     produces: [reproduction.md]
-    budget: { turns: 40, cost: 2.00 }
+    budget: { turns: 40, tokens: 400k }
 
   implementing:
     extends: implementing             # the library's, then the keys below replace its own
@@ -131,7 +131,7 @@ transitions:
   - { from: review_ready, to: merged,       approve: [changeset] }
 
 limits:
-  ticket_cost: 8.00
+  ticket_tokens: 1.6M
 ```
 
 **`import` lists library paths**, relative to `.forge/` like a prompt, read at the same commit as

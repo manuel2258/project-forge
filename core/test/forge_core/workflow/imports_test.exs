@@ -21,7 +21,7 @@ defmodule ForgeCore.Workflow.ImportsTest do
     implementing:
       prompt: agents/implement.md
       produces: [changeset]
-      budget: { turns: 10, cost: 1.0 }
+      budget: { turns: 10, tokens: 200k }
       may_invoke: { build: { max: 3 } }
   """
 
@@ -37,7 +37,7 @@ defmodule ForgeCore.Workflow.ImportsTest do
     review_ready: {}
   transitions:
     - { from: implementing, to: review_ready }
-  limits: { ticket_cost: 5 }
+  limits: { ticket_tokens: 1M }
   """
 
   defp reader(files), do: fn path -> Map.fetch(files, path) end
@@ -80,10 +80,10 @@ defmodule ForgeCore.Workflow.ImportsTest do
     test "a key the state writes replaces the template's whole, never merges into it" do
       yaml = type_with([{"inputs: [ticket]", "inputs: [ticket]\n    budget: { turns: 50 }"}])
 
-      # Merged, the template's `cost` would fill the gap and this would load.
+      # Merged, the template's `tokens` would fill the gap and this would load.
       assert {:error, errors} = load(yaml)
 
-      assert {nil, "states.implementing.budget.cost", "is required"} in messages(errors)
+      assert {nil, "states.implementing.budget.tokens", "is required"} in messages(errors)
     end
 
     test "a state may extend a template under a name of its own" do
@@ -103,7 +103,7 @@ defmodule ForgeCore.Workflow.ImportsTest do
       yaml =
         type_with([
           {"import: [common.yml]\n", ""},
-          {"extends: implementing", "prompt: a.md\n    budget: { turns: 1, cost: 1 }"}
+          {"extends: implementing", "prompt: a.md\n    budget: { turns: 1, tokens: 200k }"}
         ])
 
       assert {:ok, _workflow, flat} = Parser.load(yaml)
@@ -374,7 +374,9 @@ defmodule ForgeCore.Workflow.ImportsTest do
 
     test "a mistake in the workflow's own part of the state is the workflow's" do
       yaml =
-        type_with([{"inputs: [ticket]", "inputs: [ticket]\n    budget: { turns: 0, cost: 1 }"}])
+        type_with([
+          {"inputs: [ticket]", "inputs: [ticket]\n    budget: { turns: 0, tokens: 200k }"}
+        ])
 
       assert {:error, errors} = load(yaml)
 
@@ -461,7 +463,7 @@ defmodule ForgeCore.Workflow.ImportsTest do
       end
 
       yaml =
-        "version: 1\nimport: [common.yml]\ninitial: a\nstates: [a]\ntransitions: []\nlimits: { ticket_cost: 1 }\n"
+        "version: 1\nimport: [common.yml]\ninitial: a\nstates: [a]\ntransitions: []\nlimits: { ticket_tokens: 200k }\n"
 
       assert {:error, errors} = load(yaml)
       assert Enum.any?(errors, &(&1.path == "states" and &1.file == nil))
@@ -508,7 +510,7 @@ defmodule ForgeCore.Workflow.ImportsTest do
 
         yaml =
           type_with([
-            {"extends: implementing", "prompt: a.md\n    budget: { turns: 1, cost: 1 }"}
+            {"extends: implementing", "prompt: a.md\n    budget: { turns: 1, tokens: 200k }"}
           ])
 
         assert {:ok, _workflow, _flat} = load(yaml, files), section

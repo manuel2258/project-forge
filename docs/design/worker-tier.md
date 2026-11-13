@@ -1560,3 +1560,10 @@ from the unit's last reading rather than from that result, which it no longer pr
   fleet is large enough to be heterogeneous. Stated once, in
   `docs/design/worker-channel.md` § Open, beside the `ready` message that carries the data it
   would be matched against.
+
+## Updating a worker, Codex (ticket 43)
+
+The image gains `codex-update.service` beside `claude-code-update.service`: OpenAI's release binary
+under the worker's root where it can be overwritten, bounded by the same timeouts, ordered before
+the worker unit, writing `codex-update.json`. One reader serves both status files and the probe
+reports `codex --version`.

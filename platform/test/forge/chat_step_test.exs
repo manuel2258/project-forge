@@ -28,14 +28,14 @@ defmodule Forge.ChatStepTest do
       prompt: agents/plan.md
       inputs: [refinement.md]
       produces: [plan.md]
-      budget: { turns: 5, cost: 1 }
+      budget: { turns: 5, tokens: 200k }
     review_ready: {}
   transitions:
     - { from: refining, to: planning, approve: [refinement.md] }
     - { from: refining, to: review_ready, when: needs_more }
     - { from: planning, to: review_ready }
     - { from: review_ready, to: refining }
-  limits: { ticket_cost: 25 }
+  limits: { ticket_tokens: 5M }
   """
 
   setup do
@@ -59,6 +59,7 @@ defmodule Forge.ChatStepTest do
       "documents" => documents,
       "harness" => %{
         "turns" => 1,
+        "usage" => cost && round(cost * 200_000),
         "cost_usd" => cost,
         "session_id" => "s",
         "subtype" => "success"
@@ -96,11 +97,11 @@ defmodule Forge.ChatStepTest do
   end
 
   test "a step needs protocol 10 and another conversation 9", %{project: project, chat: chat} do
-    assert Jobs.protocol(chat) == 10
+    assert protocol_before_usage(chat) == 10
     # The kind alone, since the archive asks 9 of every conversation and would hide a step's ask.
     assert Jobs.protocol_needs(chat)[:kind] == 10
     {:ok, plain} = Conversations.open(project, "hello")
-    assert Jobs.protocol(plain) == 9
+    assert protocol_before_usage(plain) == 9
     assert Jobs.protocol_needs(plain)[:kind] == 8
   end
 
@@ -126,15 +127,15 @@ defmodule Forge.ChatStepTest do
     project: project
   } do
     answered(chat, 1, %{})
-    assert Decimal.equal?(Tickets.get!(ticket.id).cost_usd, Decimal.new("0.01"))
+    assert Tickets.get!(ticket.id).usage == 2_000
     {:ok, chat} = Conversations.record_turn(Repo.get!(Job, chat.id), turn(2, 0.05))
-    assert Decimal.equal?(Tickets.get!(ticket.id).cost_usd, Decimal.new("0.05"))
+    assert Tickets.get!(ticket.id).usage == 10_000
     assert chat.turns == 2
 
     {:ok, plain} = Conversations.open(project, "hello", ticket: ticket)
     run!(plain)
     {:ok, _} = Conversations.record_turn(plain, turn(1, 0.5))
-    assert Decimal.equal?(Tickets.get!(ticket.id).cost_usd, Decimal.new("0.05"))
+    assert Tickets.get!(ticket.id).usage == 10_000
   end
 
   test "no by-hand transition while it is live, and one once it is dormant", %{

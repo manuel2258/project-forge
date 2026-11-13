@@ -274,7 +274,8 @@ case "${FAKE_SCENARIO:-success}" in
           ;;
       esac
 
-      emit "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"reply to $(json_escape "$text")\"}]}}"
+      turn_calls=$((${turn_calls:-0} + 1))
+      emit "{\"type\":\"assistant\",\"message\":{\"id\":\"c$turn_calls\",\"usage\":{\"input_tokens\":100,\"output_tokens\":10},\"content\":[{\"type\":\"text\",\"text\":\"reply to $(json_escape "$text")\"}]}}"
       # Cumulative, as measured. A platform that adds this per turn over-counts every turn but
       # the first, and the number stays plausible while it does.
       cost=$(awk -v c="$cost" 'BEGIN { printf "%.4f", c + 0.01 }')
@@ -293,7 +294,12 @@ if [ -n "${FAKE_COMMIT-}" ]; then
 fi
 
 emit '{"type":"system","subtype":"init","session_id":"sess-42","model":"fake-model","tools":["Read","Edit"]}'
-emit '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Reading the plan."},{"type":"tool_use","id":"t1","name":"Read","input":{"path":"plan.md"}}]}}'
+# One model call repeated across two lines, as the real stream does: counted once. It weighs
+# 1000 + 400 * 1.25 + 5000 * 0.1 + 200 * 5 = 3000. The subagent's call beside it (it carries
+# `parent_tool_use_id`) weighs 100 + 10 * 5 = 150, so a run's usage is 3150.
+emit '{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":1000,"cache_creation_input_tokens":400,"cache_read_input_tokens":5000,"output_tokens":100},"content":[{"type":"text","text":"Reading the plan."}]}}'
+emit '{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":1000,"cache_creation_input_tokens":400,"cache_read_input_tokens":5000,"output_tokens":200},"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"path":"plan.md"}}]}}'
+emit '{"type":"assistant","parent_tool_use_id":"t0","message":{"id":"s1","usage":{"input_tokens":100,"output_tokens":10},"content":[{"type":"text","text":"A subagent looks."}]}}'
 emit '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"contents of plan.md"}]}}'
 emit '{"type":"stream_event","event":{"type":"message_start"}}'
 
@@ -349,6 +355,17 @@ case "${FAKE_SCENARIO:-success}" in
   max_turns)
     emit '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":40,"duration_ms":99,"total_cost_usd":1.5,"session_id":"sess-42"}'
     exit 1
+    ;;
+  # A run that never stops spending: each call weighs 50,000 and the result is never reached, so
+  # only forge's own count can end it. Slow enough for the stop to land between two calls.
+  runaway)
+    i=0
+    while [ "$i" -lt 400 ]; do
+      i=$((i + 1))
+      emit "{\"type\":\"assistant\",\"message\":{\"id\":\"r$i\",\"usage\":{\"output_tokens\":10000},\"content\":[{\"type\":\"text\",\"text\":\"call $i\"}]}}"
+      sleep 0.05
+    done
+    emit "$result_success"
     ;;
   max_budget)
     # A runaway: it spends up to whatever budget it was handed and the harness stops it there.

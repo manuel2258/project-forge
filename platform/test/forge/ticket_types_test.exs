@@ -19,7 +19,7 @@ defmodule Forge.TicketTypesTest do
     implementing:
       prompt: agents/implement.md
       produces: [implementation.md, changeset]
-      budget: { turns: 20, cost: 2.00 }
+      budget: { turns: 20, tokens: 400k }
   """
 
   @importing """
@@ -38,7 +38,7 @@ defmodule Forge.TicketTypesTest do
     - { from: implementing, to: checking }
     - { from: checking, to: review_ready }
   limits:
-    ticket_cost: 25.00
+    ticket_tokens: 5M
   """
 
   @bug """
@@ -51,7 +51,7 @@ defmodule Forge.TicketTypesTest do
       prompt: agents/reproduce.md
       inputs: [ticket]
       produces: [reproduction.md]
-      budget: { turns: 5, cost: 1.00 }
+      budget: { turns: 5, tokens: 200k }
     implementing:
       extends: implementing
       inputs: [ticket, reproduction.md]
@@ -59,7 +59,7 @@ defmodule Forge.TicketTypesTest do
   transitions:
     - { from: reproducing, to: implementing }
     - { from: implementing, to: review_ready }
-  limits: { ticket_cost: 8.00 }
+  limits: { ticket_tokens: 1.6M }
   """
 
   @feature """
@@ -74,7 +74,7 @@ defmodule Forge.TicketTypesTest do
     review_ready: {}
   transitions:
     - { from: implementing, to: review_ready }
-  limits: { ticket_cost: 25.00 }
+  limits: { ticket_tokens: 5M }
   """
 
   # A project in the directory form: no single file, a library, two types and their prompts.
@@ -165,7 +165,7 @@ defmodule Forge.TicketTypesTest do
 
       assert ticket.ticket_type == "bug"
       assert ticket.state == "reproducing"
-      assert ticket.workflow["limits"]["ticket_cost"] == 8.0
+      assert ticket.workflow["limits"]["ticket_tokens"] == "1.6M"
 
       assert %{payload: %{"ticket_type" => "bug"}} =
                ticket.id
@@ -376,12 +376,12 @@ defmodule Forge.TicketTypesTest do
       head =
         commit_to_default(project, %{
           ".forge/workflows/bug.yml" =>
-            String.replace(@bug, "ticket_cost: 8.00", "ticket_cost: 9.00")
+            String.replace(@bug, "ticket_tokens: 1.6M", "ticket_tokens: 1.8M")
         })
 
       assert {:ok, prepared} = Tickets.prepare_repin(project, ticket)
       assert {prepared.base, prepared.ticket_type} == {head, "bug"}
-      assert prepared.yaml_map["limits"]["ticket_cost"] == 9.0
+      assert prepared.yaml_map["limits"]["ticket_tokens"] == "1.8M"
     end
 
     # Admitted, then its first job writes nothing it declared and ends in `error`; with no edge for
@@ -406,11 +406,11 @@ defmodule Forge.TicketTypesTest do
 
       commit_to_default(project, %{
         ".forge/workflows/bug.yml" =>
-          String.replace(@bug, "ticket_cost: 8.00", "ticket_cost: 9.00")
+          String.replace(@bug, "ticket_tokens: 1.6M", "ticket_tokens: 1.8M")
       })
 
       assert {:ok, repinned} = Forge.Engine.repin(ticket, user.id)
-      assert repinned.workflow["limits"]["ticket_cost"] == 9.0
+      assert repinned.workflow["limits"]["ticket_tokens"] == "1.8M"
     end
 
     # The guess the refusal is there to prevent: a single file's ticket on a project now with one
@@ -475,7 +475,8 @@ defmodule Forge.TicketTypesTest do
       {:ok, ticket} = Tickets.admit(project, %{title: "x", ticket_type: "bug"})
 
       commit_to_default(project, %{
-        ".forge/workflows/feature.yml" => String.replace(@feature, "25.00", "30.00")
+        ".forge/workflows/feature.yml" =>
+          String.replace(@feature, "ticket_tokens: 5M", "ticket_tokens: 6M")
       })
 
       assert Tickets.drift(ticket, project) == nil

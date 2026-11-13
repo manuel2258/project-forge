@@ -40,6 +40,20 @@ defmodule ForgeWeb.UserLive.SettingsCredentialsTest do
   defp state(view),
     do: inspect(:sys.get_state(view.pid), limit: :infinity, printable_limit: :infinity)
 
+  # Criterion 36: a long name is cut to its row and whole in its title, as names are elsewhere.
+  test "a long credential name is truncated in its row and whole in its title", %{
+    conn: conn,
+    user: user
+  } do
+    name = String.duplicate("a-very-long-name ", 12) |> String.trim()
+    credential = Forge.ForgeFixtures.credential_fixture(user, %{name: name})
+
+    {view, _html} = open(conn)
+    row = view |> element("#credential-#{credential.id} [title]") |> render()
+    assert row =~ ~s(title="#{name}")
+    assert row =~ "truncate"
+  end
+
   test "a credential is added, and its token is in neither the page nor the state", %{conn: conn} do
     stub(200)
     {view, html} = open(conn)
@@ -177,7 +191,7 @@ defmodule ForgeWeb.UserLive.SettingsCredentialsTest do
     assert Credentials.pool(project.id, "claude_code") == []
   end
 
-  # What each has spent today and whether it is rate-limited now are what an owner of several
+  # What each has used today and whether it is rate-limited now are what an owner of several
   # needs to see which one the pool is leaning on (`docs/design/credentials.md` § Spend). The
   # limit is beside the figure and says it is not enforced, because it is not.
   test "a row says what the credential spent today and whether it is rate-limited", %{
@@ -189,15 +203,15 @@ defmodule ForgeWeb.UserLive.SettingsCredentialsTest do
     limited = Forge.ForgeFixtures.credential_fixture(user)
 
     Repo.update_all(from(c in Forge.Credentials.Credential, where: c.id == ^spending.id),
-      set: [daily_limit_usd: Decimal.new("5")]
+      set: [daily_limit: 1_000_000]
     )
 
-    ran(project, spending, "1.25")
-    ran(project, spending, "0.5")
+    ran(project, spending, 250_000)
+    ran(project, spending, 100_000)
     resets_at = DateTime.add(DateTime.utc_now(:second), 3600)
 
     :ok =
-      Forge.Jobs.record_harness_event(ran(project, limited, "0").id, %{
+      Forge.Jobs.record_harness_event(ran(project, limited, 0).id, %{
         type: "job.harness.rate_limit",
         payload: %{
           status: "rejected",
@@ -209,14 +223,49 @@ defmodule ForgeWeb.UserLive.SettingsCredentialsTest do
     {view, _html} = open(conn)
 
     spending_row = view |> element("#credential-#{spending.id}") |> render()
-    assert spending_row =~ "$1.75 today of $5/day, not enforced"
+    assert spending_row =~ "0.35 windows today (350k weighted tokens) of 1M/day, not enforced"
     refute spending_row =~ "rate-limited"
 
     limited_row = view |> element("#credential-#{limited.id}") |> render()
-    assert limited_row =~ "$0.00 today"
+    assert limited_row =~ "0 windows today (0 weighted tokens)"
 
     assert view |> element("#credential-#{limited.id}-five_hour.text-warning") |> render() =~
              "5h · resets #{Calendar.strftime(resets_at, "%H:%M")} UTC · rate-limited"
+  end
+
+  # The tokens counted behind the figure, by kind, and — only on a Claude API key, which is billed
+  # in dollars — Claude Code's own figure; a subscription token and a login show no dollars.
+  test "a row shows today's tokens by kind, and a Claude API key its dollar figure", %{
+    conn: conn,
+    user: user
+  } do
+    project = Forge.ForgeFixtures.project_fixture()
+    key = Forge.ForgeFixtures.credential_fixture(user, %{kind: "api_key"})
+    token = Forge.ForgeFixtures.credential_fixture(user)
+
+    for credential <- [key, token] do
+      for input <- [1_000, 2_000] do
+        job = Forge.ForgeFixtures.chat_fixture(%{project: project})
+
+        Forge.ForgeFixtures.run!(job,
+          credential: credential,
+          usage: 10_000,
+          tokens: %{"input" => input, "cache_write" => 0, "cache_read" => 500_000, "output" => 40},
+          claude_cost_usd: Decimal.new("0.504")
+        )
+      end
+    end
+
+    {view, _html} = open(conn)
+
+    key_tokens = view |> element("#credential-#{key.id}-tokens") |> render()
+    assert key_tokens =~ "by kind: 3k fresh input · 0 cache write · 1M cache read · 80 output"
+
+    assert view |> element("#credential-#{key.id}-dollars") |> render() =~
+             "Claude Code&#39;s figure: $1.01 today"
+
+    assert has_element?(view, "#credential-#{token.id}-tokens")
+    refute has_element?(view, "#credential-#{token.id}-dollars")
   end
 
   # Each window the provider reported, five-hour then the week: its figure when it gave one, its
@@ -230,7 +279,7 @@ defmodule ForgeWeb.UserLive.SettingsCredentialsTest do
     week = DateTime.add(DateTime.utc_now(:second), 3 * 86_400)
 
     :ok =
-      Forge.Jobs.record_harness_event(ran(project, reported, "0").id, %{
+      Forge.Jobs.record_harness_event(ran(project, reported, 0).id, %{
         type: "job.harness.rate_limit",
         payload: %{
           status: "allowed",
@@ -271,7 +320,7 @@ defmodule ForgeWeb.UserLive.SettingsCredentialsTest do
           %{"five_hour" => %{utilization: 0.02, resets_at: DateTime.to_unix(hour)}}
         ] do
       :ok =
-        Forge.Jobs.record_harness_event(ran(project, credential, "0").id, %{
+        Forge.Jobs.record_harness_event(ran(project, credential, 0).id, %{
           type: "job.harness.rate_limit",
           payload: %{
             status: "allowed",
@@ -290,15 +339,15 @@ defmodule ForgeWeb.UserLive.SettingsCredentialsTest do
              "week 30% · resets #{Calendar.strftime(week, "%a %H:%M")} UTC"
   end
 
-  # A job in `project` that started just now on `credential` and cost `cost`.
-  defp ran(project, credential, cost) do
+  # A job in `project` that started just now on `credential` and used `usage`.
+  defp ran(project, credential, usage) do
     job = Forge.ForgeFixtures.chat_fixture(%{project: project})
 
     Repo.update_all(from(j in Forge.Jobs.Job, where: j.id == ^job.id),
       set: [credential_id: credential.id]
     )
 
-    Forge.ForgeFixtures.run!(job, credential: credential, cost: cost)
+    Forge.ForgeFixtures.run!(job, credential: credential, usage: usage)
     job
   end
 

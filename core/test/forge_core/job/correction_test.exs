@@ -134,24 +134,20 @@ defmodule ForgeCore.Job.CorrectionTest do
 
   describe "remaining/2" do
     test "what is left of the budget after what was spent" do
-      assert Correction.remaining(spec(), %{turns: 30, cost: 1.5}) ==
-               {:ok, %{turns: 10, cost: 0.5}}
+      assert Correction.remaining(spec(), %{turns: 30, tokens: 300_000}) ==
+               {:ok, %{turns: 10, tokens: 100_000}}
     end
 
-    test "nothing worth starting on no turns, or no money" do
-      assert Correction.remaining(spec(), %{turns: 40, cost: 0.1}) == :exhausted
-      assert Correction.remaining(spec(), %{turns: 39, cost: 2.0}) == :exhausted
-      assert Correction.remaining(%{spec() | budget: nil}, %{turns: 0, cost: 0}) == :exhausted
+    test "nothing worth starting on no turns, or no tokens" do
+      assert Correction.remaining(spec(), %{turns: 40, tokens: 1000}) == :exhausted
+      assert Correction.remaining(spec(), %{turns: 39, tokens: 400_000}) == :exhausted
+      assert Correction.remaining(spec(), %{turns: 39, tokens: 500_000}) == :exhausted
+      assert Correction.remaining(%{spec() | budget: nil}, %{turns: 0, tokens: 0}) == :exhausted
     end
 
-    test "whole cents, rounded down, and at least one of them" do
-      assert {:ok, %{cost: 0.99}} = Correction.remaining(spec(), %{turns: 0, cost: 1.004})
-      assert {:ok, %{cost: 0.01}} = Correction.remaining(spec(), %{turns: 0, cost: 1.99})
-      assert Correction.remaining(spec(), %{turns: 0, cost: 1.996}) == :exhausted
-    end
-
-    test "one turn and a little money is enough" do
-      assert {:ok, %{turns: 1}} = Correction.remaining(spec(), %{turns: 39, cost: 1.99})
+    test "one token and one turn are enough" do
+      assert {:ok, %{turns: 1, tokens: 1}} =
+               Correction.remaining(spec(), %{turns: 39, tokens: 399_999})
     end
   end
 end

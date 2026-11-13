@@ -139,9 +139,9 @@ defmodule ForgeCore.Engine do
     end
   end
 
-  @doc "Whether a ticket that has spent `cost_usd` may still run jobs."
-  @spec within_ticket_budget?(Workflow.t(), number()) :: boolean()
-  def within_ticket_budget?(%Workflow{limits: %{ticket_cost: cap}}, cost_usd), do: cost_usd < cap
+  @doc "Whether a ticket that has used `usage` weighted tokens may still run jobs."
+  @spec within_ticket_budget?(Workflow.t(), non_neg_integer()) :: boolean()
+  def within_ticket_budget?(%Workflow{limits: %{ticket_tokens: cap}}, usage), do: usage < cap
 
   @doc "Counts after `transition` fires once more."
   @spec record(counts(), Transition.t()) :: counts()

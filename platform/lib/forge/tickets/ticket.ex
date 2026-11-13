@@ -36,7 +36,8 @@ defmodule Forge.Tickets.Ticket do
     field :ticket_type, :string
     field :state, :string
     field :status, Ecto.Enum, values: [:active, :stuck, :done, :cancelled], default: :active
-    field :cost_usd, :decimal, default: Decimal.new(0)
+    field :usage, :integer, default: 0
+    field :usage_converted, :boolean, default: false
     field :pending_transition, :map
 
     belongs_to :project, Forge.Projects.Project
@@ -104,11 +105,11 @@ defmodule Forge.Tickets.Ticket do
     |> validate_required([:base_commit])
   end
 
-  @doc "Changeset for the engine moving a ticket: state, status and accumulated cost only."
+  @doc "Changeset for the engine moving a ticket: state, status and accumulated usage only."
   def progress_changeset(ticket, attrs) do
     ticket
-    |> cast(attrs, [:state, :status, :cost_usd, :pending_transition])
-    |> validate_required([:state, :status, :cost_usd])
-    |> validate_number(:cost_usd, greater_than_or_equal_to: 0)
+    |> cast(attrs, [:state, :status, :usage, :pending_transition])
+    |> validate_required([:state, :status, :usage])
+    |> validate_number(:usage, greater_than_or_equal_to: 0)
   end
 end

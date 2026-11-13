@@ -423,6 +423,28 @@ defmodule Forge.Operator do
     with :ok <- allow(project, user, :manage), do: Projects.set_effort(project, effort, user)
   end
 
+  @doc "Sets the project's default harness."
+  @spec set_harness(Project.t(), User.t(), String.t()) :: {:ok, Project.t()} | {:error, term()}
+  def set_harness(%Project{} = project, %User{} = user, harness) do
+    with :ok <- allow(project, user, :manage), do: Projects.set_harness(project, harness, user)
+  end
+
+  @doc "Sets Codex's default model for the project."
+  @spec set_codex_model(Project.t(), User.t(), String.t() | nil) ::
+          {:ok, Project.t()} | {:error, term()}
+  def set_codex_model(%Project{} = project, %User{} = user, model) do
+    with :ok <- allow(project, user, :manage),
+         do: Projects.set_codex_model(project, model, user)
+  end
+
+  @doc "Sets Codex's default effort for the project."
+  @spec set_codex_effort(Project.t(), User.t(), String.t() | nil) ::
+          {:ok, Project.t()} | {:error, term()}
+  def set_codex_effort(%Project{} = project, %User{} = user, effort) do
+    with :ok <- allow(project, user, :manage),
+         do: Projects.set_codex_effort(project, effort, user)
+  end
+
   @doc """
   Sets one of the project's secrets: a new one, or a new version of the live one with that name.
   A project admin's (`docs/design/secrets.md` § What a secret is).

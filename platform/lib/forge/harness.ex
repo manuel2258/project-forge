@@ -13,10 +13,11 @@ defmodule Forge.Harness do
 
   @typedoc """
   Why a check did not accept a credential. `:refused` means the provider answered and said no;
-  `{:unreachable, phrase}` means it did not answer usefully, and the phrase is fixed text the
-  driver chose — **never** anything derived from the request, whose headers are the secret.
+  `{:unreachable, phrase}` means it did not answer usefully, and `{:malformed, phrase}` that the
+  secret has the wrong shape (for a harness checked by shape alone); the phrase is fixed text the
+  driver chose — **never** anything derived from the request or the secret.
   """
-  @type failure :: :refused | {:unreachable, String.t()}
+  @type failure :: :refused | {:unreachable, String.t()} | {:malformed, String.t()}
 
   @doc "The harness's own name, for a person."
   @callback label() :: String.t()
@@ -24,11 +25,31 @@ defmodule Forge.Harness do
   @doc "The kinds of secret it takes, each with a label for a person, in the order to offer them."
   @callback kinds() :: [{String.t(), String.t()}]
 
+  @typedoc """
+  What a kind of credential declares (`docs/design/credentials.md` § One mechanism, differences
+  declared per kind): whether at most one run may hold it at a time, whether a run hands it back
+  changed, and whether it is checked against the provider on save or only by its shape.
+  """
+  @type traits :: %{exclusive: boolean(), returns: boolean(), checked: :provider | :shape}
+
+  @doc "What a kind declares."
+  @callback traits(kind :: String.t()) :: traits()
+
+  @doc """
+  What the secret itself says of whose it is, for a row and for comparing a returned copy:
+  `%{account_id: ..., plan: ...}`, or nothing. Display and comparison only.
+  """
+  @callback attributes(kind :: String.t(), secret :: map()) :: map()
+
+  @optional_callbacks attributes: 2
+
   @doc """
   Asks the provider whether this secret works and which models it may use. Must never raise and
   must never put the secret, or anything carrying it, into what it returns.
   """
   @callback check(kind :: String.t(), secret :: map()) :: {:ok, [model()]} | {:error, failure()}
+
+  @unknown_kind %{exclusive: false, returns: false, checked: :provider}
 
   @doc "The driver for a harness name."
   @spec driver(String.t() | nil) :: {:ok, module()} | {:error, :unknown_harness}
@@ -42,6 +63,24 @@ defmodule Forge.Harness do
   @doc "Every harness this node knows, by name."
   @spec names() :: [String.t()]
   def names, do: drivers() |> Map.keys() |> Enum.sort()
+
+  @doc "What the secret says of itself, by the driver's `attributes/2` where it has one."
+  @spec attributes(module(), String.t(), map()) :: map()
+  def attributes(module, kind, secret) do
+    Code.ensure_loaded(module)
+    if function_exported?(module, :attributes, 2), do: module.attributes(kind, secret), else: %{}
+  end
+
+  @doc "What a kind of a harness's credential declares; a kind nobody knows declares nothing."
+  @spec traits(String.t() | nil, String.t() | nil) :: traits()
+  def traits(name, kind) do
+    with {:ok, module} <- driver(name),
+         true <- Enum.any?(module.kinds(), &(elem(&1, 0) == kind)) do
+      module.traits(kind)
+    else
+      _unknown -> @unknown_kind
+    end
+  end
 
   @doc "The kinds of secret a harness takes, or none for a harness this node does not know."
   @spec kinds(String.t() | nil) :: [{String.t(), String.t()}]
@@ -72,5 +111,6 @@ defmodule Forge.Harness do
 
   # A literal and not configuration: nothing needs to swap a harness out, and an
   # indirection with no reader is a claim nothing checks. A second harness is a line here.
-  defp drivers, do: %{"claude_code" => Forge.Harness.ClaudeCode}
+  defp drivers,
+    do: %{"claude_code" => Forge.Harness.ClaudeCode, "codex" => Forge.Harness.Codex}
 end

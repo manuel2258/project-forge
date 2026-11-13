@@ -245,13 +245,13 @@ config :phoenix, :filter_parameters, ["password", "secret", "token"]
 # a human resolves by raising it or rerouting, this one is resolved by midnight — so it pauses the
 # node rather than sticking tickets, and never puts anything in the queue. See
 # docs/design/capacity.md.
-config :forge, Forge.Spend, daily_cost_usd: nil
+config :forge, Forge.Spend, daily_tokens: nil
 
-# One unit of capacity is one percent of a five-hour window. `window_cost_usd` is the cost of a
+# One unit of capacity is one percent of a five-hour window. `window_tokens` is the weighted tokens of a
 # whole window: the only bridge from the cost the harness estimates to the unit the operator
 # reads. PLACEHOLDER until dogfooding calibrates it — display only, nothing schedules or caps on
 # it. See docs/design/capacity.md.
-config :forge, :capacity, window_cost_usd: 5.0
+config :forge, :capacity, window_tokens: 1_000_000
 
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.

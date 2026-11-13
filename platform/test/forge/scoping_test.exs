@@ -131,7 +131,7 @@ defmodule Forge.ScopingTest do
           Forge.Tickets.Ticket.progress_changeset(ticket, %{
             state: ticket.state,
             status: :done,
-            cost_usd: ticket.cost_usd
+            usage: ticket.usage
           })
         )
 
@@ -261,7 +261,7 @@ defmodule Forge.ScopingTest do
         Forge.Tickets.Ticket.progress_changeset(ticket, %{
           state: ticket.state,
           status: :stuck,
-          cost_usd: ticket.cost_usd
+          usage: ticket.usage
         })
       )
 

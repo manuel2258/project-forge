@@ -120,7 +120,7 @@ defmodule ForgeWeb.Indicators do
   end
 
   @doc """
-  What a `budget_exhausted` job ran out of, demoted beside its outcome: `turns`, `cost` or
+  What a `budget_exhausted` job ran out of, demoted beside its outcome: `turns`, `tokens` or
   `wall clock`.
 
   Drawn nowhere else and for no other outcome, and nothing at all for a job whose ceiling was
@@ -154,7 +154,7 @@ defmodule ForgeWeb.Indicators do
   # a test of it would have to build a row the platform cannot store. It is kept for what it
   # says: the ceiling belongs to that outcome and no other.
   defp ceiling_word(%{outcome: :budget_exhausted, exhausted: :turns}), do: "turns"
-  defp ceiling_word(%{outcome: :budget_exhausted, exhausted: :cost}), do: "cost"
+  defp ceiling_word(%{outcome: :budget_exhausted, exhausted: :tokens}), do: "tokens"
   defp ceiling_word(%{outcome: :budget_exhausted, exhausted: :wall_clock}), do: "wall clock"
   defp ceiling_word(_job), do: nil
 

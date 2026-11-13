@@ -913,6 +913,157 @@ defmodule ForgeWorker.Job.DirTest do
     end
   end
 
+  describe "read_auth/1" do
+    test "reads a login of the size a login can be, and not one past it", %{
+      root: root,
+      spec: spec
+    } do
+      job_dir = Dir.prepare(root, spec)
+      codex = Path.join(Dir.home_dir(job_dir), ".codex")
+      File.mkdir_p!(codex)
+      path = Path.join(codex, "auth.json")
+
+      File.write!(path, String.duplicate("x", 65_536))
+      assert {:ok, text} = Dir.read_auth(job_dir)
+      assert byte_size(text) == 65_536
+
+      File.write!(path, String.duplicate("x", 65_537))
+      assert Dir.read_auth(job_dir) == :error
+    end
+  end
+
+  # `docs/design/codex.md` § Sessions: Codex's rollout under `CODEX_HOME/sessions/`, carried like
+  # Claude's, and never the login beside it.
+  describe "a Codex session" do
+    @thread "0199-aaaa-bbbb"
+    @rollout ~s({"type":"session_meta","payload":{"id":"0199-aaaa-bbbb"}}\n{"type":"event_msg"}\n)
+
+    setup %{root: root, spec: spec} do
+      job_dir = Dir.prepare(root, spec)
+      codex = Path.join(Dir.home_dir(job_dir), ".codex")
+      day = Path.join([codex, "sessions", "2026", "11", "12"])
+      File.mkdir_p!(day)
+      File.write!(Path.join(day, "rollout-2026-11-12T08-00-00-#{@thread}.jsonl"), @rollout)
+      File.write!(Path.join(codex, "auth.json"), ~s({"tokens":{"refresh_token":"MARKER-SECRET"}}))
+
+      %{
+        job_dir: job_dir,
+        codex: codex,
+        target: Path.join(tmp_dir("staged"), "session.jsonl")
+      }
+    end
+
+    test "is staged from the date directory it is in, and only it", context do
+      assert :ok = Dir.stage_session(context.job_dir, @thread, context.target, layout: :rollout)
+      assert File.read!(context.target) == @rollout
+      refute File.read!(context.target) =~ "MARKER-SECRET"
+    end
+
+    test "never stages the login: a thread named like it is not found", context do
+      assert {:error, :not_found} =
+               Dir.stage_session(context.job_dir, "auth", context.target, layout: :rollout)
+
+      refute File.exists?(context.target)
+    end
+
+    test "is not found under another thread's id", context do
+      assert {:error, :not_found} =
+               Dir.stage_session(context.job_dir, "0199-zzzz", context.target, layout: :rollout)
+
+      assert {:error, :bad_id} =
+               Dir.stage_session(context.job_dir, "../x", context.target, layout: :rollout)
+    end
+
+    test "is not read through a link standing in for a directory", context do
+      elsewhere = tmp_dir("elsewhere")
+      File.write!(Path.join(elsewhere, "rollout-x-other-thread.jsonl"), "not the job's")
+      File.ln_s!(elsewhere, Path.join([context.codex, "sessions", "linked"]))
+
+      assert {:error, :not_found} =
+               Dir.stage_session(context.job_dir, "other-thread", context.target,
+                 layout: :rollout
+               )
+
+      sessions = Path.join(context.codex, "sessions")
+      File.rm_rf!(sessions)
+      File.ln_s!(elsewhere, sessions)
+
+      assert {:error, {:not_a_directory, _}} =
+               Dir.stage_session(context.job_dir, @thread, context.target, layout: :rollout)
+    end
+
+    test "is found four directories down, and not through a linked file",
+         context do
+      deepest = Path.join([context.codex, "sessions", "a", "b", "c", "d"])
+      File.mkdir_p!(deepest)
+      File.write!(Path.join(deepest, "rollout-t-deepest-thread.jsonl"), @rollout)
+
+      assert :ok =
+               Dir.stage_session(context.job_dir, "deepest-thread", context.target,
+                 layout: :rollout
+               )
+
+      # A link standing in for the file itself is not a rollout.
+      elsewhere = Path.join(tmp_dir("elsewhere"), "real.jsonl")
+      File.write!(elsewhere, "not the job's")
+      day = Path.join([context.codex, "sessions", "2026", "11", "12"])
+      File.ln_s!(elsewhere, Path.join(day, "rollout-t-linked-thread.jsonl"))
+
+      assert {:error, :not_found} =
+               Dir.stage_session(context.job_dir, "linked-thread", context.target,
+                 layout: :rollout
+               )
+    end
+
+    test "is not searched for five directories down", context do
+      deep = Path.join([context.codex, "sessions", "a", "b", "c", "d", "e"])
+      File.mkdir_p!(deep)
+      File.write!(Path.join(deep, "rollout-t-deep-thread.jsonl"), @rollout)
+
+      assert {:error, :not_found} =
+               Dir.stage_session(context.job_dir, "deep-thread", context.target, layout: :rollout)
+    end
+
+    test "is recognised by the thread its first record names" do
+      path = Path.join(tmp_dir("check"), "rollout.jsonl")
+      File.write!(path, @rollout)
+
+      assert Dir.session_file?(path, @thread, :rollout)
+      refute Dir.session_file?(path, "0199-zzzz", :rollout)
+      # Claude's chained records do not make a Codex rollout, nor the other way round.
+      refute Dir.session_file?(path, @thread, :projects)
+      File.write!(path, ~s({"type":"user","sessionId":"0199-aaaa-bbbb","parentUuid":null}\n))
+      refute Dir.session_file?(path, @thread, :rollout)
+      File.write!(path, @rollout <> "not json\n")
+      refute Dir.session_file?(path, @thread, :rollout)
+    end
+
+    test "is put back under sessions/ for a resume, and the login is not touched", %{
+      root: root,
+      spec: spec,
+      codex: codex
+    } do
+      File.rm_rf!(Path.join(codex, "sessions"))
+      source = Path.join(tmp_dir("fetched"), "restore.jsonl")
+      File.write!(source, @rollout)
+
+      job_dir =
+        Dir.prepare(root, spec,
+          session: %{id: @thread, source: source, cwd: "/work", layout: :rollout}
+        )
+
+      [placed] =
+        Path.wildcard(Path.join([Dir.home_dir(job_dir), ".codex", "sessions", "**", "*.jsonl"]))
+
+      assert Path.basename(placed) =~
+               ~r/\Arollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-#{@thread}\.jsonl\z/
+
+      assert File.read!(placed) == @rollout
+      assert File.read!(Path.join(codex, "auth.json")) =~ "MARKER-SECRET"
+      refute File.exists?(Path.join([Dir.home_dir(job_dir), ".claude"]))
+    end
+  end
+
   # `docs/design/claude-code-events.md` § Resume: the harness session, read out of the job's
   # `HOME` for upload and put back into it for a resume — every part of that path the job's.
   describe "the harness session" do

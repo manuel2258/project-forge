@@ -24,13 +24,13 @@ defmodule ForgeCore.Workflow.ChatStepTest do
       outcomes: [done, needs_more]
     planning:
       prompt: agents/plan.md
-      budget: { turns: 5, cost: 1 }
+      budget: { turns: 5, tokens: 200k }
     review_ready: {}
   transitions:
     - { from: refining, to: planning, approve: [refinement.md] }
     - { from: refining, to: review_ready, when: needs_more }
     - { from: planning, to: review_ready }
-  limits: { ticket_cost: 5 }
+  limits: { ticket_tokens: 1M }
   """
 
   defp base_map do
@@ -71,7 +71,7 @@ defmodule ForgeCore.Workflow.ChatStepTest do
     {:ok, workflow} =
       map
       |> update_in(["states", "refining"], &Map.delete(&1, "chat"))
-      |> then(&put_in(&1, ["states", "refining", "budget"], %{"turns" => 3, "cost" => 1}))
+      |> then(&put_in(&1, ["states", "refining", "budget"], %{"turns" => 3, "tokens" => 200_000}))
       |> Parser.from_map()
 
     assert Enum.all?(workflow.states, fn {_name, state} -> state.chat == false end)
@@ -85,7 +85,7 @@ defmodule ForgeCore.Workflow.ChatStepTest do
   test "a budget is refused on a chat step, by name, with the reason" do
     assert [message] =
              refused(
-               with_step(%{"budget" => %{"turns" => 3, "cost" => 1}}),
+               with_step(%{"budget" => %{"turns" => 3, "tokens" => 200_000}}),
                "states.refining.budget"
              )
 
@@ -222,7 +222,7 @@ defmodule ForgeCore.Workflow.ChatStepTest do
       review_ready: {}
     transitions:
       - { from: refining, to: review_ready }
-    limits: { ticket_cost: 5 }
+    limits: { ticket_tokens: 1M }
     """
 
     reader = fn path -> if path == "common.yml", do: {:ok, common}, else: :error end

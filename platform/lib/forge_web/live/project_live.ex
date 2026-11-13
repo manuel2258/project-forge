@@ -97,8 +97,7 @@ defmodule ForgeWeb.ProjectLive do
       open: Enum.count(tickets, &(&1.status in Forge.Tickets.Ticket.open_statuses())),
       waiting: Enum.count(tickets, &(&1.status == :stuck)),
       # Every ticket's, a cancelled one's too: cancelling hides a ticket, it does not unspend it.
-      spent:
-        project |> Tickets.all() |> Enum.reduce(Decimal.new(0), &Decimal.add(&2, &1.cost_usd)),
+      spent: project |> Tickets.all() |> Enum.reduce(0, &(&2 + &1.usage)),
       events: Events.for_project(project.id, 8),
       # The board is the workflow, and a plain conversation is not on it — it has no state to be in
       # (a chat step is a ticket's state).
@@ -751,7 +750,7 @@ defmodule ForgeWeb.ProjectLive do
                   </td>
                   <td data-label="Budget" class="py-2 pr-3 font-mono opacity-70">
                     <div :if={row.state.budget}>
-                      {row.state.budget.turns} turns · {Format.windows(row.state.budget.cost) || "—"}
+                      {row.state.budget.turns} turns · {Format.windows(row.state.budget.tokens) || "—"}
                     </div>
                   </td>
                   <td data-label="Goes to" class="py-2 font-mono opacity-70">

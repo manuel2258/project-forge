@@ -694,7 +694,7 @@ note defines a credential's spend as *"a query over the jobs that used it"*, and
 the credential each run of a job spent to make it one (`credentials.md` § Spend). Machine spend is
 not a query over jobs — it is hours times rate, and it accrues with nothing running. Folding both
 into one table makes every existing spend query carry a filter to stay correct, and makes
-`daily_limit_usd` mean two different things.
+`daily_limit` mean two different things.
 
 **The secret is a map, not a string.** Hetzner needs one token; another provider needs a key pair;
 a third needs a service-account document. The driver owns the shape and validates it on save, so a

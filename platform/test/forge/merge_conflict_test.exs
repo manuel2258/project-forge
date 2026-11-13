@@ -576,7 +576,7 @@ defmodule Forge.MergeConflictTest do
     %{
       "turn" => index,
       "commit" => String.duplicate("a", 40),
-      "harness" => %{"turns" => 1, "cost_usd" => 0.01, "session_id" => "sess-1"},
+      "harness" => %{"turns" => 1, "usage" => 2_000, "cost_usd" => 0.01, "session_id" => "sess-1"},
       "transition_request" => %{"decision" => "approved"}
     }
   end

@@ -70,6 +70,32 @@ defmodule ForgeWorker.Job.RunnerStreamingTest do
     {pid, spec}
   end
 
+  # **Forge stops a conversation past what was left of the day** (`docs/design/capacity.md` §
+  # Stopping a job already running). The fake's reply weighs 150 weighted tokens, so a ceiling of
+  # 100 is passed by the first reply: the process is killed and the result says why.
+  test "a conversation past its token ceiling is stopped, and says why", context do
+    {pid, _spec} = chat(context, max_tokens: 100)
+
+    assert Runner.send_message(pid, "hello") == :ok
+    assert_receive {:ended, _job_id, result}, 5_000
+
+    assert result.killed == :tokens
+    assert result.reason == "token budget reached"
+  end
+
+  test "a conversation under its token ceiling is not stopped", context do
+    {pid, _spec} = chat(context, max_tokens: 1_000)
+
+    assert Runner.send_message(pid, "hello") == :ok
+    assert_receive {:turn, _job_id, 1, event}, 5_000
+    assert event.payload.usage_total == 150
+    assert event.payload.tokens_total == %{input: 100, cache_write: 0, cache_read: 0, output: 10}
+
+    Runner.close(pid)
+    assert_receive {:ended, _job_id, result}, 5_000
+    assert result.killed == nil
+  end
+
   # A reopened conversation with nothing waiting holds its prompt until someone writes; its
   # harness is silent because it has been given nothing, and that is not a harness failing to
   # start. The watch begins when the prompt goes down, not when the process does: held for twice

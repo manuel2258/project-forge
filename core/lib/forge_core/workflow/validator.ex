@@ -168,15 +168,16 @@ defmodule ForgeCore.Workflow.Validator do
     ]
 
   # A command's environment and size are the command's own; the state has nothing to run them with
-  # but `resources`, which its commands fall back to. `model` and `effort` are not the command's
-  # own either — a command job carries no harness at all (`docs/design/commands.md`), so both name
-  # a dial nothing here turns.
+  # but `resources`, which its commands fall back to. `model`, `effort` and `harness` are not
+  # the command's own either — a command job carries no harness at all
+  # (`docs/design/commands.md`), so each names a dial nothing here turns.
   defp state_shape(path, %State{prompt: nil, invoke: [_ | _]} = command) do
     present =
       [
         env: command.env,
         model: command.model,
         effort: command.effort,
+        harness: command.harness,
         inputs: command.inputs,
         produces: command.produces,
         optional: command.optional,
@@ -221,6 +222,7 @@ defmodule ForgeCore.Workflow.Validator do
         env: human.env,
         model: human.model,
         effort: human.effort,
+        harness: human.harness,
         inputs: human.inputs,
         # Nothing obliges a person to write a human state's documents, so every one of them is
         # already optional and saying so declares nothing.

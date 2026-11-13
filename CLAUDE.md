@@ -35,6 +35,16 @@ recorded per run, and each credential's five-hour and weekly windows are drawn o
 row and in the top bar. How a real limit reads is still third-party accounts, unobserved here.
 What it leaves out on purpose is in its § Deliberately not here.
 
+`docs/design/codex.md` is the standard for the second harness, Codex CLI, on a ChatGPT login (held by
+one run at a time, returned changed) or a Codex access token, and `docs/design/capacity.md` §
+Usage in weighted tokens for how every run — Claude's too — is counted and capped in weighted
+tokens, not dollars. **It is built** (ticket 43): usage counted in weighted tokens for both
+harnesses and a run stopped by the worker once its tokens pass its budget, a job's harness and a
+model and effort per harness, the two Codex credential kinds with a login held by one run and
+handed back refreshed, the driver on `codex app-server`, a Codex session carried between machines,
+and the screens; a worker needs protocol 11. **None of the Codex side has run against OpenAI**:
+`docs/design/codex.md` § Not verified here is what a first real run has to confirm.
+
 `docs/design/provisioning.md` is the standard for what a job asks for and where a machine comes
 from: resources declared per job, a gate on kind as well as memory and cores, worker templates as
 a recipe the platform creates from, per-user provider credentials, and a driver registry in place

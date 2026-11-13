@@ -85,14 +85,14 @@ states:
     inputs: [ticket]
     produces: [refinement.md]
     outcomes: [done]                  # default; may be omitted
-    budget: { turns: 20, cost: 0.50 }
+    budget: { turns: 20, tokens: 100k }
 
   planning:
     prompt: agents/plan.md
     env: implement
     inputs: [ticket, refinement.md]
     produces: [plan.md]
-    budget: { turns: 40, cost: 2.00 }
+    budget: { turns: 40, tokens: 400k }
 
   implementing:
     prompt: agents/implement.md
@@ -106,7 +106,7 @@ states:
     # Notes on what was done, the diff, and what the merge commit will say (§ Merging).
     produces: [implementation.md, changeset, commit-message]
     outcomes: [done, plan_invalid]
-    budget: { turns: 200, cost: 10.00 }
+    budget: { turns: 200, tokens: 2M }
 
   checking:                           # a command state: no prompt, no agent, no budget
     invoke: [build, [test, --all]]
@@ -120,7 +120,7 @@ states:
     inputs: [plan.md, implementation.md, changeset]
     produces: [report.md]
     outcomes: [done, tests_failed]
-    budget: { turns: 60, cost: 3.00 }
+    budget: { turns: 60, tokens: 600k }
 
   review_ready: {}                    # human state: no prompt, no job
   merged:
@@ -134,7 +134,7 @@ states:
       build: { max: 10 }
     inputs: [plan.md, changeset]
     produces: [integration.md, changeset]
-    budget: { turns: 80, cost: 4.00 }
+    budget: { turns: 80, tokens: 800k }
 
 transitions:
   - { from: refining,     to: planning,     approve: [refinement.md] }
@@ -149,7 +149,7 @@ transitions:
   - { from: integrating,  to: checking }    # back through the checks and the approval (§ Merging)
 
 limits:
-  ticket_cost: 25.00
+  ticket_tokens: 5M
 ```
 
 ## Semantics
@@ -390,28 +390,40 @@ into it named, not whatever the branch head happens to be, and checks it before 
 transition into it is taken — and before the engine's own, when the state names `on_conflict`.
 What a conflict does is the state's to say, with that key — § Merging.
 
-**Budget.** `turns` and `cost` (USD) are per job and required on every job state. A command state
+**Budget.** `turns` and `tokens` (weighted tokens: `800k`, `4M`, an integer — `capacity.md` § Usage in
+weighted tokens) are per job and required on every job state. `cost` (USD) is the older key: the
+parser still reads it, converts it at `ForgeCore.Usage.per_dollar/0` and remembers it
+(`Workflow.legacy_keys/1` lists what a workflow still names), and **admitting a ticket on a workflow with one is refused**, naming the
+replacement. A ticket already admitted keeps running on the converted figure. `turns` bounds a
+Claude Code run and does not bound a Codex run. A command state
 has neither — there is no inference to bound — and is bounded by each command's `timeout` instead;
 declaring `budget` on one is an error. Reaching
 either ends the job with `budget_exhausted`, and the job row names which ceiling stopped it.
-There are three, not two: the turn budget, the cost budget, and the engine's wall-clock limit,
+There are three, not two: the turn budget, the token budget, and the engine's wall-clock limit,
 which is a default of the engine's and has no key here at all
-(`capacity.md` § Four exhaustions, three treatments). `limits.ticket_cost` is required and caps the
+(`capacity.md` § Four exhaustions, three treatments). `limits.ticket_tokens` (the older `ticket_cost`, refused the same way) is required and caps the
 sum over all jobs of a ticket; reaching it sticks the ticket. Budgets are never modifiable by a
 job.
 
-**`limits.ticket_cost` caps the jobs the engine starts, and not a conversation.** The workflow
+**`limits.ticket_tokens` caps the jobs the engine starts, and not a conversation.** The workflow
 and command jobs of a ticket are what it sums; a conversation opened on that ticket has no
 ticket allowance and meets the daily cap alone, as `capacity.md` § Spend caps and
 `conversations.md` § Spend already say. The allowance exists to stop a runaway workflow, and a
 person asking why a ticket is stuck is not one — a cap that stopped them investigating would
 work against its own purpose. A chat's spend is still recorded, on the conversation and its own
-runs rather than on `ticket.cost_usd` — **but for a chat step's** (§ Chat steps), whose turns add
-to `ticket.cost_usd`: the step is the ticket's own work, the next job's cap sees it, and nothing
+runs rather than on `ticket.usage` — **but for a chat step's** (§ Chat steps), whose turns add
+to `ticket.usage`: the step is the ticket's own work, the next job's cap sees it, and nothing
 the cap finds ends the conversation.
 
 **Environment.** `env` is a devShell name in the project's `flake.nix`; the job runs inside
 `nix develop .#<env>`. Absent `env` means no toolchain beyond the harness.
+
+**Harness.** `harness` names which execution harness runs this state's job: `claude_code` or `codex`
+(`ForgeCore.Harness.names/0`; `docs/design/codex.md`). A job's harness is its state's, else its
+project's setting, else `claude_code`, so a workflow naming none behaves as before. A command state
+has none. The model and effort chains below walk the **job's harness's** settings: a project holds
+a model and an effort for each, its existing ones being Claude Code's, and `FORGE_CLAUDE_MODEL` /
+`FORGE_CLAUDE_EFFORT` remain Claude Code's alone.
 
 **Model.** `model` names the model this state's job runs on — `opus`, `sonnet`, `haiku`, or a
 full id. It is optional, and what fills the gap is a chain: the state's, then the project's, then
@@ -532,7 +544,7 @@ states:
   not offer it either) and says to ask the agent for it, which the step may write.
 - **No ceiling.** `budget` is refused. The node's daily cap and the idle timeout still pause or
   end the conversation, and the ticket stays in the step. Its spend is added to the ticket's
-  cost and is seen by the cap on later jobs; the cap never ends the chat (§ `limits.ticket_cost`).
+  cost and is seen by the cap on later jobs; the cap never ends the chat (§ `limits.ticket_tokens`).
 - **A visit is one conversation.** A ticket returning to the step over a backward edge opens a
   new one, which is told it is a return. Reopening a dormant conversation is not a new visit.
 - **Not a changeset step.** A chat commits to its own branch, so `changeset` and `commit-message`
@@ -885,7 +897,7 @@ states:
     prompt: agents/implement.md
     env: implement
     produces: [implementation.md, changeset]
-    budget: { turns: 200, cost: 10.00 }
+    budget: { turns: 200, tokens: 2M }
 ```
 
 ```yaml

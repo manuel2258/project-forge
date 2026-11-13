@@ -494,9 +494,65 @@ defmodule ForgeWorker.Job.Dir do
   and the *handle's* owner decides — the job's own user while it runs, root once it has gone and
   nothing is left to swap a path. A session id that is not one is refused before it is a path.
   `:owner` and `:max_bytes` are for a test, as `stage_groups/4`'s are.
+
+  `layout: :rollout` is Codex's: `home/.codex/sessions/<year>/<month>/<day>/rollout-<time>-<thread>.jsonl`,
+  found by walking `sessions/` and nowhere else — **`auth.json` and the rest of `.codex/` are
+  never looked at, so they cannot leave in a session upload** (`docs/design/codex.md` § Sessions).
   """
   @spec stage_session(String.t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
-  def stage_session(job_dir, session_id, target, opts \\ []) do
+  def stage_session(job_dir, session_id, target, opts \\ [])
+
+  def stage_session(job_dir, session_id, target, opts) do
+    if Keyword.get(opts, :layout, :projects) == :rollout,
+      do: stage_rollout(job_dir, session_id, target, opts),
+      else: stage_project_session(job_dir, session_id, target, opts)
+  end
+
+  defp stage_rollout(job_dir, session_id, target, opts) do
+    owner = Keyword.get_lazy(opts, :owner, fn -> owner(job_dir) end)
+    max_bytes = Keyword.get(opts, :max_bytes, @session_max_bytes)
+
+    with :ok <- check_session_id(session_id),
+         {:ok, sessions} <- real_dirs(home_dir(job_dir), [".codex", "sessions"]) do
+      case find_rollout(sessions, session_id, 4) do
+        nil -> {:error, :not_found}
+        path -> copy_owned(path, target, owner, max_bytes)
+      end
+    end
+  end
+
+  # Depth-limited, and a link is never followed out of `sessions/`. `list_dir/1` answers nothing for
+  # a directory that is a link, so what `rollout_at/3`'s one `lstat` call does for a *directory* is an
+  # equivalent mutant (`File.stat` there changes nothing observable); what it does for a *file* is
+  # not, and is tested: a link named like a rollout is not one.
+  defp find_rollout(dir, session_id, depth) do
+    dir
+    |> list_dir()
+    |> Enum.sort()
+    |> Enum.find_value(&rollout_at(Path.join(dir, &1), session_id, depth))
+  end
+
+  defp rollout_at(path, session_id, depth) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :regular}} ->
+        if rollout_named?(path, session_id), do: path
+
+      {:ok, %File.Stat{type: :directory}} when depth > 0 ->
+        find_rollout(path, session_id, depth - 1)
+
+      _other ->
+        nil
+    end
+  end
+
+  defp rollout_named?(path, session_id) do
+    name = Path.basename(path)
+
+    String.starts_with?(name, "rollout-") and
+      String.ends_with?(name, "-" <> session_id <> ".jsonl")
+  end
+
+  defp stage_project_session(job_dir, session_id, target, opts) do
     owner = Keyword.get_lazy(opts, :owner, fn -> owner(job_dir) end)
     max_bytes = Keyword.get(opts, :max_bytes, @session_max_bytes)
 
@@ -536,14 +592,14 @@ defmodule ForgeWorker.Job.Dir do
   a continuation it cannot continue (`docs/measurements.md` § Session resume). This is what
   stands in front of that.
   """
-  @spec session_file?(String.t(), String.t()) :: boolean()
-  def session_file?(path, session_id) do
+  @spec session_file?(String.t(), String.t(), atom()) :: boolean()
+  def session_file?(path, session_id, layout \\ :projects) do
     with :ok <- check_session_id(session_id),
          {:ok, %File.Stat{type: :regular, size: size}} when size <= @session_max_bytes <-
            File.lstat(path) do
       path
       |> File.stream!(:line)
-      |> Enum.reduce_while(false, &read_record(&1, &2, session_id))
+      |> Enum.reduce_while(false, &read_record(&1, &2, session_id, layout))
       |> Kernel.==(true)
     else
       _no -> false
@@ -551,24 +607,40 @@ defmodule ForgeWorker.Job.Dir do
   end
 
   # Every line a record, or the file is not a session; linked once any record is.
-  defp read_record(line, linked, session_id) do
+  defp read_record(line, linked, session_id, layout) do
     case Jason.decode(line) do
-      {:ok, record} when is_map(record) -> {:cont, linked or linked?(record, session_id)}
+      {:ok, record} when is_map(record) -> {:cont, linked or linked?(record, session_id, layout)}
       _not_json -> {:halt, :broken}
     end
   end
 
-  defp linked?(%{"type" => type, "sessionId" => id} = record, session_id)
+  # Codex's rollout opens with a `session_meta` record whose payload names the thread.
+  defp linked?(%{"type" => "session_meta", "payload" => %{"id" => id}}, session_id, :rollout),
+    do: id == session_id
+
+  defp linked?(_record, _session_id, :rollout), do: false
+
+  defp linked?(%{"type" => type, "sessionId" => id} = record, session_id, :projects)
        when type in ["user", "assistant"],
        do: id == session_id and Map.has_key?(record, "parentUuid")
 
-  defp linked?(_record, _session_id), do: false
+  defp linked?(_record, _session_id, :projects), do: false
 
   # Put back where the harness looks for it, under the working directory it will run in; this
   # version of Claude Code finds it under any, but the path is the one it would have written.
   # Made fresh here: each directory on the way that is not a directory — a link the job left,
   # which this process would follow — is removed and made again, and the file is written new.
   defp place_session(_job_dir, nil), do: :ok
+
+  # Codex's goes under `.codex/sessions/<today>/`, the layout it writes and finds a thread by.
+  defp place_session(job_dir, %{id: session_id, source: source, layout: :rollout}) do
+    :ok = check_session_id(session_id)
+    now = DateTime.utc_now()
+    day = Calendar.strftime(now, "%Y/%m/%d") |> String.split("/")
+    dir = fresh_dirs(home_dir(job_dir), [".codex", "sessions" | day])
+    stamp = Calendar.strftime(now, "%Y-%m-%dT%H-%M-%S")
+    write_new!(Path.join(dir, "rollout-#{stamp}-#{session_id}.jsonl"), File.read!(source))
+  end
 
   defp place_session(job_dir, %{id: session_id, source: source, cwd: cwd}) do
     :ok = check_session_id(session_id)
@@ -615,6 +687,34 @@ defmodule ForgeWorker.Job.Dir do
           path
       end
     end)
+  end
+
+  @auth_limit 65_536
+
+  @doc """
+  The text of the job's Codex `auth.json`, or `:error` when there is none to trust.
+
+  **A regular file in a real directory**: the job's own user owns this path, and a link in its
+  place would have the worker read — as root — whatever it points at and send it on. `lstat` does
+  not follow a link, which is the model `File.read/1` would not share, and it is asked of both
+  `.codex` and `auth.json`. What this does not close is the gap between the check and the read (a
+  swap in between), and a link higher up than `.codex`, which `home` being the worker's own
+  directory prevents; the platform's checks (shape, same account, a live run) are what stands
+  behind a login that comes back. A file too large to be a login is not one.
+  """
+  @spec read_auth(String.t()) :: {:ok, String.t()} | :error
+  def read_auth(job_dir) do
+    dir = Path.join(home_dir(job_dir), ".codex")
+    path = Path.join(dir, "auth.json")
+
+    with {:ok, %File.Stat{type: :directory}} <- File.lstat(dir),
+         {:ok, %File.Stat{type: :regular, size: size}} <- File.lstat(path),
+         true <- size <= @auth_limit,
+         {:ok, text} <- File.read(path) do
+      {:ok, text}
+    else
+      _other -> :error
+    end
   end
 
   @doc "The harness's private HOME, so its own state lives with the job and not the operator."

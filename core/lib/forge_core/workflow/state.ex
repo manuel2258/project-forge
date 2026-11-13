@@ -23,6 +23,7 @@ defmodule ForgeCore.Workflow.State do
     :env,
     :model,
     :effort,
+    :harness,
     :budget,
     :outcomes,
     :resources,
@@ -58,6 +59,9 @@ defmodule ForgeCore.Workflow.State do
           # `docs/design/workflow-grammar-v1.md` § Effort for why it is a dial of its own and why
           # its value is not validated against a list.
           effort: String.t() | nil,
+          # Which harness runs this state's job: `ForgeCore.Harness.names/0`. Nil means the
+          # project's, then Claude Code (`docs/design/workflow-grammar-v1.md` § Harness).
+          harness: String.t() | nil,
           budget: Budget.t() | nil,
           inputs: [String.t()],
           produces: [String.t()],

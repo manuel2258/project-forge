@@ -29,7 +29,7 @@ defmodule ForgeWeb.SecretsDeliveryTest do
       prompt: agents/refine.md
       inputs: [ticket]
       produces: [refinement.md]
-      budget: { turns: 20, cost: 0.50 }
+      budget: { turns: 20, tokens: 100k }
       secrets: [STRIPE_TEST_KEY]
       may_invoke:
         publish: { max: 2 }
@@ -37,7 +37,7 @@ defmodule ForgeWeb.SecretsDeliveryTest do
   transitions:
     - { from: refining, to: done }
   limits:
-    ticket_cost: 5
+    ticket_tokens: 1M
   """
 
   @stripe "sk_test_51Hx-the-project's-own"
@@ -221,8 +221,8 @@ defmodule ForgeWeb.SecretsDeliveryTest do
       assert Jobs.protocol_needs(job)[:secrets] == 6
       assert Jobs.protocol(job) <= ForgeCore.WorkerProtocol.current()
       assert Jobs.protocol_needs(%{job | secret_names: []})[:secrets] == 0
-      assert Jobs.protocol(%Job{kind: :command, secret_names: ["X_KEY"]}) == 6
-      assert Jobs.protocol(%Job{kind: :command, secret_names: []}) == 2
+      assert protocol_before_usage(%Job{kind: :command, secret_names: ["X_KEY"]}) == 6
+      assert protocol_before_usage(%Job{kind: :command, secret_names: []}) == 2
     end
   end
 

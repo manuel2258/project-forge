@@ -32,7 +32,13 @@ defmodule Forge.Credentials.Credential do
     field :harness, :string
     field :kind, :string
     field :secret, :string, redact: true, load_in_query: false
-    field :daily_limit_usd, :decimal
+    field :daily_limit, :integer
+    # What a ChatGPT login names of itself, and when a returned one was last accepted; the date a
+    # Codex access token's owner says it expires. None is a secret (`Forge.Harness.Codex`).
+    field :account_id, :string
+    field :plan, :string
+    field :expires_on, :date
+    field :renewed_at, :utc_datetime
     field :models, {:array, :map}
     field :checked_at, :utc_datetime
     field :check_error, :string
@@ -56,11 +62,11 @@ defmodule Forge.Credentials.Credential do
     {secret, attrs} = pop_secret(attrs)
 
     credential
-    |> cast(attrs, [:user_id, :name, :harness, :kind, :daily_limit_usd])
+    |> cast(attrs, [:user_id, :name, :harness, :kind, :daily_limit, :expires_on])
     |> update_change(:name, &String.trim/1)
     |> validate_required([:user_id, :name, :harness, :kind])
     |> validate_length(:name, min: 1, max: 100)
-    |> validate_number(:daily_limit_usd, greater_than: 0)
+    |> validate_number(:daily_limit, greater_than: 0)
     |> validate_kind()
     |> put_secret(secret)
     |> unique_constraint(:name,

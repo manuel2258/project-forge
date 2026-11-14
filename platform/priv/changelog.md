@@ -10,6 +10,10 @@ until it changes) or **may adopt** (new and optional). A project records the rel
 brought up to in `.forge/forge-release`; `platform.md` § Upgrading to a newer forge says how an
 upgrade goes.
 
+## 0.21.0
+
+Nothing for projects in this release.
+
 ## 0.20.0
 
 - **must change** — budgets are counted in weighted tokens, not dollars. Replace `cost:` in every `budget` with `tokens:` and `limits.ticket_cost` with `limits.ticket_tokens`. A figure is an integer or a number with `k` or `M` (`800k`, `4M`, `84.2M`); the old dollar figures convert at 200k tokens a dollar, so `cost: 4.00` was `tokens: 800k`. Admitting a ticket on a workflow that still names either old key is refused, naming the replacement; a ticket already admitted keeps running on the converted figure. Giving both keys at once is an error. Before and after:

@@ -619,19 +619,47 @@ destroyed as one, and it never appears on `/workers`. **The script holds the dow
 checksum and the size, and nothing else** — the provider shows a server's first-boot script in its
 console, so no token of the provider's or of forge's and no platform address reaches it.
 
-**Being off is the success signal, and only the script's last line can produce it from a builder
-that was running.** The script masks `poweroff` and the rest, sleeps for ever on any error, and
-powers the machine off by sysrq only after the written disk has been read back and matched. A
-builder that failed any step therefore stays on. **The platform counts *off* only after it has seen
+**The disk is written with nothing mounted from it**, at power-off. The first script wrote it under
+the running system with the root remounted read-only by sysrq, and on every real builder the
+read-back failed: the old filesystem stayed mounted and in use, journald kept reading a directory
+that was no longer there, and something kept writing 4 KiB blocks into the first gigabytes after
+`dd` had finished — the console showed `jbd2/sda1` among the writers, and the checksum differed.
+So the script stages the image and the tools in `/run/initramfs` and asks for an ordinary power-off,
+and systemd's own hook for unmounting the root (`bootup(7)`) does the rest: systemd stops every
+service, unmounts what it can, pivots into `/run/initramfs` with the old root at `/oldroot` and
+executes the staged `shutdown` as PID 1, which unmounts `/oldroot` — not lazily, since a detached
+filesystem something still held would go on writing — and only then writes, reads back and powers
+off by sysrq.
+
+**Debian mounts `/run` noexec, and systemd then skips the hook without a word.** systemd-shutdown
+checks the staged program with `access(X_OK)`, which fails for root on a noexec mount; it then powers
+off normally with nothing written, and the platform would snapshot the stock image as the worker.
+The script remounts `/run` exec, and before the power-off asks `[ -x ]` — the same call, of the same
+path, `/run/initramfs/shutdown`, which is the only one systemd looks at — staying on if the answer is
+no. **That closes one of the three ways systemd falls back to a plain power-off**, the one that was
+seen. The other two are a pivot into `/run/initramfs` that fails and an `execve` of the writer that
+fails; neither has been seen, and against the second `stage` refuses to finish without every tool's
+libraries and loader beside it, but nothing on the builder can catch either before systemd acts on it.
+The writer itself refuses a device that is not a block device: given a path in an empty `/dev`, `dd`
+makes a file in memory, which reads back as the checksum.
+
+**Being off is the success signal.** The script masks `halt`, `reboot` and the rest, unmasks
+`poweroff` only once the writer is staged, waits for ever on any error, and the writer powers the
+machine off by sysrq only after the written disk has been read back and matched; after staging,
+every shutdown verb goes through systemd-shutdown and so to the writer. A builder that failed a step
+of its own therefore stays on — the exceptions are the two systemd fallbacks above, which end in
+*off* with nothing written. **The platform counts *off* only after it has seen
 the builder *running*** (`seen_running` in the handle), because a server is also off before its
 first start and after a failed one, and snapshots only a builder that was seen running and is now
 off; one still on is never snapshotted. What it cannot tell is an owner who powers the builder off
 by hand from the console while it runs: that reads as success, and the snapshot is of a half-written
 disk. The remedy is the account's own — the builder is named `forge-builder-…` and labelled — and
 the cost is a template that fails on its first machine. The cost of a signal
-a failure cannot imitate is that a failure cannot carry its words: a refused checksum, a bad
-download or a write error all read as the build being **abandoned at the time limit**, and the
-entry says so with the likely causes. The platform's own check that the blob is downloadable under
+a failure cannot imitate is that a failure cannot carry its words to the platform: a refused
+checksum, a bad download or a write error all read as the build being **abandoned at the time
+limit**, and the entry says so with the likely causes. The builder prints which one it was to its
+console, which the account's owner can open from the provider's own console page until the builder
+is deleted. The platform's own check that the blob is downloadable under
 that digest, made before anything is paid for, catches the commonest.
 
 **A build has a time limit** (30 minutes). Past it the build is abandoned, its builder deleted, and
@@ -668,9 +696,14 @@ needed it, by name, or the user who pressed *build now* — and the entry shows 
 *Build now*; only the credential's owner can press it, and only on their own page, so the person is
 never someone else.
 
-**Not verified here.** No real Hetzner builder has run. The script and its sysrq sequence are
-tested against files, the Hetzner requests through the request seam, and the anonymous GHCR pull
-is written against the published OCI distribution API.
+**What has run.** The script as it stands, unchanged, on a real Hetzner builder (`cpx22`,
+`debian-12`, nbg1): it downloaded the 0.20.0 image from GHCR, wrote and verified it at power-off and
+powered off by itself about 105 seconds after creation, and powered back on it booted the forge
+worker's NixOS. The same, with the image served locally, on Debian 12's cloud image under QEMU, where
+the serial console showed the old root unmounting before the write. What has not run is the platform
+driving one end to end: the snapshot, the mark and the delete after a builder that succeeded.
+`write_and_verify` and the program `stage` writes are tested against files and stub tools, the
+Hetzner requests through the request seam.
 
 ## Whose account
 

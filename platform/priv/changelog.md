@@ -10,6 +10,29 @@ until it changes) or **may adopt** (new and optional). A project records the rel
 brought up to in `.forge/forge-release`; `platform.md` § Upgrading to a newer forge says how an
 upgrade goes.
 
+## 0.20.0
+
+- **must change** — budgets are counted in weighted tokens, not dollars. Replace `cost:` in every `budget` with `tokens:` and `limits.ticket_cost` with `limits.ticket_tokens`. A figure is an integer or a number with `k` or `M` (`800k`, `4M`, `84.2M`); the old dollar figures convert at 200k tokens a dollar, so `cost: 4.00` was `tokens: 800k`. Admitting a ticket on a workflow that still names either old key is refused, naming the replacement; a ticket already admitted keeps running on the converted figure. Giving both keys at once is an error. Before and after:
+
+  ```yaml
+  # before
+  budget: { turns: 80, cost: 4.00 }
+  limits:
+    ticket_cost: 25.00
+  # after
+  budget: { turns: 80, tokens: 800k }
+  limits:
+    ticket_tokens: 5M
+  ```
+
+  (workflow-grammar.md § Semantics, Budget)
+
+- **may adopt** — run a state on Codex CLI with `harness: codex` on it (`claude_code` is the other value and the default). A job's harness is its state's, else the project's setting, else Claude Code, so a workflow naming none behaves as before. `model` and `effort` apply to the job's harness, and a project holds a model and an effort for each harness. `turns` bounds a Claude Code run and not a Codex run; `tokens` bounds both. A conversation can also be opened on Codex. Codex needs a Codex credential in the project's pool (a ChatGPT login, a Codex access token or an API key). Nothing of the Codex side has yet run against OpenAI. (workflow-grammar.md § Semantics, Harness)
+
+- **may adopt** — every job and conversation is handed this changelog as `$FORGE_JOB/platform/changelog.md`, and a project records the release it was last brought up to in `.forge/forge-release`, a version and a newline (`0.20.0`). The project page reads that file and says whether the project is current, behind, newer or not recorded; with no file it counts as 0.1.1. Ask a conversation to bring the project up to the latest forge release and it works through the sections after the recorded one. (platform.md § Upgrading to a newer forge)
+
+- **may adopt** — a release workflow (`release: true`) gets a record and a tag when a release ticket ends `done`: the platform keeps a record, and tags the merge's commit `v<version>` when the release has a version. The record lists the files of the groups named in `release_files: [name/*, ...]`, the text of the document named in `release_notes: <document>` (also the tag's message), and the `links:` (`[{label, url}]`) in the front matter of the documents the release's jobs wrote. The project has a Releases page listing them. Both keys are refused without `release: true`; `release_files` entries must be groups some state or command produces, and `release_notes` a plain document a non-chat job state produces. (workflow-grammar.md § Release keys, platform.md § Releases)
+
 ## 0.19.0
 
 - **may adopt** — Markdown a job or conversation writes can show and link the ticket's artifacts by relative path: `![the queue](screenshots/queue.png)` draws a raster image (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.avif`; never `.svg`) and `[the plan](plan.md)` links a document. A bare name is the version current when the text was written, `name@N` is exactly version N, `name@latest` follows the newest, and another ticket's artifacts are `archive/<n>/name`. The names must match exactly; one that does not resolve is drawn as a muted note and never fetched. It works in presentations, documents and conversation messages (a project chat links its own documents but draws no pictures), so a presenting prompt can show the screenshots a ticket produced. (platform.md § Referring to artifacts from Markdown)

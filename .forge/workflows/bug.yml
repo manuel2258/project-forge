@@ -4,18 +4,24 @@ initial: refining
 import: [common.yml]
 
 states:
-  # A conversation that ends on the person's Accept, on opus at `high` and with no budget, all for
-  # the reasons `dev.yml`'s `refining` carries: it is the same step, grilling for a defect rather
-  # than a feature (`agents/refine-bug.md`). `env` matters more here than there, because the first
-  # thing the agent is asked to do is reproduce the bug, and that needs the devshell.
+  # A job and not a conversation, unlike `dev.yml`'s `refining`: it reproduces the defect, records
+  # what it saw and asks its questions in `refinement.md` as `question` blocks, which the person
+  # answers together on the ticket (`agents/refine-bug.md`). A defect has fewer open decisions than
+  # a feature — what is wrong and what should happen are mostly facts to find, not choices to
+  # make — so one pass with a few sharp questions is the cheaper fit, and a person who wants to
+  # grill it can still open a conversation on the ticket. `env` is `default` because the first
+  # thing the agent does is reproduce the bug, which needs the devshell. Opus at `high`, for the
+  # reason `dev.yml`'s `refining` carries: the value is in what it notices and asks. 1.6M and 100
+  # turns, as `rebasing` in `common.yml` has, because a reproduction can mean building and running
+  # the code, and the cost ceiling is meant to be what binds.
   refining:
-    chat: true
     prompt: agents/refine-bug.md
     env: default
     model: opus
     effort: high
     inputs: [ticket]
     produces: [refinement.md]
+    budget: { turns: 100, tokens: 1.6M }
 
   # `implementation.md` is here because `implementing` sends the ticket back on
   # `diagnosis_invalid`, and a re-diagnosis that cannot read why it was sent back re-derives the
@@ -118,9 +124,6 @@ states:
 # `did_not_converge` keeps its retry: that is a review that had the budget and no answer, which
 # another attempt can change.
 #
-# `refining` gets none of these either, and needs none: it is a chat step, which no engine outcome
-# ends — nothing in it happens without a person, and an edge on one would never fire.
-#
 # `rebasing` gets none of these, and cannot: it is `merged`'s `on_conflict`, and the validator
 # refuses a state reached by a conflict that any transition also leads into. The rule is right —
 # a rebase is a route out of a conflict, not a step anything else may jump into — and it was found
@@ -144,6 +147,8 @@ transitions:
   - { from: rebasing,     to: checking,     when: needs_review }
 
   - { from: checking,     to: checking,     when: gate_unavailable,  max: 2 }
+  - { from: refining,     to: refining,     when: budget_exhausted,  max: 1 }
+  - { from: refining,     to: refining,     when: did_not_converge,  max: 1 }
   - { from: diagnosing,   to: diagnosing,   when: budget_exhausted,  max: 1 }
   - { from: diagnosing,   to: diagnosing,   when: did_not_converge,  max: 1 }
   - { from: implementing, to: implementing, when: budget_exhausted,  max: 1 }
@@ -154,8 +159,9 @@ transitions:
   - { from: presenting,   to: presenting,   when: did_not_converge,  max: 1 }
 
 limits:
-  # 84.2M and not 24M because `reviewing` costs 8M and its loop runs five times, and because the
-  # refinement conversation and the rebases after the approval spend under the same cap:
-  # `.forge/common.yml` derives the figure beside the review budget and the bounds it follows from.
+  # 79.8M and not 24M because `reviewing` costs 8M and its loop runs five times, and because the
+  # refinement and the rebases after the approval spend under the same cap. It is 4.4M under
+  # `dev.yml`'s 84.2M because this refinement is a job priced at its 1.6M budget and not a
+  # conversation allowed 6M; `.forge/common.yml` derives the rest beside the review budget.
   # `project_workflows_test.exs` computes it from this file rather than trusting the comment.
-  ticket_tokens: 84.2M
+  ticket_tokens: 79.8M

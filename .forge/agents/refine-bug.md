@@ -1,15 +1,28 @@
 # Refine (bug)
 
-Run this step the way `.forge/agents/refine.md` describes — a conversation that grills the person
-one question at a time, with your recommendation on each, phase by phase, writing `refinement.md`
-as it goes — and read that file first. This one says only what is different when the ticket is a
-defect. The person approves the result with Accept, and `diagnosing` starts from it.
+This step is a job, not a conversation. You read the ticket, reproduce the defect, and write
+`refinement.md` for a person to approve; `diagnosing` starts from the version they approve, and
+nothing after this step can ask them anything. So settle here what the ticket leaves open, by
+asking in the document: a `question` block next to the passage it is about, as the preamble
+describes. Everything in `.forge/agents/refine.md` that is about *reading* applies — read the
+ticket, `CLAUDE.md`, `docs/decisions.md`, the design notes the ticket touches, then
+`$FORGE_JOB/tickets/index.md` and `$FORGE_JOB/archive/` for earlier work. Its sections on the
+conversation (one question at a time, writing as you go, Accept at the end) do not apply to you.
+
+**How to ask.** Never ask what the repository can answer: if the code, a note or an earlier ticket
+settles it, say what you found and where. Where a reasonable answer exists, state it as an
+`assumption` and carry on, with a recommendation the person can confirm by doing nothing. Make a
+question **blocking** only when no assumption is safe — a defect that cannot be reproduced and
+whose reproduction only the person can supply, or a choice between two behaviours that
+`diagnosing` could not undo. A blocking question stops the job until the person answers; you are
+then resumed with `answers.md`, and the document you write after it carries no question that was
+answered. Few, sharp questions beat many; a one-line fix needs none.
 
 **Reproduce it before you ask how.** You have the checkout and the devshell. Try the ticket's steps
 yourself, and come to the first question with what you saw: reproduced, with the output, or not,
 with what you tried. A bug nobody can reproduce is the first thing to settle, not the last.
 
-The same five phases, aimed at what is wrong:
+The same five areas as `refine.md`'s phases, aimed at what is wrong:
 
 1. **Pin down the defect.** What happens now and what should happen, a sentence each. The exact
    reproduction — a command, a URL, an input — precise enough that `diagnosing` can run it without
@@ -18,14 +31,14 @@ The same five phases, aimed at what is wrong:
    regression test exists which fails against the current code and passes once the fix lands.
 2. **What a person sees.** When the symptom is visible, what they see once it is fixed, on which
    surface, as which kind of user, and with nothing to show as well as with something.
-   `refine.md`'s list of what a surface owes applies to a fix too. It matters most for the
+   `refine.md`'s list of what a surface owes applies to a fix too, as questions you answer from the code where it can and ask where it cannot. It matters most for the
    regression test: a test showing the function under the page now returns the right value does
    not show the page draws it, and a criterion written about the function is how a bug gets closed
    while the person still sees it.
 3. **Security.** First, whether the bug is itself a security defect: something read or written by
    someone who should not reach it, a guard that can be passed, a secret shown. If it is, say so
    before anything else. It changes what the criteria must cover — every path to the same data, not
-   only the one reported. Then whether the fix moves a guard, and the rest of `refine.md`'s list.
+   only the one reported. Then whether the fix moves a guard, and the rest of `refine.md`'s list. A guard moved is a blocking question unless the code settles it.
 4. **Out of scope.** The related wrongness this ticket leaves alone. A bug is where "while I'm in
    here" pulls hardest, so name what is left, and file a proposal for anything that deserves one.
 5. **Earlier work.** The ticket or commit that introduced it, if you can find it (`git log -S`,
@@ -36,3 +49,15 @@ The same five phases, aimed at what is wrong:
 Record what you observed, not why it happens. The reproduction, its output and the commit that
 introduced it are facts `diagnosing` can use. A theory of the cause, or of the fix, is
 `diagnosing`'s to form from the code, and one written here is a theory it will anchor on.
+
+## refinement.md
+
+Write it to `$FORGE_JOB/out/refinement.md` before you finish, with the sections `refine.md`'s
+§ refinement.md lists, in that order: the defect in your own words, *Acceptance criteria* (Behaviour,
+What a person sees, Security), *Out of scope*, *Earlier work* and *Decisions*. Put what you
+observed under the first and record each assumption you proceeded on as a decision, *assumed*,
+so the person approving sees what they are agreeing to and `diagnosing` knows it was not their
+word. File proposals for anything out of scope that deserves a ticket in `out/proposals/`, after
+checking `tickets/index.md`, and say so in the document. Finish with outcome `done`; if you
+cannot reproduce the bug and nothing you could ask would change that, say so in the document and
+still finish `done`, so a person decides whether `diagnosing` runs.

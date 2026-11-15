@@ -393,23 +393,45 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
     end
   end
 
-  # **Accept is the approval, and nothing else leaves the step.** `planning` and `diagnosing` start
-  # from `refinement.md` as the person last saw it, which holds only while the one edge out of
+  # **Accept is the approval, and nothing else leaves the step.** `planning` starts from
+  # `refinement.md` as the person last saw it, which holds only while the one edge out of `dev.yml`'s
   # `refining` approves it. An edge on an engine outcome is not refused by the validator, and never
   # fires from a chat step — nothing in it ends without a person — so one here would be a dead edge
   # that reads like a retry.
-  test "refining is a conversation that ends on the person's approval of refinement.md" do
-    for {name, workflow} <- reviewing_workflows() do
-      refining = Workflow.state(workflow, workflow.initial)
+  test "dev's refining is a conversation that ends on the person's approval of refinement.md" do
+    workflow = load!(Path.join(@forge, "workflows/dev.yml"))
+    refining = Workflow.state(workflow, workflow.initial)
 
-      assert refining.name == "refining", name
-      assert State.chat?(refining), "#{name}: refining is not a chat step"
-      assert refining.produces == ["refinement.md"], name
+    assert refining.name == "refining"
+    assert State.chat?(refining), "dev.yml: refining is not a chat step"
+    assert refining.produces == ["refinement.md"]
 
-      assert [%Transition{approve: ["refinement.md"], when: nil}] =
-               Workflow.transitions_from(workflow, "refining"),
-             "#{name}: refining must leave on one edge, approving refinement.md"
-    end
+    assert [%Transition{approve: ["refinement.md"], when: nil}] =
+             Workflow.transitions_from(workflow, "refining"),
+           "dev.yml: refining must leave on one edge, approving refinement.md"
+  end
+
+  # `bug.yml`'s refinement is a job that asks in `question` blocks instead. Being a job it can run
+  # out of budget or stop without an answer, so it gets the one retry each that every job state has,
+  # and its one way forward is the person's approval of what it wrote.
+  test "bug's refining is a job that ends on the person's approval of refinement.md" do
+    workflow = load!(Path.join(@forge, "workflows/bug.yml"))
+    refining = Workflow.state(workflow, workflow.initial)
+
+    assert refining.name == "refining"
+    refute State.chat?(refining), "bug.yml: refining is a chat step"
+    assert State.job?(refining)
+    assert refining.produces == ["refinement.md"]
+
+    edges = Workflow.transitions_from(workflow, "refining")
+
+    assert Enum.any?(
+             edges,
+             &match?(%Transition{to: "diagnosing", approve: ["refinement.md"], when: nil}, &1)
+           )
+
+    assert Enum.sort(for %Transition{when: w, to: "refining", max: 1} <- edges, do: w) ==
+             ["budget_exhausted", "did_not_converge"]
   end
 
   # Wherever the key is declared it is in force, and an edge without it merges at once and skips

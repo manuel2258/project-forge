@@ -53,7 +53,7 @@ states:
   # **Raising this means raising `limits.ticket_tokens` in each workflow that has a `reviewing`
   # state**, because the cap is checked before each job starts against what the ticket has spent
   # already — so what has to fit under it is every running total, not the finished total. Both
-  # workflows cost the same on the way in: the refinement conversation, then 4.8M of jobs (the state
+  # workflows cost the same on the way in but for the refinement (a conversation in `dev.yml`, a 1.6M job in `bug.yml`), then 4.8M of jobs (the state
   # that plans or diagnoses 800k, implementing 4M) with `checking` free because a command buys no
   # inference.
   #
@@ -65,7 +65,9 @@ states:
   # refinement that grills through five phases is the long kind. What one actually costs is on the
   # ticket afterwards, which is the figure to correct this with.
   #
-  # So the journey these workflows declare prices out the same in both:
+  # So the journey `dev.yml` declares prices out as below. `bug.yml`'s refinement is a job and not
+  # a conversation, so it is priced at its own 1.6M budget instead of the 6M allowance — 4.4M
+  # less at every step, which is why its cap is 79.8M:
   #
   #     6M                             =   6M   the refinement conversation, an allowance
   #     (0.8 + 4) + 8                  = 12.8M  the jobs on the way in, then the first review

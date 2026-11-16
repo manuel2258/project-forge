@@ -477,14 +477,18 @@ defmodule ForgeWorker.LinkTest do
       assert "high" in codex["efforts"]
 
       # Claude Code's own binary, model and effort are not Codex's: with them configured and no
-      # `codex` of its own, the machine offers no Codex, rather than probing `claude`.
+      # `codex` of its own, the machine does not probe `claude` as Codex.
       Application.put_env(:forge_worker, :harness_opts,
         executable: fake_codex_executable(),
         model: "opus",
         effort: "high"
       )
 
-      assert %{"harnesses" => [_only]} = Link.ready_payload(socket)
+      # Not "offers one harness": with no `:codex_executable` the probe asks `codex` on the PATH,
+      # and a worker image puts a real one there, so the gate's own command machine offers it.
+      # What must not be offered is Codex answering from Claude Code's binary.
+      %{"harnesses" => harnesses} = Link.ready_payload(socket)
+      refute Enum.any?(harnesses, &match?(%{"driver" => "codex", "version" => "9.9.9"}, &1))
     end
 
     # `FORGE_CLAUDE_MODEL` and `FORGE_CLAUDE_EFFORT` are Claude Code's dials. A Codex job whose spec

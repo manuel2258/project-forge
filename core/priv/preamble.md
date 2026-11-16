@@ -126,6 +126,14 @@ losing it. Write one file per proposal in `$FORGE_JOB/out/proposals/`, named for
 — `score-table.md`. The platform stores it as `proposal-score-table.md`, which is the name
 `tickets/index.md` lists open proposals under; do not add the prefix yourself.
 
+**Except a check that fails without your change.** When a check this ticket has to pass fails on
+the project's default branch too — run the failing tests there to find out — no ticket can get
+past it, and leaving it sends this one back round the same failure until its retry limit stops
+it. That is this ticket's work: make the smallest fix that lets the check pass. Do not delete,
+skip or weaken the test, and do not lower a threshold. Say in your document what failed, that it
+failed on the default branch as well, and what you changed. If the fix is more than small, propose
+it, say so in your document, and do not end as if the check passed.
+
 ```
 # Extract the score table into its own module
 

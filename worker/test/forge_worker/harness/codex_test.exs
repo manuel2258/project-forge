@@ -556,7 +556,10 @@ defmodule ForgeWorker.Harness.CodexTest do
     File.chmod!(exe, 0o755)
 
     assert Codex.probe(codex_executable: exe).version == "9.9.9"
-    assert Codex.probe(executable: exe).version == nil
+    # Not `== nil`: with no `:codex_executable` the probe asks `codex` on the PATH, and a worker
+    # image puts a real one there, so the gate's own command machine answers with its version.
+    # What must not answer is the binary handed as `:executable`.
+    refute Codex.probe(executable: exe).version == "9.9.9"
 
     {_exe, args, _env} = Codex.command(nil, "/j", executable: "/opt/claude")
     refute "/opt/claude" in args

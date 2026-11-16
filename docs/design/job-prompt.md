@@ -223,6 +223,12 @@ ticket's branch against its base, taken when the job was created.
   blocks. Its only front matter is the ticket type it suggests, `type: bug`, when the index lists
   types (`ticket-types.md` § Proposals). A proposal is a suggestion; nothing runs until a person accepts it,
   and there is a limit per job (`ticket-proposals.md`).
+- **Except a check that fails on the default branch as well.** That blocks every ticket, so
+  clearing it is this ticket's work: the smallest fix, never a deleted, skipped or weakened test or
+  a lowered threshold, recorded in the job's document; a fix that is more than small is proposed
+  and the job says it did not pass. Without this, ticket 47's implementing job found two worker
+  tests that assumed no `codex` on the machine, named the cause correctly, left them as "not this
+  ticket's", and `checking` then failed three times on the same two tests.
 - Read `tickets/index.md` before proposing. It lists every ticket on the project and every open
   proposal, as a snapshot; each ticket's file holds its body and nothing else.
 - The general tools on `PATH` are named, because an agent that does not know `python3` is there

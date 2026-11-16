@@ -22,6 +22,9 @@ review already sent an earlier attempt back — read it first.
   the same ones; what the command adds is a clean machine's verdict. Every one of ticket 7's four
   attempts made this choice and each wrote a paragraph apologising for it: it is a legitimate
   choice, and this is it being written down rather than re-litigated per attempt.
+- A `check` failure in code this ticket does not touch is still yours to clear when it fails on
+  the default branch too: the preamble's § Proposing a ticket says how. Naming the cause in
+  `implementation.md` and stopping sends the ticket back to you with the same failure.
 
 ## Screenshots, when the change is something a person sees
 

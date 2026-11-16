@@ -821,8 +821,13 @@ Getting these wrong makes the UI lie. They are acceptance criteria, not preferen
   than to the artifact's kind.
 - **Approve, accept and merge live only in a decision row** (§ The decision row). Not in the queue,
   not in the strip, not in the composer's row, not at the foot of a diff.
-- **The queue links to a decision and never takes one.** Its approval item's way on is *Review the
-  changeset ›*, an outline link to the ticket's Changes view, where the row is.
+- **The queue links to a decision and never takes one.** Its approval item's way on is *Read the
+  presentation ›* (or *Review the changeset ›* when the ticket has none), an outline link to the
+  ticket's Changes view, where the row is. **A way forward that records an approval or enters a
+  merging state is not a choice row in the queue**, on a stuck ticket or one resting in a human
+  state: it is that same link, and the queue refuses it in words if it is sent anyway — which is
+  what holds when the row is drawn regardless, for a ticket whose pinned workflow cannot be read
+  and so cannot say which ways decide.
 - **A reject needs a note**, refused by the operation when blank, kept with the decision, drawn in
   Activity, and handed to the next job (§ The decision row).
 - **Blocking and non-blocking questions are different.** One has halted a job. Only blocking ones
@@ -936,8 +941,10 @@ Each item is drawn in the same order: an eyebrow naming its kind and where it is
 review → merging*) with its waiting time on the right; **the queue sentence**, saying what is asked
 (*Sound toggle in settings is ready to merge.*); **the context card** — the ticket's number and
 title, its type, its workflow track with the current step in amber (a queue item waits on you), and its facts (state and visit,
-jobs and usage in windows, when it was admitted); what is particular to the kind (below); and at
-the foot **Later** and the item's way on. **On a phone the context card is one line** — the
+jobs and usage in windows, when it was admitted); **the ticket's past** (below), on every item that
+has a ticket; what is particular to the kind (below); and at the foot **Later** and the item's way
+on. The past is part of the item at every width, a phone included, and never only in the wide
+screen's side column. **On a phone the context card is one line** — the
 ticket's number, its title and `›` — because the track and the facts are one tap away and every
 line above the question card is a line of the content it covers.
 
@@ -958,33 +965,70 @@ in words if sent. At the end of the pass, the first item to arrive is drawn.
 
 ### What each kind shows
 
+- **Every item about a ticket** shows **the ticket's past**, between the context card and what is
+  particular to the kind: one line per step it has been in, in the order it first reached them —
+  *implementing · 4 runs · last converged* — then, when a loop has fired, the loops. An agent step
+  counts its agent jobs (a retry is a run, a job that waited for answers and resumed is one), a
+  command step its batches (commands an agent invokes are not runs of that step), a conversation
+  step its conversations — each drawn as a run — and a human step the times the ticket arrived,
+  drawn as visits. A step the ticket is in whose job never started reads *not run yet*.
+  Steps and runs are read from what ran, so a step the pinned workflow no longer declares is still
+  listed; a loop is every transition with a `max` that has fired, as rounds of its limit
+  (*reviewing → implementing on issues_found · 5 of 5*), counted by `Forge.Engine.rounds/1` — the
+  count `max` is decided on, so a person's move reads past the limit (*6 of 5*) and is not clamped;
+  an edge the pin no longer declares shows its count with no limit, and with no readable pin no
+  edge is declared, so every fired one does. The reroute a merge conflict takes is not a loop and is
+  never listed. With no loop fired the list is left out. **A step's
+  line opens in place, one at a time**, to its latest run and a link to that job: an agent step's
+  closing words, a command step's batch with each command's exit status, a conversation step's last
+  reply. A human step does not open, nor does a step that never ran, nor on a stuck item the current
+  step, whose latest run is the last attempt below. The open line survives a patch and a rejoin
+  (§ A reconnect is not a reload); a reload or moving to another item folds it. Items with no
+  ticket show none of this.
 - **An approval** (`18a`) shows enough to know what you are walking into: the changeset's size,
   files and check, and **the commit message it will write**, under *The commit it will make* — or, for a
   document approval, every document it pins, rendered (§ Documents) under its name and version in
   a box that scrolls inside itself, so one long plan does not push the rest below the fold. Its way
-  on is **Review the changeset ›** (or *Read the document ›*), an outline link to the ticket's
-  Changes or Docs view, **where the decision row is**. It never approves here. There is no
+  on is **Read the presentation ›** when the ticket has one (Changes, opened on the presentation) and
+  **Review the changeset ›** when it has none — or, for a document approval, *Review `<document>`
+  v`<n>` ›* to Docs (*Review `<n>` versions ›* when it pins several, or none has a version yet) — an
+  outline link to the view **where the decision row is**. It never approves here. There is no
   *Reviewer said* block: what a reviewer wrote is the presentation's, and the platform gives a
   presentation no slots (§ Semantics that must not be lost).
 - **Questions** (`13b`) show what the agent said when it stopped with the passage that asked
   highlighted, **before** the context card — it is what the questions are about, and under the card
-  it was beneath the split pane on a phone — and the questions in the question card, in the split
-  pane (§ The question card). On a phone a passage longer than four lines is clamped with *more* at
+  it was beneath the split pane on a phone — with **Read `<document>` v`<n>` ›** beside *The whole
+  job ›* at every width, and the questions in the question card, in the split pane (§ The question
+  card). On a phone a passage longer than four lines is clamped with *more* at
   its end, and the split pane starts at no more than 45 % of the screen, its choice rows scrolling
   inside it.
 - **Accounts waiting on a node admin** are one item, the oldest's age its own: the sentence counts
   them, and its way on is *Review the accounts ›*. Nothing is decided in the queue.
 - **A stuck ticket** (`13c`) says **why, in words**, beside the engine's outcome: its sentence is
   `<title> is stuck: <reason>.`, the reason from the ticket's latest `ticket.stuck` — a failed job,
-  a `max` that ran out, an outcome no edge matches, a rejected approval. Then the last attempt's
-  outcome, its error excerpt and the agent's closing words; how much of the ticket's allowance is
-  gone; and **the ways forward as choice rows** — each transition the person may take and *Run
-  `<state>` again* where the state can be — with what each does, none preselected, and a dock
-  button that takes the one picked and is disabled until one is. The push carries the reason after the title. The first ticket stuck on an exhausted
-  `max` read only *needs a way forward*, which is true of every stuck ticket and says nothing about
-  this one.
-- **A conversation waiting on its reader** shows its last reply and, when it asked questions, the
-  question card; *Open the chat ›* leads to it.
+  a `max` that ran out (*the reviewing → implementing loop on issues_found ran out (5 of 5)*), an
+  outcome no edge matches, a rejected approval. Then its past (above), and the last attempt by the
+  step's kind: an agent's outcome, turns, duration, error excerpt and closing words; a command
+  step's last batch, each command with its exit status and, for a failed one, the end of its log as
+  § Steps draws it; a conversation step's last reply; nothing for a human step. It never says
+  *No job ran* for a step whose commands ran. The step's budget is drawn in turns **and** tokens.
+  Then **the ways forward as choice rows** — each transition the person may take and *Run `<state>`
+  again* where the state can be — **each saying what taking it starts** (a run of the target step,
+  a conversation, a wait for a person) and how often that step has already run, *Retry* saying
+  which run it would be; none preselected, and a dock button that takes the one picked and is
+  disabled until one is. **A way that records an approval or enters a merging state is not a row**:
+  it is the way-on link below, and the queue refuses it in words if it is sent anyway. The push
+  carries the reason after the title. The first ticket stuck on an exhausted `max` read only *needs
+  a way forward*, which is true of every stuck ticket and says nothing about this one.
+- **A ticket resting in a human state** (`review`) has the same ways forward as a stuck one. When a
+  way merges, the item shows what an approval of a change shows — the changeset's size and files
+  and the commit message the merge will write — and its way on is **Read the presentation ›**, or
+  **Review the changeset ›** when there is none.
+- **A conversation waiting on its reader** shows its whole last reply, clamped to four lines on a
+  phone with *more* as the agent's passage is — or, when the reply asked questions, the question
+  card in its place, since those questions are what the item asks and the reply drawn beside them
+  would say them twice; *Open the chat ›* leads to the whole of it. When the conversation is a ticket's step, each document the step
+  produces that has a version is linked at its latest.
 
 ### The question card
 

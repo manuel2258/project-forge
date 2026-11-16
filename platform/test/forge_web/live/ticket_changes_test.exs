@@ -900,7 +900,7 @@ defmodule ForgeWeb.TicketChangesTest do
 
     assert has_element?(
              view,
-             ~s(#review-#{ticket.id}[href="/tickets/#{project.name}/#{ticket.number}?tab=changes"]),
+             ~s(#review-#{ticket.id}[href="/tickets/#{project.name}/#{ticket.number}?tab=changes&sub=files"]),
              "Review the changeset"
            )
   end

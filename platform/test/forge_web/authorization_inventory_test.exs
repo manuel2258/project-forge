@@ -260,9 +260,16 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # The pass is the page's own: Later reorders it and a picked way forward is a draft.
     {"queue_live.ex", "queue:later"} => :local,
     {"queue_live.ex", "queue:pick"} => :local,
+    # Which step's line is open on the item on screen: the page's own state, dropped whenever it
+    # names an item other than the one the pass is on. It reads what that item's ticket already
+    # shows to the same members (its runs and their closing words), and writes nothing.
+    {"queue_live.ex", "queue:step"} => :local,
     # Taken through `ForgeWeb.Operator.Actions`, which resolves the ticket off the wire and goes
     # through `Forge.Operator`'s membership check (`retry`, `transition`).
     {"queue_live.ex", "queue:way"} => :member,
+    # The same operation named by its own event, which the queue refuses an approving way on
+    # (`approving: false`): a crafted or older page's event takes the same membership check.
+    {"queue_live.ex", "transition"} => :member,
     {"ticket_new_live.ex", "create"} => :member,
     {"ticket_new_live.ex", "validate"} => :local,
     {"workers_live.ex", "toggle-destroyed"} => :local,

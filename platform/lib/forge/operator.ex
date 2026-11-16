@@ -160,7 +160,7 @@ defmodule Forge.Operator do
     end
   end
 
-  @doc "Takes a declared transition by hand. Options: `:outcome`, `:comment`."
+  @doc "Takes a declared transition by hand. Options: `:outcome`, `:comment`, `:approving` (`Forge.Engine.choose/4`)."
   @spec transition(Ticket.t(), actor(), String.t(), keyword()) ::
           {:ok, Ticket.t()} | {:error, term()}
   def transition(%Ticket{} = ticket, actor, to, opts \\ []) do

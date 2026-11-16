@@ -34,7 +34,8 @@ defmodule ForgeWeb.TicketLive do
 
   # How much of a failed command's log Steps shows: the end, where a build says why it stopped.
   # The whole log is one tap away on the command's page.
-  @tail_bytes 4096
+  # One figure for the Steps view and the queue (`Forge.Tickets.Past.tail_bytes/0`).
+  @tail_bytes Forge.Tickets.Past.tail_bytes()
 
   # How often the spend countdown is drawn again: the minute it is drawn to.
   @spend_tick :timer.minutes(1)

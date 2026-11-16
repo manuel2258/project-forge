@@ -11,10 +11,17 @@ defmodule ForgeWeb.QueueLive do
   Each item is drawn in the same order: an eyebrow naming its kind with its age, the sentence
   saying what is asked, the ticket's context — its track, its facts and what happened since this
   person last opened it — what is particular to its kind, and at the foot **Later** and its way
-  on. Questions put what the agent said before the context, since it is what they are about. **The queue never decides in place**: an approval leads to the ticket's decision row, beside
-  what it approves; a document's questions are answered in the question card; a stuck ticket's
-  ways forward are choice rows and a dock button that takes the one picked. Deciding moves the
-  pass on in place, without a navigation (`ForgeWeb.QueuePass` holds the pass's rules).
+  on. Questions put what the agent said before the context, since it is what they are about.
+  **Every item about a ticket shows the ticket's past** after the context — a line per step, one of
+  which opens in place, and the loops that have fired (`ForgeWeb.QueuePast`, `Forge.Tickets.Past`).
+
+  **The queue never approves and never merges**: an approval leads to the ticket's decision row,
+  beside what it approves, and so does a way forward that approves or merges
+  (`Forge.Engine.decision_edge?/2`), which a stuck ticket or one resting in a human state shows as a
+  link instead of a choice row and which the queue refuses in words if it is sent anyway. What it
+  does in place: a document's questions are answered in the question card, and a stuck ticket's
+  other ways forward are choice rows with a dock button that takes the one picked. Deciding moves
+  the pass on in place, without a navigation (`ForgeWeb.QueuePass` holds the pass's rules).
 
   The whole queue is the **All** sheet on a phone and the list column from 768px — every item in
   the pass's order, decided ones dimmed with `✓` — and beneath the items, two groups that wait
@@ -32,9 +39,21 @@ defmodule ForgeWeb.QueueLive do
   import ForgeWeb.Operator.QuestionForm, only: [question_form: 1, split_pane: 1]
 
   alias Forge.{Artifacts, Engine, Events, Jobs, Projects, Queue, Tickets}
+  alias Forge.Tickets.Past
   alias Forge.Tickets.Views
   alias ForgeCore.Workflow
-  alias ForgeWeb.{Diff, Format, PushEvents, QueuePass, Topology}
+
+  alias ForgeWeb.{
+    Diff,
+    Format,
+    PushEvents,
+    QueuePass,
+    QueuePast,
+    TicketViews,
+    Topology,
+    WorkflowMap
+  }
+
   alias ForgeWeb.Operator.Actions
   alias ForgeWeb.Operator.Drafts
   alias ForgeWeb.Operator.QuestionForm
@@ -58,6 +77,7 @@ defmodule ForgeWeb.QueueLive do
        refusal: nil,
        drafts: Drafts.init(),
        ways: %{},
+       opened: nil,
        pass: nil
      )
      # The queue button's signals reload this page too, so its count moves with the button's —
@@ -229,8 +249,18 @@ defmodule ForgeWeb.QueueLive do
   # this person last opened it, its documents, and what its kind needs — a changeset's size and
   # the message the merge will write, what the agent said when it stopped, a stuck ticket's last
   # attempt. Read again on every load, so it is current, and never for the other items.
+  #
+  # **A step's line opened is the item's**: `opened` is `{item key, step}`, and moving to another
+  # item drops it, so a line is never open on an item it was not opened on.
   defp detail(socket) do
     item = QueuePass.current(socket.assigns.pass)
+
+    socket =
+      case {item, socket.assigns.opened} do
+        {%{key: key}, {key, _step}} -> socket
+        _moved -> assign(socket, opened: nil)
+      end
+
     assign(socket, item: item, detail: item && read_detail(item, socket))
   end
 
@@ -243,14 +273,46 @@ defmodule ForgeWeb.QueueLive do
     jobs = Jobs.for_ticket(ticket.id)
     looked = user |> Views.since([ticket.id]) |> Map.get(ticket.id)
 
+    workflow =
+      case Tickets.parsed_workflow(ticket) do
+        {:ok, workflow} -> workflow
+        {:error, _errors} -> nil
+      end
+
+    artifacts = Artifacts.list(ticket.id)
+    past = Past.steps(ticket, workflow, jobs)
+
     %{
       ticket: ticket,
+      workflow: workflow,
       facts: facts(ticket, jobs),
       looked: looked,
       since: Views.events_since(ticket.id, looked, @since),
-      documents: documents(ticket)
+      documents: documents(ticket, artifacts),
+      presented: presented?(ticket, artifacts),
+      past: past,
+      loops: Past.loops(ticket, workflow)
     }
-    |> Map.merge(kind_detail(item, project, ticket, jobs))
+    |> Map.merge(opened(item, ticket, past, socket.assigns.opened))
+    |> Map.merge(
+      kind_detail(item, %{project: project, ticket: ticket, past: past, workflow: workflow})
+    )
+  end
+
+  # The line that is open, and what its latest run said — read for that one line alone.
+  defp opened(item, ticket, past, {key, name}) when key == item.key do
+    step = Enum.find(past, &(&1.name == name and QueuePast.openable?(&1, item)))
+    run = step && Past.latest_run(ticket, step)
+    %{opened: run && name, run: run}
+  end
+
+  defp opened(_item, _ticket, _past, _opened), do: %{opened: nil, run: nil}
+
+  # Whether the ticket has a presentation with a version: the approval's way on leads to it.
+  defp presented?(ticket, artifacts) do
+    Enum.any?(artifacts, fn artifact ->
+      artifact.kind == :presentation and Artifacts.latest(ticket.id, artifact.name) != nil
+    end)
   end
 
   # Nothing spent is left out rather than drawn as `0 windows`: a fact that says nothing is a
@@ -268,18 +330,37 @@ defmodule ForgeWeb.QueueLive do
 
   defp said_ago(at, now), do: Format.ago_phrase(at, now)
 
-  defp documents(ticket) do
-    for artifact <- Artifacts.list(ticket.id),
+  defp documents(ticket, artifacts) do
+    for artifact <- artifacts,
         artifact.kind == :document,
         not Workflow.proposal?(artifact.name),
         latest = Artifacts.latest(ticket.id, artifact.name),
         do: %{name: artifact.name, version: latest.version}
   end
 
-  defp kind_detail(%{kind: :approval}, project, ticket, _jobs),
-    do: %{diff: changeset(project, ticket), commit: ForgeWeb.Operator.Decision.commit(ticket)}
+  defp kind_detail(%{kind: :approval} = item, %{project: project, ticket: ticket}) do
+    %{
+      diff: changeset(project, ticket),
+      commit: ForgeWeb.Operator.Decision.commit(ticket),
+      pinned: pinned(project, ticket, item.approve)
+    }
+  end
 
-  defp kind_detail(%{kind: :questions, version: version}, _project, _ticket, _jobs) do
+  # A ticket ready to merge shows what an approval of a change shows, because what it would do is
+  # the same: its way forward merges (`Forge.Engine.merge_decision?/2`, which asks the workflow
+  # because a resting ticket has no pending approval to ask).
+  defp kind_detail(%{kind: :review}, %{workflow: %Workflow{} = workflow} = ctx) do
+    if Engine.merge_decision?(ctx.ticket, workflow) do
+      %{
+        diff: changeset(ctx.project, ctx.ticket),
+        commit: ForgeWeb.Operator.Decision.commit_of(ctx.ticket)
+      }
+    else
+      %{}
+    end
+  end
+
+  defp kind_detail(%{kind: :questions, version: version}, _ctx) do
     case version.author do
       %{"kind" => "job", "id" => job_id} ->
         %{agent: Jobs.last_words(%Forge.Jobs.Job{id: job_id}), job_id: job_id}
@@ -289,20 +370,67 @@ defmodule ForgeWeb.QueueLive do
     end
   end
 
-  defp kind_detail(%{kind: :stuck}, _project, ticket, jobs) do
-    here = Enum.filter(jobs, &(&1.state == ticket.state))
-    last = List.last(here)
-
+  defp kind_detail(%{kind: :stuck}, ctx) do
     %{
-      attempts: length(here),
-      last: last,
-      excerpt: last && excerpt(last),
-      closing: last && Jobs.last_words(last),
-      budget: budget(ticket)
+      attempt: attempt(Enum.find(ctx.past, & &1.current), ctx.ticket),
+      budget: budget(ctx.workflow, ctx.ticket)
     }
   end
 
-  defp kind_detail(_item, _project, _ticket, _jobs), do: %{}
+  # The documents the step's conversation produces that have a version, at their latest.
+  defp kind_detail(%{kind: :chat, detail: %{chat_id: chat_id}}, ctx) do
+    chat = Jobs.get!(chat_id)
+
+    with %Workflow{} = workflow <- ctx.workflow,
+         %Workflow.State{produces: produces} <- chat.state && Workflow.state(workflow, chat.state) do
+      %{produced: produced(ctx.ticket, produces)}
+    else
+      _none -> %{produced: []}
+    end
+  end
+
+  defp kind_detail(_item, _ctx), do: %{}
+
+  defp produced(ticket, produces) do
+    for name <- produces,
+        Workflow.document?(name) and not Workflow.presentation?(name),
+        version = Artifacts.latest(ticket.id, name),
+        do: %{name: name, version: version.version}
+  end
+
+  # Every document the approval pins, rendered exactly as the ticket's Docs view renders it.
+  defp pinned(project, ticket, approve) do
+    scope = Forge.References.ticket_scope(project.name, ticket)
+
+    for {name, _version} <- approve,
+        name != @changeset,
+        version = Artifacts.latest(ticket.id, name),
+        do: %{
+          name: name,
+          version: version.version,
+          body: ForgeWeb.FileType.render_document(name, version, scope)
+        }
+  end
+
+  # The last attempt of the step the ticket stuck in, by the step's kind: an agent's job, a
+  # command step's batch, a conversation's reply. Nothing for a human step, which has no run.
+  defp attempt(%{kind: :agent, job: nil}, _ticket), do: %{kind: :agent, job: nil}
+
+  defp attempt(%{kind: :agent, job: job}, _ticket),
+    do: %{kind: :agent, job: job, excerpt: excerpt(job), closing: Jobs.last_words(job)}
+
+  defp attempt(%{kind: :command, runs: 0}, _ticket), do: %{kind: :command, batch: nil}
+
+  defp attempt(%{kind: :command, name: name}, ticket),
+    do: %{
+      kind: :command,
+      batch: Forge.Jobs.Commands.latest_batch(ticket.id, name, Past.tail_bytes())
+    }
+
+  defp attempt(%{kind: :conversation, job: chat}, _ticket),
+    do: %{kind: :conversation, job: chat, reply: chat && Past.last_reply(chat)}
+
+  defp attempt(_human_or_none, _ticket), do: nil
 
   # The change the merge would make, as files and lines, or nil when the branch is not there.
   defp changeset(project, ticket) do
@@ -328,14 +456,15 @@ defmodule ForgeWeb.QueueLive do
     end
   end
 
-  defp budget(ticket) do
-    with {:ok, workflow} <- Tickets.parsed_workflow(ticket),
-         %{budget: %{} = budget} <- Workflow.state(workflow, ticket.state) do
-      budget
-    else
-      _none -> nil
+  # The step's allowance in turns and tokens, as the workflow map says it.
+  defp budget(%Workflow{} = workflow, ticket) do
+    case Workflow.state(workflow, ticket.state) do
+      %Workflow.State{} = state -> WorkflowMap.budget(state)
+      nil -> nil
     end
   end
+
+  defp budget(nil, _ticket), do: nil
 
   # -- events ------------------------------------------------------------------------------------
 
@@ -365,6 +494,21 @@ defmodule ForgeWeb.QueueLive do
   defp dispatch("queue:way", %{"ticket" => id, "way" => "to:" <> to}, socket),
     do: deciding("transition", %{"ticket" => id, "to" => to}, socket)
 
+  # **The queue never approves or merges**, whichever way the event arrives — a row of this page,
+  # one drawn before this rule, a crafted one: a transition that records an approval or enters a
+  # merging state is refused at the operation (`Forge.Engine.choose/4`, `approving: false`), in
+  # words, and nothing is written. A page that is not the queue takes it with no such option.
+  defp dispatch("transition", params, socket), do: deciding("transition", params, socket)
+
+  # A step's line opened or closed (`ForgeWeb.QueuePast`). The form carries every box that is
+  # checked, so the one just opened is the value that is not already open; none checked closes it.
+  # A form that is not about the item on screen opens nothing there: `detail/1` drops a line opened
+  # on any other item, and `opened/4` opens only a step the item can show.
+  defp dispatch("queue:step", %{"item" => key} = params, socket) do
+    opened = step_opened(socket.assigns.opened, key, params)
+    {:noreply, socket |> assign(opened: opened) |> detail()}
+  end
+
   defp dispatch(event, params, socket) when event in ["questions:send", "chat:questions:send"],
     do: deciding(event, params, socket)
 
@@ -384,7 +528,7 @@ defmodule ForgeWeb.QueueLive do
   # place; refused, the item stays with the refusal in words, drawn where it was sent from.
   # `Actions` leaves `:refusal` for a refusal and only for one, clearing it first.
   defp deciding(event, params, socket) do
-    case Actions.handle(event, params, socket) do
+    case Actions.handle(event, params, socket, approving: false) do
       {:handled, socket} ->
         socket =
           if socket.assigns.refusal,
@@ -398,6 +542,22 @@ defmodule ForgeWeb.QueueLive do
 
       :unknown ->
         {:noreply, socket}
+    end
+  end
+
+  defp step_opened(opened, key, params) do
+    was =
+      case opened,
+        do: (
+          {^key, step} -> step
+          _other -> nil
+        )
+
+    case Enum.reject(List.wrap(params["open"]), &(&1 == was)) do
+      [step | _] when is_binary(step) -> {key, step}
+      # A crafted `open` that is not a list of names opens nothing rather than crashing the page.
+      [_other | _] -> nil
+      [] -> if was in List.wrap(params["open"]), do: opened, else: nil
     end
   end
 
@@ -459,7 +619,7 @@ defmodule ForgeWeb.QueueLive do
       </:aside>
 
       <:composer :if={@item}>
-        <.dock item={@item} forms={@forms} ways={@ways} refusal={@refusal} />
+        <.dock item={@item} detail={@detail} forms={@forms} ways={@ways} refusal={@refusal} />
       </:composer>
 
       <div class="queue-page">
@@ -601,10 +761,14 @@ defmodule ForgeWeb.QueueLive do
         <.context item={@item} detail={@detail} me={@me} />
       </div>
 
-      <.approval :if={@item.kind == :approval} detail={@detail} />
+      <%!-- The ticket's past is the item's own, at every width: the context column beside it
+            carries the card and what happened since, never this. --%>
+      <QueuePast.past :if={@item.ticket} item={@item} detail={@detail} />
+
+      <.approval :if={@item.kind in [:approval, :review]} item={@item} detail={@detail} />
       <.stuck :if={@item.kind == :stuck} item={@item} detail={@detail} />
-      <.ways :if={@item.kind in [:stuck, :review]} item={@item} ways={@ways} />
-      <.chat_reply :if={@item.kind == :chat} item={@item} />
+      <.ways :if={@item.kind in [:stuck, :review]} item={@item} detail={@detail} ways={@ways} />
+      <.chat_reply :if={@item.kind == :chat} item={@item} detail={@detail} />
     </article>
     """
   end
@@ -710,12 +874,30 @@ defmodule ForgeWeb.QueueLive do
   defp excerpt_text(text),
     do: text |> String.split("\n", parts: 2) |> hd() |> String.slice(0, 140)
 
+  attr :item, :map, required: true
   attr :detail, :map, required: true
 
   # 18a: enough to know what you are walking into — the changeset's size and files, and the
-  # message the merge will write. Never the decision itself: that is the row on the ticket.
+  # message the merge will write, or every document the approval pins. Never the decision itself:
+  # that is the row on the ticket.
   defp approval(assigns) do
     ~H"""
+    <%!-- Each pinned document under its name and version, in a box that scrolls inside itself, so
+          one long plan does not push the rest below the fold (`ui.md` § What each kind shows). --%>
+    <section
+      :for={doc <- @detail[:pinned] || []}
+      id={"queue-pinned-#{doc.name}"}
+      class="queue-block"
+    >
+      <div class="queue-block-head">
+        <span class="queue-block-name">{doc.name}</span>
+        <span class="queue-doc-version">v{doc.version}</span>
+      </div>
+      <div class="queue-pinned">
+        <ForgeWeb.FileType.document_body body={doc.body} />
+      </div>
+    </section>
+
     <section :if={@detail[:diff]} id="queue-changeset" class="queue-block">
       <div class="queue-block-head">
         <span class="queue-block-name">changeset</span>
@@ -750,93 +932,130 @@ defmodule ForgeWeb.QueueLive do
 
   # 13b: what the agent said when it stopped, before the card that answers it. Below 768px a long
   # passage is clamped to four lines with *more* at its end, which unclamps it in the browser —
-  # sticky across patches, as a JS class is (UX pass, A1).
+  # sticky across patches, as a JS class is (UX pass, A1). The links are drawn at every width:
+  # the whole job it said it in, and the document version the questions are about, which no job
+  # need have written.
   defp agent(assigns) do
-    assigns = assign(assigns, long: long?(assigns.detail[:agent]))
-
     ~H"""
-    <section :if={@detail[:agent]} id="queue-agent" class="queue-block">
-      <.eyebrow>The agent, {said_ago(@item.version.inserted_at, @now)}</.eyebrow>
-      <p id="queue-said" class={["queue-said", @long && "queue-said--clamped"]}>{@detail.agent}</p>
-      <button
-        :if={@long}
-        id="queue-said-more"
-        type="button"
-        class="queue-said-more"
-        phx-click={
-          JS.remove_class("queue-said--clamped", to: "#queue-said") |> JS.hide(to: "#queue-said-more")
-        }
-      >
-        more
-      </button>
-      <.link
-        navigate={~p"/tickets/#{@item.project}/#{@item.ticket.number}/jobs/#{@detail.job_id}"}
-        class="queue-link"
-      >
-        The whole job ›
-      </.link>
+    <section id="queue-agent" class="queue-block">
+      <div :if={@detail[:agent]}>
+        <.eyebrow>The agent, {said_ago(@item.version.inserted_at, @now)}</.eyebrow>
+        <QueuePast.clamped id="queue-said" text={@detail.agent} />
+      </div>
+      <div class="queue-links">
+        <.link
+          :if={@detail[:job_id]}
+          navigate={~p"/tickets/#{@item.project}/#{@item.ticket.number}/jobs/#{@detail.job_id}"}
+          class="queue-link"
+        >
+          The whole job ›
+        </.link>
+        <.link
+          id="queue-read-version"
+          navigate={
+            ~p"/tickets/#{@item.project}/#{@item.ticket.number}/artifacts/#{@item.version.artifact.name}/#{@item.version.version}"
+          }
+          class="queue-link"
+        >
+          Read {@item.version.artifact.name} v{@item.version.version} ›
+        </.link>
+      </div>
     </section>
     """
   end
-
-  # Whether a passage would run past four lines at a phone's measure — about 45 characters a line
-  # at 14px in 372px — or holds more than four lines of its own. Only then is *more* drawn: a short
-  # one is never clamped, so it never offers to show what it already shows.
-  @clamp_chars 180
-  @clamp_lines 4
-
-  defp long?(text) when is_binary(text),
-    do:
-      String.length(text) > @clamp_chars or
-        length(String.split(text, "\n")) > @clamp_lines
-
-  defp long?(_none), do: false
 
   attr :item, :map, required: true
   attr :detail, :map, required: true
 
-  # 13c: why, in words; the last attempt, its error and the agent's closing words; how much of the
-  # budget is gone.
+  # 13c: why, in words; the last attempt by the kind of step it stuck in — an agent's job with its
+  # error and closing words, a command step's batch, a conversation's reply — and how much of the
+  # step's allowance it had. A human step has no attempt to show.
   defp stuck(assigns) do
     ~H"""
-    <section id="queue-attempt" class="queue-block">
-      <.eyebrow>Last attempt</.eyebrow>
-      <p :if={!@detail[:last]} class="queue-quiet">No job ran in {@item.ticket.state}.</p>
-      <div :if={@detail[:last]} class="queue-attempt">
-        <span class="queue-attempt-head">
-          #{@detail.last.attempt}
-          <span class="queue-attempt-outcome">{@detail.last.outcome || @detail.last.status}</span>
-          · {@detail.last.turns} turns · {Format.duration(@detail.last)}
-        </span>
-        <pre :if={@detail.excerpt} class="queue-excerpt">{@detail.excerpt}</pre>
-        <p :if={@detail.closing} class="queue-said">agent: “{@detail.closing}”</p>
-      </div>
-      <p class="queue-budget">
-        {@detail.attempts} {noun(@detail.attempts, "attempt")} in {@item.ticket.state}<span :if={
-          @detail.budget
-        }> · budget {@detail.budget.turns} turns</span>
-      </p>
+    <section :if={@detail[:attempt] || @detail[:budget]} id="queue-attempt" class="queue-block">
+      <.eyebrow :if={@detail[:attempt]}>Last attempt</.eyebrow>
+      <.attempt :if={@detail[:attempt]} item={@item} attempt={@detail.attempt} />
+      <p :if={@detail[:budget]} class="queue-budget">budget {@detail.budget} per run</p>
     </section>
     """
   end
 
   attr :item, :map, required: true
+  attr :attempt, :map, required: true
+
+  defp attempt(%{attempt: %{kind: :agent, job: nil}} = assigns) do
+    ~H"""
+    <p class="queue-quiet">{@item.ticket.state} has not run yet.</p>
+    """
+  end
+
+  defp attempt(%{attempt: %{kind: :agent}} = assigns) do
+    ~H"""
+    <div class="queue-attempt">
+      <span class="queue-attempt-head">
+        #{@attempt.job.attempt}
+        <span class="queue-attempt-outcome">{@attempt.job.outcome || @attempt.job.status}</span>
+        · {Format.counted(@attempt.job.turns, "turn")} · {Format.duration(@attempt.job)}
+      </span>
+      <pre :if={@attempt.excerpt} class="queue-excerpt">{@attempt.excerpt}</pre>
+      <p :if={@attempt.closing} class="queue-said">agent: “{@attempt.closing}”</p>
+    </div>
+    """
+  end
+
+  defp attempt(%{attempt: %{kind: :command, batch: nil}} = assigns) do
+    ~H"""
+    <p class="queue-quiet">{@item.ticket.state} has not run yet.</p>
+    """
+  end
+
+  defp attempt(%{attempt: %{kind: :command}} = assigns) do
+    ~H"""
+    <div id="queue-attempt-batch" class="queue-attempt">
+      <QueuePast.batch item={@item} batch={@attempt.batch} />
+    </div>
+    """
+  end
+
+  defp attempt(%{attempt: %{kind: :conversation}} = assigns) do
+    ~H"""
+    <div class="queue-attempt">
+      <QueuePast.clamped :if={@attempt.reply} id="queue-attempt-said" text={@attempt.reply} />
+      <p :if={!@attempt.reply} class="queue-quiet">{@item.ticket.state} has not run yet.</p>
+    </div>
+    """
+  end
+
+  attr :item, :map, required: true
+  attr :detail, :map, required: true
   attr :ways, :map, required: true
 
   # The ways forward as choice rows: run the state again where it can be, and each transition the
-  # person may take from here, each saying what it does. The dock's button takes the one picked.
+  # person may take from here that decides nothing, each saying what it starts. A way that approves
+  # or merges is not a row but the dock's link to the ticket, said here in one line when it is all
+  # there is (`Forge.Engine.decision_edge?/2`).
   defp ways(assigns) do
+    {rows, links} = ways_of(assigns.item, assigns.detail)
+
     assigns =
-      assign(assigns, offered: ways_of(assigns.item), picked: picked(assigns.item, assigns.ways))
+      assign(assigns,
+        rows: rows,
+        links: links,
+        picked: picked(assigns.item, assigns.detail, assigns.ways)
+      )
 
     ~H"""
     <section class="queue-block">
       <.eyebrow>Ways forward</.eyebrow>
-      <p :if={@offered == []} class="queue-quiet">
+      <p :if={@rows == [] and @links == []} class="queue-quiet">
         No way forward is offered from {@item.ticket.state}. Open the ticket to decide.
       </p>
+      <p :if={@rows == [] and @links != []} id="queue-ways-on-ticket" class="queue-quiet">
+        Moving on from {@item.ticket.state} approves or merges, so it is taken on the ticket, where
+        what it approves is on screen.
+      </p>
       <form
-        :if={@offered != []}
+        :if={@rows != []}
         id={"ways-#{@item.ticket.id}"}
         class="queue-ways"
         phx-change="queue:pick"
@@ -844,7 +1063,7 @@ defmodule ForgeWeb.QueueLive do
       >
         <input type="hidden" name="ticket" value={@item.ticket.id} />
         <.choice_row
-          :for={way <- @offered}
+          :for={way <- @rows}
           id={"way-#{@item.ticket.id}-#{way.value}"}
           name="way"
           value={way.value}
@@ -857,54 +1076,166 @@ defmodule ForgeWeb.QueueLive do
     """
   end
 
-  defp ways_of(%{kind: kind, ticket: ticket, detail: detail}) when kind in [:stuck, :review] do
+  # `{rows, links}`: the ways taken here, and where the ones that are not are taken. Whether a way
+  # decides is asked of the edge `ForgeCore.Engine.choose/4` resolves for it — the one
+  # `Forge.Engine.choose/4` takes and refuses — so the row not drawn is the one the operation
+  # would not take. A target that resolves to nothing, or ambiguously (an open proposal's), stays a
+  # row as it was, and so does every way when the pin cannot be read.
+  defp ways_of(%{kind: kind, ticket: ticket} = item, detail) when kind in [:stuck, :review] do
+    workflow = detail[:workflow]
+    past = detail[:past] || []
+
     retry =
-      if detail[:retry],
+      if item.detail[:retry],
         do: [
-          %{
-            value: "retry",
-            label: "Retry #{ticket.state}",
-            detail: "A fresh attempt with the same budget."
-          }
+          %{value: "retry", label: "Retry #{ticket.state}", detail: retry_detail(ticket, past)}
         ],
         else: []
 
-    moves =
-      for to <- detail[:transitions] || [],
-          do: %{value: "to:#{to}", label: "Move to #{to}", detail: "The ticket goes to #{to}."}
+    {moves, edges} =
+      for to <- item.detail[:transitions] || [], reduce: {[], []} do
+        {moves, edges} ->
+          case decision_edge(workflow, ticket, to) do
+            nil ->
+              {[
+                 %{
+                   value: "to:#{to}",
+                   label: "Move to #{to}",
+                   detail: move_detail(workflow, past, to)
+                 }
+                 | moves
+               ], edges}
 
-    retry ++ moves
+            edge ->
+              {moves, [edge | edges]}
+          end
+      end
+
+    links =
+      edges
+      |> Enum.reverse()
+      |> Enum.map(&edge_link(item, detail, &1))
+      |> Enum.uniq_by(& &1.href)
+
+    {retry ++ Enum.reverse(moves), links}
   end
 
-  defp ways_of(_item), do: []
+  defp ways_of(_item, _detail), do: {[], []}
+
+  defp decision_edge(nil, _ticket, _to), do: nil
+
+  defp decision_edge(workflow, ticket, to) do
+    with {:ok, edge} <- ForgeCore.Engine.choose(workflow, ticket.state, to),
+         true <- Engine.decision_edge?(workflow, edge) do
+      edge
+    else
+      _plain -> nil
+    end
+  end
+
+  # What it starts, then how often that step has already run: *starts a job in implementing · has
+  # run 4 times*.
+  defp move_detail(nil, _past, to), do: "The ticket goes to #{to}."
+
+  defp move_detail(workflow, past, to) do
+    step = Enum.find(past, &(&1.name == to))
+    kind = (step && step.kind) || Past.declared_kind(workflow, to)
+    "#{TicketViews.leads(workflow, to)} · #{ran_phrase(kind, (step && step.runs) || 0)}"
+  end
+
+  defp ran_phrase(:human, 0), do: "has not been visited yet"
+  defp ran_phrase(:human, n), do: "visited #{Format.counted(n, "time")}"
+  defp ran_phrase(_kind, 0), do: "has not run yet"
+  defp ran_phrase(_kind, n), do: "has run #{Format.counted(n, "time")}"
+
+  defp retry_detail(ticket, past) do
+    runs = Enum.find_value(past, 0, &(&1.name == ticket.state && &1.runs))
+    "starts run #{runs + 1} of #{ticket.state}, with the same budget"
+  end
+
+  # Where a way that decides is taken: the ticket's Changes for a merge or a changeset, its Docs
+  # for documents only.
+  defp edge_link(%{project: project, ticket: ticket}, detail, edge) do
+    change? = Workflow.merges_on_enter?(detail.workflow, edge.to) or @changeset in edge.approve
+
+    pins =
+      for name <- edge.approve,
+          version = Artifacts.latest(ticket.id, name),
+          do: {name, version.version}
+
+    review_link(project, ticket, change?, pins, detail[:presented])
+  end
+
+  # **A merge decision leads to the change**, whatever it pins: what makes it one is the state it
+  # enters, and a merge taken without the diff in front of the person is what the link exists to
+  # prevent. Opened on the presentation when there is one, since that is what is read to decide.
+  # Anything else leads to what it pins — documents, on Docs. The decision row is on every view, so
+  # the person decides from where they land.
+  defp review_link(project, ticket, true, _pins, presented) do
+    sub = if presented, do: "presentation", else: "files"
+
+    %{
+      label: if(presented, do: "Read the presentation", else: "Review the changeset"),
+      href: ~p"/tickets/#{project}/#{ticket.number}?tab=changes&sub=#{sub}"
+    }
+  end
+
+  defp review_link(project, ticket, false, pins, _presented) do
+    label =
+      case pins do
+        [{doc, version}] -> "Review #{doc} v#{version}"
+        pins -> "Review #{length(pins)} versions"
+      end
+
+    %{label: label, href: ~p"/tickets/#{project}/#{ticket.number}?tab=docs"}
+  end
 
   # The way forward picked, or nil: nothing is preselected (plan § 6, as Accept and the ticket's
   # Ways forward), so the dock's button names no way and is disabled until one is picked. An item
   # with no ticket — the accounts waiting — has no way to pick.
-  defp picked(%{ticket: nil}, _ways), do: nil
+  defp picked(%{ticket: nil}, _detail, _ways), do: nil
 
-  defp picked(item, ways) do
+  defp picked(item, detail, ways) do
     way = Map.get(ways, item.ticket.id)
-    if way in Enum.map(ways_of(item), & &1.value), do: way
+    {rows, _links} = ways_of(item, detail)
+    if way in Enum.map(rows, & &1.value), do: way
   end
 
   attr :item, :map, required: true
+  attr :detail, :map, required: true
 
   defp chat_reply(assigns) do
     ~H"""
     <section id="queue-reply" class="queue-block">
-      <%!-- With questions, what it asked is the sentence and the card; the reply's first line
-            would be the first question's fence. --%>
+      <%!-- With questions, what it asked is the sentence and the card; the reply drawn whole
+            would repeat them. Without, the whole reply is what is being decided about. --%>
       <.eyebrow :if={@item.detail.questions == []}>The agent said</.eyebrow>
-      <p :if={@item.detail.questions == []} class="queue-said">{first_line(@item.detail.text)}</p>
-      <.link navigate={~p"/chats/#{@item.detail.chat_id}"} class="queue-link">
-        Open the chat ›
-      </.link>
+      <QueuePast.clamped
+        :if={@item.detail.questions == [] and @item.detail.text}
+        id="queue-reply-said"
+        text={ForgeWeb.Transcript.asked(@item.detail.text)}
+      />
+      <div class="queue-links">
+        <.link
+          :for={doc <- @detail[:produced] || []}
+          id={"queue-produced-#{doc.name}"}
+          navigate={
+            ~p"/tickets/#{@item.project}/#{@item.ticket.number}/artifacts/#{doc.name}/#{doc.version}"
+          }
+          class="queue-link"
+        >
+          Read {doc.name} v{doc.version} ›
+        </.link>
+        <.link navigate={~p"/chats/#{@item.detail.chat_id}"} class="queue-link">
+          Open the chat ›
+        </.link>
+      </div>
     </section>
     """
   end
 
   attr :item, :map, required: true
+  attr :detail, :map, required: true
   attr :forms, :map, required: true
   attr :ways, :map, required: true
   attr :refusal, :map, default: nil
@@ -946,24 +1277,41 @@ defmodule ForgeWeb.QueueLive do
   end
 
   defp dock(assigns) do
+    {rows, links} = ways_of(assigns.item, assigns.detail)
+
     assigns =
-      assign(assigns, offered: ways_of(assigns.item), picked: picked(assigns.item, assigns.ways))
+      assign(assigns,
+        offered: rows,
+        links: links,
+        picked: picked(assigns.item, assigns.detail, assigns.ways)
+      )
 
     ~H"""
     <Actions.refused id="queue-refusal" refusal={@refusal} at={~w(retry transition)} />
     <div id="queue-dock" class="queue-dock">
       <.later />
       <%!-- Never decided here: an approval is the decision row on its ticket, beside what it
-            approves (`docs/design/ui.md` § The decision row). --%>
+            approves (`docs/design/ui.md` § The decision row) — and so is a way forward that
+            approves or merges. --%>
       <.button
         :if={@item.kind == :approval}
         id={"review-#{@item.ticket.id}"}
         variant="outline"
         fill
         chevron
-        navigate={review_href(@item)}
+        navigate={review_href(@item, @detail)}
       >
-        {review_label(@item)}
+        {review_label(@item, @detail)}
+      </.button>
+      <.button
+        :for={{link, index} <- Enum.with_index(@links)}
+        id={"review-#{@item.ticket.id}-#{index}"}
+        variant="outline"
+        fill
+        chevron
+        navigate={link.href}
+      >
+        {link.label}
       </.button>
       <.button
         :if={@offered != []}
@@ -975,7 +1323,7 @@ defmodule ForgeWeb.QueueLive do
         disabled={is_nil(@picked)}
         phx-disable-with="Sending…"
       >
-        {way_label(@item, @picked)}
+        {way_label(@offered, @picked)}
       </.button>
       <.button
         :if={@item.kind == :chat}
@@ -1008,27 +1356,16 @@ defmodule ForgeWeb.QueueLive do
     """
   end
 
-  defp way_label(_item, nil), do: "Pick a way forward"
+  defp way_label(_rows, nil), do: "Pick a way forward"
+  defp way_label(rows, picked), do: Enum.find_value(rows, &(&1.value == picked && &1.label))
 
-  defp way_label(item, picked),
-    do: Enum.find_value(ways_of(item), &(&1.value == picked && &1.label))
+  # The approval's way on, by the same rule as a way forward's (`review_link/5`): what it pins
+  # decides where it leads.
+  defp review_href(item, detail), do: approval_link(item, detail).href
+  defp review_label(item, detail), do: approval_link(item, detail).label
 
-  # **A merge decision leads to the change**, whatever it pins: what makes it one is the state it
-  # enters (`Forge.Engine.approval_merges?/1`), and a merge taken without the diff in front of
-  # the person is what the link exists to prevent. Anything else leads to what it pins — a
-  # document on Docs. The row is on every view, so the person decides from where they land.
-  defp review_href(%{project: project, ticket: ticket} = item) do
-    tab = if change?(item), do: "changes", else: "docs"
-    ~p"/tickets/#{project}/#{ticket.number}?tab=#{tab}"
-  end
-
-  defp review_label(item) do
-    case {change?(item), item.approve} do
-      {true, _pins} -> "Review the changeset"
-      {false, [{name, version}]} -> "Review #{name} v#{version}"
-      {false, pins} -> "Review #{length(pins)} versions"
-    end
-  end
+  defp approval_link(%{project: project, ticket: ticket} = item, detail),
+    do: review_link(project, ticket, change?(item), item.approve, detail[:presented])
 
   defp change?(%{ticket: ticket, approve: approve}),
     do: List.keymember?(approve, @changeset, 0) or Engine.approval_merges?(ticket)

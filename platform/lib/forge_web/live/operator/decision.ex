@@ -115,16 +115,22 @@ defmodule ForgeWeb.Operator.Decision do
   was pinned before merges carried a written message. `commit/1` draws it.
   """
   @spec commit(map()) :: %{ticket: map(), version: map() | nil, legacy: boolean()} | nil
-  def commit(ticket) do
-    if Engine.approval_merges?(ticket) do
-      version = Merge.commit_message(ticket)
+  def commit(ticket), do: if(Engine.approval_merges?(ticket), do: commit_of(ticket))
 
-      %{
-        ticket: ticket,
-        version: version,
-        legacy: is_nil(version) and Merge.legacy_message?(ticket)
-      }
-    end
+  @doc """
+  `commit/1`'s map for a caller that already knows the decision merges — a ticket resting in a
+  human state, whose way forward merges, has no pending approval for `approval_merges?/1` to read
+  (`Forge.Engine.merge_decision?/2` asks that of the workflow).
+  """
+  @spec commit_of(map()) :: %{ticket: map(), version: map() | nil, legacy: boolean()}
+  def commit_of(ticket) do
+    version = Merge.commit_message(ticket)
+
+    %{
+      ticket: ticket,
+      version: version,
+      legacy: is_nil(version) and Merge.legacy_message?(ticket)
+    }
   end
 
   @doc """

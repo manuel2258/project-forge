@@ -252,4 +252,89 @@ defmodule Forge.LoopBackTest do
 
     assert Tickets.get!(ticket.id).state == "planning"
   end
+
+  # **A loop that ran out names itself**, with the count `max` was decided on: two loops can lead
+  # to one state, so naming only its target said nothing about which had run dry. A person's move
+  # along the edge is a round too, so the loop is then spent past its limit and reads so.
+  test "a spent loop sticks the ticket with a reason that names the loop", context do
+    ticket = to_implementing(context)
+
+    ticket =
+      Enum.reduce(1..3, ticket, fn _round, ticket ->
+        ticket = run(ticket, context.worker, "implementation.md")
+        ticket = run(ticket, context.worker, "review.md", "changes_requested")
+        assert ticket.state == "implementing"
+        ticket
+      end)
+
+    ticket = run(ticket, context.worker, "implementation.md")
+    ticket = run(ticket, context.worker, "review.md", "changes_requested")
+
+    assert ticket.status == :stuck
+    assert ticket.state == "reviewing"
+
+    assert Engine.why_stuck(ticket) ==
+             "the reviewing → implementing loop on changes_requested ran out (3 of 3)"
+
+    {:ok, ticket} = Engine.choose(ticket, context.user.id, "implementing")
+    ticket = run(ticket, context.worker, "implementation.md")
+    ticket = run(ticket, context.worker, "review.md", "changes_requested")
+
+    assert Engine.why_stuck(ticket) ==
+             "the reviewing → implementing loop on changes_requested ran out (4 of 3)"
+
+    assert Engine.rounds(ticket.id)[{"reviewing", "implementing", "changes_requested"}] == 4
+  end
+
+  describe "a way that decides" do
+    alias ForgeCore.Workflow.Transition
+
+    setup %{ticket: ticket} do
+      {:ok, workflow} = Tickets.parsed_workflow(ticket)
+      %{workflow: workflow}
+    end
+
+    # Both halves, on edges built to be one without the other: approving a document that no state
+    # enters a merge for, and entering a merging state that approves nothing.
+    test "is an edge that approves or enters a merging state", %{workflow: workflow} do
+      approves = %Transition{from: "refining", to: "planning", approve: ["refinement.md"]}
+      merges = %Transition{from: "human_testing", to: "merged", approve: []}
+      neither = %Transition{from: "planning", to: "implementing"}
+
+      assert Engine.decision_edge?(workflow, approves)
+      assert Engine.decision_edge?(workflow, merges)
+      refute Engine.decision_edge?(workflow, neither)
+    end
+
+    test "is refused with approving: false, and nothing is written", context do
+      ticket = to_implementing(context)
+      ticket = run(ticket, context.worker, "implementation.md")
+      ticket = run(ticket, context.worker, "review.md")
+      assert ticket.state == "human_testing"
+      events = length(Forge.Events.for_ticket(ticket.id))
+
+      assert {:error, {:decides_on_ticket, "merged"}} =
+               Engine.choose(ticket, context.user.id, "merged", approving: false)
+
+      assert Tickets.get!(ticket.id) == ticket
+      assert length(Forge.Events.for_ticket(ticket.id)) == events
+
+      # A way that decides nothing is taken either way.
+      assert {:ok, %{state: "implementing"}} =
+               Engine.choose(ticket, context.user.id, "implementing", approving: false)
+    end
+
+    test "approving a document is refused the same way", %{ticket: ticket} = context do
+      {:ok, _job} = FakeWorker.run(pending(ticket), context.worker, "nothing")
+      stuck = Tickets.get!(ticket.id)
+      assert stuck.status == :stuck
+
+      assert {:error, {:decides_on_ticket, "planning"}} =
+               Engine.choose(stuck, context.user.id, "planning", approving: false)
+
+      # Without the option it is the operation's own refusal that answers, as on the ticket's page.
+      assert {:error, {:no_version, "refinement.md"}} =
+               Engine.choose(stuck, context.user.id, "planning")
+    end
+  end
 end

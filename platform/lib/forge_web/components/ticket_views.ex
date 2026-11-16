@@ -205,8 +205,9 @@ defmodule ForgeWeb.TicketViews do
       not step_live?(assigns.step)
   end
 
-  # What taking the edge starts, in words: the state's kind decides it.
-  defp leads(workflow, to) do
+  # What taking the edge starts, in words: the state's kind decides it. Public because the queue
+  # offers the same ways and says the same words (`ForgeWeb.QueueLive`).
+  def leads(workflow, to) do
     case Workflow.state(workflow, to) do
       %Workflow.State{on_enter: :merge} -> "merges the ticket's branch"
       %Workflow.State{chat: true} -> "opens a conversation there, waiting for a person"
@@ -726,7 +727,7 @@ defmodule ForgeWeb.TicketViews do
   attr :ticket, :map, required: true
   attr :wait, :string, default: nil
 
-  defp command_row(assigns) do
+  def command_row(assigns) do
     command = Jobs.spec(assigns.job).command
     assigns = assign(assigns, name: command["name"], args: command["args"] || [])
 

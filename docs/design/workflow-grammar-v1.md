@@ -314,7 +314,9 @@ no process — but nothing is asked of a person and the wait ends when the comma
 **Transitions.** `when` names an outcome and defaults to `done`. On job end the engine takes
 the single transition from the current state whose `when` matches the outcome. If none
 matches, the ticket becomes *stuck* (an engine flag, not a workflow state) and appears in the
-queue for the operator to pick any declared transition from that state manually. `max` caps
+queue for the operator to pick any declared transition from that state manually — except one
+that approves or merges, which is taken on the ticket's page, where what it approves is on screen,
+and which the queue links to. `max` caps
 how many times a transition may fire for one ticket; exceeding it also sticks the ticket.
 
 **Approval.** `approve` lists artifact names. The transition is not taken automatically; it

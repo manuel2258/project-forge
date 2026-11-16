@@ -41,8 +41,37 @@
   .queue-doc-version { font-family: var(--font-mono); font-size: 12px; opacity: .6; }
   .queue-doc-read { margin-left: auto; color: var(--link); font-size: 13px; }
 
+  /* The ticket's past (docs/design/ui.md § What each kind shows): a line per step, one of which
+     opens in place — a checkbox in a form, so a rejoin replays it — and the loops that fired. It
+     is the item's own, outside .queue-band, so it is drawn at every width. */
+  .queue-past { display: flex; flex-direction: column; gap: 8px; }
+  .queue-steps { display: flex; flex-direction: column; border-top: 1px solid var(--border-soft); }
+  .queue-step { border-bottom: 1px solid var(--border-soft); }
+  .queue-step-line { position: relative; display: flex; min-height: var(--target-min); align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.4; overflow-wrap: anywhere; }
+  .queue-step-line--open { cursor: pointer; }
+  .queue-step--current .queue-step-text { color: var(--warning); }
+  .queue-step-text { min-width: 0; flex: 1 1 auto; }
+  .queue-step-chevron { flex-shrink: 0; color: var(--ink-3); transition: transform .12s; }
+  .queue-step[data-open] .queue-step-chevron { transform: rotate(90deg); }
+  /* The box is the whole line, invisible but focusable: the row is the target (§ The affordance rule). */
+  .queue-step-toggle { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; appearance: none; cursor: pointer; opacity: 0; }
+  .queue-step-line:has(.queue-step-toggle:focus-visible) { outline: 2px solid var(--link); outline-offset: -2px; }
+  .queue-run { display: flex; flex-direction: column; gap: 6px; padding: 4px 0 12px 12px; border-left: 2px solid var(--border-soft); }
+  .queue-commands { display: flex; flex-direction: column; }
+  .queue-loops { display: flex; flex-direction: column; gap: 2px; font-family: var(--font-mono); font-size: 12.5px; }
+  .queue-loop { display: flex; justify-content: space-between; gap: 10px; }
+  .queue-loop-edge { min-width: 0; overflow-wrap: anywhere; }
+  .queue-loop-rounds { flex-shrink: 0; color: var(--warning); }
+  .queue-links { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+  .queue-links .queue-link { display: inline-flex; min-height: var(--target-min); align-items: center; }
+  /* A pinned document scrolls inside its box, so one long plan does not push the rest below the fold. */
+  .queue-pinned { max-height: 22rem; overflow-y: auto; overscroll-behavior: contain; padding: 10px 12px; border: 1px solid var(--border-soft); border-radius: 6px; }
+
   /* The dock: Later and the way on, at the reading measure under the item. */
-  .queue-dock { display: flex; width: 100%; max-width: 38rem; gap: 8px; margin: 0 auto; padding: 10px 0; border-top: 1px solid var(--border); }
+  .queue-dock { display: flex; flex-wrap: wrap; width: 100%; max-width: 38rem; gap: 8px; margin: 0 auto; padding: 10px 0; border-top: 1px solid var(--border); }
+  /* A ready-to-merge ticket has its link and a way to send it back: three buttons do not fit a phone
+     in a row, so the second fill button goes to a row of its own rather than off the edge. */
+  .queue-dock > .ui-btn--fill { flex: 1 1 12rem; }
 
   /* The end of the pass. */
   .queue-end { display: flex; flex-direction: column; gap: 10px; }

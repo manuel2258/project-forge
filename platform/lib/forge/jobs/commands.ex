@@ -707,12 +707,64 @@ defmodule Forge.Jobs.Commands do
          %Event{payload: %{"jobs" => ids}} <- started(ticket_id, batch) do
       from(j in Job, where: j.id in ^ids)
       |> Repo.all()
-      |> Enum.reject(&(exit_status(&1) == 0))
-      |> Enum.flat_map(&failure_tail(&1, bytes))
-      |> Map.new()
+      |> tails_of(bytes)
     else
       _none -> %{}
     end
+  end
+
+  defp tails_of(jobs, bytes) do
+    jobs
+    |> Enum.reject(&(exit_status(&1) == 0))
+    |> Enum.flat_map(&failure_tail(&1, bytes))
+    |> Map.new()
+  end
+
+  @doc """
+  The latest batch a command state started, whether or not it was decided: `%{batch, outcome,
+  jobs, tails}`, or nil when the state never started one. `jobs` are the batch's command jobs in
+  `invoke` order, `outcome` what its `commands.decided` mapped the exit statuses to (nil while it
+  runs), and `tails` — only when `tail_bytes` is given — the end of each non-zero command's log
+  as `failure_tails/2` reads it, by job id.
+
+  The state's own latest batch, where `failure_tails/2` reads the ticket's latest decided one: a
+  ticket stuck in `checking` has to show what `checking` ran, however long ago it was.
+  """
+  @spec latest_batch(Ecto.UUID.t(), String.t(), pos_integer() | nil) ::
+          %{
+            batch: String.t(),
+            outcome: String.t() | nil,
+            jobs: [Job.t()],
+            tails: %{Ecto.UUID.t() => String.t()}
+          }
+          | nil
+  def latest_batch(ticket_id, state, tail_bytes) do
+    case latest_started(ticket_id, state) do
+      %Event{payload: %{"batch" => batch, "jobs" => ids}} ->
+        by_id = Map.new(Repo.all(from j in Job, where: j.id in ^ids), &{&1.id, &1})
+        jobs = ids |> Enum.map(&by_id[&1]) |> Enum.reject(&is_nil/1)
+
+        %{
+          batch: batch,
+          outcome: decided_outcome(ticket_id, batch),
+          jobs: jobs,
+          tails: if(tail_bytes, do: tails_of(jobs, tail_bytes), else: %{})
+        }
+
+      _none ->
+        nil
+    end
+  end
+
+  defp decided_outcome(ticket_id, batch) do
+    Repo.one(
+      from e in Event,
+        where:
+          e.ticket_id == ^ticket_id and e.type == "commands.decided" and
+            fragment("?->>'batch'", e.payload) == ^batch,
+        select: fragment("?->>'outcome'", e.payload),
+        limit: 1
+    )
   end
 
   defp failure_tail(%Job{id: id}, bytes) do

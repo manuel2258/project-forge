@@ -106,7 +106,9 @@ defmodule Forge.Engine do
     multi = Multi.new()
 
     if Core.within_ticket_budget?(workflow, ticket.usage) do
-      case Core.step(workflow, job.state, outcome, counts(ticket.id)) do
+      rounds = rounds(ticket.id)
+
+      case Core.step(workflow, job.state, outcome, rounds) do
         {:transition, transition} when held ->
           put_held_transition(multi, ticket, job, transition, outcome)
 
@@ -117,7 +119,7 @@ defmodule Forge.Engine do
           put_pending_approval(multi, ticket, transition, outcome)
 
         {:stuck, reason} ->
-          put_stuck(multi, ticket, stuck_reason(reason))
+          put_stuck(multi, ticket, stuck_reason(reason, rounds))
 
         {:error, reason} ->
           put_stuck(multi, ticket, inspect(reason))
@@ -584,13 +586,31 @@ defmodule Forge.Engine do
     end
   end
 
-  defp stuck_reason({:no_transition, outcome}), do: "no transition from #{inspect(outcome)}"
+  defp stuck_reason({:no_transition, outcome}, _rounds),
+    do: "no transition from #{inspect(outcome)}"
 
-  defp stuck_reason({:max_exceeded, %Transition{to: to, max: max}}),
-    do: "transition to #{to} already fired #{max} times"
+  # Names the loop, not only its target: *reviewing → implementing* and *verifying → implementing*
+  # both lead to implementing. The count is the real one, so a loop a person has moved along past
+  # its limit reads *6 of 5* (`docs/design/ui.md` § What each kind shows).
+  defp stuck_reason(
+         {:max_exceeded, %Transition{from: from, to: to, max: max} = transition},
+         rounds
+       ),
+       do:
+         "the #{from} → #{to} loop on #{Transition.outcome(transition)} ran out " <>
+           "(#{Map.get(rounds, Transition.id(transition), 0)} of #{max})"
 
-  # Firing counts come from the event log, keyed like Transition.id/1.
-  defp counts(ticket_id) do
+  @doc """
+  How many times each transition has fired for the ticket, keyed like `Transition.id/1`
+  (`{from, to, outcome}`), counted from the event log.
+
+  **The one count `max` is decided on**: `put_after_job/4` and the chat step's acceptance hand it
+  to `ForgeCore.Engine.step/4`, and the queue draws the same figures as a loop's rounds, so what a
+  person is shown is what the engine would compare to the limit. It counts every firing of an
+  edge, a person's included, and a retry takes no transition and so adds none.
+  """
+  @spec rounds(Ecto.UUID.t()) :: ForgeCore.Engine.counts()
+  def rounds(ticket_id) do
     from(e in Event,
       where: e.ticket_id == ^ticket_id and e.type == "transition.taken",
       select: e.payload
@@ -733,6 +753,10 @@ defmodule Forge.Engine do
   waiting, and while a decision on another transition is pending. A transition that requires
   approval records the approvals as part of the choice.
   Options: `:outcome` picks between parallel edges, `:comment` is stored with approvals.
+  **`approving: false` refuses an edge that approves or merges** (`decision_edge?/2`) with
+  `{:error, {:decides_on_ticket, to}}` and writes nothing: the queue passes it, because what such an
+  edge decides is on the ticket's page and not on the queue's. Default `true`, so the page, the API
+  and a conversation are unchanged.
 
   **The pending check is here and not on a page.** It was the ticket page's
   `:if={!@ticket.pending_transition}` alone, which was armour while clicking was the only way in
@@ -756,13 +780,34 @@ defmodule Forge.Engine do
 
     with :ok <- not_queued(ticket),
          :ok <- no_live_job(ticket),
-         {:ok, transition} <- Core.choose(workflow, ticket.state, to, Keyword.get(opts, :outcome)) do
+         {:ok, transition} <-
+           Core.choose(workflow, ticket.state, to, Keyword.get(opts, :outcome)),
+         :ok <- approving(workflow, transition, Keyword.get(opts, :approving, true)) do
       take(ticket, workflow, transition, nil, user_id, :approved, %{
         comment: Keyword.get(opts, :comment),
         pinned: %{}
       })
     end
   end
+
+  # The guard sits on the very edge `choose/4` is about to take, not on a second resolution of it.
+  defp approving(_workflow, _transition, true), do: :ok
+
+  defp approving(workflow, %Transition{to: to} = transition, false) do
+    if decision_edge?(workflow, transition), do: {:error, {:decides_on_ticket, to}}, else: :ok
+  end
+
+  @doc """
+  Whether taking `transition` decides something: it records an approval, or enters a state that
+  merges. The one definition the queue hides a way forward by and `choose/4`'s `approving: false`
+  refuses by, so — when the pinned workflow is readable and the target resolves to one edge — the
+  row it does not draw is the one it would not take (`CLAUDE.md` § Rules).
+  """
+  @spec decision_edge?(Workflow.t(), Transition.t()) :: boolean()
+  def decision_edge?(%Workflow{} = workflow, %Transition{} = transition),
+    do:
+      Transition.requires_approval?(transition) or
+        Workflow.merges_on_enter?(workflow, transition.to)
 
   # **While a ticket is queued no other transition may be taken on it**, by the page, the API or a
   # conversation alike: the line owns its next step until a person takes it out. The same rule as
@@ -1980,7 +2025,7 @@ defmodule Forge.Engine do
     declared = declared || [Workflow.default_outcome()]
 
     if outcome in declared do
-      case Core.step(workflow, chat.state, outcome, counts(ticket.id)) do
+      case Core.step(workflow, chat.state, outcome, rounds(ticket.id)) do
         {:transition, transition} -> {:ok, transition}
         {:approval, transition} -> {:ok, transition}
         {:stuck, {:no_transition, _outcome}} -> {:error, {:no_edge, outcome}}

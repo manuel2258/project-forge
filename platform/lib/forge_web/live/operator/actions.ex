@@ -25,14 +25,18 @@ defmodule ForgeWeb.Operator.Actions do
   reloads; `{:state, socket}` for a change to a question form's draft
   (`ForgeWeb.Operator.QuestionForm`) or a card's (`ForgeWeb.Operator.Drafts`), which needs no
   reload; `:unknown` for anything else.
+
+  `opts` reaches the `"transition"` event alone, as `Forge.Operator.transition/4`'s options: the
+  queue passes `approving: false`, so a way that approves or merges is refused there in words
+  (`describe({:decides_on_ticket, to})`) and taken on the ticket's page instead.
   """
   # Every event clears the last refusal first: a refusal stays only until the next thing done.
-  def handle(event, params, socket) do
+  def handle(event, params, socket, opts \\ []) do
     socket = assign(socket, :refusal, nil)
 
     with :unknown <- QuestionForm.handle(event, params, socket),
          :unknown <- Drafts.handle(event, params, socket) do
-      act_on(event, params, socket)
+      act_on(event, params, socket, opts)
     end
   rescue
     Ecto.NoResultsError -> {:handled, refuse(socket, event, "That ticket no longer exists.")}
@@ -70,8 +74,8 @@ defmodule ForgeWeb.Operator.Actions do
   # A submit that committed forgets the draft its own form named, so the comment on an approval
   # does not come back on the next one and a saved document is drawn from the version just
   # written (`ForgeWeb.Operator.Drafts`). Only on success: a refusal leaves what was typed.
-  defp act_on(event, params, socket) do
-    case act(event, params, socket) do
+  defp act_on(event, params, socket, opts) do
+    case act(event, params, socket, opts) do
       :unknown ->
         :unknown
 
@@ -95,11 +99,13 @@ defmodule ForgeWeb.Operator.Actions do
 
   defp keep_typed(socket, _params, _reason), do: socket
 
-  defp act("transition", %{"ticket" => id, "to" => to}, socket) do
-    with {:ok, ticket} <- Operator.transition(ticket(id), user(socket), to) do
+  defp act("transition", %{"ticket" => id, "to" => to}, socket, opts) do
+    with {:ok, ticket} <- Operator.transition(ticket(id), user(socket), to, opts) do
       {:ok, "Moved to #{ticket.state}"}
     end
   end
+
+  defp act(event, params, socket, _opts), do: act(event, params, socket)
 
   defp act("cancel-ticket", %{"ticket" => id}, socket) do
     with {:ok, _ticket} <- Operator.cancel(ticket(id), user(socket)) do
@@ -206,6 +212,10 @@ defmodule ForgeWeb.Operator.Actions do
   `ForgeWeb.Operator.Decision`, which draws it inside the decision's panel.
   """
   @spec describe(term()) :: String.t()
+  def describe({:decides_on_ticket, to}),
+    do:
+      "moving to #{to} approves or merges, so it is taken on the ticket, where what it approves is on screen"
+
   def describe({:job_live, state}), do: "a job for #{state} is still live"
   def describe({:step_live, state}), do: "#{state} is a conversation; Accept it to move on"
   def describe({:invalid_document, errors}), do: ForgeCore.Error.format(errors)

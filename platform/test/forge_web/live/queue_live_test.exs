@@ -905,11 +905,13 @@ defmodule ForgeWeb.QueueLiveTest do
 
     assert has_element?(
              view,
-             ~s(a#review-#{ticket.id}[href="/tickets/#{project.name}/#{ticket.number}?tab=changes"]),
+             ~s(a#review-#{ticket.id}[href="/tickets/#{project.name}/#{ticket.number}?tab=changes&sub=files"]),
              "Review the changeset"
            )
 
     refute has_element?(view, ~s([id="#{commit_message_id(ticket)}"]))
+    # The past is on the item too, between the context card and the changeset (criterion 1, 21).
+    assert has_element?(view, "#queue-item #queue-past")
     refute has_element?(view, ~s(button[value="approved"]))
     refute has_element?(view, ~s(button[value="rejected"]))
 
@@ -930,6 +932,31 @@ defmodule ForgeWeb.QueueLiveTest do
     assert has_element?(view, "#{row} .ui-row-age", "now")
     assert has_element?(view, "#{row} .ui-row-latest", "→ merged")
     assert view |> element(row) |> render() |> String.split("→") |> length() == 2
+  end
+
+  # 13: the way on is the presentation when the ticket has one — it is what is read to decide — and
+  # still the changeset's files when it has none.
+  test "an approval of a change leads to the presentation when there is one", %{
+    conn: conn,
+    project: project
+  } do
+    ticket = admit(project, "Persist scores")
+    changeset!(ticket, seeded_head(project))
+    commit_message!(ticket, "Persist the scores\n")
+    pend_merge(ticket)
+
+    {:ok, _version} =
+      Artifacts.record_version(ticket.id, "deck", :presentation, :system, %{content: "# Deck\n"})
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    assert has_element?(
+             view,
+             ~s(a#review-#{ticket.id}[href="/tickets/#{project.name}/#{ticket.number}?tab=changes&sub=presentation"]),
+             "Read the presentation"
+           )
+
+    refute has_element?(view, "#review-#{ticket.id}", "Review the changeset")
   end
 
   # The queue draws the message only where the panel would: an approval that does not merge says
@@ -1003,7 +1030,7 @@ defmodule ForgeWeb.QueueLiveTest do
 
     assert has_element?(
              view,
-             ~s(#review-#{ticket.id}[href="/tickets/#{project.name}/#{ticket.number}?tab=changes"]),
+             ~s(#review-#{ticket.id}[href="/tickets/#{project.name}/#{ticket.number}?tab=changes&sub=files"]),
              "Review the changeset"
            )
   end
@@ -1023,6 +1050,8 @@ defmodule ForgeWeb.QueueLiveTest do
 
     # Drawn, linked to its ticket, and nothing claimed about a merge it cannot be sure of.
     assert has_element?(view, "#review-#{ticket.id}", "Review the changeset")
+    # Steps and runs come from what ran, so the past is listed without the workflow (criterion 5).
+    assert has_element?(view, "#queue-past #queue-step-refining")
     refute has_element?(view, ~s([id="#{commit_message_id(ticket)}"]))
   end
 

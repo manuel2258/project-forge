@@ -21,6 +21,7 @@ defmodule Forge.Look.Setups do
   @setups %{
     "decision" => Forge.Look.Setups.Decision,
     "queue" => Forge.Look.Setups.Queue,
+    "queue_past" => Forge.Look.Setups.QueuePast,
     "ticket" => Forge.Look.Setups.Ticket,
     "repo_file" => Forge.Look.Setups.RepoFile,
     "repo" => Forge.Look.Setups.Repo,

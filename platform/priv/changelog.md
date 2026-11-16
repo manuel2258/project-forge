@@ -10,6 +10,10 @@ until it changes) or **may adopt** (new and optional). A project records the rel
 brought up to in `.forge/forge-release`; `platform.md` § Upgrading to a newer forge says how an
 upgrade goes.
 
+## 0.22.0
+
+- **may adopt** — a job whose check also fails on the project's default branch now treats fixing it as its own ticket's work, rather than proposing it and stopping: the smallest fix, never a deleted, skipped or weakened test or a lowered threshold, and recorded in the job's document. A fix that is more than small is proposed, and the job says the check did not pass. A project whose own prompts forbid touching code outside the ticket's change should say whether that rule gives way here. (the job preamble, which is the prompt a job is given, § Proposing a ticket)
+
 ## 0.21.0
 
 Nothing for projects in this release.

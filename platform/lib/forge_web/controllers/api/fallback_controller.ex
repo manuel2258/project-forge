@@ -175,6 +175,93 @@ defmodule ForgeWeb.Api.FallbackController do
 
   def call(conn, {:error, :not_found}), do: error(conn, :not_found, "not_found", nil)
 
+  # Hold, milestones and order (`docs/design/workflow-grammar-v1.md` § Holding a ticket). The
+  # state of the ticket or the milestone and so the client's to resolve are 409; a request that
+  # names something that cannot be is 422.
+  def call(conn, {:error, :start_or_hold}),
+    do:
+      error(
+        conn,
+        :unprocessable_entity,
+        "start_or_hold",
+        "say whether to start the ticket now or put it on hold: on_hold is true or false"
+      )
+
+  def call(conn, {:error, :milestone}),
+    do:
+      error(
+        conn,
+        :unprocessable_entity,
+        "milestone",
+        "an open milestone of this project is needed"
+      )
+
+  def call(conn, {:error, :already_on_hold}),
+    do: error(conn, :conflict, "already_on_hold", "the ticket is already on hold")
+
+  def call(conn, {:error, :not_on_hold}),
+    do: error(conn, :conflict, "not_on_hold", "the ticket is not on hold")
+
+  def call(conn, {:error, {:not_holdable, status}}),
+    do: error(conn, :conflict, "not_holdable", "a #{status} ticket cannot be put on hold")
+
+  def call(conn, {:error, {:not_releasable, status}}),
+    do: error(conn, :conflict, "not_releasable", "a #{status} ticket cannot be released")
+
+  def call(conn, {:error, :nothing_running}),
+    do: error(conn, :conflict, "nothing_running", "no run of the ticket's state is going")
+
+  def call(conn, {:error, {:no_state, state}}),
+    do:
+      error(
+        conn,
+        :unprocessable_entity,
+        "no_state",
+        "the workflow now on the default branch has no state #{state}"
+      )
+
+  def call(conn, {:error, :branch_moved}),
+    do:
+      error(
+        conn,
+        :conflict,
+        "branch_moved",
+        "the ticket's branch has moved since it was admitted, so it cannot be refreshed"
+      )
+
+  def call(conn, {:error, :changed}),
+    do: error(conn, :conflict, "changed", "the ticket changed while this was made; try again")
+
+  def call(conn, {:error, :release_title}),
+    do:
+      error(
+        conn,
+        :unprocessable_entity,
+        "release_title",
+        "a release's title is its version, set by the release itself"
+      )
+
+  def call(conn, {:error, :blank}),
+    do: error(conn, :unprocessable_entity, "blank", "the title cannot be empty")
+
+  def call(conn, {:error, {:not_open, status}}),
+    do: error(conn, :conflict, "not_open", "a #{status} ticket keeps its place and milestone")
+
+  def call(conn, {:error, :moved}),
+    do: error(conn, :conflict, "moved", "the ticket moved to another order while this was made")
+
+  def call(conn, {:error, :not_in_order}),
+    do: error(conn, :unprocessable_entity, "not_in_order", "that is not in this order")
+
+  def call(conn, {:error, :closed}),
+    do: error(conn, :conflict, "closed", "the milestone is closed")
+
+  def call(conn, {:error, :already_closed}),
+    do: error(conn, :conflict, "already_closed", "the milestone is already closed")
+
+  def call(conn, {:error, :not_closed}),
+    do: error(conn, :conflict, "not_closed", "the milestone is not closed")
+
   # A changeset is a commit, not bytes. Where its diff is, is the whole of the answer.
   def call(conn, {:error, :not_a_file}),
     do:

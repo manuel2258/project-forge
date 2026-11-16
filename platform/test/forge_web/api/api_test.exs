@@ -98,7 +98,10 @@ defmodule ForgeWeb.ApiTest do
 
     assert %{"number" => number} =
              conn
-             |> post(~p"/api/v1/projects/#{project.name}/tickets", %{title: "Persist scores"})
+             |> post(~p"/api/v1/projects/#{project.name}/tickets", %{
+               title: "Persist scores",
+               on_hold: false
+             })
              |> json_response(201)
 
     ticket = Tickets.get_by_number!(project, number)
@@ -309,7 +312,7 @@ defmodule ForgeWeb.ApiTest do
 
     response =
       conn
-      |> post(~p"/api/v1/projects/#{name}/tickets", %{title: "No workflow here"})
+      |> post(~p"/api/v1/projects/#{name}/tickets", %{title: "No workflow here", on_hold: false})
       |> json_response(422)
 
     assert %{"error" => %{"reason" => "no_workflow_file"}} = response
@@ -366,7 +369,7 @@ defmodule ForgeWeb.ApiTest do
 
     response =
       conn
-      |> post(~p"/api/v1/projects/#{name}/tickets", %{title: "Nowhere to run"})
+      |> post(~p"/api/v1/projects/#{name}/tickets", %{title: "Nowhere to run", on_hold: false})
       |> json_response(422)
 
     assert %{"error" => %{"reason" => "no_workflow_file"}} = response
@@ -479,7 +482,8 @@ defmodule ForgeWeb.ApiTest do
              conn
              |> post(~p"/api/v1/projects/#{name}/tickets", %{
                title: "Persist scores",
-               body: "gone"
+               body: "gone",
+               on_hold: false
              })
              |> json_response(201)
 
@@ -663,7 +667,10 @@ defmodule ForgeWeb.ApiTest do
     } do
       assert %{"number" => number, "title" => "Extract the score table"} =
                conn
-               |> post(~p"/api/v1/proposals/#{version.id}/accept", %{comment: "yes"})
+               |> post(~p"/api/v1/proposals/#{version.id}/accept", %{
+                 comment: "yes",
+                 on_hold: false
+               })
                |> json_response(200)
 
       assert %{"ticket" => %{"number" => ^number, "title" => "Extract the score table"}} =
@@ -690,7 +697,9 @@ defmodule ForgeWeb.ApiTest do
       conn |> post(~p"/api/v1/proposals/#{version.id}/decline", %{}) |> json_response(200)
 
       assert %{"error" => %{"reason" => "already_decided"}} =
-               conn |> post(~p"/api/v1/proposals/#{version.id}/accept", %{}) |> json_response(409)
+               conn
+               |> post(~p"/api/v1/proposals/#{version.id}/accept", %{on_hold: false})
+               |> json_response(409)
     end
 
     test "accepting one a person edited into nonsense is answerable, not a 500", %{
@@ -701,7 +710,7 @@ defmodule ForgeWeb.ApiTest do
 
       assert %{"error" => %{"reason" => "invalid_proposal", "detail" => detail}} =
                conn
-               |> post(~p"/api/v1/proposals/#{version.id}/accept", %{})
+               |> post(~p"/api/v1/proposals/#{version.id}/accept", %{on_hold: false})
                |> json_response(422)
 
       assert detail =~ "level-one heading"
@@ -710,7 +719,7 @@ defmodule ForgeWeb.ApiTest do
     test "a proposal that is not there is a 404", %{conn: conn} do
       assert %{"error" => %{"reason" => "not_found"}} =
                conn
-               |> post(~p"/api/v1/proposals/#{Ecto.UUID.generate()}/accept", %{})
+               |> post(~p"/api/v1/proposals/#{Ecto.UUID.generate()}/accept", %{on_hold: false})
                |> json_response(404)
     end
   end

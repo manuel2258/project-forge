@@ -293,4 +293,19 @@
   }
   .work-act-turn::before,
   .work-act-turn::after { height: 1px; flex: 1 1 0%; background: var(--border-soft); content: ""; }
+
+  /* -- on hold (docs/design/ui.md § The ticket) -----------------------------------------------
+     A neutral band where a status goes: the surface and the quiet ink, never the accent, because
+     nothing waits on you. */
+  .ticket-hold { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 10px var(--gutter, 16px); border-bottom: 1px solid var(--border-soft); background: var(--surface-1); }
+  .ticket-hold-line { display: flex; min-width: 0; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
+  .ticket-hold-word { font-family: var(--font-mono); font-size: 12px; letter-spacing: var(--tracking-eyebrow); text-transform: uppercase; color: var(--ink-2); }
+  .ticket-hold-waits { min-width: 0; overflow-wrap: anywhere; color: var(--ink-3); font-size: 13px; }
+  .ticket-hold-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .ticket-retitle { display: flex; align-items: flex-end; gap: 8px; }
+  .ticket-retitle-field { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 4px; }
+  .ticket-milestone-form { display: flex; }
+  @media (width >= 768px) {
+    .ticket-hold { padding: 10px var(--gutter-desk); }
+  }
 }

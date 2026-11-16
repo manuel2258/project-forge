@@ -197,6 +197,75 @@ defmodule Forge.BacklogTest do
     end
   end
 
+  describe "holds and milestones" do
+    # The index as it was before holds and milestones existed, written out: a project with neither
+    # reads as it always did, byte for byte.
+    test "a project with no milestones and nothing on hold gets the index it always did" do
+      project = project_fixture(%{name: "plain"})
+      ticket_fixture(%{project: project, number: 12, title: "Scores vanish"})
+
+      expected = """
+      # Tickets on plain
+
+      Taken at 2026-09-15T21:30:00Z. This is a snapshot: it does not change while you work,
+      so a ticket admitted after this moment is not here.
+
+      One file per ticket in this folder, named after its number. Read a line here first and open
+      the file only when the line looks relevant — the body is what the work is, and it is the
+      only thing this folder holds. Another ticket's plan, report or changeset is not yours to
+      read: it is pinned to a job that is not this one.
+
+      | # | state | status | title |
+      |---|---|---|---|
+      | 12 | refining | active | Scores vanish |
+
+
+      ## Open proposals
+
+      None. If you propose something, it appears here for every job that runs after you.
+
+      """
+
+      assert Backlog.compose(project, ~U[2026-09-15 21:30:00Z])["index"] == expected
+    end
+
+    test "a ticket on hold says so, and its milestone is named in the index and its file" do
+      project = project_fixture()
+
+      {:ok, m} =
+        Forge.Milestones.create(project, %{name: "0.4 | saves", description: "Scores"}, :system)
+
+      {:ok, _} = Forge.Milestones.create(project, %{name: "Later"}, :system)
+      held = ticket_fixture(%{project: project, number: 3, title: "Held idea"})
+      {:ok, held} = Forge.Milestones.set_ticket_milestone(held, m.id, :system)
+      {:ok, _} = Forge.Engine.hold(held, :system)
+      ticket_fixture(%{project: project, number: 4, title: "Plain one"})
+      {:ok, _} = Forge.Milestones.set_current(project.id, m.id, :system)
+
+      backlog = Backlog.compose(project)
+
+      assert backlog["index"] =~ "| # | state | status | milestone | title |"
+      assert backlog["index"] =~ "| 3 | refining | active, on hold | 0.4 \\| saves | Held idea |"
+      assert backlog["index"] =~ "| 4 | refining | active | — | Plain one |"
+      assert backlog["index"] =~ "## Milestones"
+      assert backlog["index"] =~ "| 0.4 \\| saves (current) | Scores |"
+      assert backlog["index"] =~ "| Later |  |"
+
+      assert %{"content" => content} = file(backlog, "3.md")
+      assert content =~ "on hold · milestone 0.4 | saves"
+      assert %{"content" => plain} = file(backlog, "4.md")
+      refute plain =~ "on hold"
+    end
+
+    test "a closed milestone is not listed as one a job could use" do
+      project = project_fixture()
+      {:ok, m} = Forge.Milestones.create(project, %{name: "Done goal"}, :system)
+      {:ok, _} = Forge.Milestones.close(project.id, m.id, :system)
+
+      refute Backlog.compose(project)["index"] =~ "## Milestones"
+    end
+  end
+
   describe "the hash" do
     test "is stable for the same content and changes when a ticket does" do
       project = project_fixture()

@@ -597,6 +597,10 @@ defmodule Forge.Conversations do
   #
   # The turn is recorded either way. Nothing here can fail the turn, whose cost is the one thing
   # that must not be lost.
+  #
+  # **Left alone by a hold on purpose** (`docs/design/workflow-grammar-v1.md` § Holding a ticket): it
+  # moves the ticket in the opener's name, which is a person's own move, and it writes no hold — an
+  # agent cannot hold, release or stop anything. What the move would start waits for the release.
   defp apply_transition_request(chat, payload) do
     case request(payload) do
       :none -> :ok

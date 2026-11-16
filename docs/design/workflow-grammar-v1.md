@@ -385,6 +385,86 @@ The cancel locks the ticket and its live jobs, so a job starting or a result bei
 same moment happens wholly before it or is refused after it. The ticket's conversations are left
 as they are: a conversation is ended by closing it.
 
+**Holding a ticket.** A member may put an open ticket — active or stuck, in any state, of any
+type, a release's included — **on hold** (`Forge.Engine.hold/2`), and release it
+(`Forge.Engine.release/2`). While a ticket is on hold the platform takes no step on it by itself:
+no job or command is handed to a machine, no transition is taken on the engine's own authority
+(the retry edges `budget_exhausted` and `did_not_converge` included), a job
+waiting on a credential's rate limit does not resume, a restart does not set its jobs running, no
+chat step opens a conversation, and the merge queue does not merge it. A person's own moves work:
+answering, approving or rejecting, taking a transition by hand, Accept, retrying; what they would
+start waits for the release.
+
+**A hold is three nullable columns on `tickets`, not a status.** `held_at` is the flag;
+`held_transition` is `{job_id, state, outcome, from, to}` for an engine transition that waits, the
+outcome being the *string* the engine routed on (an agent's declared outcome, or a command batch's
+mapped exit outcome) and not the job's enum; `held_entry` is `{state, entered, came_back}` for a
+job, command or chat step that waits to be made. A new status would lose a held ticket's place in
+the merge queue (`run_entry/1` drops a ticket that is not `active`) and orphan the outcome of its
+finishing run (`put_after_job/4` records a job whose ticket is not `active` as orphaned), both
+without an error.
+
+**Two layers, so that a race costs nothing.** *Deferral* covers what the engine would make while a
+ticket is held: `put_after_job/4` reads the ticket row `FOR UPDATE` and, when held and the engine
+would take a transition, writes `held_transition` and `transition.held` instead; `put_entry/6`
+(where the engine makes a state's job, commands or conversation once a ticket exists — release
+also uses it, so the two cannot drift; admission makes its first state's directly, behind its own
+hold branch; the commands an agent invokes are inserted by `Forge.Jobs.Commands.put_invoked/7`,
+which does not go through it and is held back by the dispatch gate alone) writes `held_entry`
+instead of making anything; an approval, stuck and the
+budget cap behave as they do today. *The dispatch gate* covers rows that already exist:
+`Forge.Jobs.pending/2` leaves a held ticket's workflow and command jobs out and `mark_started`
+re-reads the ticket `FOR SHARE` and refuses a held one, so a job placed from a read taken before
+the hold is refused under the lock. A conversation is not gated: an open one is a person talking,
+and carries on. A held ticket's pending job reserves none of the day's allowance
+(`capacity.md`) and holds no claim on a machine.
+
+**A run already going finishes**, and its outcome is recorded as it would be; the transition it
+would take waits. **Stop now** (`Forge.Engine.stop_now/2`) is the separate, further action: every
+live job and command of the state is finished as `cancelled`, the machine is told with the cancel
+a cancelled ticket's is (`{:cancel, id, :ticket_cancelled}` — the worker acts on the cancel and
+not the reason, so there is no protocol bump), what the run spent is settled by the worker's
+report, and the state runs again on release as a retry would run it. A command state's batch that
+has a cancelled command is never decided, and so `Forge.Jobs.Commands.recover/0` on a restart does
+not take the failure edge for a batch that was stopped.
+
+**What release does.** In one transaction: the row is locked and the hold re-read (so of two
+people releasing at once one is refused with `:not_on_hold`); a ticket that **never started** is
+refreshed; the hold is cleared; and what waited is made — the transition through `put_after_job/4`
+with the outcome it was routed on, so `max` rounds, approvals and the budget are read now, or else
+the entry through `put_entry/6` on the ticket's current pin; then the entry actions of the state
+it moved into, as after any transition, and a kick of the merge queue. `ticket/N` is moved by the
+transaction's last step, so that nothing which can refuse runs after the branch has moved; only
+the commit can, and an infrastructure fault there is the one way the branch is left at the new
+head under the old pin (a later release is then refused with `:branch_moved`). A move by hand out of the
+state (`choose`, `integrate`, a retry) clears `held_transition`: it replaces the transition that
+waited, which is then not taken.
+
+**A ticket that never started** — `Forge.Tickets.started?/1`: no workflow job or command has
+`started_at`, and no chat step's conversation has opened (a derived read, no column to keep true;
+`mark_started` writes before it pushes, so a failed push counts as started and is released
+without a refresh) — is **refreshed** when released: its workflow is re-pinned at the default
+branch's head, its own type's file as `repin/2` reads it, `base_commit` moves to that head and
+`ticket/N` with it, as a compare-and-swap (`git update-ref <ref> <head> <old base>`) after the
+database writes and before a chat step's branch is cut. A job made for it before it was held that
+no machine took is withdrawn (finished as `cancelled`) and made again on the new pin. **The
+release is refused whole, changing nothing and leaving the ticket on hold, when the type's file
+is gone or does not parse, when the new workflow has no state of the ticket's name, or when the
+branch is no longer where admission left it.** A ticket that has started is released as it is.
+Only a first start refreshes: keying it on "no commits" would re-pin a ticket held between steps.
+
+**Cancel and restore.** Cancelling clears `held_transition` and `held_entry` and keeps `held_at`;
+restoring brings the ticket back stuck *and* on hold, and nothing restarts on release that the
+restore said would not. A cancelled ticket keeps its milestone, so one restored after the milestone
+closed is put at the bottom of the tickets in no milestone, as closing would have put it, and the
+move is an event (`ticket.milestone_set`): an open ticket in a closed milestone is in no list.
+
+**Left alone on purpose.** `Forge.Merge.Watch` only records and tells. `Engine.resume_placement/2`
+unsticks and starts nothing, since the gate holds the job, and excluding held tickets would make a
+placement stick a dead end again. `Conversations.apply_transition_request/2` moves the ticket in
+the opener's name, which is a person's move; it writes no hold. No job and no conversation can hold,
+release or stop a ticket.
+
 **Merging.** A state declaring `on_enter: merge` merges the `changeset` version the transition
 into it named, not whatever the branch head happens to be, and checks it before a person's
 transition into it is taken — and before the engine's own, when the state names `on_conflict`.
@@ -518,7 +598,8 @@ job runs. A ticket conversation opens on the ticket (`conversations.md` § A con
 a step) and the ticket waits for a person. The documents the step declares are written as the
 conversation goes; when the person is satisfied they press **Accept**, pick the outcome when the
 step declares more than one, and the ticket takes the edge for that outcome as after a job. Until
-then it stays in the step.
+then it stays in the step. **While the ticket is on hold no conversation opens** (§ Holding a
+ticket): the entry waits and the conversation opens at release; one already open carries on.
 
 ```yaml
 states:
@@ -738,6 +819,12 @@ it off for that edge, and a workflow with no `queue` key never writes a row, so 
 at once and a conflicting approval takes the conflict route exactly as above. The engine's own
 edge into a merging state queues the same way (it is the ticket's place that matters, not who
 asked), with the job's outcome behind it.
+
+**A ticket on hold keeps its place in the line and is skipped** (§ Holding a ticket): `claim/1`
+passes over a waiting entry whose ticket is held and takes the one behind it, `lock_entry` puts a
+claimed row whose ticket was held since back to `waiting` at its place rather than leaving the
+line, and the places the line draws do not count a held entry as one a ticket waits behind.
+Released, it is merged from the place it kept.
 
 A runner takes the line one project at a time (`Forge.MergeQueue.Runner`; the work is a task of
 its own, not the request that approved):

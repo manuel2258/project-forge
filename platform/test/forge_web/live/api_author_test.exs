@@ -30,7 +30,7 @@ defmodule ForgeWeb.ApiAuthorTest do
   end
 
   defp written_through_the_api(project, token) do
-    {:ok, ticket} = Operator.admit(project, token, %{title: "By API"})
+    {:ok, ticket} = Operator.admit(project, token, %{title: "By API", on_hold: false})
 
     {:ok, _} =
       Operator.edit(ticket, token, "plan.md", """

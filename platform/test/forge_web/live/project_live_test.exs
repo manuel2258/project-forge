@@ -300,7 +300,8 @@ defmodule ForgeWeb.ProjectLiveTest do
       assert html =~ "Extract the score table"
       assert html =~ "The plan assumes a module that is not there."
       assert html =~ "ticket ##{ticket.number}"
-      assert html =~ ~s(value="accepted")
+      assert html =~ ~s(value="start")
+      assert html =~ ~s(value="hold")
       assert html =~ ~s(value="declined")
     end
 
@@ -315,16 +316,16 @@ defmodule ForgeWeb.ProjectLiveTest do
       {:ok, view, _html} =
         live(conn, ~p"/projects/#{project.name}?view=proposals&read=#{version.id}")
 
-      assert has_element?(view, ~s(#proposal-reader button[value="accepted"]))
-      refute has_element?(view, ~s(#proposal-reader button[value="accepted"][disabled]))
+      assert has_element?(view, ~s(#proposal-reader button[value="start"]))
+      refute has_element?(view, ~s(#proposal-reader button[value="start"][disabled]))
       refute has_element?(view, "#proposal-admit-why")
 
       {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}?view=proposals")
       view |> element("#proposal-lists + button", "Select") |> render_click()
       view |> form("#proposal-select") |> render_change(%{"ids" => [version.id]})
 
-      assert has_element?(view, ~s(#proposal-bulk button[value="admit"]))
-      refute has_element?(view, ~s(#proposal-bulk button[value="admit"][disabled]))
+      assert has_element?(view, ~s(#proposal-bulk button[value="admit_start"]))
+      refute has_element?(view, ~s(#proposal-bulk button[value="admit_start"][disabled]))
     end
 
     # `docs/design/ui.md` § The affordance rule: as a one-line input the comment submitted on
@@ -356,7 +357,7 @@ defmodule ForgeWeb.ProjectLiveTest do
       html =
         render_submit(view, "decide_proposal", %{
           "version_id" => version.id,
-          "decision" => "accepted"
+          "admit" => "start"
         })
 
       assert html =~ "Admitted as ticket"
@@ -400,7 +401,7 @@ defmodule ForgeWeb.ProjectLiveTest do
       html =
         render_submit(view, "decide_proposal", %{
           "version_id" => version.id,
-          "decision" => "accepted"
+          "admit" => "start"
         })
 
       assert html =~ "already decided"
@@ -650,6 +651,34 @@ defmodule ForgeWeb.ProjectLiveTest do
       assert has_element?(view, ~s(#project-page[data-view="tickets"]))
     end
 
+    # `docs/design/ui.md` § The bottom strip: at most five. The project has six views, and a phone's
+    # strip with six had its labels cut and colliding; Workflow is the one it leaves out, and the
+    # details link to it. The desktop's view tabs draw all six.
+    test "the phone's strip is five tabs, the desktop's view tabs six, and Workflow is in the details",
+         %{conn: conn, project: project} do
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}")
+
+      assert view
+             |> render()
+             |> Floki.parse_document!()
+             |> Floki.find("nav.ui-strip a")
+             |> length() ==
+               5
+
+      refute has_element?(view, "nav.ui-strip #tab-workflow")
+      assert has_element?(view, "nav.ui-strip #tab-milestones")
+
+      assert view
+             |> render()
+             |> Floki.parse_document!()
+             |> Floki.find("nav.ui-tabs a")
+             |> length() ==
+               6
+
+      view |> element("#details-facts a.project-link-phone", "Workflow") |> render_click()
+      assert has_element?(view, ~s(#project-page[data-view="workflow"]))
+    end
+
     test "+ New opens the sheet with a ticket and a chat for this project", %{
       conn: conn,
       project: project
@@ -813,7 +842,7 @@ defmodule ForgeWeb.ProjectLiveTest do
     test "History keeps a declined one's reason and reopens it; an admitted one links its ticket",
          %{conn: conn, project: project, user: user, a: a, b: b} do
       {:ok, _} = Forge.Operator.decline_proposal(a.id, user, "needs a server first")
-      {:ok, ticket} = Forge.Operator.accept_proposal(b.id, user)
+      {:ok, ticket} = Forge.Operator.accept_proposal(b.id, user, nil, nil, on_hold: false)
 
       {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}?view=proposals")
 
@@ -903,7 +932,7 @@ defmodule ForgeWeb.ProjectLiveTest do
     disabled? = fn html ->
       html
       |> LazyHTML.from_fragment()
-      |> LazyHTML.query(~s(button[value="admit"][disabled]))
+      |> LazyHTML.query(~s(button[value="admit_start"][disabled]))
       |> Enum.count() == 1
     end
 

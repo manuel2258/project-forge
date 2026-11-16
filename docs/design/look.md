@@ -108,7 +108,11 @@ credentials on the fake driver, one with a running build and four ended every wa
 Credentials view's builds (`ui.md` § Templates and credentials); `weighted_usage` — a ticket with a
 job counted in weighted tokens and one converted from dollars, and a credential with a day's usage,
 for the job, converted-job, ticket and account-settings pages; `codex` — Codex credentials, a
-project on Codex and its jobs and chats (`codex.md`). **Never a project secret's value** in
+project on Codex and its jobs and chats (`codex.md`); `milestones` — a current milestone with
+held, in-flight and merged tickets, a second open milestone and a closed one, tickets in none (one
+held), a held ticket with a running job (Stop now) and one with a blocking question, a milestone of
+two hundred tickets for the phone, and a long hostile name, for the Milestones view, the Tickets
+list's *On hold* and the ticket page's band (`ui.md` § Milestones). **Never a project secret's value** in
 a setup: nothing masks a picture (`secrets.md`, which this leaves as written).
 
 ## What it is built on

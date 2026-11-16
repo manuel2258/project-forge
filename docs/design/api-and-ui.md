@@ -94,11 +94,16 @@ it. Every refusal to authenticate is the same 401 body.
 
 | Method and path | Purpose |
 |---|---|
+| `POST /projects/:project/tickets`, `POST /proposals/:id/accept` | Admit; accept. **`on_hold` is required**, `true` or `false`, otherwise 422 `start_or_hold`; `milestone_id` is optional, and a milestone of another project or a closed one is 422 `milestone`. |
+| `POST /tickets/:project/:number/{hold,release,stop}` | Put on hold; release (refused whole, 409/422, when a never-started ticket cannot be refreshed); stop the run a held ticket is finishing |
+| `POST /tickets/:project/:number/title` `{title}`, `…/milestone` `{milestone_id}`, `…/move` `{to: top\|up\|down\|bottom}` or `{before: number}` | Retitle (a release's is 422 `release_title`); put in a milestone or none; order |
+| `GET /projects/:project/milestones`, `POST` | List with order, current, closed, progress and ticket numbers in order; create `{name, description}` |
+| `POST /projects/:project/milestones/:id` and `/:id/{current,close,reopen,move}` | Update; mark current (`current: false` unmarks); close; reopen; order. Other projects' ids answer 404. |
 | `GET /me` | The token's user; for a project token, `{token: {id, name, project, git, api, expires_at}}` |
 | `GET /queue` | The operator queue |
 | `GET /projects`, `POST /projects` | List; register `{name, default_branch}` (repository created under the platform's repos directory) |
 | `GET /tickets[?project=name][&state=s][&open=true]` | List tickets. `state` filters to one state name, `open=true` to status active or stuck; they combine. A project token needs no `project` |
-| `POST /projects/:name/tickets` | Admit `{title, body, ticket_type}`; `ticket_type` is required when the project has more than one (`ticket-types.md`); naming the release type is refused with 422 `release_ticket_type`, saying a project admin starts it with Release on the project page |
+| `POST /projects/:name/tickets` | Admit `{title, body, ticket_type, on_hold, milestone_id}` (`on_hold` required, below); `ticket_type` is required when the project has more than one (`ticket-types.md`); naming the release type is refused with 422 `release_ticket_type`, saying a project admin starts it with Release on the project page |
 | `GET /tickets/:project/:number` | Ticket with jobs, artifacts, open questions, pending transition |
 | `GET /tickets/:project/:number/events` | The event timeline |
 | `GET /tickets/:project/:number/review` | The merge decision: diff, documents, presentations, the commit message, answers, cost |

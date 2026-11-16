@@ -252,9 +252,11 @@ made it look true sorted the stored strings, so "admins first" held because 'adm
 `Forge.Operator` is the single place every human action exists, taking the acting user, and the
 guard goes at the entrance of each of its functions.
 
-The acting *user* is a `%User{}` or, for the eleven operations a project token may do (`answer`,
+The acting *user* is a `%User{}` or, for the twenty-three operations a project token may do (`answer`,
 `answer_all`, `decide`, `transition`, `retry`, `cancel`, `restore`, `edit`, `admit`,
-`accept_proposal`, `decline_proposal`), a `%Forge.Git.Token{}`. Both go through the same
+`accept_proposal`, `decline_proposal`, and the twelve of holds and milestones: `hold`, `release`,
+`stop_now`, `retitle`, `set_milestone`, `move_ticket`, `create_milestone`, `update_milestone`,
+`set_current_milestone`, `close_milestone`, `reopen_milestone`, `move_milestone`), a `%Forge.Git.Token{}`. Both go through the same
 `Forge.Access` call, a token's scope being `:use` only on its own project and only with API write.
 Every other function still takes a `%User{}` only, so a token cannot reach one by construction.
 Below `Operator` the actor is `{:user, id}` or `{:api, id, name}`, and answers, approvals and

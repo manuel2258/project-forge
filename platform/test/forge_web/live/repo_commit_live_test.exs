@@ -73,9 +73,12 @@ defmodule ForgeWeb.RepoCommitLiveTest do
     {:ok, head} = Git.resolve(repo, "refs/heads/main")
     {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo/commits/#{head}")
 
-    for key <- ~w(tickets merge chats workflow proposals) do
+    for key <- ~w(tickets milestones merge chats proposals) do
       assert has_element?(view, ~s|#tab-#{key}[href="/projects/#{project.name}?view=#{key}"]|)
     end
+
+    # At most five tabs: Workflow is not in the phone's strip (`ui.md` § The bottom strip).
+    refute has_element?(view, "#tab-workflow")
   end
 
   test "the header names the author, the parent and the size of the change", %{

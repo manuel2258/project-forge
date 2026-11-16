@@ -153,6 +153,34 @@ defmodule ForgeWeb.Operator.Actions do
     end
   end
 
+  # The hold (`docs/design/workflow-grammar-v1.md` § Holding a ticket). *On hold*, *hold* and
+  # *release* in every sentence: never *paused*, which is the spend and capacity pauses' word.
+  defp act("hold-ticket", %{"ticket" => id}, socket) do
+    with {:ok, _ticket} <- Operator.hold(ticket(id), user(socket)), do: {:ok, "Put on hold"}
+  end
+
+  defp act("release-ticket", %{"ticket" => id}, socket) do
+    with {:ok, _ticket} <- Operator.release(ticket(id), user(socket)), do: {:ok, "Released"}
+  end
+
+  defp act("stop-now", %{"ticket" => id}, socket) do
+    with {:ok, _ticket} <- Operator.stop_now(ticket(id), user(socket)),
+         do: {:ok, "Stopped; it runs again when released"}
+  end
+
+  defp act("retitle", %{"ticket" => id, "title" => title}, socket) when is_binary(title) do
+    with {:ok, _ticket} <- Operator.retitle(ticket(id), user(socket), title),
+         do: {:ok, "Title changed"}
+  end
+
+  # A ticket's milestone from its page. An empty choice takes it out of its milestone.
+  defp act("set-milestone", %{"ticket" => id} = params, socket) do
+    milestone = if params["milestone"] in [nil, ""], do: nil, else: params["milestone"]
+
+    with {:ok, _ticket} <- Operator.set_milestone(ticket(id), user(socket), milestone),
+         do: {:ok, "Milestone changed"}
+  end
+
   defp act(_event, _params, _socket), do: :unknown
 
   defp ticket(id), do: row!(id, &Tickets.get!/1, Forge.Tickets.Ticket)
@@ -190,6 +218,45 @@ defmodule ForgeWeb.Operator.Actions do
     do:
       "#{name} is at v#{version} now, written since this page was drawn; nothing was saved. " <>
         "What you typed is still in the box — save again to write it over v#{version}"
+
+  def describe(:already_on_hold), do: "it is already on hold"
+  def describe(:not_on_hold), do: "it is not on hold"
+  def describe({:not_holdable, status}), do: "a #{status} ticket cannot be put on hold"
+  def describe({:not_releasable, status}), do: "a #{status} ticket cannot be released"
+  def describe(:nothing_running), do: "no run of its state is going, so there is nothing to stop"
+
+  def describe(:branch_moved),
+    do:
+      "its branch has moved since it was admitted, so it cannot be brought up to date; it stays on hold"
+
+  def describe(:changed), do: "it changed while this was done; try again"
+
+  def describe(:release_title),
+    do: "a release's title is its version, set by the release itself"
+
+  def describe(:blank), do: "a title cannot be empty"
+  def describe({:not_open, status}), do: "a #{status} ticket keeps its place and its milestone"
+  def describe(:moved), do: "it moved to another order while this was done; try again"
+  def describe(:not_in_order), do: "that is not in this order any more"
+  def describe(:milestone), do: "that milestone is closed or does not exist"
+  def describe(:closed), do: "that milestone is closed"
+  def describe(:already_closed), do: "that milestone is already closed"
+  def describe(:not_closed), do: "that milestone is not closed"
+  def describe(:not_found), do: "that does not exist any more"
+  def describe(:start_or_hold), do: "choose whether to start it now or put it on hold"
+
+  def describe({:no_workflow_file, path}),
+    do: "#{path} is not on the default branch any more, so it cannot be brought up to date"
+
+  def describe(%Ecto.Changeset{} = changeset) do
+    changeset
+    |> Ecto.Changeset.traverse_errors(fn {message, opts} ->
+      Enum.reduce(opts, message, fn {key, value}, acc ->
+        String.replace(acc, "%{#{key}}", to_string(value))
+      end)
+    end)
+    |> Enum.map_join("; ", fn {field, messages} -> "#{field} #{Enum.join(messages, ", ")}" end)
+  end
 
   def describe(:no_such_transition), do: "no such transition"
   def describe({:no_version, name}), do: "#{name} has no version to approve"

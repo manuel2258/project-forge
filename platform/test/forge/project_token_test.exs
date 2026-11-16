@@ -318,7 +318,9 @@ defmodule Forge.ProjectTokenTest do
       assert {:error, :not_found} = Operator.accept_proposal(accepted.id, foreign)
       assert {:error, :not_found} = Operator.decline_proposal(declined.id, foreign)
 
-      assert {:ok, ticket} = Operator.accept_proposal(accepted.id, write)
+      assert {:ok, ticket} =
+               Operator.accept_proposal(accepted.id, write, nil, nil, on_hold: false)
+
       assert {:ok, decision} = Operator.decline_proposal(declined.id, write)
       assert decision.token_id == write.id and is_nil(decision.user_id)
 

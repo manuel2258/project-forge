@@ -145,6 +145,7 @@
   .project-notice-link { display: inline-flex; min-height: var(--target-min); align-items: center; }
   .project-side { display: contents; }
   .project-page[data-view="tickets"] [data-section="tickets"],
+  .project-page[data-view="milestones"] [data-section="milestones"],
   .project-page[data-view="merge"] [data-section="merge"],
   .project-page[data-view="chats"] [data-section="chats"],
   .project-page[data-view="workflow"] [data-section="workflow"],
@@ -290,17 +291,23 @@
   /* Stuck waits on you: amber like a wait, a ring so the map still tells it from a question. */
   .wf-map-dot--stuck { fill: none; stroke: var(--accent); stroke-width: 1.5; }
   .wf-map-dot--idle { fill: var(--ink-4); }
+  /* On hold: a ring in the muted ink, not the accent — nothing waits on you. */
+  .wf-map-dot--held { fill: none; stroke: var(--ink-4); stroke-width: 1.5; stroke-dasharray: 2 2; }
   .workflow-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; font-family: var(--font-mono); font-size: 11px; opacity: .7; }
   .wf-map-dot-key { display: inline-block; width: 8px; height: 8px; margin-right: -6px; border-radius: 50%; }
   .wf-map-dot-key.wf-map-dot--waiting { background: var(--accent); }
   .wf-map-dot-key.wf-map-dot--running { background: var(--info); }
   .wf-map-dot-key.wf-map-dot--stuck { box-shadow: inset 0 0 0 1.5px var(--accent); }
   .wf-map-dot-key.wf-map-dot--idle { background: var(--ink-4); }
+  .wf-map-dot-key.wf-map-dot--held { box-shadow: inset 0 0 0 1.5px var(--ink-4); }
 
   /* The facts (7f): the details panel and, from 768, the rail. */
   .project-facts-body { display: flex; flex-direction: column; gap: 14px; font-size: 13px; }
   .project-facts-links { display: flex; gap: 16px; }
   .project-facts-links a { display: inline-flex; min-height: var(--target-min); align-items: center; }
+  /* The phone's strip leaves Workflow out (at most five tabs), so the details link to it; from 768
+     the view tabs draw it. */
+  @media (min-width: 768px) { .project-facts-links .project-link-phone { display: none; } }
 
   /* + New (21c) and the release block (21c, 21d). */
   .new-sheet { display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px; }
@@ -465,5 +472,52 @@
   @media (width >= 1440px) {
     .proposals-open { display: grid; align-items: start; gap: 40px; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); }
     .proposals-reader { padding-top: 0; padding-left: 32px; border-top: 0; border-left: 1px solid var(--border); }
+  }
+
+  /* -- milestones and the hold (docs/design/ui.md § Milestones) -----------------------------
+     A milestone is a card of rows in priority order. Nothing here is amber: a ticket on hold
+     waits on nobody, so its mark is the quiet ink and a dashed edge, never the accent. Long names
+     and titles wrap inside their column; nothing widens the page. */
+  .ms-create { display: flex; align-items: flex-end; gap: 10px; }
+  .ms-field { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 4px; }
+  .ms-list { display: flex; flex-direction: column; gap: 16px; }
+  .ms-card { display: flex; min-width: 0; flex-direction: column; gap: 8px; padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-1); }
+  .ms-card--current { border-color: var(--border-strong); }
+  .ms-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; min-width: 0; }
+  .ms-name { min-width: 0; margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -.01em; overflow-wrap: anywhere; }
+  .ms-head > .ms-name { flex: 1 1 10rem; }
+  .ms-mark { margin-left: 8px; font-family: var(--font-mono); font-size: 11px; font-weight: 400; letter-spacing: var(--tracking-eyebrow); text-transform: uppercase; color: var(--ink-3); }
+  .ms-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; }
+  .ms-description { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; color: var(--ink-2); font-size: 13.5px; line-height: 1.5; }
+  .ms-progress { margin: 0; font-family: var(--font-mono); font-size: 12px; color: var(--ink-3); }
+  .ms-empty { margin: 0; color: var(--ink-3); font-size: 13px; line-height: 1.5; }
+  .ms-rows { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
+  .ms-row { display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; border-top: 1px solid var(--border-soft); }
+  .ms-row--held .ms-title { color: var(--ink-2); }
+  .ms-row--dragging { background: var(--surface-3); opacity: .85; }
+  .ms-handle { display: inline-flex; min-width: var(--target-min); min-height: var(--target-min); align-items: center; justify-content: center; margin: -8px 0 -8px -10px; color: var(--ink-3); cursor: grab; touch-action: none; user-select: none; }
+  .ms-row-body { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 4px; }
+  .ms-row-link { display: flex; min-width: 0; gap: 8px; color: inherit; text-decoration: none; }
+  .ms-title { min-width: 0; overflow-wrap: anywhere; }
+  .ms-row-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-3); }
+  .ms-flag--held { padding: 0 6px; border: 1px dashed var(--ink-4); border-radius: 6px; color: var(--ink-2); }
+  .ms-flag--stuck { color: var(--accent-text); }
+  .ms-waits { overflow-wrap: anywhere; }
+  .ms-row-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 2px 4px; max-width: 22rem; }
+  .ms-row-actions .ui-btn { white-space: nowrap; }
+  .ms-place select { max-width: 9rem; }
+  .ms-merged-list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
+  .ms-merged-row { display: flex; min-height: 36px; align-items: center; gap: 8px; color: var(--ink-2); text-decoration: none; }
+  .ms-edit-summary { min-height: var(--target-min); display: flex; align-items: center; cursor: pointer; color: var(--link); font-size: 13px; }
+  .ms-edit-form { display: flex; flex-direction: column; gap: 10px; }
+  .ms-edit-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .ms-closed-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; padding: 8px 0; border-top: 1px solid var(--border-soft); }
+  .ticket-milestone { max-width: 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-3); }
+  .ticket-row--held { opacity: .72; }
+  .ticket-new-actions { display: flex; gap: 10px; }
+  .ticket-new-actions > .ui-btn { flex: 1; }
+  @media (width < 768px) {
+    .ms-row { flex-wrap: wrap; }
+    .ms-row-actions { max-width: none; width: 100%; justify-content: flex-start; padding-left: 38px; }
   }
 }

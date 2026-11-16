@@ -1922,8 +1922,13 @@ defmodule Forge.Workers do
       |> Repo.all()
       |> Enum.map(&DateTime.add(&1.updated_at, Forge.Jobs.wall_clock_ms(&1), :millisecond))
 
+    # A held ticket's job is not coming back to this machine until a person releases it, so it
+    # holds no claim on it (`docs/design/workflow-grammar-v1.md` § Holding a ticket).
     returned =
-      from(j in Job, where: j.worker_id == ^id and j.status == :pending)
+      from(j in Job,
+        left_join: t in assoc(j, :ticket),
+        where: j.worker_id == ^id and j.status == :pending and is_nil(t.held_at)
+      )
       |> Repo.all()
       |> Enum.map(&DateTime.add(&1.updated_at, period(worker), :millisecond))
 

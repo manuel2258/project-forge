@@ -10,6 +10,9 @@ defmodule Forge.Merge.Watch do
   started: a job spends a credential, and what to do about a conflict is a person's call
   (`docs/design/workflow-grammar-v1.md` § Merging).
 
+  **A ticket on hold is not excluded**: this only records and tells, which is not a step the
+  engine takes on a ticket (`docs/design/workflow-grammar-v1.md` § Holding a ticket).
+
   **It runs in a task of its own beside the merge's request**, under the platform's task
   supervisor, so pressing merge on a project with many open tickets is not made slow by them. Configured
   `inline: true` it runs in the caller instead, which is what the tests ask for: a task that

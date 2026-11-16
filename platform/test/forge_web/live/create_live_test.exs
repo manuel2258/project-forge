@@ -284,7 +284,7 @@ defmodule ForgeWeb.CreateLiveTest do
                    "body" => "They vanish on restart."
                  }
                })
-               |> render_submit()
+               |> render_submit(%{"on_hold" => "false"})
 
       assert [ticket] = Tickets.list(project)
       assert ticket.title == "Persist scores"

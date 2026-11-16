@@ -36,7 +36,9 @@ defmodule ForgeWeb.TicketViews do
   @said ~w(commands.decided ticket.stuck transition.taken ticket.merge_conflicted
            chat.transition_refused merge_queue.entered merge_queue.returned merge_queue.taken_out
            merge_queue.left ticket.merged ticket.renamed approval.approved approval.rejected
-           ticket.cancelled ticket.restored ticket.repinned)
+           ticket.cancelled ticket.restored ticket.repinned ticket.held ticket.released
+           ticket.stopped ticket.refreshed transition.held ticket.retitled
+           ticket.milestone_set ticket.moved)
 
   @doc "The ticket's event types Activity says in words, beside what its jobs did."
   @spec said_types() :: [String.t()]
@@ -385,6 +387,57 @@ defmodule ForgeWeb.TicketViews do
     </div>
     """
   end
+
+  @doc """
+  The band a ticket on hold carries where a status goes (`docs/design/ui.md` § The ticket): the
+  words *on hold*, what releasing does, **Release**, and **Stop now** while a run of its state is
+  still going. Neutral, never amber: nothing waits on you, because nothing moves until you say so.
+  """
+  attr :ticket, :map, required: true
+  attr :on_release, :any, required: true
+  attr :stoppable, :boolean, required: true
+  attr :refusal, :map, default: nil
+
+  def hold_band(assigns) do
+    ~H"""
+    <div id="hold-band" class="ticket-hold">
+      <div class="ticket-hold-line">
+        <span class="ticket-hold-word">On hold</span>
+        <span :if={on_release_words(@on_release)} id="hold-waits" class="ticket-hold-waits">
+          {on_release_words(@on_release)}
+        </span>
+      </div>
+      <div class="ticket-hold-actions">
+        <.button
+          id="release-ticket"
+          type="button"
+          variant="outline"
+          size="md"
+          phx-click="release-ticket"
+          phx-value-ticket={@ticket.id}
+        >
+          Release
+        </.button>
+        <.confirm
+          :if={@stoppable}
+          id="stop-now"
+          label="Stop now"
+          act="Stop it"
+          sentence="Stop the run now? What it spent is counted, and the state runs again when you release."
+          tone="neutral"
+          size="md"
+          phx-click="stop-now"
+          phx-value-ticket={@ticket.id}
+        />
+      </div>
+      <Actions.refused id="hold-refusal" refusal={@refusal} at={~w(release-ticket stop-now)} />
+    </div>
+    """
+  end
+
+  defp on_release_words({:transition, _from, to, _outcome}), do: "moves to #{to} when released"
+  defp on_release_words({:entry, state}), do: "starts #{state} when released"
+  defp on_release_words(nil), do: nil
 
   # The current step's dot (`ui.md` § Colour): amber only while the ticket waits on a person — it
   # is stuck, a decision row is drawn, or a job in the step stopped to ask — info while something
@@ -959,6 +1012,54 @@ defmodule ForgeWeb.TicketViews do
         </p>
       </div>
 
+      <%!-- A title a member may change in any state, except a release's, which is its version. The
+            draft survives a reconnect (`docs/design/ui.md` § A reconnect is not a reload). --%>
+      <form
+        :if={not Forge.ReleaseTickets.release?(@ticket)}
+        id="retitle-form"
+        phx-change="draft:change"
+        phx-submit="retitle"
+        class="ticket-retitle"
+      >
+        <input type="hidden" name="draft" value="retitle" />
+        <input type="hidden" name="ticket" value={@ticket.id} />
+        <label class="ticket-retitle-field">
+          <span class="ui-field-label">Title</span>
+          <input
+            type="text"
+            name="title"
+            class="ui-field-input"
+            autocomplete="off"
+            value={ForgeWeb.Operator.Drafts.field(@drafts, "retitle", "title", @ticket.title)}
+          />
+        </label>
+        <.button type="submit" variant="outline" size="md">Save title</.button>
+      </form>
+      <p :if={Forge.ReleaseTickets.release?(@ticket)} id="retitle-why" class="ticket-details-sub">
+        A release's title is its version, set by the release itself, so it is not edited here.
+      </p>
+
+      <form
+        :if={
+          @ticket.status in Forge.Tickets.Ticket.open_statuses() and
+            (@milestones != [] or @ticket.milestone_id)
+        }
+        phx-change="set-milestone"
+        phx-auto-recover="ignore"
+        class="ticket-milestone-form"
+      >
+        <input type="hidden" name="ticket" value={@ticket.id} />
+        <label class="ticket-retitle-field">
+          <span class="ui-field-label">Milestone</span>
+          <select name="milestone" id="ticket-milestone" class="ui-field-input">
+            <option value="" selected={@ticket.milestone_id == nil}>None</option>
+            <option :for={m <- @milestones} value={m.id} selected={m.id == @ticket.milestone_id}>
+              {m.name}
+            </option>
+          </select>
+        </label>
+      </form>
+
       <div id="ticket-usage">
         <%!-- At zero, said in words with no meter (UX re-check #7). --%>
         <div class="flex items-baseline justify-between font-mono text-[13px]">
@@ -1090,7 +1191,7 @@ defmodule ForgeWeb.TicketViews do
       <Actions.refused
         id="details-refusal"
         refusal={@refusal}
-        at={~w(repin integrate cancel-ticket restore-ticket)}
+        at={~w(repin integrate cancel-ticket restore-ticket hold-ticket retitle set-milestone)}
       />
     </div>
     """
@@ -1123,6 +1224,17 @@ defmodule ForgeWeb.TicketViews do
   # ways forward: `workflow-grammar-v1.md` § Cancelling a ticket.
   defp lifecycle(assigns) do
     ~H"""
+    <.button
+      :if={@ticket.status in Forge.Tickets.Ticket.open_statuses() and @ticket.held_at == nil}
+      id="hold-ticket"
+      type="button"
+      variant="outline"
+      size="lg"
+      phx-click="hold-ticket"
+      phx-value-ticket={@ticket.id}
+    >
+      Put on hold
+    </.button>
     <.confirm
       :if={@ticket.status in Forge.Tickets.Ticket.open_statuses()}
       id="cancel-ticket"

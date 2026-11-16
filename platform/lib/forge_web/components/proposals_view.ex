@@ -214,6 +214,7 @@ defmodule ForgeWeb.ProposalsView do
   attr :group, :map, required: true
   attr :position, :any, required: true, doc: "`{n, of}` over every open proposal"
   attr :types, :list, default: []
+  attr :milestones, :list, default: [], doc: "the open milestones it may be admitted into"
   attr :drafts, :map, required: true
   attr :error, :string, default: nil
   attr :now, :any, required: true
@@ -270,6 +271,19 @@ defmodule ForgeWeb.ProposalsView do
             </option>
           </select>
         </label>
+        <label :if={@milestones != [] and @item.readable} class="proposal-type">
+          <span class="ui-field-label">Milestone</span>
+          <select name="milestone_id" class="ui-field-input" aria-label="Milestone">
+            <option value="">None</option>
+            <option
+              :for={milestone <- @milestones}
+              value={milestone.id}
+              selected={milestone.id == Drafts.field(@drafts, @draft, "milestone_id", nil)}
+            >
+              {milestone.name}
+            </option>
+          </select>
+        </label>
         <%!-- Enter breaks a line: a one-line input submitted with the first button
               (`docs/design/ui.md` § The affordance rule). --%>
         <ForgeWeb.Conversations.message_box
@@ -304,17 +318,31 @@ defmodule ForgeWeb.ProposalsView do
           >
             Decline
           </.button>
+          <%!-- Two ways to admit, side by side, neither chosen for the person and neither primary
+                (`docs/design/ui.md` § Proposals). --%>
           <.button
             :if={@item.readable}
+            id="proposal-admit-hold"
             type="submit"
-            name="decision"
-            value="accepted"
-            variant="decision"
-            fill
+            name="admit"
+            value="hold"
+            variant="outline"
             disabled={@typeless}
             phx-disable-with="Admitting…"
           >
-            Admit
+            Put on hold
+          </.button>
+          <.button
+            :if={@item.readable}
+            id="proposal-admit-start"
+            type="submit"
+            name="admit"
+            value="start"
+            variant="outline"
+            disabled={@typeless}
+            phx-disable-with="Admitting…"
+          >
+            Start now
           </.button>
         </div>
       </form>
@@ -371,6 +399,7 @@ defmodule ForgeWeb.ProposalsView do
   """
   attr :count, :integer, required: true
   attr :types, :list, default: []
+  attr :milestones, :list, default: []
   attr :drafts, :map, required: true
   attr :error, :string, default: nil
 
@@ -400,6 +429,21 @@ defmodule ForgeWeb.ProposalsView do
             {type.name}
           </option>
         </select>
+        <select
+          :if={@milestones != []}
+          name="milestone_id"
+          class="ui-field-input"
+          aria-label="Milestone"
+        >
+          <option value="">No milestone</option>
+          <option
+            :for={milestone <- @milestones}
+            value={milestone.id}
+            selected={milestone.id == Drafts.field(@drafts, "bulk", "milestone_id", nil)}
+          >
+            {milestone.name}
+          </option>
+        </select>
       </div>
       <ForgeWeb.Conversations.message_box
         id="proposal-bulk-reason"
@@ -417,13 +461,22 @@ defmodule ForgeWeb.ProposalsView do
         <.button
           type="submit"
           name="bulk"
-          value="admit"
-          variant="decision"
-          fill
+          value="admit_hold"
+          variant="outline"
           disabled={@typeless}
           title={@typeless && "Choose a type to admit them"}
         >
-          Admit {@count}
+          Put {@count} on hold
+        </.button>
+        <.button
+          type="submit"
+          name="bulk"
+          value="admit_start"
+          variant="outline"
+          disabled={@typeless}
+          title={@typeless && "Choose a type to admit them"}
+        >
+          Start {@count} now
         </.button>
       </div>
     </form>

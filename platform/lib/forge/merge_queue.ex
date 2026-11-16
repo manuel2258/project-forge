@@ -56,15 +56,30 @@ defmodule Forge.MergeQueue do
 
   defp place_map(rows) do
     total = length(rows)
+    held = held_ids(rows)
 
     # `ahead` is the tickets in front that hold the line: one being integrated is skipped over,
-    # so it is not what anyone behind it waits for.
+    # and so is one on hold, so neither is what anyone behind it waits for.
     rows
     |> Enum.with_index(1)
     |> Map.new(fn {entry, index} ->
-      ahead = rows |> Enum.take(index - 1) |> Enum.count(&(&1.status != :integrating))
+      ahead =
+        rows
+        |> Enum.take(index - 1)
+        |> Enum.count(&(&1.status != :integrating and &1.ticket_id not in held))
+
       {entry.ticket_id, %{index: index, total: total, status: entry.status, ahead: ahead}}
     end)
+  end
+
+  defp held_ids([]), do: MapSet.new()
+
+  defp held_ids(rows) do
+    ids = Enum.map(rows, & &1.ticket_id)
+
+    from(t in Ticket, where: t.id in ^ids and not is_nil(t.held_at), select: t.id)
+    |> Repo.all()
+    |> MapSet.new()
   end
 
   @doc "Which of these tickets are queued."
@@ -212,9 +227,13 @@ defmodule Forge.MergeQueue do
   """
   @spec claim(String.t()) :: Entry.t() | nil | :busy
   def claim(project_id) do
+    # A ticket on hold keeps its row and its place, and is skipped: the one behind it is the front
+    # (`docs/design/workflow-grammar-v1.md` § The merge queue). Released, it is the front again.
     front =
       from e in Entry,
-        where: e.project_id == ^project_id and e.status == :waiting,
+        join: t in Ticket,
+        on: t.id == e.ticket_id,
+        where: e.project_id == ^project_id and e.status == :waiting and is_nil(t.held_at),
         order_by: e.position,
         limit: 1,
         select: e.id

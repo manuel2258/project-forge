@@ -309,6 +309,7 @@ defmodule ForgeWeb.WorkflowMap do
   end
 
   defp dot_word(:waiting), do: "waiting on you"
+  defp dot_word(:held), do: "on hold"
   defp dot_word(tone), do: to_string(tone)
 
   defp clip(text, max) do

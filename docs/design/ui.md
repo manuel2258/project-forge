@@ -628,7 +628,11 @@ starts from; its secondary is *Answer first*, which folds the panel and opens th
 
 `BottomStrip`: the views of the object on screen, equal-width 40px tabs, the active one on `--bg`
 with a border and weight 500, a grey count bubble where a count means something. **A count of zero
-is drawn muted, never hidden, so tabs never move.** At most five. **It only navigates**: a new
+is drawn muted, never hidden, so tabs never move.** At most five: the project has six views, and a
+phone's strip draws all but Workflow, which the project page's details link to (six, at a phone's
+width, had their labels cut and colliding). Every page that draws the project's strip — its
+repository, a commit, its releases and its settings too — leaves Workflow out of it the same way,
+and reaches it through the project page. **It only navigates**: a new
 view of an object is a new tab, never a special button, and no decision is ever in it. The view
 is in the URL (`?tab=changes`, by patch) so back, reload and a pushed link land on it; an unknown
 view falls back to the object's default.
@@ -637,7 +641,7 @@ view falls back to the object's default.
 |---|---|
 | a ticket | Steps · Changes · Docs · Activity, and Talk while it has a live or step conversation |
 | a chat | Talk · Changes · Docs · Activity |
-| a project, its repository and its settings | Tickets · Merge · Chats · Workflow · Proposals |
+| a project, its repository and its settings | Tickets · Milestones · Merge · Chats · Proposals on a phone's strip, and Workflow too on a desktop's view tabs |
 | machines | Machines · Templates · Credentials |
 
 **A job takes the ticket's strip** (§ The job page), and a chat step the ticket's (§ The Accept
@@ -1072,6 +1076,12 @@ and writes nothing. A dead render carries none, nor does another page, so a new 
 
 ### What the queue counts
 
+**A ticket on hold never appears in the queue for being on hold, and no push is sent for holding
+one.** It is never in the under-way group or the project summaries' count of running work (the Tickets list's *Running* shows it only while a run it started is finishing, § Tickets). A decision waiting on a
+ticket that has started — a blocking question, a pending approval, a stuck ticket — reaches the
+queue and the push as on any ticket; a ticket admitted on hold and never started has none
+(`Forge.Queue.for_ticket/1`).
+
 **The queue button's count is the number of items the queue page draws** for the viewer: questions
 grouped per document version, approvals, stuck tickets, conversations waiting on their reader — and
 not assumptions, not the two under-way kinds. **For a node admin it also counts accounts waiting
@@ -1178,7 +1188,15 @@ Four rules, each of which the group broke first:
 
 ## The ticket
 
-`/tickets/:project/:number`. A ticket and a conversation are both *one piece of work*: a branch, a
+`/tickets/:project/:number`. **A ticket on hold says so where a status goes** — *on hold* in the
+subline, and a neutral band under the top bar with what releasing does (*moves to planning when
+released*, *starts refining when released*), **Release**, and **Stop now** while a run of its job or
+command is still going. None of it is amber, because nothing waits on you. **Put on hold** is in the
+details beside Cancel, the **title is editable there** by any member in any state — a release's
+never, because it is its version and the next release computes what shipped from it — and so is
+the ticket's **milestone**. A refusal is said where it was pressed.
+
+A ticket and a conversation are both *one piece of work*: a branch, a
 record, a cost, and something that may be waiting on you. They are drawn in the same frame from
 the same components, so that steering a conversation and steering a workflow are the same gesture
 on the same screen.
@@ -1754,7 +1772,7 @@ to Talk never adds or removes the column. **Only while the step has its row**: a
 
 `/projects/:name`, `7a`–`7h`, `21c`–`21e`. The project's own page: its top bar is the project's
 name over *12 open · 2 waiting on you*, with **`+ New`** in the right slot; tapping the title drops
-**the details** (`7f`); the views are **Tickets · Merge · Chats · Workflow · Proposals**.
+**the details** (`7f`); the views are **Tickets · Milestones · Merge · Chats · Workflow · Proposals**.
 
 **There is no board.** `/board` — every project at once, a column per state — is gone, and so is
 the project page's own board. What the board answered is answered by Tickets, which says what each
@@ -1773,9 +1791,58 @@ spilled a row onto a fourth line); and the most recent thing that happened, in w
 needs, at full strength. Colour follows meaning only: amber waits on you — a stuck ticket included — and info is running; the row of a ticket waiting on you carries the amber edge. A paused ticket says
 `paused · spend` where its activity would be (`capacity.md` § Four exhaustions). A queued ticket
 says *queued 2/5*. History — done and cancelled tickets — folds beneath, led by a `▸` that turns
-when open. The switch above is **All · Waiting · Running** with counts in bubbles, and *Running*
+when open. The switch above is **All · Waiting · Running · On hold** with counts in bubbles, and *Running*
 means a job running now — not a ticket queued to merge or waiting for a machine, which the map
-draws with the running ones. The table's usage is a right-aligned figure.
+draws with the running ones; a ticket on hold is in it only while a run it started before the hold
+is still finishing. **A ticket on hold is drawn below the rest, quietly** (*on hold*, in the muted
+ink with a dashed mark, never amber), unless something on it waits on a person — a blocking
+question, a pending approval, a stuck ticket — and then it is in the first list, where the decision
+is, as any ticket's is. It is in *Waiting* only for that. A row names the ticket's milestone where
+it has one. The table's usage is a right-aligned figure.
+
+### Milestones
+
+**The Milestones view**: the current milestone first, then the other open ones in their order, then
+the tickets in no milestone, each list in its **priority order**; the closed milestones fold at the
+end, each reopenable. A milestone is a named goal of one project — a name (at most 80 characters),
+an optional description (at most 2,000) and **no date**: nothing would act on one, and a date nobody
+maintains is wrong without anyone noticing. It is first-class rather than a label. It is shown with
+its **progress** — merged tickets out of its open and merged together, cancelled counting towards
+nothing — and, alongside, its open tickets counted apart as *on hold* and *in flight*. Its open
+tickets are listed in order, on hold and in flight alike, each with its state, and its merged
+tickets fold beneath. A milestone is never deleted, only closed: closing moves its open tickets to
+the bottom of the no-milestone list, keeps its merged and cancelled ones, and unmarks it if it was
+current; reopening brings nothing back. At most one open milestone is *current*, marked by a
+person and independent of the order; a closed one cannot be.
+
+**Every row of a ticket on hold has Release**, so the routine — open the current milestone, release
+its top ticket — is one tap from the list. It does what releasing from the ticket does, is refused
+the same way, and says why on the row. **Order is changed both ways, wherever order is drawn** — the Milestones view: by dragging
+a row by its handle, and by the move buttons on it — to the top, up one, down one — and each does
+the same thing, so a phone can do all of it. **Milestones are ordered the same way**, a card's handle
+and its *Top*, *↑* and *↓*, worked out against the order drawn: the current milestone is pinned
+first and so has no handle and its buttons are disabled (unmark it to order it), the others are
+ordered among themselves, and a card dropped above the current one lands first among them. A drag
+ends in one event, and the server's reply says whether the order stands: where it was refused, or
+changed nothing, the browser puts the order it drew back. A ticket is put into, out of or between milestones by
+the *Move to* select on its row and from the ticket's details; a ticket goes to the bottom of the
+order it enters.
+
+*With nothing to show*: a project with no open milestone says what one is for and offers to create
+one, above its tickets in no milestone — and, where every one it has is closed, that they are and
+that one can be reopened below; one with no current milestone says none is marked and how to
+mark one; a milestone with no tickets says how a ticket is put in it. *Two people at once*: the
+view and every list that shows order, hold or milestone update for everyone looking, through a topic
+of the project's own (`Events.subscribe_project/1`) so that no other project's page does any work; a
+move is relative to the order read under a lock, so two people reordering at once both see the same
+final order and neither's move is lost unless both moved the same ticket. A half-typed name,
+description or title survives a reconnect, and a drag cut off by one moves nothing.
+
+**The drag is the page's first gesture code**, and departs from what this note said of Select's
+long-press (§ Proposals), which was left unbuilt for that reason: the person chose both ways of
+ordering, so the move buttons are not a fallback. It is a colocated hook on pointer events, not
+HTML5 drag and drop, which is poor on touch, with no dependency; it pushes one event on pointer-up
+and cancels and restores the order when the socket drops.
 
 ### Merge
 
@@ -1800,6 +1867,9 @@ opens it. A plain conversation has no state, so without this a chat would be a t
 can start from the page and then cannot find from the page.
 
 ### Workflow
+
+*A ticket on hold is drawn on its state as a ring in the muted ink (`:held`, with its legend entry),
+not a filled dot.*
 
 `7d`. **It shows the workflow and never edits it.** A workflow is `.forge/workflow.yml` — or one
 file per ticket type under `.forge/workflows/` — in the project's own repository, read at the
@@ -1866,7 +1936,7 @@ nowhere else.
   sharpened before it becomes a ticket; a proposal a ticket's job wrote has no chat to ask, and
   draws no composer.
 - **Selecting** (`8c`, `8f`): *Select* beside the list switches on selection (a long-press, which
-  `8c` draws, is not built: it would be the page's only gesture code), and each row becomes a
+  `8c` draws, is not built; dragging a row or a card in Milestones is the page's one gesture code), and each row becomes a
   checkbox rather than a link; a group's header gains a box
   that selects or clears the whole group, showing a dash when only some are picked. A bulk bar with
   the type, one reason and the two verbs sits at the foot, above the strip. **Declining several takes one shared
@@ -1998,6 +2068,16 @@ list (a release).
   page. Markup in a version, a label or a file name is text. A record with 100 files lists 100.
 
 ## Creating things
+
+**Every way of admitting a ticket asks the same two things, and chooses neither for the person**:
+*Start now* or *Put on hold*, as two buttons side by side with neither primary — on the ticket
+form, on a proposal in the reader and on the bulk bar — and an optional **milestone**, an open one of
+the project. The API and `mix forge.admit` take them as an explicit parameter and refuse without the
+first. **Enter in the title does not start the ticket**: a browser clicks a form's first submit
+button for it, and the first is *Start now*, so the ticket form begins with a hidden submit button
+that sends neither choice, which is refused with the sentence that says to choose. A ticket
+admitted on hold has run nothing and asked nothing until it is released. A release
+started from the project page's release block starts at once.
 
 **A project** is made rarely and from nowhere in particular, so it is offered on the projects page
 — in the dock while there are none, beside the list otherwise — and from the title menu's Projects.
@@ -3007,6 +3087,10 @@ line below is something this note says that the code does not do yet; a change t
 removes its line. Until then, where the two disagree, the code is the previous design and the
 previous note describes it.
 
+- **Dragging**: `bin/look` has no drag step, so only the drag's server half — the event it pushes
+  and the reply that says whether the order stands — is under test, for tickets and for milestones;
+  the pointer handling, the restore on that reply and the cancel on a dropped socket have not run
+  in a browser.
 - **The decision row**: the check's time in a changeset's meta line.
 - **The queue**: a changeset's check and its time in 18a's meta, and the list rows' track ticks.
   The question card's tabs and split pane are drawn in the queue and in a chat; the ticket draws

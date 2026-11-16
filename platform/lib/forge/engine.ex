@@ -84,8 +84,32 @@ defmodule Forge.Engine do
       ) do
     workflow = Tickets.workflow(ticket)
 
+    # The ticket row is read locked, inside the transaction, to learn whether it is on hold: the
+    # struct in hand was read before, and a hold committed since is what decides whether the engine
+    # may take this edge now (`docs/design/workflow-grammar-v1.md` § Holding a ticket).
+    multi
+    |> Multi.run(held_key(ticket), fn repo, _changes -> {:ok, locked_held?(repo, ticket.id)} end)
+    |> Multi.merge(fn changes ->
+      decide_after_job(workflow, ticket, job, outcome, Map.fetch!(changes, held_key(ticket)))
+    end)
+  end
+
+  def put_after_job(multi, %Ticket{} = ticket, %Job{} = job, outcome) do
+    Events.log(multi, :orphan_event, "job.orphaned", :system, %{
+      ticket_id: ticket.id,
+      job_id: job.id,
+      payload: %{"job_state" => job.state, "ticket_state" => ticket.state, "outcome" => outcome}
+    })
+  end
+
+  defp decide_after_job(workflow, ticket, job, outcome, held) do
+    multi = Multi.new()
+
     if Core.within_ticket_budget?(workflow, ticket.usage) do
       case Core.step(workflow, job.state, outcome, counts(ticket.id)) do
+        {:transition, transition} when held ->
+          put_held_transition(multi, ticket, job, transition, outcome)
+
         {:transition, transition} ->
           put_engine_transition(multi, ticket, workflow, transition, outcome)
 
@@ -103,11 +127,40 @@ defmodule Forge.Engine do
     end
   end
 
-  def put_after_job(multi, %Ticket{} = ticket, %Job{} = job, outcome) do
-    Events.log(multi, :orphan_event, "job.orphaned", :system, %{
+  defp held_key(%Ticket{id: id}), do: {:held, id}
+
+  # The hold, read from the row under `FOR UPDATE`. Every writer that decides something for a
+  # ticket on the engine's own authority asks it this way, so a hold and a decision serialise: the
+  # one that comes second sees the other.
+  defp locked_held?(repo, ticket_id) do
+    repo.one!(from t in Ticket, where: t.id == ^ticket_id, lock: "FOR UPDATE", select: t.held_at) !=
+      nil
+  end
+
+  # A transition the engine would take, kept for the release instead (`docs/design/workflow-grammar-v1.md`
+  # § Holding a ticket). What is kept is the outcome *string* the engine routed on — an agent's
+  # declared outcome or a command batch's mapped one — and the job it came from, which together are
+  # what `put_after_job/4` takes at release, so the edge is chosen then exactly as it is now.
+  defp put_held_transition(multi, ticket, %Job{} = job, %Transition{} = transition, outcome) do
+    held = %{
+      "job_id" => job.id,
+      "state" => job.state,
+      "outcome" => outcome,
+      "from" => transition.from,
+      "to" => transition.to
+    }
+
+    multi
+    |> Multi.update(:ticket, Ticket.hold_changeset(ticket, %{held_transition: held}))
+    |> Events.log(:held_transition_event, "transition.held", :system, %{
       ticket_id: ticket.id,
       job_id: job.id,
-      payload: %{"job_state" => job.state, "ticket_state" => ticket.state, "outcome" => outcome}
+      payload: %{
+        "from" => transition.from,
+        "to" => transition.to,
+        "outcome" => outcome,
+        "job_id" => job.id
+      }
     })
   end
 
@@ -171,6 +224,10 @@ defmodule Forge.Engine do
       state: transition.to,
       status: if(terminal, do: :done, else: :active),
       pending_transition: nil,
+      # A move out of the state, by whoever, is the transition a held ticket was waiting to make
+      # (`put_after_job/4` takes it only after clearing it at release), or replaces it: a person's
+      # own move is not taken twice (`docs/design/workflow-grammar-v1.md` § Holding a ticket).
+      held_transition: nil,
       usage: ticket.usage
     })
     |> Events.log(:transition_event, "transition.taken", actor, %{
@@ -289,44 +346,80 @@ defmodule Forge.Engine do
     })
   end
 
+  defp put_follow_up(multi, _ticket, workflow, transition, _target, false, entered) do
+    Multi.merge(multi, fn %{ticket: ticket} ->
+      put_entry(Multi.new(), ticket, workflow, transition.to, entered, true)
+    end)
+  end
+
+  @doc """
+  Adds what entering `state_name` makes to `multi`, **or records that it waits**: a chat step's
+  conversation, an agent's job, a command state's commands — nothing for a human state or a final
+  one.
+
+  While the ticket is on hold nothing is made; the entry is written to the ticket's `held_entry`
+  instead, and `release/2` makes it through this same function, so the two cannot drift
+  (`docs/design/workflow-grammar-v1.md` § Holding a ticket). The hold is read from the row under
+  `FOR UPDATE` here, inside the transaction that wrote the move, which is what makes a hold
+  committed a moment before this a hold this respects.
+
+  `entered` is how the ticket came in (`Forge.Jobs.put_create/7`), and `came_back` says a transition
+  created it rather than a person asking for the state again.
+  """
+  @spec put_entry(Multi.t(), Ticket.t(), Workflow.t(), String.t(), map() | nil, boolean()) ::
+          Multi.t()
+  def put_entry(multi, %Ticket{} = ticket, %Workflow{} = workflow, state_name, entered, came_back) do
+    state = Workflow.state(workflow, state_name)
+
+    cond do
+      not makes_work?(state) ->
+        multi
+
+      locked_held?(Repo, ticket.id) ->
+        entry = %{"state" => state_name, "entered" => entered, "came_back" => came_back}
+
+        Multi.update(
+          multi,
+          {:held_entry, state_name},
+          Ticket.hold_changeset(ticket, %{held_entry: entry})
+        )
+
+      true ->
+        put_entry_now(multi, ticket, workflow, state, state_name, entered, came_back)
+    end
+  end
+
+  defp makes_work?(%State{chat: true}), do: true
+  defp makes_work?(%State{prompt: prompt}) when is_binary(prompt), do: true
+  defp makes_work?(%State{invoke: [_ | _]}), do: true
+  defp makes_work?(_human_or_final), do: false
+
   # A chat step's entry opens a conversation instead of a job: no job, no budget, no outcome from
   # the harness (`docs/design/workflow-grammar-v1.md` § Chat steps). Before the clause below
   # because a chat step has a prompt too.
-  defp put_follow_up(multi, _ticket, workflow, transition, %State{chat: true}, false, entered) do
-    Multi.merge(multi, fn %{ticket: ticket} ->
-      put_step_chat(Multi.new(), :next_job, ticket, workflow, transition.to, entered)
-    end)
-  end
+  defp put_entry_now(multi, ticket, workflow, %State{chat: true}, state_name, entered, _back),
+    do: put_step_chat(multi, :next_job, ticket, workflow, state_name, entered)
 
-  defp put_follow_up(multi, _ticket, workflow, transition, %State{prompt: prompt}, false, entered)
+  defp put_entry_now(multi, ticket, workflow, %State{prompt: prompt}, state_name, entered, back)
        when is_binary(prompt) do
-    Multi.merge(multi, fn %{ticket: ticket} ->
-      entered = put_batch(entered, ticket)
-
-      Jobs.put_create(Multi.new(), :next_job, ticket, workflow, transition.to, entered,
-        came_back: true
-      )
-    end)
+    # What its commands said is added to an arrival a transition made; a state run again keeps the
+    # arrival the last attempt had, which carries it already (`again/1`).
+    entered = if back, do: put_batch(entered, ticket), else: entered
+    Jobs.put_create(multi, :next_job, ticket, workflow, state_name, entered, came_back: back)
   end
 
-  # A command state's entry runs its commands (`docs/design/commands.md`).
-  defp put_follow_up(
+  # A command state's entry runs its commands (`docs/design/commands.md`). How the ticket came in
+  # is for an agent to read; a command has no manifest to put it in.
+  defp put_entry_now(
          multi,
-         _ticket,
+         ticket,
          workflow,
-         transition,
          %State{invoke: [_ | _]},
-         false,
-         _entered
-       ) do
-    # How the ticket came in is for an agent to read; a command has no manifest to put it in.
-    Multi.merge(multi, fn %{ticket: ticket} ->
-      Forge.Jobs.Commands.put_for_state(Multi.new(), :next_job, ticket, workflow, transition.to)
-    end)
-  end
-
-  defp put_follow_up(multi, _ticket, _workflow, _transition, _human_state, false, _entered),
-    do: multi
+         state_name,
+         _entered,
+         _back
+       ),
+       do: Forge.Jobs.Commands.put_for_state(multi, :next_job, ticket, workflow, state_name)
 
   # The conversation a ticket entering a chat step gets, and its branch, cut from the ticket's.
   # (`Forge.Tickets.put_admit/5` does the same for a first state with the pieces from `Jobs`,
@@ -351,6 +444,8 @@ defmodule Forge.Engine do
       nil -> entered
     end
   end
+
+  defp put_batch(entered, _ticket), do: entered
 
   defp put_pending_approval(multi, ticket, %Transition{} = transition, outcome) do
     pending = %{
@@ -436,6 +531,10 @@ defmodule Forge.Engine do
   state, comes back: a ticket stuck on its allowance, a rejected approval or a missing transition
   was stuck for a reason no arrival answers. If the arrival was not the missing piece, the next
   scheduling pass sticks it again — once, and pushed once, not a loop.
+
+  **A ticket on hold is deliberately not excluded** (`docs/design/workflow-grammar-v1.md` §
+  Holding a ticket). Unsticking starts nothing — `Forge.Jobs.pending/2` leaves a held ticket's job
+  where it is — and leaving it stuck would make a placement stick a dead end again.
   """
   @spec resume_placement(String.t(), Forge.Events.actor()) :: non_neg_integer()
   def resume_placement(project_id, actor) do
@@ -765,7 +864,12 @@ defmodule Forge.Engine do
         state: locked.state,
         status: :cancelled,
         usage: locked.usage,
-        pending_transition: nil
+        pending_transition: nil,
+        # What waited on a release is dropped with the rest of the ticket's work; `held_at` stays,
+        # so a restored ticket comes back on hold and nothing runs on release that restoring said
+        # would not (`docs/design/workflow-grammar-v1.md` § Holding a ticket).
+        held_transition: nil,
+        held_entry: nil
       })
       |> Multi.update_all(:ended, from(j in Job, where: j.id in ^ids),
         set: [status: :finished, outcome: :cancelled, finished_at: now, updated_at: now]
@@ -785,11 +889,7 @@ defmodule Forge.Engine do
         # says it stopped (`Forge.Jobs.hibernate/4` and `complete/2`, which settle what the run
         # spent), not here, where its process is still running. `Workers.push/2` to a job with
         # no worker is an equivalent mutant of the filter: it finds no channel and does nothing.
-        for %Job{status: :running, worker_id: worker_id} = job <- live, worker_id != nil do
-          Forge.Workers.push(worker_id, {:cancel, job.id, :ticket_cancelled})
-        end
-
-        Enum.each(live, &Forge.Git.Tokens.revoke_for_job(&1.id))
+        stop_runs(live)
         stop_step_chats(ticket, user_id)
         {:ok, ticket}
 
@@ -799,6 +899,21 @@ defmodule Forge.Engine do
       {:error, step, reason, _changes} ->
         {:error, {step, reason}}
     end
+  end
+
+  # Tells the machine running each of `live` (read before they were finished) to stop, and revokes
+  # every one's git credential. After the commit, never inside it — see `cancel/2`.
+  #
+  # The push is `{:cancel, id, :ticket_cancelled}` for a stop now as well: the worker acts on the
+  # cancel, not on the reason, and `WorkerChannel.why_stop/1` maps any finished-and-cancelled job to
+  # it, so the worker's report of the run that follows — which is how its spend is settled — needs
+  # no new message and **no protocol bump**.
+  defp stop_runs(live) do
+    for %Job{status: :running, worker_id: worker_id} = job <- live, worker_id != nil do
+      Forge.Workers.push(worker_id, {:cancel, job.id, :ticket_cancelled})
+    end
+
+    Enum.each(live, &Forge.Git.Tokens.revoke_for_job(&1.id))
   end
 
   # A cancelled ticket's step conversation is stopped and left dormant, its branch kept, so that
@@ -840,7 +955,10 @@ defmodule Forge.Engine do
   """
   @spec restore(Ticket.t(), String.t()) :: {:ok, Ticket.t()} | {:error, term()}
   def restore(%Ticket{status: :cancelled} = ticket, user_id) do
+    # First, for the lock order (the project's row, then the ticket's), and so that a ticket whose
+    # milestone was closed while it was cancelled is back in no milestone.
     Multi.new()
+    |> Forge.Milestones.put_restored(ticket, actor(user_id))
     # A release is one at a time (`docs/design/ticket-types.md` § Releases): another may have been
     # started since this one was cancelled.
     |> Forge.ReleaseTickets.put_restorable(ticket)
@@ -869,6 +987,360 @@ defmodule Forge.Engine do
 
   def restore(%Ticket{status: status}, _user_id), do: {:error, {:not_cancelled, status}}
 
+  # -- the hold -------------------------------------------------------------------------------
+
+  @doc """
+  Puts an open ticket on hold (`docs/design/workflow-grammar-v1.md` § Holding a ticket): from now
+  the engine takes no step on it by itself. A run already going finishes and its outcome is
+  recorded; the transition it would take waits for `release/2`.
+
+  Refused with `:already_on_hold` for a ticket that is, and `{:not_holdable, status}` for one that
+  is not open. The row is locked, so two holds at once are one hold and one refusal.
+  """
+  @spec hold(Ticket.t(), term()) :: {:ok, Ticket.t()} | {:error, term()}
+  def hold(%Ticket{} = ticket, actor) do
+    Multi.new()
+    |> Multi.run(:open, fn repo, _changes -> lock_open(repo, ticket.id, :not_holdable) end)
+    |> Multi.run(:free, fn _repo, %{open: open} ->
+      if Ticket.held?(open), do: {:error, :already_on_hold}, else: {:ok, open}
+    end)
+    |> Multi.update(:ticket, fn %{open: open} ->
+      Ticket.hold_changeset(open, %{held_at: DateTime.utc_now(:second)})
+    end)
+    |> Events.log(:hold_event, "ticket.held", actor(actor), %{
+      ticket_id: ticket.id,
+      payload: %{"state" => ticket.state}
+    })
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{ticket: held}} ->
+        Events.notify(held.id)
+        {:ok, held}
+
+      {:error, step, reason, _changes} when step in [:open, :free] ->
+        {:error, reason}
+
+      {:error, step, reason, _changes} ->
+        {:error, {step, reason}}
+    end
+  end
+
+  @doc """
+  Lifts a hold: what the engine would have done meanwhile is done now, and the ticket goes on.
+
+  **A ticket that never started is refreshed first** (`Forge.Tickets.started?/1`): its workflow is
+  re-pinned at the default branch's head — its own type's file, as `repin/2` reads it — and
+  `ticket/N` is moved to that head, in the same transaction as the release. A job made for it
+  before it was held but never taken by a machine is withdrawn and made again on the new pin. The
+  release is **refused whole** when the re-pin cannot be made (the type's file is gone or does not
+  parse, the new workflow has no state of the ticket's name) or when the branch is no longer where
+  admission left it; the ticket stays on hold on its old pin, its branch untouched. Running months-old rules
+  silently is the staleness the refresh is for.
+
+  A started ticket is released as it is, pin and branch unchanged.
+
+  Then, in this order and in one transaction: the hold is cleared; a transition the engine had
+  waiting is taken through `put_after_job/4` with the outcome it was routed on (so `max` rounds,
+  approvals and the budget are read now, as they would have been then); or else the job, command
+  or conversation that waited to be made is made. The row is locked and the hold re-read under the
+  lock, so of two people releasing at once one releases and the other is refused with
+  `:not_on_hold`.
+  """
+  @spec release(Ticket.t(), term()) :: {:ok, Ticket.t()} | {:error, term()}
+  def release(%Ticket{} = ticket, actor) do
+    with {:ok, fresh} <- fresh_held(ticket),
+         {:ok, prepared} <- prepare_release(fresh) do
+      Multi.new()
+      |> Multi.run(:open, fn repo, _changes -> lock_held(repo, ticket.id) end)
+      |> Multi.run(:refresh, fn repo, %{open: open} -> refresh(repo, open, prepared) end)
+      |> Multi.merge(fn %{refresh: refresh} -> put_refreshed_event(Multi.new(), refresh) end)
+      |> Multi.update(:released, fn %{refresh: %{ticket: before}} ->
+        Ticket.hold_changeset(before, %{held_at: nil, held_transition: nil, held_entry: nil})
+      end)
+      |> Events.log(:release_event, "ticket.released", actor(actor), %{
+        ticket_id: ticket.id,
+        payload: %{"state" => ticket.state}
+      })
+      |> Multi.merge(fn %{refresh: %{ticket: before}, released: released} ->
+        put_replay(Multi.new(), before, released)
+      end)
+      # Last, so that nothing which can refuse runs after the branch has moved: only the commit
+      # itself can fail once it has, and the branch is not rolled back with the transaction. No test
+      # fails if it is moved back: it differs only when a step after it fails, and none of the
+      # replay's can be made to here.
+      |> Multi.run(:branch, fn _repo, %{refresh: refresh} -> move_branch(refresh, prepared) end)
+      |> Repo.transaction()
+      |> case do
+        {:ok, changes} ->
+          moved = Map.get(changes, :ticket, changes.released)
+          MergeQueue.kick(moved.project_id)
+          Events.notify(moved.id)
+          {:ok, entered(changes.refresh.ticket, moved)}
+
+        {:error, step, reason, _changes} when step in [:open, :refresh, :branch] ->
+          {:error, reason}
+
+        {:error, step, reason, _changes} ->
+          {:error, {step, reason}}
+      end
+    end
+  end
+
+  # What the row says now, read before anything is prepared: a stale struct must not decide
+  # whether there is something to release.
+  defp fresh_held(%Ticket{id: id}) do
+    case Repo.get(Ticket, id) do
+      %Ticket{held_at: nil} -> {:error, :not_on_hold}
+      %Ticket{status: status} = held when Ticket.open?(status) -> {:ok, held}
+      %Ticket{status: status} -> {:error, {:not_releasable, status}}
+      nil -> {:error, :not_found}
+    end
+  end
+
+  # The type's file at the default branch's head, read before the transaction and only for a ticket
+  # that never started: git is not read under a row lock, and a ticket that has started is released
+  # as it is.
+  defp prepare_release(%Ticket{} = ticket) do
+    if Tickets.started?(ticket),
+      do: {:ok, nil},
+      else: Tickets.prepare_repin(Forge.Projects.get!(ticket.project_id), ticket)
+  end
+
+  defp lock_held(repo, ticket_id) do
+    case repo.one!(from t in Ticket, where: t.id == ^ticket_id, lock: "FOR UPDATE") do
+      %Ticket{held_at: nil} -> {:error, :not_on_hold}
+      %Ticket{status: status} = ticket when Ticket.open?(status) -> {:ok, ticket}
+      %Ticket{status: status} -> {:error, {:not_releasable, status}}
+    end
+  end
+
+  # Under the lock: has it started, and if not, re-pin it. `prepared` is nil for a ticket that had
+  # started when it was read; one that has *not* started now but did then cannot be (a held ticket
+  # starts nothing), and is refused rather than refreshed without a reading.
+  defp refresh(repo, %Ticket{} = open, prepared) do
+    started = Tickets.started?(open)
+
+    cond do
+      started ->
+        {:ok, %{ticket: open, refreshed: false}}
+
+      prepared == nil ->
+        {:error, :changed}
+
+      Workflow.state(prepared.workflow, open.state) == nil ->
+        {:error, {:no_state, open.state}}
+
+      open.workflow_commit == prepared.base and open.base_commit == prepared.base ->
+        {:ok, %{ticket: open, refreshed: false}}
+
+      true ->
+        withdrawn = withdraw_unstarted(repo, open)
+
+        entry = open.held_entry || withdrawn
+
+        {:ok, refreshed} =
+          open
+          |> Ticket.refresh_changeset(%{
+            workflow: prepared.yaml_map,
+            workflow_commit: prepared.base,
+            base_commit: prepared.base
+          })
+          |> Ticket.hold_changeset(%{held_entry: entry})
+          |> repo.update()
+
+        {:ok, %{ticket: refreshed, refreshed: true, from: open.base_commit, to: prepared.base}}
+    end
+  end
+
+  # A job made for the ticket before it was held, that no machine ever took, is finished as
+  # cancelled and its arrival kept as the held entry, to be made again on the new pin. Returns the
+  # entry, or nil when there was none.
+  defp withdraw_unstarted(repo, %Ticket{id: id}) do
+    now = DateTime.utc_now(:second)
+
+    waiting =
+      repo.all(
+        from j in Job,
+          where:
+            j.ticket_id == ^id and j.kind in [:workflow, :command] and j.status == :pending and
+              is_nil(j.started_at),
+          order_by: [asc: j.inserted_at],
+          lock: "FOR UPDATE"
+      )
+
+    case waiting do
+      [] ->
+        nil
+
+      [first | _] = jobs ->
+        repo.update_all(from(j in Job, where: j.id in ^Enum.map(jobs, & &1.id)),
+          set: [status: :finished, outcome: :cancelled, finished_at: now, updated_at: now]
+        )
+
+        entered = if first.kind == :workflow, do: first.spec["entered"], else: nil
+        %{"state" => first.state, "entered" => entered, "came_back" => first.kind == :workflow}
+    end
+  end
+
+  defp put_refreshed_event(multi, %{refreshed: false}), do: multi
+
+  defp put_refreshed_event(multi, %{ticket: ticket, from: from, to: to}) do
+    Events.log(multi, :refresh_event, "ticket.refreshed", :system, %{
+      ticket_id: ticket.id,
+      payload: %{"from" => from, "to" => to}
+    })
+  end
+
+  # The branch moves with the database writes' transaction still open and before any chat step's
+  # own branch is cut from it. A compare-and-swap, so a branch somebody moved since admission is
+  # never overwritten: git refuses, and the release is refused whole.
+  defp move_branch(%{refreshed: false}, _prepared), do: {:ok, :unchanged}
+
+  defp move_branch(%{ticket: ticket, from: from, to: to}, %{repo: repo}) do
+    case Forge.Git.move_branch(repo, ticket.branch, to, from) do
+      :ok -> {:ok, to}
+      {:error, _reason} -> {:error, :branch_moved}
+    end
+  end
+
+  # What waited, made now. A transition the engine had waiting wins; it is replayed only while the
+  # ticket is still in the state it was for. Otherwise the job, command or conversation that waited
+  # to be made is made, on the ticket's *current* pin.
+  defp put_replay(multi, %Ticket{held_transition: %{"state" => state} = held} = before, released)
+       when state == released.state do
+    case Repo.get(Job, held["job_id"]) do
+      %Job{} = job -> put_after_job(multi, released, job, held["outcome"])
+      nil -> put_replay_entry(multi, before, released)
+    end
+  end
+
+  defp put_replay(multi, %Ticket{} = before, released),
+    do: put_replay_entry(multi, before, released)
+
+  defp put_replay_entry(multi, %Ticket{held_entry: %{"state" => state} = entry}, released)
+       when state == released.state do
+    put_entry(
+      multi,
+      released,
+      Tickets.workflow(released),
+      state,
+      entry["entered"],
+      entry["came_back"] == true
+    )
+  end
+
+  defp put_replay_entry(multi, _before, _released), do: multi
+
+  @doc """
+  What a ticket on hold waits to do when released, for a surface to say: `{:transition, from, to,
+  outcome}`, `{:entry, state}`, or nil. A transition wins, as it does at release.
+  """
+  @spec waiting_on_release(Ticket.t()) ::
+          {:transition, String.t(), String.t(), String.t()} | {:entry, String.t()} | nil
+  def waiting_on_release(%Ticket{held_at: nil}), do: nil
+
+  def waiting_on_release(%Ticket{held_transition: %{"from" => from, "to" => to} = held}),
+    do: {:transition, from, to, held["outcome"]}
+
+  def waiting_on_release(%Ticket{held_entry: %{"state" => state}}), do: {:entry, state}
+  def waiting_on_release(%Ticket{}), do: nil
+
+  @doc """
+  `waiting_on_release/1`, and for a ticket held with a job already made for it — admitted to start
+  and held before a machine took it — what releasing does to that job: `{:entry, state}`, because a
+  refreshed ticket makes it again and an unrefreshed one has it placed. One read; the lists, which
+  draw many tickets, use the pure one.
+  """
+  @spec waiting_on_release_or_job(Ticket.t()) ::
+          {:transition, String.t(), String.t(), String.t()} | {:entry, String.t()} | nil
+  def waiting_on_release_or_job(%Ticket{} = ticket) do
+    with nil <- waiting_on_release(ticket),
+         true <- Ticket.held?(ticket),
+         true <- pending_job?(ticket) do
+      {:entry, ticket.state}
+    else
+      _nothing -> waiting_on_release(ticket)
+    end
+  end
+
+  @doc """
+  Whether `stop_now/2` would stop something: the ticket is on hold and a workflow job or command of
+  its state is running.
+  """
+  @spec stoppable?(Ticket.t()) :: boolean()
+  def stoppable?(%Ticket{held_at: nil}), do: false
+
+  def stoppable?(%Ticket{id: id, state: state}) do
+    Repo.exists?(
+      from j in Job,
+        where:
+          j.ticket_id == ^id and j.state == ^state and j.kind in [:workflow, :command] and
+            j.status == :running
+    )
+  end
+
+  @doc """
+  Stops the run a held ticket is still finishing, now: every live job and command of its state is
+  finished as `cancelled`, a machine running one is told to stop and the run's spend is counted
+  against the ticket when the machine reports it, as any run's is. The state runs again on release
+  as `retry/2` would run it, and a transition the engine had waiting is dropped with the run.
+
+  Refused with `:not_on_hold` for a ticket that is not held (`{:not_releasable, status}` when it is
+  not open either) and `:nothing_running` when no run of its state is going.
+  """
+  @spec stop_now(Ticket.t(), term()) :: {:ok, Ticket.t()} | {:error, term()}
+  def stop_now(%Ticket{} = ticket, actor) do
+    now = DateTime.utc_now(:second)
+
+    Multi.new()
+    |> Multi.run(:locked, fn repo, _changes -> lock_held(repo, ticket.id) end)
+    |> Multi.run(:live, fn repo, %{locked: locked} ->
+      live =
+        repo.all(
+          from j in Job,
+            where:
+              j.ticket_id == ^ticket.id and j.state == ^locked.state and
+                j.kind in [:workflow, :command] and j.status in @live_job_statuses,
+            lock: "FOR UPDATE"
+        )
+
+      if Enum.any?(live, &(&1.status == :running)),
+        do: {:ok, live},
+        else: {:error, :nothing_running}
+    end)
+    |> Multi.merge(fn %{locked: locked, live: live} ->
+      ids = Enum.map(live, & &1.id)
+      entry = %{"state" => locked.state, "entered" => again(locked), "came_back" => false}
+
+      Multi.new()
+      |> Multi.update(
+        :ticket,
+        Ticket.hold_changeset(locked, %{held_transition: nil, held_entry: entry})
+      )
+      |> Multi.update_all(:ended, from(j in Job, where: j.id in ^ids),
+        set: [status: :finished, outcome: :cancelled, finished_at: now, updated_at: now]
+      )
+      |> Jobs.Runs.close_all(ids, now)
+      |> Events.log(:stop_event, "ticket.stopped", actor(actor), %{
+        ticket_id: ticket.id,
+        payload: %{"state" => locked.state, "jobs" => ids}
+      })
+    end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{ticket: stopped, live: live}} ->
+        stop_runs(live)
+        Events.notify(stopped.id)
+        {:ok, stopped}
+
+      {:error, step, reason, _changes} when step in [:locked, :live] ->
+        {:error, reason}
+
+      {:error, step, reason, _changes} ->
+        {:error, {step, reason}}
+    end
+  end
+
   # -- running a state again ------------------------------------------------------------------
 
   @doc """
@@ -890,7 +1362,8 @@ defmodule Forge.Engine do
         state: ticket.state,
         status: :active,
         usage: ticket.usage,
-        pending_transition: nil
+        pending_transition: nil,
+        held_transition: nil
       })
       |> Events.log(:retry_event, "ticket.retried", actor(user_id), %{
         ticket_id: ticket.id,
@@ -983,15 +1456,11 @@ defmodule Forge.Engine do
 
   defp queued_or_live(ticket), do: with(:ok <- not_queued(ticket), do: no_live_job(ticket))
 
-  defp put_again(multi, workflow, %State{prompt: prompt}) when is_binary(prompt) do
+  # The state again, as a person asked for it: the arrival the last attempt had, and no session
+  # forked. On a ticket on hold it waits (`put_entry/6`).
+  defp put_again(multi, workflow, %State{}) do
     Multi.merge(multi, fn %{ticket: ticket} ->
-      Jobs.put_create(Multi.new(), :next_job, ticket, workflow, ticket.state, again(ticket))
-    end)
-  end
-
-  defp put_again(multi, workflow, %State{invoke: [_ | _]}) do
-    Multi.merge(multi, fn %{ticket: ticket} ->
-      Forge.Jobs.Commands.put_for_state(Multi.new(), :next_job, ticket, workflow, ticket.state)
+      put_entry(Multi.new(), ticket, workflow, ticket.state, again(ticket), false)
     end)
   end
 
@@ -1790,6 +2259,9 @@ defmodule Forge.Engine do
         Events.notify(ticket.id)
         settle(entry, entered, workflow)
 
+      {:error, :open, :held, _changes} ->
+        release_claim(entry)
+
       {:error, :open, _gone, _changes} ->
         leave_line(entry, "moved on")
 
@@ -1829,6 +2301,9 @@ defmodule Forge.Engine do
         Events.notify(ticket.id)
         settle(entry, moved, workflow)
 
+      {:error, :open, :held, _changes} ->
+        release_claim(entry)
+
       {:error, :open, _gone, _changes} ->
         leave_line(entry, "moved on")
 
@@ -1840,18 +2315,37 @@ defmodule Forge.Engine do
   # The ticket row, locked, only while it is still the one the row is for: active, where it was
   # queued, and the row not taken out meanwhile.
   #
-  # Every condition here is an equivalent mutant as far as a test can tell: `run_entry/1` read the
-  # status and the state a moment earlier, and the row is `merging` since `claim/1`, which
-  # `take_out/2` refuses to delete. A ticket or row can only differ now by another writer
-  # committing between that read and this lock, which nothing in the suite can open on demand (the
-  # same window `cancel/2` documents).
+  # The held branch needs a hold committed between `claim/1` and this lock, and no test reaches it
+  # (`release_claim/1` is what it does). **The other conditions are equivalent mutants as far as a
+  # test can tell:** `run_entry/1` read the status and the state a moment earlier, and the row is
+  # `merging` since `claim/1`, which `take_out/2` refuses to delete. A ticket or row can only differ
+  # now by another writer committing between that read and this lock, which nothing in the suite
+  # can open on demand (the same window `cancel/2` documents).
   defp lock_entry(repo, %Entry{} = entry) do
     ticket = repo.one!(from t in Ticket, where: t.id == ^entry.ticket_id, lock: "FOR UPDATE")
     current = repo.get(Entry, entry.id)
 
-    if ticket.status == :active and ticket.state == entry.from_state and current != nil,
-      do: {:ok, ticket},
-      else: {:error, :gone}
+    cond do
+      # Held since `claim/1` read it: a hold commits under this same row lock, so one that came
+      # first is seen here. The row goes back to `waiting` and keeps its place
+      # (`release_claim/1`), where `:gone` would have taken the ticket out of the line.
+      ticket.held_at != nil and current != nil ->
+        {:error, :held}
+
+      ticket.status == :active and ticket.state == entry.from_state and current != nil ->
+        {:ok, ticket}
+
+      true ->
+        {:error, :gone}
+    end
+  end
+
+  # A claimed row whose ticket was put on hold before the merge: back to `waiting`, at its place.
+  # It must not call `leave_line/2`, which would delete the row and lose the place.
+  defp release_claim(%Entry{id: id, ticket_id: ticket_id}) do
+    Repo.update_all(from(e in Entry, where: e.id == ^id), set: [status: :waiting])
+    Events.notify(ticket_id)
+    :held
   end
 
   # What became of the ticket the merge was for, and so of its row.
@@ -1904,6 +2398,9 @@ defmodule Forge.Engine do
         Events.notify(entry.ticket_id)
         leave_line(entry, "stuck")
         :stuck
+
+      {:error, _step, :held, _changes} ->
+        release_claim(entry)
 
       {:error, _step, _reason, _changes} ->
         leave_line(entry, "moved on")

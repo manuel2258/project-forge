@@ -21,7 +21,18 @@ only git config. See `design/git-hosting.md`.
 the project row), `title`, `body`, `base_commit`, `branch` (`ticket/<number>`), `workflow`
 (parsed definition, JSON), `workflow_commit`, `state` (a state name from the pinned
 workflow), `status` (`active | stuck | done | cancelled`), `usage` (denormalised sum
-over jobs), `pending_transition` (set while a transition waits for approval).
+over jobs), `pending_transition` (set while a transition waits for approval). **The hold**:
+`held_at` (null is not on hold), `held_transition` (`{job_id, state, outcome, from, to}`, an engine
+transition waiting for release) and `held_entry` (`{state, entered, came_back}`, a job, command or
+conversation waiting to be made) — a flag and not a status (`design/workflow-grammar-v1.md`
+§ Holding a ticket). **The order**: `milestone_id` (null: in none; no cascade) and `position`
+within `(project_id, milestone_id)`, meaningful for open tickets; existing tickets were given their
+number.
+
+**milestone** — `project_id`, `name` (at most 80 characters, unique among the project's, closed
+ones included), `description` (at most 2,000), `position` in the project's order, `current` (at
+most one per project: a partial unique index, and a check that a current one is not closed) and
+`closed_at`. Never deleted (`design/ui.md` § Milestones).
 
 **job** — one execution of one job state, one command invocation, or one conversation. `kind`
 (`workflow | command | chat`), `project_id`, `ticket_id`, `state`, `attempt` (per ticket and state

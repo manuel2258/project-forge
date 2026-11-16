@@ -29,6 +29,7 @@ defmodule Forge.Operator do
   alias Forge.Git.Token
   alias Forge.Jobs
   alias Forge.Jobs.Job
+  alias Forge.Milestones
   alias Forge.Projects
   alias Forge.Projects.Project
   alias Forge.Proposals
@@ -276,11 +277,140 @@ defmodule Forge.Operator do
 
   @doc """
   Admits a ticket into a project. A member's write, like the rest of the work.
+
+  **`attrs[:on_hold]` must be given, true or false**: a person admitting a ticket chooses between
+  starting it now and putting it on hold, and there is no default at any person's door
+  (`docs/design/ui.md` § Creating things). Missing, or anything but a boolean, is
+  `{:error, :start_or_hold}`, and nothing is written. `attrs[:milestone_id]` is optional: the
+  ticket goes to the bottom of that open milestone of this project (`{:error, :milestone}` for
+  any other), or of the no-milestone order.
   """
   @spec admit(Project.t(), actor(), map()) :: {:ok, Ticket.t()} | {:error, term()}
   def admit(%Project{} = project, actor, attrs) do
-    with :ok <- allow(project, actor, :use) do
+    with :ok <- allow(project, actor, :use),
+         :ok <- start_or_hold(attrs) do
       Tickets.admit(project, attrs, Actor.of(actor))
+    end
+  end
+
+  defp start_or_hold(%{on_hold: on_hold}) when is_boolean(on_hold), do: :ok
+  defp start_or_hold(_attrs), do: {:error, :start_or_hold}
+
+  ## Hold, titles and milestones
+
+  @doc """
+  Puts an open ticket on hold (`Forge.Engine.hold/2`). A member's write, a release ticket's
+  included; a write-enabled token may too.
+  """
+  @spec hold(Ticket.t(), actor()) :: {:ok, Ticket.t()} | {:error, term()}
+  def hold(%Ticket{} = ticket, actor) do
+    with :ok <- allow(ticket, actor, :use),
+         {:ok, held} <- Engine.hold(ticket, Actor.of(actor)) do
+      notify(held)
+    end
+  end
+
+  @doc "Releases a ticket on hold (`Forge.Engine.release/2`)."
+  @spec release(Ticket.t(), actor()) :: {:ok, Ticket.t()} | {:error, term()}
+  def release(%Ticket{} = ticket, actor) do
+    with :ok <- allow(ticket, actor, :use),
+         {:ok, released} <- Engine.release(ticket, Actor.of(actor)) do
+      notify(released)
+    end
+  end
+
+  @doc "Stops the run a held ticket is still finishing (`Forge.Engine.stop_now/2`)."
+  @spec stop_now(Ticket.t(), actor()) :: {:ok, Ticket.t()} | {:error, term()}
+  def stop_now(%Ticket{} = ticket, actor) do
+    with :ok <- allow(ticket, actor, :use),
+         {:ok, stopped} <- Engine.stop_now(ticket, Actor.of(actor)) do
+      notify(stopped)
+    end
+  end
+
+  @doc "Changes a ticket's title (`Forge.Tickets.retitle/3`); a release's is refused."
+  @spec retitle(Ticket.t(), actor(), String.t()) :: {:ok, Ticket.t()} | {:error, term()}
+  def retitle(%Ticket{} = ticket, actor, title) when is_binary(title) do
+    with :ok <- allow(ticket, actor, :use),
+         {:ok, retitled} <- Tickets.retitle(ticket, title, Actor.of(actor)) do
+      notify(retitled)
+    end
+  end
+
+  @doc """
+  Puts an open ticket in an open milestone of its project, or in none (`nil`)
+  (`Forge.Milestones.set_ticket_milestone/3`).
+  """
+  @spec set_milestone(Ticket.t(), actor(), String.t() | nil) ::
+          {:ok, Ticket.t()} | {:error, term()}
+  def set_milestone(%Ticket{} = ticket, actor, milestone_id) do
+    with :ok <- allow(ticket, actor, :use),
+         {:ok, placed} <-
+           Milestones.set_ticket_milestone(ticket, milestone_id, Actor.of(actor)) do
+      notify(placed)
+    end
+  end
+
+  @doc "Moves an open ticket in its order (`Forge.Milestones.move_ticket/3`)."
+  @spec move_ticket(Ticket.t(), actor(), Milestones.to()) :: {:ok, Ticket.t()} | {:error, term()}
+  def move_ticket(%Ticket{} = ticket, actor, to) do
+    with :ok <- allow(ticket, actor, :use),
+         {:ok, _moved} <- Milestones.move_ticket(ticket, to, Actor.of(actor)) do
+      notify(ticket)
+    end
+  end
+
+  @doc "Creates a milestone of the project."
+  @spec create_milestone(Project.t(), actor(), map()) ::
+          {:ok, Milestones.Milestone.t()} | {:error, term()}
+  def create_milestone(%Project{} = project, actor, attrs) do
+    with :ok <- allow(project, actor, :use) do
+      Milestones.create(project, attrs, Actor.of(actor))
+    end
+  end
+
+  @doc "Renames and describes a milestone of the project."
+  @spec update_milestone(Project.t(), actor(), String.t(), map()) ::
+          {:ok, Milestones.Milestone.t()} | {:error, term()}
+  def update_milestone(%Project{id: project_id} = project, actor, id, attrs) do
+    with :ok <- allow(project, actor, :use) do
+      Milestones.update(project_id, id, attrs, Actor.of(actor))
+    end
+  end
+
+  @doc "Marks a milestone as the project's current one, or `nil` unmarks."
+  @spec set_current_milestone(Project.t(), actor(), String.t() | nil) ::
+          {:ok, Milestones.Milestone.t() | nil} | {:error, term()}
+  def set_current_milestone(%Project{id: project_id} = project, actor, id) do
+    with :ok <- allow(project, actor, :use) do
+      Milestones.set_current(project_id, id, Actor.of(actor))
+    end
+  end
+
+  @doc "Closes a milestone of the project."
+  @spec close_milestone(Project.t(), actor(), String.t()) ::
+          {:ok, Milestones.Milestone.t()} | {:error, term()}
+  def close_milestone(%Project{id: project_id} = project, actor, id) do
+    with :ok <- allow(project, actor, :use) do
+      Milestones.close(project_id, id, Actor.of(actor))
+    end
+  end
+
+  @doc "Reopens a closed milestone of the project."
+  @spec reopen_milestone(Project.t(), actor(), String.t()) ::
+          {:ok, Milestones.Milestone.t()} | {:error, term()}
+  def reopen_milestone(%Project{id: project_id} = project, actor, id) do
+    with :ok <- allow(project, actor, :use) do
+      Milestones.reopen(project_id, id, Actor.of(actor))
+    end
+  end
+
+  @doc "Moves a milestone in the project's order."
+  @spec move_milestone(Project.t(), actor(), String.t(), Milestones.to()) ::
+          {:ok, term()} | {:error, term()}
+  def move_milestone(%Project{id: project_id} = project, actor, id, to) do
+    with :ok <- allow(project, actor, :use) do
+      Milestones.move(project_id, id, to, Actor.of(actor))
     end
   end
 
@@ -543,12 +673,16 @@ defmodule Forge.Operator do
   ticket it *made*, which is a different one. A proposal belongs to the job that wrote it rather
   than to a ticket, and a project chat's proposal has no ticket anywhere near it.
   """
-  @spec accept_proposal(String.t(), actor(), String.t() | nil, String.t() | nil) ::
+  @spec accept_proposal(String.t(), actor(), String.t() | nil, String.t() | nil, keyword()) ::
           {:ok, Ticket.t()} | {:error, term()}
-  def accept_proposal(version_id, actor, comment \\ nil, ticket_type \\ nil) do
+  def accept_proposal(version_id, actor, comment \\ nil, ticket_type \\ nil, opts \\ []) do
+    # As `admit/3`, start or hold is the person's to say and nothing is written without it. A
+    # proposal that is not there is still `:not_found` whatever else was left out, so it is the
+    # one case that is not asked.
     with :ok <- allow_proposal(version_id, actor),
+         :ok <- if(Proposals.get(version_id), do: start_or_hold(Map.new(opts)), else: :ok),
          {:ok, %Ticket{} = ticket} <-
-           Proposals.accept(version_id, Actor.of(actor), comment, ticket_type) do
+           Proposals.accept(version_id, Actor.of(actor), comment, ticket_type, opts) do
       # Both: the ticket the proposal came out of has a page that lists it, and the ticket it
       # became has one of its own that nobody is looking at yet.
       notify_origin(version_id)

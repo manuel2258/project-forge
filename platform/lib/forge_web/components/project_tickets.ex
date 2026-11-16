@@ -32,6 +32,8 @@ defmodule ForgeWeb.ProjectTickets do
           usage_high: boolean(),
           aged: boolean(),
           running: boolean(),
+          held: boolean(),
+          milestone: String.t() | nil,
           latest: String.t() | nil,
           decision: boolean(),
           changed: DateTime.t(),
@@ -41,7 +43,10 @@ defmodule ForgeWeb.ProjectTickets do
   @doc """
   One row per open ticket, ordered: the tickets waiting on you, then the rest, each by last change,
   newest first. `facts` holds `:items` (the project's queue items), `:live`, `:said`, `:places`,
-  `:paused` and `:now`.
+  `:paused`, `:milestones` (milestone names by id) and `:now`.
+
+  **A ticket on hold is drawn quietly, below the rest**, unless something on it waits on a person:
+  then it is with what waits on you, where the decision is (`docs/design/ui.md` § Tickets).
   """
   @spec rows([Ticket.t()], map()) :: [row()]
   def rows(tickets, facts) do
@@ -52,8 +57,13 @@ defmodule ForgeWeb.ProjectTickets do
 
     tickets
     |> Enum.map(&row(&1, Map.get(items, &1.id, []), workflows, facts))
-    |> Enum.sort_by(&{not &1.waiting, -DateTime.to_unix(&1.changed)})
+    |> Enum.sort_by(&{group(&1), -DateTime.to_unix(&1.changed)})
   end
+
+  # What waits on you, then the rest, then what is on hold with nothing waiting.
+  defp group(%{waiting: true}), do: 0
+  defp group(%{held: true}), do: 2
+  defp group(_row), do: 1
 
   defp row(ticket, items, workflows, facts) do
     workflow = Topology.pinned(workflows, ticket)
@@ -80,6 +90,8 @@ defmodule ForgeWeb.ProjectTickets do
       # Running means a job running now: not one queued to merge or one waiting for a machine,
       # which `tone` puts on the map with the running ones.
       running: running,
+      held: Ticket.held?(ticket),
+      milestone: Map.get(facts[:milestones] || %{}, ticket.milestone_id),
       latest: latest,
       decision: decision,
       changed: ticket.updated_at,
@@ -102,6 +114,13 @@ defmodule ForgeWeb.ProjectTickets do
   defp doing(_ticket, [first | _] = items, _live, facts) do
     since = items |> Enum.map(& &1.since) |> Enum.min(DateTime, fn -> first.since end)
     {"waiting #{Format.lasted(since, facts.now)}", "accent", :waiting}
+  end
+
+  # On hold, with nothing waiting on a person: neither amber nor info, because nothing is waiting
+  # and nothing is moving. A run it started before the hold is still finishing, and says so.
+  defp doing(%Ticket{held_at: held_at}, [], live, _facts) when held_at != nil do
+    finishing = if match?(%{status: :running}, live), do: " · its run is finishing", else: ""
+    {"on hold" <> finishing, nil, :held}
   end
 
   defp doing(ticket, [], live, facts) do
@@ -180,13 +199,18 @@ defmodule ForgeWeb.ProjectTickets do
         <.link
           id={"#{@id}-#{row.ticket.number}"}
           navigate={~p"/tickets/#{@project}/#{row.ticket.number}"}
-          class={["ui-row ticket-row", row.waiting && "ui-row--accent"]}
+          class={[
+            "ui-row ticket-row",
+            row.waiting && "ui-row--accent",
+            row.held && "ticket-row--held"
+          ]}
         >
           <div class="ui-row-body">
             <div class="ticket-row-head">
               <span class="ticket-row-number">#{row.ticket.number}</span>
               <span class="ui-row-title ticket-row-title">{row.ticket.title}</span>
               <span :if={row.ticket.ticket_type} class="ui-type-badge">{row.ticket.ticket_type}</span>
+              <span :if={row.milestone} class="ticket-milestone">{row.milestone}</span>
               <span :if={not row.aged} class="ticket-row-age">{Format.ago(row.changed, @now)}</span>
             </div>
             <div class="ui-row-meta ticket-row-meta">
@@ -240,13 +264,18 @@ defmodule ForgeWeb.ProjectTickets do
         id={"#{@id}-#{row.ticket.number}"}
         navigate={~p"/tickets/#{@project}/#{row.ticket.number}"}
         role="row"
-        class={["tickets-table-row", row.waiting && "tickets-table-row--waiting"]}
+        class={[
+          "tickets-table-row",
+          row.waiting && "tickets-table-row--waiting",
+          row.held && "ticket-row--held"
+        ]}
       >
         <span role="cell" class="ticket-row-number">#{row.ticket.number}</span>
         <span role="cell" class="tickets-table-title">
           <span class="ticket-row-title">
             {row.ticket.title}
             <span :if={row.ticket.ticket_type} class="ui-type-badge">{row.ticket.ticket_type}</span>
+            <span :if={row.milestone} class="ticket-milestone">{row.milestone}</span>
           </span>
           <span :if={row.latest} class={["ui-row-latest", row.decision && "ticket-latest--decision"]}>
             {row.latest}

@@ -17,6 +17,7 @@ defmodule ForgeWeb.TicketNewLive do
 
   use ForgeWeb, :live_view
 
+  alias Forge.Milestones.Milestone
   alias Forge.{Operator, Projects, ReleaseTickets, Tickets}
   alias ForgeWeb.{Indicators, Topology, WorkflowMap}
   alias ForgeWeb.Operator.Admission
@@ -38,25 +39,35 @@ defmodule ForgeWeb.TicketNewLive do
      )
      |> assign(
        form:
-         to_form(%{"project" => chosen, "ticket_type" => "", "title" => "", "body" => ""},
+         to_form(
+           %{
+             "project" => chosen,
+             "ticket_type" => "",
+             "title" => "",
+             "body" => "",
+             "milestone_id" => ""
+           },
            as: :ticket
          )
      )
      |> assign_workflow(chosen)}
   end
 
-  defp assign_workflow(socket, nil), do: assign(socket, project: nil, types: nil, workflow: nil)
+  defp assign_workflow(socket, nil),
+    do: assign(socket, project: nil, types: nil, workflow: nil, milestones: [])
 
   defp assign_workflow(socket, name) do
     case Enum.find(socket.assigns.projects, &(&1.name == name)) do
       nil ->
-        assign(socket, project: nil, types: nil, workflow: nil)
+        assign(socket, project: nil, types: nil, workflow: nil, milestones: [])
 
       project ->
         socket
         |> assign(
           project: project,
-          types: project |> Tickets.types() |> ReleaseTickets.ordinary()
+          types: project |> Tickets.types() |> ReleaseTickets.ordinary(),
+          # The open milestones a ticket may be admitted into, in their order.
+          milestones: project.id |> Forge.Milestones.list() |> Enum.filter(&Milestone.open?/1)
         )
         |> assign_chosen()
     end
@@ -115,7 +126,13 @@ defmodule ForgeWeb.TicketNewLive do
     end
   end
 
-  def handle_event("create", %{"ticket" => params}, socket) do
+  # Which button was pressed is the form's `on_hold`, sent as the submitter's own name and value:
+  # `false` for *Start now*, `true` for *Put on hold*. Neither is the default — a submit with
+  # neither (Enter in the title, say, which clicks the hidden first button in the form) says
+  # nothing and is refused (`docs/design/ui.md` § Creating
+  # things).
+  def handle_event("create", %{"ticket" => params} = sent, socket) do
+    params = Map.put(params, "on_hold", sent["on_hold"])
     title = String.trim(params["title"] || "")
 
     cond do
@@ -137,7 +154,9 @@ defmodule ForgeWeb.TicketNewLive do
     attrs = %{
       title: title,
       body: String.trim(params["body"] || ""),
-      ticket_type: params["ticket_type"]
+      ticket_type: params["ticket_type"],
+      on_hold: on_hold(params["on_hold"]),
+      milestone_id: if(params["milestone_id"] in [nil, ""], do: nil, else: params["milestone_id"])
     }
 
     case Operator.admit(project, socket.assigns.current_scope.user, attrs) do
@@ -153,10 +172,21 @@ defmodule ForgeWeb.TicketNewLive do
       {:error, reason} ->
         {:noreply,
          socket
-         |> assign(form: to_form(params, as: :ticket), error: Admission.explain(reason))
+         |> assign(form: to_form(params, as: :ticket), error: refusal(reason))
          |> assign_workflow(project.name)}
     end
   end
+
+  # The refusals of the choices this form adds are sentences of their own; the rest are the
+  # project's, which `Admission` words.
+  defp refusal(reason) when reason in [:start_or_hold, :milestone, :release_title, :blank],
+    do: ForgeWeb.Operator.Actions.describe(reason)
+
+  defp refusal(reason), do: Admission.explain(reason)
+
+  defp on_hold("true"), do: true
+  defp on_hold("false"), do: false
+  defp on_hold(_neither), do: nil
 
   @impl true
   def render(assigns) do
@@ -190,6 +220,13 @@ defmodule ForgeWeb.TicketNewLive do
         phx-submit="create"
         class="mt-6 flex flex-col gap-4"
       >
+        <%!-- Enter in a text box clicks the form's first submit button, whatever it says, and the
+              server is sent that button's name and value. This is first so that it is the one
+              clicked: it sends neither choice, which is refused with the sentence that says to
+              choose, where the real first button, Start now, would have started the ticket. --%>
+        <button type="submit" name="on_hold" value="" tabindex="-1" aria-hidden="true" class="sr-only">
+          Submit
+        </button>
         <%!-- Reached from a project, the project is not a question. The select survives only for
               the bare /tickets/new, which nothing links to. See docs/design/ui.md § Creating
               things. --%>
@@ -286,17 +323,47 @@ defmodule ForgeWeb.TicketNewLive do
           disabled={blocked?(@project, @workflow)}
         />
 
+        <%!-- Optional: the ticket goes to the bottom of that milestone's order, or of the tickets in
+              none. Only an open milestone of this project is offered. --%>
+        <.input
+          :if={@milestones != []}
+          field={@form[:milestone_id]}
+          type="select"
+          label="Milestone"
+          prompt="None"
+          options={Enum.map(@milestones, &{&1.name, &1.id})}
+        />
+
         <.error_note :if={@error} id="ticket-new-error">{@error}</.error_note>
 
-        <.button
-          type="submit"
-          variant="primary"
-          size="xl"
-          fill
-          disabled={not Admission.ready?(@workflow)}
-        >
-          Admit it
-        </.button>
+        <%!-- Two actions side by side and neither chosen for the person (`docs/design/ui.md`
+              § Creating things): neither is primary. --%>
+        <div class="ticket-new-actions">
+          <.button
+            id="admit-start"
+            type="submit"
+            name="on_hold"
+            value="false"
+            variant="outline"
+            size="xl"
+            fill
+            disabled={not Admission.ready?(@workflow)}
+          >
+            Start now
+          </.button>
+          <.button
+            id="admit-hold"
+            type="submit"
+            name="on_hold"
+            value="true"
+            variant="outline"
+            size="xl"
+            fill
+            disabled={not Admission.ready?(@workflow)}
+          >
+            Put on hold
+          </.button>
+        </div>
       </.form>
     </Layouts.app>
     """

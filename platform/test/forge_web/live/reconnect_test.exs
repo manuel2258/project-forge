@@ -744,7 +744,12 @@ defmodule ForgeWeb.ReconnectTest do
             {"live/operator/components.ex", "write_document"},
             {"live/project_live.ex", "release:start"},
             # Project settings' one form for the model and the effort (`9g`).
-            {"live/project_settings_live.ex", "defaults"}
+            {"live/project_settings_live.ex", "defaults"},
+            # A half-typed milestone name or description and ticket title survive a reconnect
+            # (`docs/design/ui.md` § Milestones).
+            {"components/milestones_view.ex", "milestones:create"},
+            {"components/milestones_view.ex", "milestones:update"},
+            {"components/ticket_views.ex", "retitle"}
           ] do
         assert site in recovering, "#{inspect(site)} is not in the scan at all"
       end

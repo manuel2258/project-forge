@@ -18,7 +18,12 @@ defmodule ForgeWeb.Api.Render do
     }
   end
 
-  def ticket(%Ticket{} = t, project_name) do
+  @doc """
+  A ticket as the API shows it. `opts` carries what a list has already read for all its tickets,
+  so that a list does not ask once per row: `:started` (a boolean) and `:milestones` (a map of
+  milestone id to name).
+  """
+  def ticket(%Ticket{} = t, project_name, opts \\ []) do
     %{
       id: t.id,
       ref: "#{project_name}##{t.number}",
@@ -34,8 +39,54 @@ defmodule ForgeWeb.Api.Render do
       workflow_commit: t.workflow_commit,
       ticket_type: t.ticket_type,
       pending_transition: t.pending_transition,
+      on_hold: Ticket.held?(t),
+      held_at: t.held_at,
+      started: Keyword.get_lazy(opts, :started, fn -> Forge.Tickets.started?(t) end),
+      stoppable: Forge.Engine.stoppable?(t),
+      waiting_on_release: waiting_on_release(t),
+      milestone: milestone(t, opts),
+      position: t.position,
       inserted_at: t.inserted_at,
       updated_at: t.updated_at
+    }
+  end
+
+  defp waiting_on_release(%Ticket{} = t) do
+    case Forge.Engine.waiting_on_release_or_job(t) do
+      {:transition, from, to, outcome} ->
+        %{transition: %{from: from, to: to, outcome: outcome}}
+
+      {:entry, state} ->
+        %{entry: state}
+
+      nil ->
+        nil
+    end
+  end
+
+  defp milestone(%Ticket{milestone_id: nil}, _opts), do: nil
+
+  defp milestone(%Ticket{milestone_id: id}, opts) do
+    name =
+      case Keyword.fetch(opts, :milestones) do
+        {:ok, names} -> Map.get(names, id)
+        :error -> Forge.Milestones.name(id)
+      end
+
+    %{id: id, name: name}
+  end
+
+  @doc "A milestone with its progress and the numbers of its open tickets, in order."
+  def milestone_entry(%{milestone: m, open: open, progress: progress}) do
+    %{
+      id: m.id,
+      name: m.name,
+      description: m.description,
+      position: m.position,
+      current: m.current,
+      closed_at: m.closed_at,
+      progress: progress,
+      tickets: Enum.map(open, & &1.number)
     }
   end
 

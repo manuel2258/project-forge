@@ -123,8 +123,12 @@ defmodule Forge.Queue do
   (`docs/design/ui.md` § Decide and Timeline). A finished ticket has none.
   """
   @spec for_ticket(Ticket.t()) :: [item()]
-  def for_ticket(%Ticket{status: status} = ticket) when status in @open,
-    do: questions([ticket]) ++ decisions([ticket]) ++ step_items(ticket)
+  def for_ticket(%Ticket{status: status} = ticket) when status in @open do
+    case askable([ticket]) do
+      [] -> []
+      [ticket] -> questions([ticket]) ++ decisions([ticket]) ++ step_items(ticket)
+    end
+  end
 
   def for_ticket(%Ticket{}), do: []
 
@@ -208,7 +212,10 @@ defmodule Forge.Queue do
           # says the opposite. Excluded by the read, whose model is the ticket's own `status`
           # column, and not by an `if` over a derived flag afterwards.
           where: t.status == :active,
-          where: ^visible(project_ids)
+          where: ^visible(project_ids),
+          # Never a ticket on hold: nothing is moving on it and nothing is about to, so it is in no
+          # count of running work (`docs/design/ui.md` § What the queue counts).
+          where: is_nil(t.held_at)
       )
 
     live = live_jobs(Enum.map(tickets, & &1.id))
@@ -396,11 +403,31 @@ defmodule Forge.Queue do
           order_by: t.inserted_at
       )
 
+    tickets = askable(tickets)
+
     {waiting, assumed} =
       (questions(tickets) ++ decisions(tickets) ++ chats(project_ids))
       |> Enum.split_with(&waiting?/1)
 
     oldest_first(waiting) ++ oldest_first(assumed)
+  end
+
+  # **A ticket on hold that has never started asks nothing**: the hold itself is never a queue item
+  # (`docs/design/ui.md` § What the queue counts), and a ticket nothing has run for has no question
+  # or approval of its own — what could be there is a by-hand move into a human state, a review of
+  # nothing. A held ticket that has started keeps every decision it has, which the queue and the push
+  # show as on any ticket.
+  defp askable(tickets) do
+    held = for t <- tickets, Ticket.held?(t), do: t.id
+
+    case held do
+      [] ->
+        tickets
+
+      ids ->
+        started = MapSet.new(Tickets.started_ids(ids))
+        Enum.reject(tickets, &(&1.id in ids and &1.id not in started))
+    end
   end
 
   # A queued ticket waits on the merge queue and not on a person: its approval is given, so nothing

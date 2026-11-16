@@ -340,12 +340,15 @@ defmodule Forge.Proposals do
   failing that, none, which a project with several types refuses as no type chosen
   (`docs/design/ticket-types.md` § Proposals).
   """
-  @spec accept(String.t(), String.t(), String.t() | nil, String.t() | nil) ::
+  @spec accept(String.t(), term(), String.t() | nil, String.t() | nil, keyword()) ::
           {:ok, Forge.Tickets.Ticket.t()} | {:error, term()}
-  def accept(version_id, user_id, comment \\ nil, ticket_type \\ nil) do
+  def accept(version_id, user_id, comment \\ nil, ticket_type \\ nil, opts \\ []) do
+    # `on_hold` is the caller's: absent, the ticket is started, as `Tickets.put_admit/5` does for
+    # the engine and the fixtures. The person's own door, `Forge.Operator.accept_proposal/5`, asks
+    # them to say.
     with {:ok, found} <- fetch_open(version_id),
          {:ok, proposal} <- parse(found.version) do
-      admit(found, proposal, user_id, comment, ticket_type)
+      admit(found, proposal, user_id, comment, ticket_type, opts)
     end
   end
 
@@ -362,9 +365,15 @@ defmodule Forge.Proposals do
   # `Git.create_branch`, which is a filesystem effect. A rolled-back accept leaves the branch
   # without the ticket that named it. That is the pre-existing shape of `admit/3` and it is the
   # right way round — a stray ref is collectable, a stray ticket spends money.
-  defp admit(found, proposal, user_id, comment, ticket_type) do
+  defp admit(found, proposal, user_id, comment, ticket_type, opts) do
     project = Projects.get!(found.job.project_id)
-    attrs = %{title: proposal.title, body: proposal.body}
+
+    # `:on_hold` and `:milestone_id` are the person's, passed on to `put_admit/5` as they are given:
+    # the ticket is admitted on hold and into the milestone in the transaction that records the
+    # decision, or not at all.
+    attrs =
+      %{title: proposal.title, body: proposal.body}
+      |> Map.merge(Map.new(Keyword.take(opts, [:on_hold, :milestone_id])))
 
     with {:ok, prepared} <- prepare(project, ticket_type, proposal.ticket_type) do
       Multi.new()
@@ -378,6 +387,9 @@ defmodule Forge.Proposals do
 
         {:error, :decision, %Ecto.Changeset{errors: errors}, _changes} ->
           decision_error(errors)
+
+        {:error, :milestone, :milestone, _changes} ->
+          {:error, :milestone}
 
         {:error, step, reason, _changes} ->
           {:error, {step, reason}}

@@ -107,6 +107,20 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/api/v1/tickets/:project/:number/retry" => :member,
     "/api/v1/tickets/:project/:number/cancel" => :member,
     "/api/v1/tickets/:project/:number/restore" => :member,
+    # The hold, titles and milestones: `Forge.Operator` guards every one, a project token with API
+    # write included (`docs/design/identity.md` § Where the guard lives).
+    "/api/v1/tickets/:project/:number/hold" => :member,
+    "/api/v1/tickets/:project/:number/release" => :member,
+    "/api/v1/tickets/:project/:number/stop" => :member,
+    "/api/v1/tickets/:project/:number/title" => :member,
+    "/api/v1/tickets/:project/:number/milestone" => :member,
+    "/api/v1/tickets/:project/:number/move" => :member,
+    "/api/v1/projects/:project/milestones" => :member,
+    "/api/v1/projects/:project/milestones/:id" => :member,
+    "/api/v1/projects/:project/milestones/:id/current" => :member,
+    "/api/v1/projects/:project/milestones/:id/close" => :member,
+    "/api/v1/projects/:project/milestones/:id/reopen" => :member,
+    "/api/v1/projects/:project/milestones/:id/move" => :member,
     "/api/v1/projects/:project/proposals" => :member,
     "/api/v1/proposals/:version_id/accept" => :member,
     "/api/v1/proposals/:version_id/decline" => :member,
@@ -199,6 +213,22 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # `Operator.start_release/3` asks for `:manage`, and the page draws the block for an admin only
     # (`docs/design/ticket-types.md` § Releases).
     {"project_live.ex", "release:start"} => :manage,
+    # The Milestones view: every one is a `Forge.Operator` function asking `:use`, and each ticket
+    # or milestone id off the wire is resolved inside this project first
+    # (`Forge.Milestones.get/2`, `ticket_of/2`), so another project's answers as one that is not
+    # there. The last is the catch-all for a name no clause knows, which does nothing.
+    {"project_live.ex", "milestones:create"} => :member,
+    {"project_live.ex", "milestones:update"} => :member,
+    {"project_live.ex", "milestones:current"} => :member,
+    {"project_live.ex", "milestones:close"} => :member,
+    {"project_live.ex", "milestones:reopen"} => :member,
+    {"project_live.ex", "milestones:move"} => :member,
+    {"project_live.ex", "milestones:ticket_move"} => :member,
+    {"project_live.ex", "milestones:drag"} => :member,
+    {"project_live.ex", "milestones:drag_milestone"} => :member,
+    {"project_live.ex", "milestones:place"} => :member,
+    {"project_live.ex", "milestones:release"} => :member,
+    {"project_live.ex", "milestones:"} => :local,
     # `Operator.open_chat/4` asks for `:use`.
     {"project_live.ex", "chat:start"} => :member,
     # `Operator.decline_proposals/3` resolves every id to its project and refuses the lot unless
@@ -318,6 +348,14 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"operator/actions.ex", "integrate"} => :member,
     {"operator/actions.ex", "take-out"} => :member,
     {"operator/actions.ex", "write_document"} => :member,
+    # The hold and its words (`Forge.Operator.hold/2`, `release/2`, `stop_now/2`, `retitle/3`,
+    # `set_milestone/3`), each resolving its ticket off the wire before it asks `:use`.
+    {"operator/actions.ex", "hold-ticket"} => :member,
+    {"operator/actions.ex", "release-ticket"} => :member,
+    {"operator/actions.ex", "stop-now"} => :member,
+    {"operator/actions.ex", "retitle"} => :member,
+    {"operator/actions.ex", "set-milestone"} => :member,
+
     # A card's draft is the page's alone, the same as a question form's: nothing is written
     # until the form it sits in is submitted, and that submit carries its own guard.
     {"project_live.ex", "draft:change"} => :local,

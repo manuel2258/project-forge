@@ -174,7 +174,10 @@ defmodule ForgeWeb.Api.ProjectTokenTest do
       # A write into the other project is refused as a missing project, not as forbidden.
       assert conn
              |> as(secret)
-             |> post("/api/v1/projects/#{other.name}/tickets", %{"title" => "Sneak"})
+             |> post("/api/v1/projects/#{other.name}/tickets", %{
+               "on_hold" => false,
+               "title" => "Sneak"
+             })
              |> json_response(404)
 
       assert Tickets.list(other) |> length() == 1
@@ -459,6 +462,7 @@ defmodule ForgeWeb.Api.ProjectTokenTest do
       |> String.replace(":name", "doc.md")
       |> String.replace(":version_id", Ecto.UUID.generate())
       |> String.replace(":version", "1")
+      |> String.replace(":id", Ecto.UUID.generate())
       |> String.replace(":job_id", Ecto.UUID.generate())
     end
 
@@ -538,7 +542,10 @@ defmodule ForgeWeb.Api.ProjectTokenTest do
       assert %{"ref" => ref} =
                conn
                |> as(secret)
-               |> post("/api/v1/projects/#{project.name}/tickets", %{"title" => "By API"})
+               |> post("/api/v1/projects/#{project.name}/tickets", %{
+                 "on_hold" => false,
+                 "title" => "By API"
+               })
                |> json_response(201)
 
       [_, number] = String.split(ref, "#")

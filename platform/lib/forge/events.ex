@@ -182,6 +182,28 @@ defmodule Forge.Events do
   @spec subscribe() :: :ok | {:error, term()}
   def subscribe, do: Phoenix.PubSub.subscribe(Forge.PubSub, @topic)
 
+  @doc """
+  Tells the pages drawing one project's milestones that something about them changed
+  (`{:project_changed, project_id}`), on a topic of that project alone — so a page subscribed to
+  its own project does no work for any other's (`CLAUDE.md` § Rules). A ticket's own changes are
+  `notify/1`'s; this is for what has no ticket: a milestone made, renamed, marked, closed, moved.
+  """
+  @spec notify_project(String.t()) :: :ok
+  def notify_project(project_id) when is_binary(project_id) do
+    Phoenix.PubSub.broadcast(
+      Forge.PubSub,
+      project_topic(project_id),
+      {:project_changed, project_id}
+    )
+  end
+
+  @doc "Subscribes the caller to `{:project_changed, project_id}` for that one project."
+  @spec subscribe_project(String.t()) :: :ok | {:error, term()}
+  def subscribe_project(project_id) when is_binary(project_id),
+    do: Phoenix.PubSub.subscribe(Forge.PubSub, project_topic(project_id))
+
+  defp project_topic(project_id), do: "project:" <> project_id
+
   @chats_topic "chats"
 
   @doc """
@@ -374,6 +396,55 @@ defmodule Forge.Events do
        do: "statuses #{Enum.map_join(statuses, ", ", &(&1 || "none"))} → #{outcome}"
 
   defp describe(%Event{type: "ticket.stuck", payload: %{"reason" => reason}}, _bound), do: reason
+
+  # The hold and milestones (`docs/design/workflow-grammar-v1.md` § Holding a ticket,
+  # `docs/design/ui.md` § Milestones). *On hold*, *hold* and *release*: never *paused*, which is the
+  # spend and capacity pauses' word.
+  defp describe(%Event{type: "ticket.held"}, _bound), do: "put on hold"
+  defp describe(%Event{type: "ticket.released"}, _bound), do: "released from hold"
+
+  defp describe(%Event{type: "ticket.stopped", payload: %{"state" => state}}, _bound),
+    do: "stopped the run in #{state} while on hold; it runs again when released"
+
+  defp describe(%Event{type: "ticket.refreshed", payload: %{"from" => from, "to" => to}}, _bound),
+    do: "workflow and branch moved to the default branch's head, #{short(from)} → #{short(to)}"
+
+  defp describe(
+         %Event{type: "transition.held", payload: %{"from" => from, "to" => to} = p},
+         _bound
+       ),
+       do: "#{from} → #{to} (#{p["outcome"]}) waits for release"
+
+  defp describe(%Event{type: "ticket.retitled", payload: %{"from" => from, "to" => to}}, bound),
+    do: "title changed from #{bounded(from, 80, bound)} to #{bounded(to, 80, bound)}"
+
+  defp describe(%Event{type: "ticket.milestone_set", payload: p}, _bound),
+    do: "milestone #{p["from_name"] || "none"} → #{p["to_name"] || "none"}"
+
+  defp describe(%Event{type: "ticket.moved", payload: %{"in" => place} = p}, _bound),
+    do: "moved to place #{p["to"]} in #{place}"
+
+  defp describe(%Event{type: "milestone.created", payload: %{"name" => name}}, bound),
+    do: "milestone #{bounded(name, 80, bound)} created"
+
+  defp describe(%Event{type: "milestone.updated", payload: %{"name" => name}}, bound),
+    do: "milestone #{bounded(name, 80, bound)} edited"
+
+  defp describe(%Event{type: "milestone.current", payload: %{"name" => name}}, bound)
+       when is_binary(name),
+       do: "milestone #{bounded(name, 80, bound)} marked current"
+
+  defp describe(%Event{type: "milestone.current"}, _bound), do: "no milestone is marked current"
+
+  defp describe(%Event{type: "milestone.closed", payload: %{"name" => name} = p}, bound),
+    do:
+      "milestone #{bounded(name, 80, bound)} closed; #{length(p["moved"] || [])} open tickets left it"
+
+  defp describe(%Event{type: "milestone.reopened", payload: %{"name" => name}}, bound),
+    do: "milestone #{bounded(name, 80, bound)} reopened"
+
+  defp describe(%Event{type: "milestone.moved", payload: %{"name" => name}}, bound),
+    do: "milestone #{bounded(name, 80, bound)} moved in the order"
 
   # A decision, with the note it was made with: a rejection always has one, and Activity draws it
   # with the rejection (`docs/design/ui.md` § The decision row).

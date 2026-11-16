@@ -110,6 +110,19 @@ defmodule ForgeWeb.Router do
     post "/tickets/:project/:number/retry", TicketController, :retry
     post "/tickets/:project/:number/cancel", TicketController, :cancel
     post "/tickets/:project/:number/restore", TicketController, :restore
+    post "/tickets/:project/:number/hold", TicketController, :hold
+    post "/tickets/:project/:number/release", TicketController, :release
+    post "/tickets/:project/:number/stop", TicketController, :stop
+    post "/tickets/:project/:number/title", TicketController, :title
+    post "/tickets/:project/:number/milestone", TicketController, :milestone
+    post "/tickets/:project/:number/move", TicketController, :move
+    get "/projects/:project/milestones", MilestoneController, :index
+    post "/projects/:project/milestones", MilestoneController, :create
+    post "/projects/:project/milestones/:id", MilestoneController, :update
+    post "/projects/:project/milestones/:id/current", MilestoneController, :current
+    post "/projects/:project/milestones/:id/close", MilestoneController, :close
+    post "/projects/:project/milestones/:id/reopen", MilestoneController, :reopen
+    post "/projects/:project/milestones/:id/move", MilestoneController, :move
     get "/projects/:project/proposals", TicketController, :proposals
     post "/proposals/:version_id/accept", TicketController, :accept_proposal
     post "/proposals/:version_id/decline", TicketController, :decline_proposal

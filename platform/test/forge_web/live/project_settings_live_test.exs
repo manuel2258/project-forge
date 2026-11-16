@@ -46,9 +46,12 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
   test "the strip is the project's views", %{conn: conn, project: project} do
     {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
 
-    for key <- ~w(tickets merge chats workflow proposals) do
+    for key <- ~w(tickets milestones merge chats proposals) do
       assert has_element?(view, ~s|#tab-#{key}[href="/projects/#{project.name}?view=#{key}"]|)
     end
+
+    # At most five tabs: Workflow is not in the phone's strip (`ui.md` § The bottom strip).
+    refute has_element?(view, "#tab-workflow")
   end
 
   test "issues a read token and shows it once, with the line that uses it", ctx do

@@ -222,6 +222,27 @@ defmodule Forge.Git do
     end
   end
 
+  @doc """
+  Moves `branch` from `old` to `new` as a compare-and-swap (`git update-ref <ref> <new> <old>`):
+  git refuses when the branch is not at `old`, so a branch somebody moved is never overwritten.
+
+  A branch already at `new` is `:ok`, so a move whose transaction rolled back afterwards can be
+  made again. That is the one case where the branch is not at `old` and nothing is lost.
+  """
+  @spec move_branch(repo(), String.t(), sha(), sha()) :: :ok | {:error, term()}
+  def move_branch(repo, branch, new, old) do
+    ref = "refs/heads/" <> branch
+
+    case resolve(repo, ref) do
+      {:ok, ^new} ->
+        :ok
+
+      _other ->
+        with {:ok, _out} <- run(repo, ["update-ref", {:data, ref}, {:data, new}, {:data, old}]),
+             do: :ok
+    end
+  end
+
   @spec branch_exists?(repo(), String.t()) :: boolean()
   def branch_exists?(repo, branch), do: match?({:ok, _}, resolve(repo, "refs/heads/" <> branch))
 

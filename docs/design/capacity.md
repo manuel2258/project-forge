@@ -257,7 +257,10 @@ of a job is a run (`docs/design/credentials.md` § Spend) — monotonic, and it 
 operator watched happen. A job in flight has recorded nothing — usage lands
 at completion — so the figure the gate reads adds the budgeted tokens of every live job to what is
 already spent. Without that, several concurrent jobs each pass the gate on their own and together
-walk straight through the cap.
+walk straight through the cap. **A held ticket's pending job reserves nothing**
+(`Spend.budgeted_live/0` leaves it out): it will not run until a person releases it, so committing
+the day to it would pause work that can run (`workflow-grammar-v1.md` § Holding a ticket). A job
+already running on a held ticket still counts, because it is spending.
 
 **Stopping a job already running** is forge's own, during the run, for both harnesses. The driver
 emits a `usage` event per model call; the runner (and a chat's process) keeps the weighted sum and,

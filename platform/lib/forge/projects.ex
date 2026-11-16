@@ -200,7 +200,10 @@ defmodule Forge.Projects do
     running =
       counts(
         from(j in Forge.Jobs.Job,
-          where: j.project_id in ^ids and j.status == :running,
+          left_join: t in assoc(j, :ticket),
+          # A run a held ticket is still finishing is not counted as running work
+          # (`docs/design/ui.md` § What the queue counts).
+          where: j.project_id in ^ids and j.status == :running and is_nil(t.held_at),
           group_by: j.project_id,
           select: {j.project_id, count(j.id)}
         )

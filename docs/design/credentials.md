@@ -158,7 +158,7 @@ kept apart:
 | state | what happens | who resolves it |
 |---|---|---|
 | nothing in the pool for this harness | the ticket sticks: *no credential is assigned to this project* | a person assigns one |
-| everything in the pool is rate-limited | the job waits pending; the ticket stays active; the pass after the earliest reset starts it | time |
+| everything in the pool is rate-limited | the job waits pending; the ticket stays active; the pass after the earliest reset starts it (**a job of a ticket on hold is not placed at all**, so it does not resume until a person releases the ticket — `workflow-grammar-v1.md` § Holding a ticket) | time |
 | its own credential is limited, another is free | the job moves to the free one and starts at once | — |
 | a credential is found | the job goes on to be placed on a machine | — |
 

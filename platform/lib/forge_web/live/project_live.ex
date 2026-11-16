@@ -1,7 +1,7 @@
 defmodule ForgeWeb.ProjectLive do
   @moduledoc """
   One project (`docs/design/ui.md` § The project page, `7a`–`7h`, `21c`, `21d`): its views
-  **Tickets · Merge · Chats · Workflow · Proposals**, its details dropped from its name, and
+  **Tickets · Milestones · Merge · Chats · Workflow · Proposals**, its details dropped from its name, and
   `+ New` — a ticket, a chat, and for a project admin the release.
 
   **There is no board.** Tickets says what each open ticket is doing; the Workflow view's map puts
@@ -28,6 +28,7 @@ defmodule ForgeWeb.ProjectLive do
     ForgeRelease,
     Git,
     MergeQueue,
+    Milestones,
     Operator,
     Projects,
     Proposals,
@@ -38,10 +39,19 @@ defmodule ForgeWeb.ProjectLive do
 
   alias Forge.Git.Url
   alias Forge.Tickets.{Doing, Ticket}
-  alias ForgeWeb.{Format, ProjectTickets, ProposalsView, ReleaseComponents, WorkflowMap}
+
+  alias ForgeWeb.{
+    Format,
+    MilestonesView,
+    ProjectTickets,
+    ProposalsView,
+    ReleaseComponents,
+    WorkflowMap
+  }
+
   alias ForgeWeb.Operator.{Actions, Admission, Drafts}
 
-  @views ~w(tickets merge chats workflow proposals)
+  @views ~w(tickets milestones merge chats workflow proposals)
 
   @impl true
   def mount(%{"name" => name}, _session, socket) do
@@ -50,6 +60,8 @@ defmodule ForgeWeb.ProjectLive do
     if connected?(socket) do
       Events.subscribe()
       Events.subscribe_chats()
+      # Milestones have no ticket to change: their writes say so on this project's own topic.
+      Events.subscribe_project(project.id)
     end
 
     {:ok,
@@ -124,12 +136,14 @@ defmodule ForgeWeb.ProjectLive do
         said: Doing.said(ids),
         places: places,
         paused: Forge.Spend.paused?(),
+        milestones: Milestones.names(id),
         now: now
       })
 
     assign(socket,
       project: project,
       rows: rows,
+      milestones: Milestones.overview(project.id),
       history: Enum.sort_by(closed, & &1.updated_at, {:desc, DateTime}),
       # The merge queue in order. Replaced only by a read that succeeded: `load/1` raises on a
       # failure, so the last known order stays.
@@ -327,9 +341,124 @@ defmodule ForgeWeb.ProjectLive do
     end
   end
 
+  # -- milestones (`docs/design/ui.md` § Milestones) -------------------------------------------
+  #
+  # Every one is `Forge.Operator`'s, as the signed-in member: the page decides nothing, so a crafted
+  # event naming another project's milestone or ticket is refused there, as `:not_found`. A refusal
+  # is said where the person acted — the view's head, a milestone's card or the ticket's own row —
+  # and leaves what they saw as it was.
+
+  def handle_event("milestones:create", %{"name" => name}, socket) when is_binary(name) do
+    case Operator.create_milestone(socket.assigns.project, user(socket), %{name: name}) do
+      {:ok, _milestone} -> {:noreply, socket |> forget("milestone-create") |> load()}
+      {:error, reason} -> {:noreply, refuse(socket, "milestones", reason)}
+    end
+  end
+
+  def handle_event("milestones:update", %{"milestone" => id} = params, socket)
+      when is_binary(id) do
+    attrs = %{name: params["name"], description: params["description"]}
+
+    case Operator.update_milestone(socket.assigns.project, user(socket), id, attrs) do
+      {:ok, _milestone} -> {:noreply, socket |> forget("ms-edit-" <> id) |> load()}
+      {:error, reason} -> {:noreply, refuse(socket, {:milestone, id}, reason)}
+    end
+  end
+
+  # An empty id unmarks whichever is current.
+  def handle_event("milestones:current", %{"id" => id}, socket) when is_binary(id) do
+    target = blank_to_nil(id)
+
+    socket.assigns.project
+    |> Operator.set_current_milestone(user(socket), target)
+    |> milestone_result(socket, {:milestone, target})
+  end
+
+  def handle_event("milestones:close", %{"id" => id}, socket) when is_binary(id),
+    do:
+      milestone_result(
+        Operator.close_milestone(socket.assigns.project, user(socket), id),
+        socket,
+        {:milestone, id}
+      )
+
+  def handle_event("milestones:reopen", %{"id" => id}, socket) when is_binary(id),
+    do:
+      milestone_result(
+        Operator.reopen_milestone(socket.assigns.project, user(socket), id),
+        socket,
+        "milestones"
+      )
+
+  def handle_event("milestones:move", %{"id" => id, "to" => to}, socket)
+      when is_binary(id) and to in ~w(up down top bottom) do
+    {_outcome, socket} = move_milestone(socket, id, String.to_existing_atom(to))
+    {:noreply, socket}
+  end
+
+  # A milestone dragged: the card and the card it now sits before, nothing meaning the bottom.
+  # The reply says whether the browser keeps the order it drew under the finger.
+  def handle_event("milestones:drag_milestone", %{"milestone" => id} = params, socket)
+      when is_binary(id) do
+    to =
+      case params["before"] do
+        before when is_binary(before) -> {:before, before}
+        _bottom -> :bottom
+      end
+
+    socket |> move_milestone(id, to) |> drag_reply()
+  end
+
+  # A ticket's place in its order, by the buttons: relative to the order under the lock.
+  def handle_event("milestones:ticket_move", %{"ticket" => id, "to" => to}, socket)
+      when is_binary(id) and to in ~w(top up down bottom) do
+    {_outcome, socket} = move_ticket(socket, id, String.to_existing_atom(to))
+    {:noreply, socket}
+  end
+
+  # A drag, which ends in one event: the row and the row it now sits before, nothing meaning the
+  # bottom. The same operation as the buttons.
+  def handle_event("milestones:drag", %{"ticket" => id} = params, socket) when is_binary(id) do
+    to =
+      case params["before"] do
+        before when is_binary(before) -> {:before, before}
+        _bottom -> :bottom
+      end
+
+    socket |> move_ticket(id, to) |> drag_reply()
+  end
+
+  # The select on a row: into a milestone, or into none.
+  def handle_event("milestones:place", %{"ticket" => id, "milestone" => milestone}, socket)
+      when is_binary(id) and is_binary(milestone) do
+    result =
+      with {:ok, ticket} <- ticket_of(socket, id) do
+        Operator.set_milestone(ticket, user(socket), blank_to_nil(milestone))
+      end
+
+    case result do
+      {:ok, _ticket} -> {:noreply, load(socket)}
+      {:error, reason} -> {:noreply, socket |> refuse({:row, id}, reason) |> load()}
+    end
+  end
+
+  # Release from the row: what releasing from the ticket does, refused the same way, and said on
+  # the row.
+  def handle_event("milestones:release", %{"ticket" => id}, socket) when is_binary(id) do
+    result =
+      with {:ok, ticket} <- ticket_of(socket, id), do: Operator.release(ticket, user(socket))
+
+    case result do
+      {:ok, _ticket} -> {:noreply, load(socket)}
+      {:error, reason} -> {:noreply, socket |> refuse({:row, id}, reason) |> load()}
+    end
+  end
+
+  def handle_event("milestones:" <> _other, _params, socket), do: {:noreply, socket}
+
   # The open tickets narrowed to what waits on you or what runs. The page's own; nothing written.
   def handle_event("tickets:filter", %{"value" => value}, socket)
-      when value in ~w(open waiting running),
+      when value in ~w(open waiting running on_hold),
       do: {:noreply, assign(socket, filter: value)}
 
   def handle_event("tickets:filter", _params, socket), do: {:noreply, socket}
@@ -394,36 +523,29 @@ defmodule ForgeWeb.ProjectLive do
     end
   end
 
+  # Admitting is one of two buttons, `admit` = `start` or `hold`; declining is `decision`. Neither
+  # admission is the default: a submit that names neither (Enter in a box) does nothing.
+  def handle_event("decide_proposal", %{"version_id" => id, "admit" => how} = params, socket)
+      when how in ["start", "hold"] do
+    decide_proposal(socket, id, params, fn user ->
+      Operator.accept_proposal(id, user, params["comment"], params["ticket_type"],
+        on_hold: how == "hold",
+        milestone_id: blank_to_nil(params["milestone_id"])
+      )
+    end)
+  end
+
   def handle_event(
         "decide_proposal",
-        %{"version_id" => id, "decision" => decision} = params,
+        %{"version_id" => id, "decision" => "declined"} = params,
         socket
       ) do
-    user = socket.assigns.current_scope.user
-    comment = params["comment"]
-
-    result =
-      case decision do
-        "accepted" -> Operator.accept_proposal(id, user, comment, params["ticket_type"])
-        "declined" -> Operator.decline_proposal(id, user, comment)
-      end
-
-    # Decided, so the draft goes and the reader moves on; refused, so what was typed stays to be
-    # sent again, and the refusal is said in the reader.
-    next = next_after(socket, id)
-
-    case result do
-      {:ok, %Ticket{number: number}} ->
-        {:noreply,
-         socket |> decided(params, "Admitted as ticket ##{number}") |> load() |> read(next)}
-
-      {:ok, _decision} ->
-        {:noreply, socket |> decided(params, "Declined") |> load() |> read(next)}
-
-      {:error, reason} ->
-        {:noreply, socket |> assign(proposal_error: explain(reason)) |> load()}
-    end
+    decide_proposal(socket, id, params, fn user ->
+      Operator.decline_proposal(id, user, params["comment"])
+    end)
   end
+
+  def handle_event("decide_proposal", _params, socket), do: {:noreply, socket}
 
   # Which list the Proposals view shows: the open ones, or what became of the decided ones.
   def handle_event("proposals:list", %{"value" => value}, socket)
@@ -491,11 +613,20 @@ defmodule ForgeWeb.ProjectLive do
     end
   end
 
-  def handle_event("proposals:bulk", %{"bulk" => "admit"} = params, socket) do
+  def handle_event("proposals:bulk", %{"bulk" => "admit_" <> how} = params, socket)
+      when how in ["start", "hold"] do
+    on_hold = how == "hold"
+    milestone = blank_to_nil(params["milestone_id"])
     ids = MapSet.to_list(socket.assigns.selected)
     type = if is_binary(params["ticket_type"]), do: params["ticket_type"]
     user = socket.assigns.current_scope.user
-    results = Enum.map(ids, &Operator.accept_proposal(&1, user, nil, type))
+
+    results =
+      Enum.map(
+        ids,
+        &Operator.accept_proposal(&1, user, nil, type, on_hold: on_hold, milestone_id: milestone)
+      )
+
     admitted = Enum.count(results, &match?({:ok, _}, &1))
     refused = for {:error, reason} <- results, uniq: true, do: explain(reason)
 
@@ -599,6 +730,8 @@ defmodule ForgeWeb.ProjectLive do
   defp explain(:already_decided), do: "Someone has already decided that one."
   defp explain(:not_found), do: "One of them is not yours to decide."
   defp explain({:invalid_proposal, errors}), do: ForgeCore.Error.format(errors)
+  defp explain(:milestone), do: "That milestone is closed or does not exist."
+  defp explain(:start_or_hold), do: "Choose whether to start it now or put it on hold."
 
   # Anything else is why the project could not admit it, in the sentence the ticket form uses.
   defp explain(reason), do: "Not admitted: " <> Admission.explain(reason) <> "."
@@ -623,6 +756,12 @@ defmodule ForgeWeb.ProjectLive do
 
   def handle_info({:chat_changed, _id, _other, _ticket_id}, socket), do: {:noreply, socket}
 
+  # Only this project's topic is subscribed to, so the head match is the whole of the filtering.
+  def handle_info({:project_changed, project_id}, %{assigns: %{project_id: project_id}} = socket),
+    do: {:noreply, load(socket)}
+
+  def handle_info({:project_changed, _other}, socket), do: {:noreply, socket}
+
   def handle_info({:ticket_changed, id}, socket) do
     project_id = socket.assigns.project.id
 
@@ -631,6 +770,101 @@ defmodule ForgeWeb.ProjectLive do
       _other -> {:noreply, socket}
     end
   end
+
+  defp decide_proposal(socket, id, params, decide) do
+    user = socket.assigns.current_scope.user
+    result = decide.(user)
+
+    # Decided, so the draft goes and the reader moves on; refused, so what was typed stays to be
+    # sent again, and the refusal is said in the reader.
+    next = next_after(socket, id)
+
+    case result do
+      {:ok, %Ticket{number: number}} ->
+        {:noreply,
+         socket |> decided(params, "Admitted as ticket ##{number}") |> load() |> read(next)}
+
+      {:ok, _decision} ->
+        {:noreply, socket |> decided(params, "Declined") |> load() |> read(next)}
+
+      {:error, reason} ->
+        {:noreply, socket |> assign(proposal_error: explain(reason)) |> load()}
+    end
+  end
+
+  defp user(socket), do: socket.assigns.current_scope.user
+
+  defp refuse(socket, at, reason),
+    do: Actions.refuse(socket, at, "Failed: " <> Actions.describe(reason))
+
+  defp forget(socket, draft), do: Drafts.forget(socket, draft)
+
+  defp milestone_result({:ok, _value}, socket, _at), do: {:noreply, load(socket)}
+
+  defp milestone_result({:error, reason}, socket, at),
+    do: {:noreply, socket |> refuse(at, reason) |> load()}
+
+  # `{:moved | :refused, socket}`: the buttons draw what the server says either way, and a drag
+  # also needs to know whether the order it drew under the finger stands. A move that changed
+  # nothing is `:refused` here for that reason — the order the browser drew is not the stored one.
+  # It is read off the orders themselves, before and after: `Operator.move_ticket/3` answers the
+  # ticket either way, and a ticket's own `position` is no sign, since positions are not dense
+  # (a merged ticket's place is kept) and a real move can rewrite one to the value it had.
+  defp move_ticket(socket, id, to) do
+    before = placed(socket)
+
+    with {:ok, ticket} <- ticket_of(socket, id),
+         {:ok, _moved} <- Operator.move_ticket(ticket, user(socket), to) do
+      outcome = if placed(socket) == before, do: :refused, else: :moved
+      {outcome, load(socket)}
+    else
+      {:error, reason} -> {:refused, socket |> refuse({:row, id}, reason) |> load()}
+    end
+  end
+
+  # Every list of open tickets in the order it is stored in: the tickets in no milestone, then each
+  # open milestone's.
+  defp placed(socket) do
+    overview = Forge.Milestones.overview(socket.assigns.project.id)
+
+    [overview.unplaced | Enum.map(overview.milestones, & &1.open)]
+    |> Enum.map(fn tickets -> Enum.map(tickets, & &1.id) end)
+  end
+
+  # The order a milestone is moved in is the one the view draws: the current one is pinned first
+  # and is not moved by anything (`ForgeWeb.MilestonesView.target/3`), so a move is worked out
+  # against the others and the stored order is only what they share.
+  defp move_milestone(socket, id, to) do
+    case MilestonesView.target(socket.assigns.milestones, id, to) do
+      :same ->
+        {:refused, socket}
+
+      {:ok, target} ->
+        case Operator.move_milestone(socket.assigns.project, user(socket), id, target) do
+          {:ok, _moved} -> {:moved, load(socket)}
+          {:error, reason} -> {:refused, socket |> refuse({:milestone, id}, reason) |> load()}
+        end
+    end
+  end
+
+  # The reply a drag waits for: `restore` puts the order the browser drew back, where the server
+  # kept the old one — a refusal, or a move that changes nothing.
+  defp drag_reply({outcome, socket}), do: {:reply, %{restore: outcome == :refused}, socket}
+
+  # The ticket a row event names, **in this project**: an id off the wire that is another project's,
+  # or not an id at all, is a ticket that does not exist here.
+  defp ticket_of(socket, id) do
+    with {:ok, uuid} <- Ecto.UUID.cast(id),
+         %Ticket{project_id: project_id} = ticket <- Forge.Repo.get(Ticket, uuid),
+         true <- project_id == socket.assigns.project.id do
+      {:ok, ticket}
+    else
+      _other -> {:error, :not_found}
+    end
+  end
+
+  defp blank_to_nil(value) when value in [nil, ""], do: nil
+  defp blank_to_nil(value), do: value
 
   # -- what the render reads ----------------------------------------------------------------
 
@@ -681,12 +915,14 @@ defmodule ForgeWeb.ProjectLive do
 
   defp kept?(row, "waiting"), do: row.waiting
   defp kept?(row, "running"), do: row.running
+  defp kept?(row, "on_hold"), do: row.held
   defp kept?(_row, _open), do: true
 
   defp waiting_count(rows), do: Enum.count(rows, & &1.waiting)
   # A job running now: a ticket queued to merge or waiting for a machine is not running, though
   # the map draws it with the running ones.
   defp running_count(rows), do: Enum.count(rows, & &1.running)
+  defp held_count(rows), do: Enum.count(rows, & &1.held)
 
   defp subline(rows) do
     case waiting_count(rows) do
@@ -700,6 +936,7 @@ defmodule ForgeWeb.ProjectLive do
       assigns.project,
       %{
         "tickets" => length(assigns.rows),
+        "milestones" => length(assigns.milestones.milestones),
         "merge" => length(assigns.queue),
         "chats" => length(assigns.chats),
         "proposals" => length(assigns.proposals)
@@ -719,16 +956,17 @@ defmodule ForgeWeb.ProjectLive do
   def strip(project, counts, link) do
     for {key, label} <- [
           {"tickets", "Tickets"},
+          {"milestones", "Milestones"},
           {"merge", "Merge"},
           {"chats", "Chats"},
           {"workflow", "Workflow"},
           {"proposals", "Proposals"}
         ] do
-      Map.put(
-        %{key: key, label: label, count: counts[key]},
-        link,
-        ~p"/projects/#{project.name}?#{[view: key]}"
-      )
+      %{key: key, label: label, count: counts[key]}
+      |> Map.put(link, ~p"/projects/#{project.name}?#{[view: key]}")
+      # Six do not fit a phone's strip, which is at most five: the Workflow view is the one the
+      # strip leaves out there, and the details link to it (`docs/design/ui.md` § The bottom strip).
+      |> Map.put(:phone, key != "workflow")
     end
   end
 
@@ -819,6 +1057,12 @@ defmodule ForgeWeb.ProjectLive do
       <div class="project-facts-links">
         <.link navigate={~p"/projects/#{@project.name}/repo"} class="project-link">
           Repository ›
+        </.link>
+        <.link
+          patch={~p"/projects/#{@project.name}?#{[view: "workflow"]}"}
+          class="project-link project-link-phone"
+        >
+          Workflow ›
         </.link>
         <.link navigate={~p"/projects/#{@project.name}/releases"} class="project-link">
           Releases ›
@@ -1045,6 +1289,7 @@ defmodule ForgeWeb.ProjectLive do
   attr :selected, :any, required: true
   attr :reading, :string, default: nil
   attr :current, :any, required: true
+  attr :milestones, :map, required: true, doc: "`Forge.Milestones.overview/1`"
   attr :drafts, :map, required: true
   attr :proposal_error, :string, default: nil
   attr :history_error, :string, default: nil
@@ -1114,6 +1359,7 @@ defmodule ForgeWeb.ProjectLive do
             group={elem(@reader, 1)}
             position={elem(@reader, 2)}
             types={choosable(@current)}
+            milestones={Enum.map(@milestones.milestones, & &1.milestone)}
             drafts={@drafts}
             error={@proposal_error}
             now={@now}
@@ -1190,6 +1436,7 @@ defmodule ForgeWeb.ProjectLive do
         <ProposalsView.bulk
           count={MapSet.size(@selected)}
           types={choosable(@current)}
+          milestones={Enum.map(@milestones.milestones, & &1.milestone)}
           drafts={@drafts}
           error={@bulk_error}
         />
@@ -1246,7 +1493,8 @@ defmodule ForgeWeb.ProjectLive do
               options={[
                 {"All", "open", length(@rows)},
                 {"Waiting", "waiting", waiting_count(@rows)},
-                {"Running", "running", running_count(@rows)}
+                {"Running", "running", running_count(@rows)},
+                {"On hold", "on_hold", held_count(@rows)}
               ]}
             />
           </div>
@@ -1277,10 +1525,21 @@ defmodule ForgeWeb.ProjectLive do
               project={@project.name}
               now={@now}
             />
-            <.eyebrow :if={Enum.any?(@shown, &(not &1.waiting))}>In progress</.eyebrow>
+            <.eyebrow :if={Enum.any?(@shown, &(not &1.waiting and not &1.held))}>
+              In progress
+            </.eyebrow>
             <ProjectTickets.list
               id="tickets-rest"
-              rows={Enum.reject(@shown, & &1.waiting)}
+              rows={Enum.reject(@shown, &(&1.waiting or &1.held))}
+              project={@project.name}
+              now={@now}
+            />
+            <%!-- On hold and with nothing waiting on anyone: drawn quietly, below the rest. A held
+                  ticket with a decision waiting is in the first list, where the decision is. --%>
+            <.eyebrow :if={Enum.any?(@shown, &(&1.held and not &1.waiting))}>On hold</.eyebrow>
+            <ProjectTickets.list
+              id="tickets-held"
+              rows={Enum.filter(@shown, &(&1.held and not &1.waiting))}
               project={@project.name}
               now={@now}
             />
@@ -1296,6 +1555,13 @@ defmodule ForgeWeb.ProjectLive do
         </section>
 
         <div class="project-side">
+          <MilestonesView.view
+            overview={@milestones}
+            project={@project}
+            drafts={@drafts}
+            refusal={@refusal}
+          />
+
           <section id="project-proposals" class="project-section" data-section="proposals">
             <%!-- From 768, outside the Proposals view: the open ones in brief, each opening the
                   reader. The view itself is below. --%>
@@ -1506,6 +1772,7 @@ defmodule ForgeWeb.ProjectLive do
                 <span class="wf-map-dot-key wf-map-dot--waiting" /> waiting on you
                 <span class="wf-map-dot-key wf-map-dot--running" /> running
                 <span class="wf-map-dot-key wf-map-dot--stuck" /> stuck
+                <span class="wf-map-dot-key wf-map-dot--held" /> on hold
                 <span class="wf-map-dot-key wf-map-dot--idle" /> idle
               </p>
             </div>

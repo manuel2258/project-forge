@@ -239,6 +239,13 @@ defmodule ForgeWeb.TicketLive do
       proposals: Proposals.open_for_ticket(ticket.id),
       changeset: Artifacts.latest(ticket.id, Workflow.changeset_artifact()),
       release: release(ticket),
+      # The hold (`docs/design/workflow-grammar-v1.md` § Holding a ticket): what releasing does, and
+      # whether a run is still going that Stop now would stop. The open milestones are what the
+      # details' select offers.
+      on_release: Engine.waiting_on_release_or_job(ticket),
+      stoppable: Engine.stoppable?(ticket),
+      milestones:
+        Forge.Milestones.list(project.id) |> Enum.filter(&Forge.Milestones.Milestone.open?/1),
       paused: paused?(ticket, jobs),
       now: DateTime.utc_now()
     )
@@ -689,6 +696,7 @@ defmodule ForgeWeb.TicketLive do
     [
       "##{assigns.ticket.number} · #{ForgeWeb.Topology.mark(topology)} #{assigns.ticket.state}",
       assigns.ticket.status != :active && to_string(assigns.ticket.status),
+      Forge.Tickets.Ticket.held?(assigns.ticket) && "on hold",
       # No "waiting on you": the decision row says it, in amber, and on a phone it was the part
       # the ellipsis cut (`ui.md` § The ticket).
       assigns.paused && spend_paused(assigns.now)
@@ -770,8 +778,15 @@ defmodule ForgeWeb.TicketLive do
       fill
       resizable
     >
-      <:decision :if={@decision || @release || @decision_error}>
+      <:decision :if={@decision || @release || @decision_error || @ticket.held_at}>
         <TicketViews.release_band :if={@release} ticket={@ticket} release={@release} />
+        <TicketViews.hold_band
+          :if={@ticket.held_at}
+          ticket={@ticket}
+          on_release={@on_release}
+          stoppable={@stoppable}
+          refusal={@refusal}
+        />
         <Decision.gone :if={is_nil(@decision) && @decision_error} error={@decision_error} />
         <Decision.row
           :if={@decision}

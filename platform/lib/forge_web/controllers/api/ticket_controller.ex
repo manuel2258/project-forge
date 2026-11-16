@@ -1,7 +1,7 @@
 defmodule ForgeWeb.Api.TicketController do
   use ForgeWeb, :controller
 
-  alias Forge.{Artifacts, Events, Jobs, Operator, Projects, Proposals, Queue, Tickets}
+  alias Forge.{Artifacts, Events, Jobs, Operator, Projects, Proposals, Queue, Repo, Tickets}
   alias ForgeWeb.Api.Render
 
   action_fallback ForgeWeb.Api.FallbackController
@@ -19,6 +19,12 @@ defmodule ForgeWeb.Api.TicketController do
               :retry,
               :cancel,
               :restore,
+              :hold,
+              :release,
+              :stop,
+              :title,
+              :milestone,
+              :move,
               :accept_proposal,
               :decline_proposal
             ]
@@ -83,8 +89,20 @@ defmodule ForgeWeb.Api.TicketController do
   defp listed(project, params) do
     case filters(params) do
       :none -> []
-      filters -> project |> Tickets.list(filters) |> Enum.map(&Render.ticket(&1, project.name))
+      filters -> project |> Tickets.list(filters) |> render_all(project)
     end
+  end
+
+  # One read of what every row needs, not one per row — but for a ticket on hold, whose `stoppable`
+  # and `waiting_on_release` are a query each (`Forge.Engine.stoppable?/1`,
+  # `waiting_on_release_or_job/1`): a list's held rows cost that, and the rest cost nothing.
+  defp render_all(tickets, project) do
+    started = MapSet.new(Tickets.started_ids(Enum.map(tickets, & &1.id)))
+    names = Forge.Milestones.names(project.id)
+
+    Enum.map(tickets, fn ticket ->
+      Render.ticket(ticket, project.name, started: ticket.id in started, milestones: names)
+    end)
   end
 
   defp filters(params) do
@@ -120,7 +138,9 @@ defmodule ForgeWeb.Api.TicketController do
     attrs = %{
       title: params["title"] || "",
       body: params["body"] || "",
-      ticket_type: params["ticket_type"]
+      ticket_type: params["ticket_type"],
+      on_hold: on_hold(params),
+      milestone_id: params["milestone_id"]
     }
 
     with %{} = project <- Projects.by_name(name) || {:error, :not_found},
@@ -128,6 +148,12 @@ defmodule ForgeWeb.Api.TicketController do
       conn |> put_status(:created) |> json(Render.ticket(ticket, project.name))
     end
   end
+
+  # Start or hold is the caller's to say (`docs/design/ui.md` § Creating things): a boolean, or the
+  # strings a form sends. Anything else is nothing said, which the operation refuses.
+  defp on_hold(%{"on_hold" => value}) when value in [true, "true"], do: true
+  defp on_hold(%{"on_hold" => value}) when value in [false, "false"], do: false
+  defp on_hold(_params), do: nil
 
   defp admit(project, actor, attrs) do
     case Operator.admit(project, actor, attrs) do
@@ -300,6 +326,53 @@ defmodule ForgeWeb.Api.TicketController do
     end
   end
 
+  # The hold (`docs/design/workflow-grammar-v1.md` § Holding a ticket). Each is `Operator`'s, so a
+  # token and a person are guarded by the one function the page calls.
+  def hold(conn, _params), do: respond(conn, Operator.hold(conn.assigns.ticket, actor(conn)))
+
+  def release(conn, _params),
+    do: respond(conn, Operator.release(conn.assigns.ticket, actor(conn)))
+
+  def stop(conn, _params), do: respond(conn, Operator.stop_now(conn.assigns.ticket, actor(conn)))
+
+  def title(conn, %{"title" => title}) when is_binary(title),
+    do: respond(conn, Operator.retitle(conn.assigns.ticket, actor(conn), title))
+
+  def title(_conn, _params), do: {:error, {:bad_request, "title is text"}}
+
+  # `milestone_id` null takes the ticket out of its milestone.
+  def milestone(conn, %{"milestone_id" => id}) when is_binary(id) or is_nil(id),
+    do: respond(conn, Operator.set_milestone(conn.assigns.ticket, actor(conn), id))
+
+  def milestone(_conn, _params), do: {:error, {:bad_request, "milestone_id is an id or null"}}
+
+  # `to` is `top`, `up`, `down` or `bottom`; `before` is the number of a ticket in the same order.
+  def move(conn, params) do
+    with {:ok, to} <- move_target(params, conn.assigns.project) do
+      respond(conn, Operator.move_ticket(conn.assigns.ticket, actor(conn), to))
+    end
+  end
+
+  defp move_target(%{"to" => to}, _project) when to in ~w(top up down bottom),
+    do: {:ok, String.to_existing_atom(to)}
+
+  defp move_target(%{"before" => number}, project) when is_integer(number) or is_binary(number) do
+    with {n, ""} <- Integer.parse(to_string(number)),
+         %{id: id} <- Repo.get_by(Forge.Tickets.Ticket, project_id: project.id, number: n) do
+      {:ok, {:before, id}}
+    else
+      _none -> {:error, :not_in_order}
+    end
+  end
+
+  defp move_target(_params, _project),
+    do: {:error, {:bad_request, "to is top, up, down or bottom, or before is a ticket number"}}
+
+  defp respond(conn, {:ok, ticket}),
+    do: json(conn, Render.ticket(ticket, conn.assigns.project.name))
+
+  defp respond(_conn, {:error, _reason} = error), do: error
+
   # Open proposals are per project, not per ticket: a project chat's proposal has no ticket, and
   # the operator's question is "what has been suggested here", not "what did ticket 12 suggest".
   def proposals(conn, %{"project" => name}) do
@@ -314,7 +387,9 @@ defmodule ForgeWeb.Api.TicketController do
              version_id,
              actor(conn),
              params["comment"],
-             params["ticket_type"]
+             params["ticket_type"],
+             on_hold: on_hold(params),
+             milestone_id: params["milestone_id"]
            ) do
       json(conn, Render.ticket(ticket, project_name(ticket)))
     end

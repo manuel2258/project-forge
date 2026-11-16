@@ -285,6 +285,7 @@ defmodule ForgeWeb.Layouts do
         <.bottom_strip active={active_label(@views, @view)} aria-label="Views">
           <:tab
             :for={view <- @views}
+            :if={view[:phone] != false}
             id={"tab-#{view.key}"}
             label={view.label}
             count={view[:count]}

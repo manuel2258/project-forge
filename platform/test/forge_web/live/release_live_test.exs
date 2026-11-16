@@ -514,6 +514,7 @@ defmodule ForgeWeb.ReleaseLiveTest do
                conn
                |> put_req_header("authorization", "Bearer " <> token)
                |> post(~p"/api/v1/projects/#{project.name}/tickets", %{
+                 on_hold: false,
                  title: "x",
                  ticket_type: "release"
                })
@@ -534,7 +535,7 @@ defmodule ForgeWeb.ReleaseLiveTest do
       assert %{"error" => %{"reason" => "only_release_types"}} =
                conn
                |> put_req_header("authorization", "Bearer " <> token)
-               |> post(~p"/api/v1/projects/#{project.name}/tickets", %{title: "x"})
+               |> post(~p"/api/v1/projects/#{project.name}/tickets", %{on_hold: false, title: "x"})
                |> json_response(422)
     end
 
@@ -551,7 +552,7 @@ defmodule ForgeWeb.ReleaseLiveTest do
       assert %{"ticket_type" => "dev"} =
                conn
                |> put_req_header("authorization", "Bearer " <> token)
-               |> post(~p"/api/v1/proposals/#{version.id}/accept", %{})
+               |> post(~p"/api/v1/proposals/#{version.id}/accept", %{on_hold: false})
                |> json_response(200)
 
       assert Enum.all?(Tickets.list(project), &(&1.ticket_type != "release"))
@@ -587,7 +588,10 @@ defmodule ForgeWeb.ReleaseLiveTest do
       assert %{"error" => %{"reason" => "release_ticket_type"}} =
                conn
                |> put_req_header("authorization", "Bearer " <> token)
-               |> post(~p"/api/v1/proposals/#{version.id}/accept", %{ticket_type: "release"})
+               |> post(~p"/api/v1/proposals/#{version.id}/accept", %{
+                 on_hold: false,
+                 ticket_type: "release"
+               })
                |> json_response(422)
 
       assert Enum.all?(Tickets.list(project), &(&1.ticket_type != "release"))
@@ -607,7 +611,7 @@ defmodule ForgeWeb.ReleaseLiveTest do
 
       view
       |> element("#propose-#{version.id}")
-      |> render_submit(%{"decision" => "accepted"})
+      |> render_submit(%{"admit" => "start"})
 
       assert Enum.any?(
                Tickets.list(project),

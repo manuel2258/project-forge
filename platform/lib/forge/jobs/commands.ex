@@ -587,12 +587,22 @@ defmodule Forge.Jobs.Commands do
           order_by: j.attempt
       )
 
+    # A batch with a cancelled command is never decided. `Engine.stop_now/2` ends a held ticket's
+    # run that way, and a release withdraws a never-started ticket's waiting commands that way
+    # (`Engine.withdraw_unstarted/2`); either way the state runs again as a new batch, so a
+    # restart's `recover/0` deciding the old one would take the failure edge (or, held, replace
+    # what release is to do).
     cond do
       decided -> :decided
-      Enum.any?(jobs, &(&1.status != :finished)) -> :open
+      Enum.any?(jobs, &undecidable?/1) -> :open
       true -> {:done, jobs}
     end
   end
+
+  # Still going, or ended as cancelled (stopped, or withdrawn at a release): neither has an answer
+  # to decide on.
+  defp undecidable?(%Job{status: status, outcome: outcome}),
+    do: status != :finished or outcome == :cancelled
 
   defp put_decision(ticket, job, batch, jobs) do
     workflow = Tickets.workflow(ticket)

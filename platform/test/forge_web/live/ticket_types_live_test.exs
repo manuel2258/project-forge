@@ -89,7 +89,7 @@ defmodule ForgeWeb.TicketTypesLiveTest do
 
       view
       |> form("#ticket-form", %{"ticket" => %{"ticket_type" => "bug", "title" => "Lost slot"}})
-      |> render_submit()
+      |> render_submit(%{"on_hold" => "false"})
 
       assert [%{title: "Lost slot", ticket_type: "bug", state: "fixing"}] = Tickets.list(project)
     end
@@ -132,7 +132,10 @@ defmodule ForgeWeb.TicketTypesLiveTest do
       refute has_element?(view, "#first-step", "Bugs.")
       assert has_element?(view, "#first-step .ui-state", "fixing")
 
-      view |> form("#ticket-form", %{"ticket" => %{"title" => "x"}}) |> render_submit()
+      view
+      |> form("#ticket-form", %{"ticket" => %{"title" => "x"}})
+      |> render_submit(%{"on_hold" => "false"})
+
       assert [%{ticket_type: "bug"}] = Tickets.list(project)
     end
 
@@ -239,14 +242,14 @@ defmodule ForgeWeb.TicketTypesLiveTest do
 
       assert html =~ "suggests bug"
       assert has_element?(view, ~s(select[name="ticket_type"] option[value="bug"][selected]))
-      refute has_element?(view, ~s(#proposal-reader button[value="accepted"][disabled]))
+      refute has_element?(view, ~s(#proposal-reader button[value="start"][disabled]))
       refute has_element?(view, ~s(select[name="ticket_type"] option[value="feature"][selected]))
 
       view
       |> element("form[phx-submit=decide_proposal]")
       |> render_submit(%{
         "version_id" => version.id,
-        "decision" => "accepted",
+        "admit" => "start",
         "ticket_type" => "feature"
       })
 
@@ -269,20 +272,20 @@ defmodule ForgeWeb.TicketTypesLiveTest do
       html =
         view
         |> element("form[phx-submit=decide_proposal]")
-        |> render_submit(%{"version_id" => version.id, "decision" => "accepted"})
+        |> render_submit(%{"version_id" => version.id, "admit" => "start"})
 
       assert html =~
                "Not admitted: it has more than one ticket type, so one must be chosen: bug, feature."
 
       # Admit waits for a type, and says so; choosing one lets it go.
-      assert has_element?(view, ~s(#proposal-reader button[value="accepted"][disabled]))
+      assert has_element?(view, ~s(#proposal-reader button[value="start"][disabled]))
       assert has_element?(view, "#proposal-admit-why", "Choose a type")
 
       view
       |> element("form[phx-submit=decide_proposal]")
       |> render_change(%{"draft" => "propose-#{version.id}", "ticket_type" => "bug"})
 
-      refute has_element?(view, ~s(#proposal-reader button[value="accepted"][disabled]))
+      refute has_element?(view, ~s(#proposal-reader button[value="start"][disabled]))
       refute has_element?(view, "#proposal-admit-why")
     end
 
@@ -311,7 +314,7 @@ defmodule ForgeWeb.TicketTypesLiveTest do
         |> element("form[phx-submit=decide_proposal]")
         |> render_submit(%{
           "version_id" => version.id,
-          "decision" => "accepted",
+          "admit" => "start",
           "ticket_type" => "spike"
         })
 
@@ -355,6 +358,7 @@ defmodule ForgeWeb.TicketTypesLiveTest do
       assert %{"ticket_type" => "feature", "state" => "building"} =
                conn
                |> post(~p"/api/v1/projects/#{project.name}/tickets", %{
+                 on_hold: false,
                  title: "Co-op",
                  ticket_type: "feature"
                })
@@ -362,7 +366,10 @@ defmodule ForgeWeb.TicketTypesLiveTest do
 
       assert %{"error" => %{"reason" => "ticket_type_required", "detail" => detail}} =
                conn
-               |> post(~p"/api/v1/projects/#{project.name}/tickets", %{title: "Co-op"})
+               |> post(~p"/api/v1/projects/#{project.name}/tickets", %{
+                 on_hold: false,
+                 title: "Co-op"
+               })
                |> json_response(422)
 
       assert detail ==
@@ -372,7 +379,7 @@ defmodule ForgeWeb.TicketTypesLiveTest do
 
       assert %{"ticket_type" => "bug"} =
                conn
-               |> post(~p"/api/v1/proposals/#{version.id}/accept", %{})
+               |> post(~p"/api/v1/proposals/#{version.id}/accept", %{on_hold: false})
                |> json_response(200)
 
       assert %{"proposals" => []} =
@@ -388,12 +395,16 @@ defmodule ForgeWeb.TicketTypesLiveTest do
 
       assert %{"ticket_type" => "feature"} =
                conn
-               |> post(~p"/api/v1/proposals/#{other.id}/accept", %{ticket_type: "feature"})
+               |> post(~p"/api/v1/proposals/#{other.id}/accept", %{
+                 on_hold: false,
+                 ticket_type: "feature"
+               })
                |> json_response(200)
 
       assert %{"error" => %{"reason" => "invalid_ticket_type"}} =
                conn
                |> post(~p"/api/v1/projects/#{project.name}/tickets", %{
+                 on_hold: false,
                  title: "x",
                  ticket_type: %{a: 1}
                })
@@ -402,6 +413,7 @@ defmodule ForgeWeb.TicketTypesLiveTest do
       assert %{"error" => %{"reason" => "unknown_ticket_type", "detail" => detail}} =
                conn
                |> post(~p"/api/v1/projects/#{project.name}/tickets", %{
+                 on_hold: false,
                  title: "x",
                  ticket_type: "chore"
                })
@@ -421,6 +433,7 @@ defmodule ForgeWeb.TicketTypesLiveTest do
       assert %{"error" => %{"reason" => "no_ticket_types", "detail" => detail}} =
                conn
                |> post(~p"/api/v1/projects/#{single.name}/tickets", %{
+                 on_hold: false,
                  title: "x",
                  ticket_type: "bug"
                })
@@ -432,7 +445,7 @@ defmodule ForgeWeb.TicketTypesLiveTest do
 
       assert %{"error" => %{"reason" => "both_workflow_forms"}} =
                conn
-               |> post(~p"/api/v1/projects/#{both.name}/tickets", %{title: "x"})
+               |> post(~p"/api/v1/projects/#{both.name}/tickets", %{on_hold: false, title: "x"})
                |> json_response(422)
     end
   end

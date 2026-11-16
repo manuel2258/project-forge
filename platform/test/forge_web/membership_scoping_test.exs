@@ -478,18 +478,18 @@ defmodule ForgeWeb.MembershipScopingTest do
 
       refused =
         api(conn, outsider)
-        |> post(~p"/api/v1/projects/#{project.name}/tickets", %{title: "theirs"})
+        |> post(~p"/api/v1/projects/#{project.name}/tickets", %{title: "theirs", on_hold: false})
         |> json_response(404)
 
       missing =
         api(conn, outsider)
-        |> post(~p"/api/v1/projects/no-such-project/tickets", %{title: "theirs"})
+        |> post(~p"/api/v1/projects/no-such-project/tickets", %{title: "theirs", on_hold: false})
         |> json_response(404)
 
       assert refused == missing
 
       assert api(conn, outsider)
-             |> post(~p"/api/v1/projects/#{project.name}/tickets", %{title: ""})
+             |> post(~p"/api/v1/projects/#{project.name}/tickets", %{title: "", on_hold: false})
              |> json_response(404) == missing
 
       assert Forge.Tickets.list(project) == before
@@ -517,7 +517,10 @@ defmodule ForgeWeb.MembershipScopingTest do
       # different reason, while the outsider above never gets that far and sees 404.
       assert json_response(
                api(conn, owner)
-               |> post(~p"/api/v1/projects/#{project.name}/tickets", %{title: "mine"}),
+               |> post(~p"/api/v1/projects/#{project.name}/tickets", %{
+                 title: "mine",
+                 on_hold: false
+               }),
                422
              )
     end

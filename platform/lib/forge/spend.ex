@@ -72,8 +72,15 @@ defmodule Forge.Spend do
   # end until a person says so, and a cap that cannot see a job running all afternoon is not a
   # cap. See `docs/design/conversations.md` § Spend.
   defp budgeted_live do
+    # A held ticket's pending job reserves nothing: it is not going to run until a person releases
+    # it, and committing the day's allowance to it would pause work that can run
+    # (`docs/design/capacity.md`). A job already running on a held ticket still counts — it is
+    # spending.
     from(j in Job,
-      where: j.status in [:pending, :running] and j.kind == :workflow,
+      join: t in assoc(j, :ticket),
+      where:
+        j.kind == :workflow and
+          (j.status == :running or (j.status == :pending and is_nil(t.held_at))),
       select: j.spec
     )
     |> Repo.all()

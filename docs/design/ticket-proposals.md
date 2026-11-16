@@ -139,6 +139,13 @@ enough to write down. A proposal is not work in flight and holds nothing; it sho
 whatever the project declares when a person says go, which may be months after an agent thought
 of it.
 
+**Acceptance asks two things the person says, and neither has a default.** *Start now* or *Put on
+hold*: a ticket admitted on hold exists, numbered and titled, and has run and asked nothing until it
+is released (`workflow-grammar-v1.md` § Holding a ticket); and an optional **milestone**, an open one
+of the project, into which the ticket goes at the bottom of its order (`ui.md` § Milestones). Both
+travel through `Proposals.accept/5` into `put_admit/5`, so they commit with the decision or not at
+all. The API and the one-at-a-time and bulk forms ask the same.
+
 Acceptance and the admission it causes are one transaction. The decision row carries the new
 ticket (§ Deciding), so the link is a foreign key in both directions rather than a payload field
 to be dug out of the log, and the events are written beside it as every mutation's are. One
@@ -301,6 +308,11 @@ things that were never in it.
   proposal being scheduled. A document needs none of that, and admission stays the single door.
 
 ## Reading the backlog
+
+*A ticket on hold is shown as such, and a ticket's milestone is shown: the index's status cell reads
+`active, on hold`, a milestone column appears only where some ticket has a milestone, and a Milestones
+section only where the project has an open one, and a ticket's file header names both. A project with no milestones and nothing on hold
+gets the index it always did.*
 
 Proposing without reading produces duplicates on the first day: three jobs on three tickets each
 notice the same missing module and each propose it. So every job is given the project's tickets,

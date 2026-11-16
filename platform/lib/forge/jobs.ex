@@ -588,7 +588,11 @@ defmodule Forge.Jobs do
     Repo.all(
       from j in Job,
         left_join: t in assoc(j, :ticket),
-        where: j.status == :pending and (j.kind == :chat or t.status == :active),
+        # A job of a held ticket is never placed (`docs/design/workflow-grammar-v1.md` § Holding a
+        # ticket); a conversation is a person talking and is not filtered, as it is not by status.
+        where:
+          j.status == :pending and
+            (j.kind == :chat or (t.status == :active and is_nil(t.held_at))),
         order_by: ^pending_order(waited_since),
         limit: ^limit
     )
@@ -1922,11 +1926,25 @@ defmodule Forge.Jobs do
   # Asked of the row, not compared with the struct, because pending is the only status a job is
   # started from. Locked, so a close waiting on the same row sees `running` and asks the worker
   # instead (`Forge.Conversations.close/2`).
-  defp still_pending(repo, %Job{id: id}) do
+  #
+  # **And its ticket is not on hold**, read `FOR SHARE` in the same transaction: `pending/2` left a
+  # held ticket's job out, but a pass reads it once and places it later, and a hold committed in
+  # between would otherwise be placed anyway. A hold takes the row `FOR UPDATE`, so one of the two
+  # waits for the other. A conversation is not gated (`pending/2`).
+  defp still_pending(repo, %Job{id: id, kind: kind, ticket_id: ticket_id}) do
     case repo.one!(from j in Job, where: j.id == ^id, lock: "FOR UPDATE", select: j.status) do
-      :pending -> {:ok, :pending}
+      :pending -> not_held(repo, kind, ticket_id)
       now -> {:error, {:changed, now}}
     end
+  end
+
+  defp not_held(_repo, :chat, _ticket_id), do: {:ok, :pending}
+
+  defp not_held(repo, _kind, ticket_id) do
+    held =
+      repo.one!(from t in Ticket, where: t.id == ^ticket_id, lock: "FOR SHARE", select: t.held_at)
+
+    if held == nil, do: {:ok, :pending}, else: {:error, {:changed, :held}}
   end
 
   # A job keeps its credential while it is usable, so a different one here means the first was

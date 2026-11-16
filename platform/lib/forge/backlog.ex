@@ -46,14 +46,15 @@ defmodule Forge.Backlog do
     tickets = tickets(project.id)
     bodies = bodies(project.id)
     proposals = proposals(project.id)
+    milestones = milestones(project)
 
     files =
       Enum.map(tickets, fn ticket ->
-        %{"file" => "#{ticket.number}.md", "content" => body(ticket, bodies)}
+        %{"file" => "#{ticket.number}.md", "content" => body(ticket, bodies, milestones.names)}
       end)
 
     proposal_files = proposal_files(proposals)
-    index = index(project, tickets, proposal_files, types(project), now)
+    index = index(project, tickets, proposal_files, types(project), milestones, now)
 
     %{
       "index" => index,
@@ -78,9 +79,23 @@ defmodule Forge.Backlog do
           status: t.status,
           branch: t.branch,
           ticket_type: t.ticket_type,
+          held_at: t.held_at,
+          milestone_id: t.milestone_id,
           id: t.id
         }
     )
+  end
+
+  # The project's open milestones in their order, current one marked, and every milestone's name by
+  # id. A job reads them so it does not propose what is already collected under a goal
+  # (`docs/design/ticket-proposals.md` § Reading the backlog).
+  defp milestones(project) do
+    all = Forge.Milestones.list(project.id)
+
+    %{
+      open: Enum.filter(all, &Forge.Milestones.Milestone.open?/1),
+      names: Map.new(all, &{&1.id, &1.name})
+    }
   end
 
   # The latest `ticket` document per ticket, in one query rather than one per ticket. A person
@@ -136,11 +151,14 @@ defmodule Forge.Backlog do
     end)
   end
 
-  defp body(ticket, bodies) do
+  defp body(ticket, bodies, names) do
     text = Map.get(bodies, ticket.id) || "# #{ticket.title}\n\n#{ticket.body}"
 
+    # Two facts only when they are true, so a ticket nobody held or placed reads as it always did.
     fields =
-      Enum.reject([ticket.ticket_type, ticket.state, ticket.status, ticket.branch], &is_nil/1)
+      Enum.reject([ticket.ticket_type, ticket.state, ticket.status, ticket.branch], &is_nil/1) ++
+        if(ticket.held_at, do: ["on hold"], else: []) ++
+        if(ticket.milestone_id, do: ["milestone #{names[ticket.milestone_id]}"], else: [])
 
     """
     <!-- ticket #{ticket.number} · #{Enum.join(fields, " · ")} -->
@@ -174,7 +192,7 @@ defmodule Forge.Backlog do
       []
   end
 
-  defp index(%Project{} = project, tickets, proposal_files, types, now) do
+  defp index(%Project{} = project, tickets, proposal_files, types, milestones, now) do
     """
     # Tickets on #{project.name}
 
@@ -186,27 +204,33 @@ defmodule Forge.Backlog do
     only thing this folder holds. Another ticket's plan, report or changeset is not yours to
     read: it is pinned to a job that is not this one.
 
-    #{table(tickets)}
-    #{types_section(types)}#{proposal_section(proposal_files)}
+    #{table(tickets, milestones.names)}
+    #{milestones_section(milestones.open)}#{types_section(types)}#{proposal_section(proposal_files)}
     """
   end
 
-  defp table([]), do: "No tickets yet.\n"
+  defp table([], _names), do: "No tickets yet.\n"
 
   # A type column only where some ticket has a type: on a project with the single workflow file
   # it would be a column of dashes in every job's context.
-  defp table(tickets) do
+  # A milestone column likewise, only where some ticket is in one. A ticket on hold says so in its
+  # status cell, so a job does not take it for work in flight.
+  defp table(tickets, names) do
     typed? = Enum.any?(tickets, & &1.ticket_type)
+    placed? = Enum.any?(tickets, & &1.milestone_id)
 
     columns =
-      if typed?,
-        do: ["#", "type", "state", "status", "title"],
-        else: ["#", "state", "status", "title"]
+      ["#"] ++
+        if(typed?, do: ["type"], else: []) ++
+        ["state", "status"] ++
+        if(placed?, do: ["milestone"], else: []) ++ ["title"]
 
     rows =
       Enum.map(tickets, fn t ->
         type = if typed?, do: [t.ticket_type || "—"], else: []
-        [t.number | type] ++ [t.state, t.status, escape(t.title)]
+        status = if t.held_at, do: "#{t.status}, on hold", else: to_string(t.status)
+        milestone = if placed?, do: [escape(names[t.milestone_id]) |> dash()], else: []
+        [t.number | type] ++ [t.state, status] ++ milestone ++ [escape(t.title)]
       end)
 
     markdown_table(columns, rows)
@@ -220,6 +244,27 @@ defmodule Forge.Backlog do
   end
 
   defp cells(row), do: "| " <> Enum.join(row, " | ") <> " |"
+
+  defp dash(""), do: "—"
+  defp dash(text), do: text
+
+  defp milestones_section([]), do: ""
+
+  defp milestones_section(open) do
+    rows =
+      Enum.map(open, fn m ->
+        [escape(m.name) <> if(m.current, do: " (current)", else: ""), escape(m.description)]
+      end)
+
+    """
+
+    ## Milestones
+
+    The project's open milestones in their order. A ticket belongs to at most one; its row above
+    names it.
+
+    """ <> markdown_table(["milestone", "description"], rows)
+  end
 
   defp types_section([]), do: ""
 

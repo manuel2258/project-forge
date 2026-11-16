@@ -8,6 +8,7 @@ defmodule Forge.Tickets do
 
   alias Ecto.Multi
   alias Forge.{Artifacts, Events, Git, Jobs, Projects, Repo, TicketTypes}
+  alias Forge.Jobs.Job
   alias Forge.Projects.Project
   alias Forge.Tickets.Ticket
   alias ForgeCore.Workflow
@@ -31,6 +32,9 @@ defmodule Forge.Tickets do
         {:ok, %{ticket: ticket}} ->
           Events.notify(ticket.id)
           {:ok, ticket}
+
+        {:error, :milestone, :milestone, _changes} ->
+          {:error, :milestone}
 
         {:error, step, reason, _changes} ->
           {:error, {step, reason}}
@@ -244,6 +248,13 @@ defmodule Forge.Tickets do
   Adds the steps that admit a ticket to `multi`, under `:number`, `:ticket`, `:admitted`,
   `{:ticket_doc, _}`, `{:first_job, _}` and `:branch`.
 
+  `attrs` may carry `:on_hold` (default false, which is the engine's, the fixtures' and the
+  release's: they start) and `:milestone_id`. A ticket admitted on hold has run nothing and made
+  nothing: no first job and no step conversation, only the entry it waits to make
+  (`held_entry`), and its branch, which is cut either way. The ticket goes to the bottom of its
+  milestone's order, or of the no-milestone order; the milestone is locked `FOR SHARE` and must
+  be open and the project's own, which serialises admission against closing it.
+
   The caller transacts. `admit/3` is the ordinary caller and does nothing else; a caller with
   more to do in the same transaction adds its own steps around these.
   """
@@ -257,19 +268,28 @@ defmodule Forge.Tickets do
       repo_.one!(from p in Project, where: p.id == ^project.id, lock: "FOR UPDATE")
       {:ok, next_number(repo_, project)}
     end)
-    |> Multi.insert(:ticket, fn %{number: number} ->
-      Ticket.admit_changeset(%Ticket{}, %{
-        project_id: project.id,
-        number: number,
-        title: Map.fetch!(attrs, :title),
-        body: Map.get(attrs, :body, ""),
-        base_commit: base,
-        branch: "ticket/#{number}",
-        workflow: yaml_map,
-        workflow_commit: base,
-        ticket_type: prepared.ticket_type,
-        state: workflow.initial
-      })
+    |> Multi.run(:milestone, fn repo_, _ ->
+      lock_milestone(repo_, project, attrs[:milestone_id])
+    end)
+    |> Multi.insert(:ticket, fn %{number: number, milestone: milestone} ->
+      Ticket.admit_changeset(
+        %Ticket{},
+        Map.merge(
+          %{
+            project_id: project.id,
+            number: number,
+            title: Map.fetch!(attrs, :title),
+            body: Map.get(attrs, :body, ""),
+            base_commit: base,
+            branch: "ticket/#{number}",
+            workflow: yaml_map,
+            workflow_commit: base,
+            ticket_type: prepared.ticket_type,
+            state: workflow.initial
+          },
+          place_attrs(project, milestone, attrs[:on_hold] == true, workflow.initial)
+        )
+      )
     end)
     |> Events.log(:admitted, "ticket.admitted", actor, fn %{ticket: ticket} ->
       %{
@@ -293,11 +313,17 @@ defmodule Forge.Tickets do
     end)
     |> Multi.merge(fn %{ticket: ticket} ->
       # A first state that is a chat step opens its conversation instead (its branch is cut below,
-      # after the ticket's own exists).
-      if chat_initial?(workflow),
-        do:
-          Jobs.put_create_step(Multi.new(), :first_job, ticket, workflow, workflow.initial, nil),
-        else: Jobs.put_create(Multi.new(), :first_job, ticket, workflow, workflow.initial)
+      # after the ticket's own exists). On hold, nothing is made: `Forge.Engine.release/2` makes it.
+      cond do
+        Ticket.held?(ticket) ->
+          Multi.new()
+
+        chat_initial?(workflow) ->
+          Jobs.put_create_step(Multi.new(), :first_job, ticket, workflow, workflow.initial, nil)
+
+        true ->
+          Jobs.put_create(Multi.new(), :first_job, ticket, workflow, workflow.initial)
+      end
     end)
     |> Multi.run(:branch, fn _repo, %{ticket: ticket} ->
       case Git.create_branch(repo, ticket.branch, base) do
@@ -305,11 +331,48 @@ defmodule Forge.Tickets do
         {:error, reason} -> {:error, reason}
       end
     end)
-    |> Multi.merge(fn %{ticket: ticket, first_job: first} ->
-      if chat_initial?(workflow),
-        do: Jobs.put_step_branch(Multi.new(), :step_branch, first, ticket),
+    |> Multi.merge(fn %{ticket: ticket} = changes ->
+      if chat_initial?(workflow) and not Ticket.held?(ticket),
+        do: Jobs.put_step_branch(Multi.new(), :step_branch, changes.first_job, ticket),
         else: Multi.new()
     end)
+  end
+
+  # Where a ticket is admitted to — the bottom of its milestone's order or of the unplaced — and the
+  # hold it is admitted with, if any.
+  defp place_attrs(project, milestone, on_hold, initial) do
+    milestone_id = milestone && milestone.id
+
+    Map.merge(
+      %{
+        milestone_id: milestone_id,
+        position: Forge.Milestones.next_position(Repo, project.id, milestone_id)
+      },
+      held_attrs(on_hold, initial)
+    )
+  end
+
+  # The hold a ticket is admitted with: what it waits to make is its first state, entered as a
+  # first state is — no arrival, no session to fork.
+  defp held_attrs(false, _initial), do: %{}
+
+  defp held_attrs(true, initial) do
+    %{
+      held_at: DateTime.utc_now(:second),
+      held_entry: %{"state" => initial, "entered" => nil, "came_back" => false}
+    }
+  end
+
+  # The milestone a ticket is admitted into, locked `FOR SHARE`: open, and of this project. Nil is
+  # no milestone. `{:error, :milestone}` is one of another project, a closed one or one that does
+  # not exist — all one answer, so a milestone of another project is not told apart from none.
+  defp lock_milestone(_repo, _project, nil), do: {:ok, nil}
+
+  defp lock_milestone(repo, %Project{id: project_id}, id) do
+    case Forge.Milestones.lock_open(repo, project_id, id, :share) do
+      %Forge.Milestones.Milestone{} = milestone -> {:ok, milestone}
+      nil -> {:error, :milestone}
+    end
   end
 
   defp chat_initial?(workflow),
@@ -464,6 +527,75 @@ defmodule Forge.Tickets do
 
   @spec project_of(Ticket.t()) :: Project.t()
   def project_of(%Ticket{project_id: id}), do: Projects.get!(id)
+
+  @doc """
+  Whether anything has ever run for the ticket: a workflow job or a command handed to a machine
+  (`started_at` is set), or a chat step's conversation opened (it has a `state`). A derived read
+  and not a column, so there is no second source of truth to keep in step.
+
+  `mark_started` writes `started_at` before it pushes to the worker, so a job whose push failed
+  counts as started, and the ticket is released without a refresh: some machine may hold a worktree
+  of the old pin. That is the safe side of the question.
+  """
+  @spec started?(Ticket.t()) :: boolean()
+  def started?(%Ticket{id: id}), do: id in started_ids([id])
+
+  @doc "`started?/1` for many tickets at once: the ids among `ticket_ids` that have started."
+  @spec started_ids([String.t()]) :: [String.t()]
+  def started_ids([]), do: []
+
+  def started_ids(ticket_ids) do
+    Repo.all(
+      from j in Job,
+        where: j.ticket_id in ^ticket_ids,
+        where:
+          (j.kind in [:workflow, :command] and not is_nil(j.started_at)) or
+            (j.kind == :chat and not is_nil(j.state)),
+        distinct: true,
+        select: j.ticket_id
+    )
+  end
+
+  @doc """
+  Changes a ticket's title, in any status. The title is trimmed and may not be blank. **A release
+  ticket's is refused** with `:release_title`: it is its version, set by the release itself
+  (`Forge.ReleaseTickets`), and the next release reads it to find what shipped since. Writes no new
+  version of the `ticket` document, and an event with the old and the new title.
+  """
+  @spec retitle(Ticket.t(), String.t(), Events.actor()) ::
+          {:ok, Ticket.t()} | {:error, :release_title | :blank | Ecto.Changeset.t()}
+  def retitle(%Ticket{id: id}, title, actor) when is_binary(title) do
+    title = String.trim(title)
+
+    Multi.new()
+    |> Multi.run(:locked, fn repo, _ ->
+      ticket = repo.one!(from t in Ticket, where: t.id == ^id, lock: "FOR UPDATE")
+
+      cond do
+        Forge.ReleaseTickets.release?(ticket) -> {:error, :release_title}
+        title == "" -> {:error, :blank}
+        true -> {:ok, ticket}
+      end
+    end)
+    |> Multi.update(:ticket, fn %{locked: locked} ->
+      Ticket.rename_changeset(locked, %{title: title})
+    end)
+    |> Events.log(:retitled, "ticket.retitled", actor, fn %{locked: locked} ->
+      %{ticket_id: id, payload: %{"from" => locked.title, "to" => title}}
+    end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{ticket: ticket}} ->
+        Events.notify(id)
+        {:ok, ticket}
+
+      {:error, :locked, reason, _changes} ->
+        {:error, reason}
+
+      {:error, :ticket, changeset, _changes} ->
+        {:error, changeset}
+    end
+  end
 
   @doc "Adds a ticket update to a multi."
   @spec put_progress(Multi.t(), term(), Ticket.t(), map()) :: Multi.t()

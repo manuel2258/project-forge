@@ -930,6 +930,37 @@ defmodule Forge.CommandsTest do
     end
   end
 
+  describe "a batch stopped now, on a ticket on hold" do
+    # `Engine.stop_now/2` ends the batch as cancelled and decides nothing. A restart's `recover/0`
+    # must not decide it either: with a nil status counting as failure it would take the failure
+    # edge, or record that edge as what release is to take.
+    test "is not decided by a restart, held or after the release", %{user: user} = context do
+      ticket = implement(context)
+      assert ticket.state == "checking"
+      [first, second] = pending(ticket, :command) |> Enum.sort_by(& &1.attempt)
+
+      {:ok, _} = first |> FakeWorker.assign(context.worker) |> FakeWorker.finish_command(0)
+      FakeWorker.assign(second, context.worker)
+
+      {:ok, held} = Forge.Operator.hold(Tickets.get!(ticket.id), user)
+      {:ok, stopped} = Forge.Operator.stop_now(held, user)
+      assert stopped.held_entry["state"] == "checking"
+
+      Forge.Jobs.Commands.recover()
+      after_restart = Tickets.get!(ticket.id)
+      assert after_restart.state == "checking"
+      assert after_restart.held_transition == nil
+      assert after_restart.held_entry == stopped.held_entry
+
+      {:ok, _} = Forge.Operator.release(after_restart, user)
+      assert length(pending(ticket, :command)) == 2
+
+      Forge.Jobs.Commands.recover()
+      assert %{state: "checking", status: :active} = Tickets.get!(ticket.id)
+      assert length(pending(ticket, :command)) == 2
+    end
+  end
+
   defp finished_without_follow_up(job) do
     {:ok, _job} =
       job

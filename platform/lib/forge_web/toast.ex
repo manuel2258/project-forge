@@ -41,6 +41,9 @@ defmodule ForgeWeb.Toast do
       end
 
     cond do
+      ticket.held_at != nil ->
+        "on hold"
+
       MergeQueue.queued?(ticket) ->
         "in the merge queue"
 

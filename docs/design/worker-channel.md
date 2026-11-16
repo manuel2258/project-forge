@@ -695,7 +695,7 @@ jobs, keeps its terminal messages until they are acked, and redials within secon
 only has to not throw the work away before it does. So at boot `Forge.Jobs.recover/0` touches
 only what no machine can ever report: a job left `running` on a row that is `destroyed`, or
 missing, or no row at all. Those go back to the queue — a conversation dormant — and their git
-credentials are revoked. Every other `running` job is left as it is, credential and open run
+credentials are revoked (**a held ticket's job goes back to the queue and stays there**: `Forge.Jobs.pending/2` does not offer it, so a restart does not set it running). Every other `running` job is left as it is, credential and open run
 included, and what becomes of it is the worker's to say at its rejoin, by the rules above: listed,
 it runs on in place; not listed, it is re-queued; never back, the unreachable sweep re-queues it
 (§ When the machine goes away).

@@ -53,15 +53,90 @@ defmodule ForgeWorker.Harness.Codex do
 
   @impl true
   def probe(opts) do
-    %{
+    executable = executable(opts)
+    version = version(executable)
+
+    offer = %{
       driver: driver(),
       name: "Codex",
-      version: version(executable(opts)),
+      version: version,
       # Nothing in forge lists Codex's models: a new one needs nothing from forge, so the model is
       # free text and an empty one is Codex's own default (`docs/design/codex.md`).
       aliases: [],
       efforts: @efforts
     }
+
+    # **A `codex` that answers `--version` is not a `codex` that can run a command.** Every shell
+    # and tool call goes through `codex-code-mode-host`, which Codex looks for beside its own
+    # executable, and an install without it answers `--version` and fails every tool call closed
+    # (`docs/design/codex.md` § On the image). `problem` is the reason, and its presence is what
+    # makes `ForgeWorker.Link` withhold the credential, which is what keeps a Codex job off the machine.
+    # `version &&` is an equivalent mutant: `Link.extra_offer/2` drops a `problem` that has no
+    # version, so asking about the host of an executable that did not answer changes nothing.
+    case version && host_problem(executable) do
+      problem when is_binary(problem) -> Map.put(offer, :problem, problem)
+      _none -> offer
+    end
+  end
+
+  @host "codex-code-mode-host"
+  # The kernel's own bound on a chain of links is 40. **Equivalent mutant**: `host_problem/1` runs
+  # only for an executable that has just answered `--version`, which the kernel could not have
+  # started through a chain this long or a loop, so the bound and the `:error` it ends in cannot
+  # be reached from `probe/1` and no test of them can fail. It is here so that this walk is
+  # finite on its own terms rather than by what its caller happens to have checked.
+  @max_links 40
+
+  # Whether the host is where Codex looks, **by the model Codex uses**: beside the executable once
+  # its links are followed (it reads `/proc/self/exe`), not beside the path it was started by — a
+  # `codex` that is a link into an unpacked package has its host in the package, not beside the
+  # link. Links are followed here one at a time and the target joined to the link's own
+  # directory without `Path.expand`, which would collapse a `..` that the kernel resolves
+  # differently after a link; the kernel resolves the rest, in `File.stat/1`.
+  defp host_problem(executable) do
+    with {:ok, path} <- locate(executable),
+         {:ok, real} <- follow(path, @max_links) do
+      dir = Path.dirname(real)
+      host_state(File.stat(Path.join(dir, @host)), dir)
+    else
+      :error -> "#{@host} could not be looked for: the codex executable is not where it was found"
+    end
+  end
+
+  # The job runs as another user, so what matters is the bit for others, not whether the worker's
+  # own user (root, in an image) could run it.
+  defp host_state({:ok, %File.Stat{type: :regular, mode: mode}}, dir) do
+    if Bitwise.band(mode, 0o001) != 0,
+      do: nil,
+      else: "#{@host} is not executable by the job user in #{dir}"
+  end
+
+  defp host_state(_missing, dir), do: "#{@host} missing beside #{dir}"
+
+  # **Equivalent mutant**: `else: :error` — a bare name not on `PATH` has no version either, and
+  # `host_problem/1` runs only after a version answered, so this branch is not reached from `probe/1`.
+  defp locate(executable) do
+    if String.contains?(executable, "/"),
+      do: {:ok, executable},
+      else: if(found = System.find_executable(executable), do: {:ok, found}, else: :error)
+  end
+
+  defp follow(_path, 0), do: :error
+
+  defp follow(path, left) do
+    case File.read_link(path) do
+      {:ok, target} ->
+        follow(
+          if(Path.type(target) == :absolute,
+            do: target,
+            else: Path.join(Path.dirname(path), target)
+          ),
+          left - 1
+        )
+
+      {:error, _not_a_link} ->
+        {:ok, path}
+    end
   end
 
   defp version(executable) do
@@ -132,7 +207,9 @@ defmodule ForgeWorker.Harness.Codex do
       requests: %{},
       last_usage: 0,
       last_limits: %{},
-      messages: 0
+      messages: 0,
+      # The app-server's warning that it cannot run commands, once it has sent it (`notification/3`).
+      code_mode: nil
     }
 
     {request(0, "initialize", %{
@@ -318,6 +395,25 @@ defmodule ForgeWorker.Harness.Codex do
     {[event("notice", %{subtype: "error", raw: params})] ++ limit_events(text, state), [], state}
   end
 
+  # **The app-server says once per thread that it cannot run a command**, on the thread's first
+  # `turn/start` and before that turn begins: `Code Mode is unavailable because failed to spawn
+  # code-mode host …`, when `codex-code-mode-host` is not beside the executable. Every tool call
+  # then fails closed while the turn still completes, so without this the run ends `success` and
+  # reads as healthy (`docs/design/codex.md` § Events). It is kept, and **every turn of the thread
+  # ends as a failure with that text** (`finish_turn/4`): reporting it where it arrives would report a
+  # turn that has not started, and a flag cleared per turn would let the second turn read as fine.
+  #
+  # **The match is on OpenAI's wording**: the warning carries no code, only text, and a release that
+  # rewords it makes this a plain notice again — which is why the worker does not rely on this alone
+  # (`ForgeWorker.Harness.Codex.probe/1` refuses a machine without the host). Any other `warning`,
+  # such as the WebSocket fallback, is the notice it always was.
+  @code_mode_unavailable "Code Mode is unavailable"
+
+  defp notification("warning", %{"message" => @code_mode_unavailable <> _ = text} = params, state) do
+    {[event("notice", %{subtype: "warning", raw: params})], [],
+     %{state | code_mode: state.code_mode || text}}
+  end
+
   defp notification(method, params, state),
     do: {[event("notice", %{subtype: method, raw: params})], [], state}
 
@@ -393,7 +489,16 @@ defmodule ForgeWorker.Harness.Codex do
 
   defp next_queued(%{queue: [text | rest]} = state), do: start_turn(text, %{state | queue: rest})
 
-  defp finish_turn(subtype, error?, detail, state) do
+  # A turn that would have ended `success` on a thread that cannot run commands ends as the failure
+  # it is, with the app-server's own words. One that failed or was interrupted for another reason
+  # keeps its own, which is the more specific.
+  defp finish_turn("success", _error?, _detail, %{code_mode: text} = state) when is_binary(text),
+    do: do_finish_turn("error_during_execution", true, text, state)
+
+  defp finish_turn(subtype, error?, detail, state),
+    do: do_finish_turn(subtype, error?, detail, state)
+
+  defp do_finish_turn(subtype, error?, detail, state) do
     finished =
       event("finished", %{
         subtype: subtype,

@@ -750,7 +750,10 @@ defmodule ForgeWeb.WorkersLive do
 
   # The harnesses a machine offers beyond the one on the line above (`harnesses` is the list its
   # last `ready` sent; `harness` is the first of it): each with its version, and the outcome of its
-  # own update when it left one, loud only when it failed, like Claude Code's. A row an older
+  # own update when it left one, loud only when it failed, like Claude Code's, and the `problem` a
+  # machine gives for an install that answers `--version` and cannot run a command — in error
+  # colour, because that machine takes no job for it (`Forge.Workers.runs?/2` reads a harness with
+  # no `credential` as not run). A row an older
   # release wrote has no list and draws nothing. Every value goes through `harness_text/1`.
   defp other_harnesses(%{worker: %{harnesses: [_primary | rest]}} = assigns) do
     assigns = assign(assigns, others: Enum.filter(rest, &is_map/1))
@@ -760,6 +763,9 @@ defmodule ForgeWeb.WorkersLive do
       <span>{harness_text(offer["name"]) || harness_text(offer["driver"])}</span>
       <span class="text-ink-3">
         {harness_text(offer["version"]) || "not installed"}
+      </span>
+      <span :if={harness_text(offer["problem"])} class="text-danger">
+        · {harness_text(offer["problem"])}
       </span>
       <span
         :if={harness_text(get_in(offer, ["update", "outcome"]))}

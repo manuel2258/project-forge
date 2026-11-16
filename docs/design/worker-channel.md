@@ -843,7 +843,9 @@ worker takes nothing and the scheduler's *Waiting for a newer worker image* reas
 workers page say why.
 
 A worker announces `harnesses` in `ready`, each with its version: the configured harness always
-and Codex when its binary answers `--version` (the old single `harness` map stays, and is the first
+and Codex when its binary answers `--version` **and `codex-code-mode-host` is beside it** — with
+the version and a `problem` and no `credential` when it is not, so that it takes no Codex job and
+`/workers` says why (`codex.md` § On the image) (the old single `harness` map stays, and is the first
 of them; a row from before reads as the one harness it sent). The platform matches a job's harness
 against the list (`Forge.Workers.runs?/2`). An assignment carries `harness`, and a result or a chat
 turn report may carry `credential_return` in its harness map: a login Codex rewrote, sealed to the

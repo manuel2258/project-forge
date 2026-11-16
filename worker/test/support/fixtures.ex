@@ -10,8 +10,51 @@ defmodule ForgeWorker.Fixtures do
 
   @fake_codex Path.expand("fake_codex.sh", __DIR__)
 
-  @doc "The stand-in for `codex app-server` (`test/support/fake_codex.sh`)."
-  def fake_codex_executable, do: @fake_codex
+  @doc """
+  The stand-in for `codex app-server` (`test/support/fake_codex.sh`), **in a directory of its own
+  with a `codex-code-mode-host` beside it**: a `codex` with no host is one the worker does not offer
+  (`ForgeWorker.Harness.Codex.probe/1`), so a stand-in standing alone in `test/support/` would not
+  be taken for Codex. Made once per test run and removed when it ends.
+  """
+  def fake_codex_executable do
+    case :persistent_term.get({__MODULE__, :fake_codex}, nil) do
+      nil ->
+        path = stage_fake_codex(System.tmp_dir!(), host: true)
+        System.at_exit(fn _status -> File.rm_rf(Path.dirname(Path.dirname(path))) end)
+        :persistent_term.put({__MODULE__, :fake_codex}, path)
+        path
+
+      path ->
+        path
+    end
+  end
+
+  @doc """
+  A copy of the stand-in under `parent`, in a directory of its own, and the path of the `codex` in
+  it: `host: false` leaves the sidecar out, `host: mode` gives it that mode. The caller removes
+  `parent`'s subdirectory (`Path.dirname(Path.dirname(path))`).
+  """
+  def stage_fake_codex(parent, opts) do
+    dir =
+      Path.join(parent, "fake-codex-#{System.unique_integer([:positive])}-#{System.os_time()}")
+
+    bin = Path.join(dir, "bin")
+    File.mkdir_p!(bin)
+    File.cp!(@fake_codex, Path.join(bin, "codex"))
+    File.chmod!(Path.join(bin, "codex"), 0o755)
+
+    case Keyword.get(opts, :host, true) do
+      false ->
+        :ok
+
+      host ->
+        path = Path.join(bin, "codex-code-mode-host")
+        File.write!(path, "#!/bin/sh\nexit 0\n")
+        File.chmod!(path, if(is_integer(host), do: host, else: 0o755))
+    end
+
+    Path.join(bin, "codex")
+  end
 
   def spec(overrides \\ %{}) do
     Map.merge(

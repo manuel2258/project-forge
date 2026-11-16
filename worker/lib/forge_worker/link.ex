@@ -1242,9 +1242,11 @@ defmodule ForgeWorker.Link do
     |> put_unless_nil("update", ClaudeUpdate.status(root))
   end
 
-  # The configured harness always, as it was; and Codex when this machine has it installed — a
-  # harness is offered when its binary answers `--version`, which is what keeps a job for a harness
-  # off a machine that cannot run it. A probe that fails offers nothing rather than guessing.
+  # The configured harness always, as it was; and Codex when this machine has it installed. It is
+  # **offered to run jobs** when its binary answers `--version` and, for Codex, its code-mode host
+  # is beside it (`extra_offer/2`): that is what keeps a job for a harness off a machine that
+  # cannot run it. One that answers and lacks the host is listed with its version and a `problem`
+  # and no `credential`. A probe that fails offers nothing rather than guessing.
   defp harness_offers(root) do
     primary = harness_offer(root)
 
@@ -1269,6 +1271,17 @@ defmodule ForgeWorker.Link do
     update = ClaudeUpdate.status(root, offer.driver)
 
     cond do
+      # A version and a `problem`: installed and not whole, so as for no version, **no
+      # `credential`**, and the entry carries what is wrong for the operator to read. The one
+      # harness this applies to is Codex, which is only ever an extra here: Claude Code is the
+      # primary in production (`:harness` is set in tests alone), so this is the one gate and
+      # `probed_offer/0` has none.
+      offer.version && Map.has_key?(offer, :problem) ->
+        offer
+        |> Map.drop([:aliases, :efforts])
+        |> Map.new(fn {key, value} -> {Atom.to_string(key), encode_offer(value)} end)
+        |> put_unless_nil("update", update)
+
       offer.version ->
         offer
         |> Map.merge(%{capabilities: module.capabilities(), credential: "per_job"})

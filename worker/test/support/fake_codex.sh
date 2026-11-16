@@ -6,7 +6,8 @@
 # windows, and completes. Exits when stdin reaches EOF, which is how a runner ends a job.
 #
 # FAKE_CODEX_SCENARIO: success (default) | runaway (calls that never stop, for a budget) |
-# limit (a turn that fails with a usage limit) | rotates (rewrites auth.json, as a refresh does).
+# limit (a turn that fails with a usage limit) | nohost (the app-server's warning that it cannot run
+# commands, then a turn that completes) | rotates (rewrites auth.json, as a refresh does).
 set -u
 
 if [ "${1:-}" = "--version" ]; then
@@ -71,6 +72,15 @@ while IFS= read -r line; do
             usage $((i * 50000)) 0 0 10000
             sleep 0.05
           done
+          ;;
+        nohost)
+          # What a `codex` with no `codex-code-mode-host` beside it sends, once, and then completes
+          # the turn as though nothing were wrong. Its document is written, as a model that could
+          # not run a command might still write one: the run must not read as a success for it.
+          emit '{"method":"warning","params":{"threadId":"th-fake","message":"Code Mode is unavailable because failed to spawn code-mode host /x/codex-code-mode-host: host executable was not found. Code mode will fail closed."}}'
+          mkdir -p "$FORGE_JOB/out"
+          printf -- '---\noutcome: done\n---\n# Plan\n\nNothing ran.\n' > "$FORGE_JOB/out/${FAKE_DOC:-plan.md}"
+          emit '{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"i2","text":"I could not run anything."}}}'
           ;;
         limit)
           emit '{"method":"turn/completed","params":{"turn":{"id":"t1","status":"failed","error":{"message":"You have hit your usage limit"}}}}'

@@ -506,6 +506,12 @@ defmodule Forge.Conversations do
           "usage" => Runs.figure(harness).usage,
           "cost_usd" => harness["cost_usd"],
           "subtype" => harness["subtype"],
+          # Whether the harness ended the turn on an error, and what it said: a Codex turn whose
+          # commands could not run completes with a `success` subtype's shape and is an error all
+          # the same (`docs/design/conversations.md` § Turns), and Claude Code's "Not logged in"
+          # is `success` with `is_error`. The page tells the person from these two (`notice/3`).
+          "is_error" => harness["is_error"] == true,
+          "error" => turn_error(harness),
           # The job's memory as the turn ended, kept here and nowhere else
           # (`docs/design/claude-code-events.md` § Memory).
           "memory" => harness["memory"],
@@ -1547,11 +1553,40 @@ defmodule Forge.Conversations do
   # log, which is read off the machine by its owner and not by them
   # (`docs/design/conversations.md` § Commits).
   defp notice(done, %Event{payload: payload} = event, turn) do
-    case uncommitted(payload["uncommitted"]) do
-      nil -> done
-      text -> [%{role: :notice, text: text, at: event.inserted_at, turn: turn} | done]
+    done
+    |> add_notice(failed(payload), event, turn)
+    |> add_notice(uncommitted(payload["uncommitted"]), event, turn)
+  end
+
+  defp add_notice(done, nil, _event, _turn), do: done
+
+  defp add_notice(done, text, event, turn),
+    do: [%{role: :notice, text: text, at: event.inserted_at, turn: turn} | done]
+
+  # **A turn the harness ended on an error says so in the conversation**, which it did not: the
+  # page showed the reply, or nothing, and a person read a turn whose every command had failed as
+  # a turn that went well. Not an interrupted one — an operator's Stop reports the same subtype and
+  # is not a failure (`docs/design/conversations.md` § Turns). An event from before the platform
+  # kept `is_error` has none and reads as it always did.
+  defp failed(%{"interrupted" => true}), do: nil
+
+  defp failed(%{"is_error" => true} = payload) do
+    case payload["error"] do
+      text when is_binary(text) and text != "" -> "This turn failed: " <> text
+      _none -> "This turn failed."
     end
   end
+
+  defp failed(_payload), do: nil
+
+  # The reason, as long as it is worth keeping on an event: a harness's `result` is its whole reply
+  # on a turn that went well, and only an error's is wanted here.
+  @turn_error_bytes 500
+
+  defp turn_error(%{"is_error" => true, "result" => text}) when is_binary(text),
+    do: String.slice(text, 0, @turn_error_bytes)
+
+  defp turn_error(_harness), do: nil
 
   # The merge case names the paths, because it is the one a person can do something about. What it
   # does *not* say is that the work is safe: the tree is left as the run left it, so the next turn

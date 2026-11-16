@@ -888,6 +888,16 @@ execution error reports. Only the worker knows it was asked to interrupt, so the
 A conversation that renders an operator's own Stop as an error is the failure mode, and it is the
 default one.
 
+**A turn the harness ended on an error says so in the transcript.** The platform keeps the turn's
+`is_error` on its `chat.turn` event, and its `result` — at most 500 characters — when it is one, and
+the transcript draws a line of the platform's own after the turn, *This turn failed: …*, as it does
+for a turn that could not commit (§ Commits). Not for an interrupted turn, which reports the same
+subtype (above), and not for an event from before the platform kept `is_error`, which reads as it
+did. It is the one thing that makes a Codex turn whose commands could not run
+(`codex.md` § On the image) read as failed in a chat: the turn completes, and without this its reply
+is all a person sees. It shows a failed Claude Code turn too — `Not logged in` is `success` with
+`is_error` — which is the class.
+
 Interrupting is a `control_request` written to the same stdin, not the channel's `cancel`: `cancel`
 ends the process, and for a conversation the process is the thing being kept.
 

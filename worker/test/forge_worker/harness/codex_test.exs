@@ -316,6 +316,126 @@ defmodule ForgeWorker.Harness.CodexTest do
     end
   end
 
+  # The app-server cannot run a command when `codex-code-mode-host` is missing, says so once per
+  # thread with a `warning`, and then completes its turns as if nothing were wrong: every tool call
+  # failed closed and the run read `success`. Other `warning`s are not failures.
+  describe "a thread that cannot run commands" do
+    setup do
+      {id, _method, state} = ready()
+      {[], state} = Codex.send_message("first", state)
+      {_e, _b, state} = feed(state, [%{"id" => id, "result" => %{"thread" => %{"id" => "th-1"}}}])
+      %{state: state}
+    end
+
+    @unavailable "Code Mode is unavailable because failed to spawn code-mode host /h/codex-code-mode-host: host executable was not found. Code mode will fail closed."
+
+    defp completed(status \\ "completed"),
+      do: %{
+        "method" => "turn/completed",
+        "params" => %{"turn" => %{"id" => "t", "status" => status}}
+      }
+
+    defp finished(events), do: Enum.filter(events, &(&1.type == "finished"))
+
+    test "its turn ends as a failure carrying the warning's text, though it completed", %{
+      state: state
+    } do
+      {events, [], _state} =
+        feed(state, [
+          %{
+            "method" => "warning",
+            "params" => %{"threadId" => "th-1", "message" => @unavailable}
+          },
+          %{"method" => "turn/started", "params" => %{"turn" => %{"id" => "t"}}},
+          completed()
+        ])
+
+      # The warning is still a notice, and the one `finished` comes at the turn's end.
+      assert [%{type: "notice", payload: %{subtype: "warning"}}] =
+               Enum.filter(events, &(&1.type == "notice"))
+
+      assert [
+               %{
+                 payload: %{
+                   subtype: "error_during_execution",
+                   is_error: true,
+                   result: @unavailable
+                 }
+               }
+             ] =
+               finished(events)
+    end
+
+    test "the next turn, which gets no second warning, fails too", %{state: state} do
+      {first, _bytes, state} =
+        feed(state, [
+          %{"method" => "warning", "params" => %{"message" => @unavailable}},
+          completed()
+        ])
+
+      {_bytes, state} = Codex.send_message("second", state)
+      {second, _bytes, _state} = feed(state, [completed()])
+
+      assert [%{payload: %{is_error: true, result: @unavailable}}] = finished(first)
+      assert [%{payload: %{is_error: true, result: @unavailable}}] = finished(second)
+    end
+
+    test "the warning about falling back from WebSockets is a notice and nothing more", %{
+      state: state
+    } do
+      {events, [], _state} =
+        feed(state, [
+          %{
+            "method" => "warning",
+            "params" => %{"message" => "Falling back from WebSockets to HTTPS transport."}
+          },
+          completed()
+        ])
+
+      assert [%{payload: %{subtype: "success", is_error: false}}] = finished(events)
+    end
+
+    # Matching on the start of OpenAI's sentence, not on the words "Code Mode": a warning about
+    # something else in code mode is not a thread that cannot run commands.
+    test "another warning that mentions code mode is a notice and nothing more", %{state: state} do
+      {events, [], _state} =
+        feed(state, [
+          %{"method" => "warning", "params" => %{"message" => "Code Mode is slow today."}},
+          completed()
+        ])
+
+      assert [%{payload: %{subtype: "success", is_error: false}}] = finished(events)
+    end
+
+    test "the first warning's text is the one a thread keeps", %{state: state} do
+      {events, [], _state} =
+        feed(state, [
+          %{"method" => "warning", "params" => %{"message" => @unavailable}},
+          %{"method" => "warning", "params" => %{"message" => @unavailable <> " (again)"}},
+          completed()
+        ])
+
+      assert [%{payload: %{result: @unavailable}}] = finished(events)
+    end
+
+    test "a turn that failed or was stopped for another reason keeps its own reason", %{
+      state: state
+    } do
+      {events, _bytes, _state} =
+        feed(state, [
+          %{"method" => "warning", "params" => %{"message" => @unavailable}},
+          %{
+            "method" => "turn/completed",
+            "params" => %{
+              "turn" => %{"status" => "failed", "error" => %{"message" => "401 Unauthorized"}}
+            }
+          }
+        ])
+
+      assert [%{payload: %{is_error: true, result: "401 Unauthorized"}}] = finished(events)
+    end
+  end
+
   describe "everything else the app-server says" do
     setup do
       {id, _method, state} = ready()
@@ -547,6 +667,115 @@ defmodule ForgeWorker.Harness.CodexTest do
     assert "high" in offer.efforts
   end
 
+  # A `codex` that answers `--version` and has no `codex-code-mode-host` where Codex looks for it
+  # runs no command at all (`docs/design/codex.md` § On the image): so it has a version, as it does,
+  # and a `problem`, which is what keeps a Codex job off the machine (`ForgeWorker.Link`).
+  describe "a codex that answers --version" do
+    @describetag :tmp_dir
+
+    defp script(path, body) do
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, "#!/bin/sh\n#{body}\n")
+      File.chmod!(path, 0o755)
+      path
+    end
+
+    defp codex_in(dir), do: script(Path.join(dir, "codex"), "echo 'codex-cli 9.9.9'")
+
+    defp host_in(dir, mode \\ 0o755),
+      do: script(Path.join(dir, "codex-code-mode-host"), "exit 0") |> tap(&File.chmod!(&1, mode))
+
+    test "with the host beside it has no problem", %{tmp_dir: dir} do
+      exe = codex_in(dir)
+      host_in(dir)
+
+      offer = Codex.probe(codex_executable: exe)
+      assert offer.version == "9.9.9"
+      refute Map.has_key?(offer, :problem)
+    end
+
+    test "with no host beside it has a version and says what is missing", %{tmp_dir: dir} do
+      offer = Codex.probe(codex_executable: codex_in(dir))
+
+      assert offer.version == "9.9.9"
+      assert offer.problem == "codex-code-mode-host missing beside #{dir}"
+    end
+
+    test "with a host the job user cannot run has a problem", %{tmp_dir: dir} do
+      exe = codex_in(dir)
+
+      # No exec bit at all, and an exec bit for the owner and the group but not for others: the
+      # job runs as another user than the worker's, so the owner's bit is not the one that counts.
+      for mode <- [0o644, 0o770] do
+        host_in(dir, mode)
+        assert Codex.probe(codex_executable: exe).problem =~ "is not executable by the job user"
+      end
+    end
+
+    test "a directory where the host should be is not a host", %{tmp_dir: dir} do
+      exe = codex_in(dir)
+      File.mkdir_p!(Path.join(dir, "codex-code-mode-host"))
+
+      assert Codex.probe(codex_executable: exe).problem =~ "missing beside"
+    end
+
+    # Codex reads `/proc/self/exe`, so it looks beside the file a link leads to. Looking beside the
+    # link would refuse a good install and accept a bad one.
+    test "the host is looked for beside where a link leads, not beside the link", %{tmp_dir: dir} do
+      whole = Path.join(dir, "pkg/bin")
+      codex_in(whole)
+      host_in(whole)
+      File.mkdir_p!(Path.join(dir, "home/bin"))
+      File.ln_s!(Path.join(whole, "codex"), Path.join(dir, "home/bin/codex"))
+
+      refute Map.has_key?(
+               Codex.probe(codex_executable: Path.join(dir, "home/bin/codex")),
+               :problem
+             )
+
+      # A host beside the link and none beside the target.
+      bare = Path.join(dir, "bare/bin")
+      codex_in(bare)
+      File.mkdir_p!(Path.join(dir, "home2/bin"))
+      File.ln_s!(Path.join(bare, "codex"), Path.join(dir, "home2/bin/codex"))
+      host_in(Path.join(dir, "home2/bin"))
+
+      assert Codex.probe(codex_executable: Path.join(dir, "home2/bin/codex")).problem ==
+               "codex-code-mode-host missing beside #{bare}"
+    end
+
+    # A `..` after a link is resolved by the kernel against where the link really is. `Path.expand`
+    # would collapse it against the path as written and look beside a directory that is not there.
+    test "a `..` after a linked directory is not collapsed before the kernel resolves it", %{
+      tmp_dir: dir
+    } do
+      whole = Path.join(dir, "real/a/pkg/bin")
+      codex_in(whole)
+      host_in(whole)
+      File.mkdir_p!(Path.join(dir, "real/a/b/bin"))
+      File.ln_s!("../../pkg/bin/codex", Path.join(dir, "real/a/b/bin/codex"))
+      File.mkdir_p!(Path.join(dir, "home"))
+      File.ln_s!(Path.join(dir, "real/a/b/bin"), Path.join(dir, "home/bin"))
+
+      refute Map.has_key?(
+               Codex.probe(codex_executable: Path.join(dir, "home/bin/codex")),
+               :problem
+             )
+    end
+
+    test "a relative link, and a chain of them, are followed", %{tmp_dir: dir} do
+      whole = Path.join(dir, "pkg/bin")
+      codex_in(whole)
+      host_in(whole)
+      File.mkdir_p!(Path.join(dir, "a/bin"))
+      File.mkdir_p!(Path.join(dir, "b"))
+      File.ln_s!("../../pkg/bin/codex", Path.join(dir, "a/bin/codex"))
+      File.ln_s!("../a/bin/codex", Path.join(dir, "b/codex"))
+
+      refute Map.has_key?(Codex.probe(codex_executable: Path.join(dir, "b/codex")), :problem)
+    end
+  end
+
   # Claude Code's `FORGE_CLAUDE_EXECUTABLE` arrives as `:executable`. Reading it here made the image
   # probe, and spawn, `claude app-server` as Codex.
   @tag :tmp_dir
@@ -556,6 +785,8 @@ defmodule ForgeWorker.Harness.CodexTest do
     File.chmod!(exe, 0o755)
 
     assert Codex.probe(codex_executable: exe).version == "9.9.9"
+    # Named and absent: the default is the `codex` on `PATH`, which a worker image has.
+    assert Codex.probe(executable: exe, codex_executable: "/nonexistent/codex").version == nil
     # Not `== nil`: with no `:codex_executable` the probe asks `codex` on the PATH, and a worker
     # image puts a real one there, so the gate's own command machine answers with its version.
     # What must not answer is the binary handed as `:executable`.

@@ -2419,7 +2419,9 @@ agent job, and the row says to update it (`credentials.md` § What a worker offe
 that, one below protocol 11, which takes **no job of any kind** because tokens are counted during a
 run there (`capacity.md` § Spend caps): *takes no job: it speaks protocol 10 and counting tokens
 during a run needs 11; update it*. The harnesses a machine offers beyond its first are listed
-under it, each with its version and the outcome of its own update (`codex.md`).
+under it, each with its version, in error colour the `problem` of an install that answers
+`--version` and cannot run a command (*codex-code-mode-host missing beside …*; that machine takes no
+job for it), and the outcome of its own update (`codex.md`).
 
 **A row leads with its connection dot and what it is doing, in words** (`12f`): the job and its
 ticket (*implementing #2 · game#41 · 4m*), the chat (*chat · game · 3m*), or — for a machine the

@@ -477,16 +477,27 @@ defmodule ForgeWorker.LinkTest do
       assert "high" in codex["efforts"]
 
       # Claude Code's own binary, model and effort are not Codex's: with them configured and no
-      # `codex` of its own, the machine does not probe `claude` as Codex.
+      # `codex` of its own, the machine offers no Codex, rather than probing `claude`. The Codex
+      # path is named and absent, because the default is whatever `codex` is on this machine's `PATH`
+      # — and a worker image has one.
+      Application.put_env(:forge_worker, :harness_opts,
+        codex_executable: "/nonexistent/codex",
+        executable: fake_codex_executable(),
+        model: "opus",
+        effort: "high"
+      )
+
+      assert %{"harnesses" => [_only]} = Link.ready_payload(socket)
+
+      # And with no `:codex_executable` at all the probe asks `codex` on the PATH, which a worker
+      # image puts a real one on, so the gate's own command machine may offer it. What must not be
+      # offered is Codex answering from Claude Code's binary.
       Application.put_env(:forge_worker, :harness_opts,
         executable: fake_codex_executable(),
         model: "opus",
         effort: "high"
       )
 
-      # Not "offers one harness": with no `:codex_executable` the probe asks `codex` on the PATH,
-      # and a worker image puts a real one there, so the gate's own command machine offers it.
-      # What must not be offered is Codex answering from Claude Code's binary.
       %{"harnesses" => harnesses} = Link.ready_payload(socket)
       refute Enum.any?(harnesses, &match?(%{"driver" => "codex", "version" => "9.9.9"}, &1))
     end
@@ -572,6 +583,44 @@ defmodule ForgeWorker.LinkTest do
       assert %{"harnesses" => [_primary, codex]} = Link.ready_payload(socket)
       assert codex["update"] == %{"outcome" => "succeeded"}
       assert codex["credential"] == "per_job"
+    end
+
+    # A `codex` that answers `--version` with no `codex-code-mode-host` beside it was offered, and
+    # took Codex jobs it could run no command for. Now its entry says why and carries **no
+    # `credential`**, which `Forge.Workers.runs?/2` reads as "does not run it", and keeps whatever
+    # the update said so the operator reads both.
+    test "a codex with no host beside it is listed with its problem and no credential", %{
+      socket: socket,
+      root: root
+    } do
+      previous = Application.get_env(:forge_worker, :harness_opts)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:forge_worker, :harness_opts, previous),
+          else: Application.delete_env(:forge_worker, :harness_opts)
+      end)
+
+      File.write!(Path.join(root, "codex-update.json"), ~s|{"outcome":"succeeded"}|)
+      codex = stage_fake_codex(tmp_dir("codex"), host: false)
+      Application.put_env(:forge_worker, :harness_opts, codex_executable: codex)
+
+      assert %{"harnesses" => [_primary, entry]} = Link.ready_payload(socket)
+
+      assert entry == %{
+               "driver" => "codex",
+               "name" => "Codex",
+               "version" => "9.9.9",
+               "problem" => "codex-code-mode-host missing beside #{Path.dirname(codex)}",
+               "update" => %{"outcome" => "succeeded"}
+             }
+
+      # The same machine with the host put there is offered, with no `problem` key at all.
+      File.write!(Path.join(Path.dirname(codex), "codex-code-mode-host"), "#!/bin/sh\n")
+      File.chmod!(Path.join(Path.dirname(codex), "codex-code-mode-host"), 0o755)
+      assert %{"harnesses" => [_primary, whole]} = Link.ready_payload(socket)
+      assert whole["credential"] == "per_job"
+      refute Map.has_key?(whole, "problem")
     end
 
     # Absent, not null, exactly as `accepts` is: an image older than the unit attempted no update

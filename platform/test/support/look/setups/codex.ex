@@ -5,10 +5,12 @@ defmodule Forge.Look.Setups.Codex do
   its harness and Codex's model and effort; and the new-conversation form.
   Today's usage by kind on the login and on a Claude API key (with Claude Code's dollar figure);
   and a worker offering Codex, another whose Codex install failed, on the workers page.
+  A third worker whose Codex install answers `--version` and has no code-mode host (a version, a
+  `problem`, no `credential`), and a Codex conversation whose turn the harness ended on that error.
   A ticket whose job ran on Codex, with a counted run and a converted one and the waiting sentence,
   and a conversation waiting the same way; a long-named access token that has expired.
   Users: `member`. Paths: `settings`, `project_settings`, `new_chat`, `chat`, `workers`, `ticket`,
-  `job`, `waiting_chat`.
+  `job`, `waiting_chat`, `failed_chat`.
 
   The login's tokens are made-up marker strings: a picture is not masked.
   """
@@ -171,6 +173,32 @@ defmodule Forge.Look.Setups.Codex do
       "Waiting for a Codex login: all in this project's pool are in use."
     )
 
+    # A turn that completed and could run no command: the platform draws it as failed, with the
+    # app-server's words, after the reply the model still gave.
+    failed = chat_fixture(%{project: project, harness: "codex", model: "gpt-look"})
+    run!(failed)
+
+    :ok =
+      Forge.Jobs.record_harness_event(failed.id, %{
+        type: "job.harness.text",
+        payload: %{text: "I could not run any command here, so nothing was changed."}
+      })
+
+    {:ok, _} =
+      Forge.Conversations.record_turn(failed, %{
+        "turn" => 1,
+        "commit" => nil,
+        "harness" => %{
+          "turns" => 1,
+          "session_id" => "look",
+          "subtype" => "error_during_execution",
+          "is_error" => true,
+          "result" =>
+            "Code Mode is unavailable because failed to spawn code-mode host " <>
+              "/var/lib/forge/.local/bin/codex-code-mode-host: host executable was not found."
+        }
+      })
+
     claude = %{
       "driver" => "claude_code",
       "name" => "Claude Code",
@@ -194,7 +222,7 @@ defmodule Forge.Look.Setups.Codex do
       %{
         "driver" => "codex",
         "name" => "Codex",
-        "version" => "codex-cli 0.46.0",
+        "version" => "0.46.0",
         "credential" => "per_job",
         "efforts" => ~w(minimal low medium high),
         "update" => %{"outcome" => "succeeded"}
@@ -212,6 +240,16 @@ defmodule Forge.Look.Setups.Codex do
       }
     ])
 
+    offering.([
+      %{
+        "driver" => "codex",
+        "name" => "Codex",
+        "version" => "0.169.0",
+        "problem" => "codex-code-mode-host missing beside /var/lib/forge/.local/bin",
+        "update" => %{"outcome" => "succeeded"}
+      }
+    ])
+
     %{
       users: %{"member" => member},
       paths: %{
@@ -222,7 +260,8 @@ defmodule Forge.Look.Setups.Codex do
         "workers" => "/workers",
         "ticket" => "/tickets/#{project.name}/#{ticket.number}",
         "job" => "/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}",
-        "waiting_chat" => "/chats/#{waiting.id}"
+        "waiting_chat" => "/chats/#{waiting.id}",
+        "failed_chat" => "/chats/#{failed.id}"
       }
     }
   end

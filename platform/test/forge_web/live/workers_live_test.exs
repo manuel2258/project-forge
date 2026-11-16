@@ -493,6 +493,58 @@ defmodule ForgeWeb.WorkersLiveTest do
     refute line =~ "text-error"
   end
 
+  # A Codex that answers `--version` and cannot run a command (`codex-code-mode-host` is not beside
+  # it) is offered with its version, a `problem` and **no `credential`**: the machine takes no Codex
+  # job, and the row says why, in error colour (`docs/design/codex.md` § On the image).
+  test "a harness that is installed and cannot run a command is drawn with its problem, in error",
+       %{
+         conn: conn,
+         user: user
+       } do
+    w = worker(user)
+    claude = %{"driver" => "claude_code", "name" => "Claude Code", "credential" => "per_job"}
+
+    codex = %{
+      "driver" => "codex",
+      "name" => "Codex",
+      "version" => "0.169.0",
+      "problem" => "codex-code-mode-host missing beside /var/lib/forge/.local/bin",
+      "update" => %{"outcome" => "succeeded"}
+    }
+
+    {:ok, w} =
+      Workers.ready(w, %{
+        "memory_budget" => 8_000,
+        "harness" => claude,
+        "harnesses" => [claude, codex]
+      })
+
+    refute Workers.runs?(w, "codex")
+    assert Workers.runs?(w, "claude_code")
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+    line = view |> element("#harness-#{w.id}-codex") |> render()
+
+    assert text(line) ==
+             "Codex 0.169.0 · codex-code-mode-host missing beside /var/lib/forge/.local/bin · update succeeded"
+
+    # The problem is the span in error, and the version and the quiet update beside it are not.
+    assert [problem] = Regex.run(~r/<span[^>]*text-danger[^>]*>.*?<\/span>/s, line)
+    assert text(problem) =~ "codex-code-mode-host missing"
+    refute text(problem) =~ "update succeeded"
+
+    # A value that is not text is not drawn, as for every field out of `harness`.
+    {:ok, _w} =
+      Workers.ready(w, %{
+        "memory_budget" => 8_000,
+        "harness" => claude,
+        "harnesses" => [claude, Map.put(codex, "problem", %{"oops" => 1})]
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+    refute view |> element("#harness-#{w.id}-codex") |> render() =~ "text-danger"
+  end
+
   # An attempt that worked is still drawn — the operator asked whether it succeeded, not only
   # whether it failed — and quietly, because the one loud thing in the interface is an item
   # waiting on a human (`docs/design/ui.md` § Colour).

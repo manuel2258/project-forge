@@ -1563,7 +1563,10 @@ from the unit's last reading rather than from that result, which it no longer pr
 
 ## Updating a worker, Codex (ticket 43)
 
-The image gains `codex-update.service` beside `claude-code-update.service`: OpenAI's release binary
-under the worker's root where it can be overwritten, bounded by the same timeouts, ordered before
-the worker unit, writing `codex-update.json`. One reader serves both status files and the probe
-reports `codex --version`.
+The image gains `codex-update.service` beside `claude-code-update.service`: OpenAI's release
+**package** (the binary, `codex-code-mode-host` that Codex runs every tool call through, and the
+rest) unpacked under the worker's root where it can be replaced, with `bin/codex` a link swapped to
+it whole, bounded by the same timeouts, ordered before the worker unit, writing `codex-update.json`
+(`nix/codex-update.sh`; `codex.md` § On the image). One reader serves both status files, and the
+probe reports `codex --version` **and whether the host is beside it**: the lone binary this
+installed first answered `--version` and ran no command (ticket 49).

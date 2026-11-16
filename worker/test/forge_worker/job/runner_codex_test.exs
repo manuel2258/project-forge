@@ -123,6 +123,18 @@ defmodule ForgeWorker.Job.RunnerCodexTest do
     assert result.harness["is_error"] == true
   end
 
+  # A `codex` with no `codex-code-mode-host` runs no command, says so in a `warning`, and completes
+  # its turns. That turn is not a success, whatever documents it wrote (`docs/design/codex.md`).
+  test "a thread that cannot run commands ends the run in error, with the app-server's words",
+       context do
+    {:ok, result} = context |> run("nohost") |> Runner.await(10_000)
+
+    assert result.harness["is_error"] == true
+    assert result.harness["subtype"] == "error_during_execution"
+    assert result.outcome == :error
+    assert result.reason =~ "Code Mode is unavailable"
+  end
+
   describe "the login" do
     test "reaches the process as a file under umask 077, and as nothing else", context do
       {:ok, result} = context |> run("success") |> Runner.await(10_000)

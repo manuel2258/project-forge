@@ -1239,6 +1239,107 @@ defmodule Forge.ConversationsTest do
     end
   end
 
+  # A turn the harness ended on an error, which a Codex turn that could run no command is: it
+  # completed, and every tool call in it failed. The person in the chat has to be told, in the
+  # transcript, because the reply alone reads as a turn that went well.
+  describe "a turn the harness ended on an error" do
+    setup %{project: project} do
+      {:ok, chat} = Conversations.open(project, "bring this up to date")
+      %{chat: chat}
+    end
+
+    defp failed_turn(chat, harness, extra \\ %{}) do
+      base = turn(1, 0.01)
+
+      {:ok, _chat} =
+        Conversations.record_turn(
+          chat,
+          base |> Map.merge(extra) |> Map.update!("harness", &Map.merge(&1, harness))
+        )
+    end
+
+    test "says so in the transcript, with the reason", %{chat: chat} do
+      text(chat, "I could not run it.")
+
+      failed_turn(chat, %{
+        "subtype" => "error_during_execution",
+        "is_error" => true,
+        "result" => "Code Mode is unavailable because failed to spawn code-mode host"
+      })
+
+      assert [%{role: :user}, %{role: :assistant}, notice] = Conversations.transcript(chat.id)
+      assert notice.role == :notice
+      assert notice.turn == 1
+
+      assert notice.text ==
+               "This turn failed: Code Mode is unavailable because failed to spawn code-mode host"
+    end
+
+    test "says so without a reason when the harness gave none", %{chat: chat} do
+      failed_turn(chat, %{"subtype" => "error_max_turns", "is_error" => true})
+
+      assert [%{role: :user}, %{role: :notice, text: "This turn failed."}] =
+               Conversations.transcript(chat.id)
+    end
+
+    # A reason that is an empty string is no reason: "This turn failed: " with nothing after it
+    # reads as a line cut off.
+    test "says so without a reason when the harness's was empty", %{chat: chat} do
+      failed_turn(chat, %{"is_error" => true, "result" => ""})
+
+      assert [%{role: :user}, %{role: :notice, text: "This turn failed."}] =
+               Conversations.transcript(chat.id)
+    end
+
+    test "keeps no more of the reason than a line's worth, and none of a good turn's reply", %{
+      chat: chat
+    } do
+      failed_turn(chat, %{"is_error" => true, "result" => String.duplicate("x", 5_000)})
+
+      assert %{payload: %{"error" => error}} = Forge.Events.latest_for_job(chat.id, "chat.turn")
+      assert String.length(error) == 500
+
+      {:ok, other} = Conversations.open(Repo.get!(Forge.Projects.Project, chat.project_id), "x")
+      failed_turn(other, %{"is_error" => false, "result" => "Done, and here is the whole reply."})
+
+      assert %{payload: %{"error" => nil, "is_error" => false}} =
+               Forge.Events.latest_for_job(other.id, "chat.turn")
+    end
+
+    # An operator's Stop reports the same subtype as a failure, and is not one
+    # (`docs/design/conversations.md` § Turns).
+    test "is not said of a turn the operator stopped", %{chat: chat} do
+      text(chat, "Working on")
+
+      failed_turn(
+        chat,
+        %{"subtype" => "error_during_execution", "is_error" => true, "result" => "stopped"},
+        %{"interrupted" => true}
+      )
+
+      assert [%{role: :user}, %{role: :assistant}] = Conversations.transcript(chat.id)
+    end
+
+    test "a turn that went well draws no notice", %{chat: chat} do
+      failed_turn(chat, %{"is_error" => false, "result" => "Done."})
+
+      assert [%{role: :user}] = Conversations.transcript(chat.id)
+    end
+
+    test "sits beside the line for a turn that also did not commit, once each", %{chat: chat} do
+      failed_turn(
+        chat,
+        %{"is_error" => true, "result" => "nope"},
+        %{"commit" => nil, "uncommitted" => %{"reason" => "not_committed"}}
+      )
+
+      assert [%{role: :user}, one, two] = Conversations.transcript(chat.id)
+
+      assert Enum.sort([one.text, two.text]) ==
+               ["Nothing from this turn reached the branch.", "This turn failed: nope"]
+    end
+  end
+
   describe "the projection" do
     setup %{project: project} do
       {:ok, chat} = Conversations.open(project, "first")

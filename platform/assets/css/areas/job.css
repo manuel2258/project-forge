@@ -85,7 +85,8 @@
   .job-entry-detail { min-width: 0; overflow-wrap: anywhere; color: var(--ink-2); }
   /* The agent's words, boxed as the transcript boxes them. */
   .job-said {
-    /* Prose stops at a reading measure, as a chat's bubbles do (UX pass, B5). */
+    /* Prose stops at a reading measure on the job page (UX pass, B5). A ticket's and a chat's views
+       fill their column instead, and a chat's bubbles no longer stop short (ticket 48). */
     max-width: 68ch;
     padding: 10px 14px;
     border-radius: var(--radius);

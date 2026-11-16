@@ -33,6 +33,16 @@
         if (!document.documentElement.hasAttribute("data-theme")) {
           setTheme(localStorage.getItem("phx:theme") || "system");
         }
+        // The width a person dragged a ticket's or a chat's side column to, applied before first
+        // paint so a reload does not jump (`Layouts`' `.AsideResize`). The stylesheet holds it to
+        // its limits, so a value that no longer fits is harmless; one that is not a whole number
+        // is ignored.
+        try {
+          const aside = localStorage.getItem("forge:aside-width");
+          if (/^[1-9][0-9]{0,5}$/.test(aside)) {
+            document.documentElement.style.setProperty("--frame-aside-width", aside + "px");
+          }
+        } catch (_) {}
         window.addEventListener("storage", (e) => e.key === "phx:theme" && setTheme(e.newValue || "system"));
         window.addEventListener("phx:set-theme", (e) => setTheme(e.target.dataset.phxTheme));
 

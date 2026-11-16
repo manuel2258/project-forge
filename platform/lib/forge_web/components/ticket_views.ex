@@ -25,6 +25,7 @@ defmodule ForgeWeb.TicketViews do
 
   alias Forge.{Artifacts, Conversations, Events, Git, Jobs, Projects}
   alias ForgeCore.Workflow
+  alias ForgeWeb.Components.StepAccept
   alias ForgeWeb.{Diff, FileType, Format, WorkScreen}
   alias ForgeWeb.Operator.{Actions, QuestionForm}
 
@@ -340,6 +341,13 @@ defmodule ForgeWeb.TicketViews do
   """
   @spec aside?(map()) :: boolean()
   def aside?(assigns), do: aside_doc(assigns) != nil
+
+  # A step's Accept names its own document (`StepAccept.aside_doc_name/1`, the conversation's page
+  # asks the same); an approval, the first document it waits on that has something to render.
+  defp aside_doc(%{docs: docs, decision: %{kind: :step, step: step}}) do
+    name = StepAccept.aside_doc_name(step)
+    Enum.find(docs, &(&1.name == name and &1.latest.body != nil))
+  end
 
   defp aside_doc(%{docs: docs}),
     do: Enum.find(docs, &(&1[:group] == :waiting and &1.latest.body != nil))
@@ -718,7 +726,7 @@ defmodule ForgeWeb.TicketViews do
         >
           {@waits[@step.chat.id]}
         </p>
-        <ForgeWeb.Components.StepAccept.status step={@step} />
+        <StepAccept.status step={@step} />
       </div>
 
       <%!-- The approval itself is the row pinned above, on every view: read Changes or Docs and

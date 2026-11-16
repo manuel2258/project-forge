@@ -7,7 +7,7 @@
   /* -- the transcript ------------------------------------------------------------------------ */
   .chat-messages { display: flex; flex-direction: column; gap: 16px; }
   .chat-messages--stopped { opacity: .72; }
-  .chat-messages [data-said] { max-width: 760px; padding: 12px 16px; border-radius: 10px; }
+  .chat-messages [data-said] { padding: 12px 16px; border-radius: 10px; }
   .chat-messages [data-said="you"] { border: 0; background: var(--surface-2); }
   /* Both sides are full width; on a phone the person's is set in from the left as well as told
      apart by its ground, so a glance down the column says who spoke (UX pass, B6). */

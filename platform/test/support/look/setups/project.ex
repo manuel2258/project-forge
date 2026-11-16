@@ -1,10 +1,17 @@
 defmodule Forge.Look.Setups.Project do
   @moduledoc """
   The project page (`7a`–`7h`, `21c`, `21d`) and the ticket form (`12e`): `game`, with ticket
-  types `feature` and `bug` and a release workflow, and open tickets in every way the Tickets view
+  types `feature`, `bug` and `dev` and a release workflow, and open tickets in every way the Tickets view
   draws one — two waiting on an approval, one stuck, two running with their agent's last line, one
   waiting for a machine, two in the merge queue — then two in its history, three conversations
   (one with two proposals) and a failing mirror.
+
+  **`dev` is the tangled one** (ticket 48): this repository's own `.forge/workflows/dev.yml`, nine
+  states with four loops back and `rebasing`'s way back to `merged`, eight retries of a state on itself, two outcomes on one edge
+  (`reviewing → presenting` on `done` and `budget_exhausted`) and the conflict edge — what the
+  map drew with its labels overprinting. It is written out in full here, not imported, and has no
+  tickets, so the Workflow view opens on `feature` (the type with the most open tickets); a look
+  reaches `dev` with `click text "dev"`. `dev_workflow/0` is its text, which the map's test draws.
 
   Users: `admin` (a project admin, who sees the release block) and `member`. Paths: `project`,
   `merge`, `chats`, `workflow`, `proposals`, `new`, `ticket_new`.
@@ -27,7 +34,12 @@ defmodule Forge.Look.Setups.Project do
     ".forge/agents/plan.md" => "Write a plan.\n",
     ".forge/agents/implement.md" => "Implement the plan.\n",
     ".forge/agents/fix.md" => "Fix the bug.\n",
-    ".forge/agents/release.md" => "Write the changelog.\n"
+    ".forge/agents/release.md" => "Write the changelog.\n",
+    ".forge/agents/refine.md" => "Refine it with the person.\n",
+    ".forge/agents/review.md" => "Review the change.\n",
+    ".forge/agents/present.md" => "Present the change.\n",
+    ".forge/agents/rebase.md" => "Rebase the change.\n",
+    ".forge/commands/check.sh" => "#!/bin/sh\nexit 0\n"
   }
 
   @feature """
@@ -113,6 +125,86 @@ defmodule Forge.Look.Setups.Project do
   limits: { ticket_tokens: 1M }
   """
 
+  @dev """
+  version: 1
+  description: Code changes — refine, plan, implement, check, review, merge.
+  initial: refining
+  commands:
+    check:
+      run: .forge/commands/check.sh
+      produces: check.log
+      timeout: 20m
+  states:
+    refining:
+      chat: true
+      prompt: agents/refine.md
+      inputs: [ticket]
+      produces: [refinement.md]
+    planning:
+      prompt: agents/plan.md
+      inputs: [ticket, refinement.md, implementation.md]
+      produces: [plan.md]
+      budget: { turns: 80, tokens: 800k }
+    implementing:
+      prompt: agents/implement.md
+      inputs: [ticket, refinement.md, plan.md, report.md]
+      produces: [implementation.md, changeset]
+      outcomes: [done, plan_invalid]
+      budget: { turns: 300, tokens: 4M }
+    checking:
+      invoke: [check]
+      exit: { 0: done, 2: gate_unavailable, "*": checks_failed }
+    reviewing:
+      prompt: agents/review.md
+      inputs: [refinement.md, plan.md, implementation.md, report.md, rebase.md, changeset]
+      produces: [report.md]
+      outcomes: [done, issues_found]
+      budget: { turns: 120, tokens: 8M }
+    presenting:
+      prompt: agents/present.md
+      inputs: [refinement.md, plan.md, implementation.md, report.md, rebase.md, changeset]
+      produces: [presentation.md!, commit-message]
+      optional: [presentation.md]
+      budget: { turns: 60, tokens: 600k }
+    review_ready: {}
+    merged:
+      on_enter: merge
+      on_conflict: rebasing
+    rebasing:
+      prompt: agents/rebase.md
+      inputs: [refinement.md, plan.md, changeset]
+      produces: [rebase.md, changeset]
+      outcomes: [done, needs_review]
+      budget: { turns: 100, tokens: 1.6M }
+  transitions:
+    - { from: refining,     to: planning,     approve: [refinement.md] }
+    - { from: planning,     to: implementing }
+    - { from: implementing, to: checking }
+    - { from: implementing, to: planning,     when: plan_invalid,      max: 2 }
+    - { from: checking,     to: reviewing }
+    - { from: checking,     to: implementing, when: checks_failed,     max: 3 }
+    - { from: reviewing,    to: presenting }
+    - { from: reviewing,    to: implementing, when: issues_found,      max: 5 }
+    - { from: presenting,   to: review_ready }
+    - { from: review_ready, to: merged,       approve: [changeset], queue: true }
+    - { from: rebasing,     to: merged,       queue: true }
+    - { from: rebasing,     to: checking,     when: needs_review }
+    - { from: checking,     to: checking,     when: gate_unavailable,  max: 2 }
+    - { from: planning,     to: planning,     when: budget_exhausted,  max: 1 }
+    - { from: planning,     to: planning,     when: did_not_converge,  max: 1 }
+    - { from: implementing, to: implementing, when: budget_exhausted,  max: 1 }
+    - { from: implementing, to: implementing, when: did_not_converge,  max: 1 }
+    - { from: reviewing,    to: presenting,   when: budget_exhausted }
+    - { from: reviewing,    to: reviewing,    when: did_not_converge,  max: 1 }
+    - { from: presenting,   to: presenting,   when: budget_exhausted,  max: 1 }
+    - { from: presenting,   to: presenting,   when: did_not_converge,  max: 1 }
+  limits: { ticket_tokens: 84.2M }
+  """
+
+  @doc "The `dev` type's workflow, written out: the tangled one the map's test draws."
+  @spec dev_workflow() :: String.t()
+  def dev_workflow, do: @dev
+
   @impl true
   def build do
     admin = user_fixture(%{email: "you@example.com"})
@@ -177,6 +269,7 @@ defmodule Forge.Look.Setups.Project do
       Map.merge(@prompts, %{
         ".forge/workflows/feature.yml" => @feature,
         ".forge/workflows/bug.yml" => @bug,
+        ".forge/workflows/dev.yml" => @dev,
         ".forge/workflows/release.yml" => @release,
         "README.md" => "# Game\n"
       })

@@ -116,6 +116,14 @@ defmodule ForgeWeb.QueueLiveTest do
              index(html, "item-questions-#{newer_version.id}")
 
     assert on_screen(view) == "questions-#{older_version.id}"
+    # The queue draws a context column of its own, and it is not the person's to resize: only a
+    # ticket's and a chat's are (`ui.md` § Three layouts).
+    assert has_element?(view, "aside.frame-aside")
+    refute has_element?(view, "#frame-aside-handle")
+    # Nor is the column or the layout drawn as one that can be: the handle's `aria-controls`
+    # names it, and the stylesheet's resizing rules are keyed on it.
+    refute has_element?(view, "#frame-aside")
+    refute has_element?(view, ".frame-columns--resizable")
     # What the queue shows waits on you: the card's current step is the amber one (`ui.md`
     # § Colour), as it is nowhere a ticket waits on nobody.
     assert has_element?(view, "#queue-item .ui-context .ui-track.ui-track--waiting")

@@ -20,6 +20,7 @@ defmodule ForgeWeb.ChatLive do
   alias Forge.{Artifacts, Conversations, Events, Git, Jobs, Merge, Operator, Projects, Tickets}
   alias Forge.Git.Url
   alias ForgeWeb.{ChatViews, Diff, Format, JobStream, TicketViews, Transcript, WorkScreen}
+  alias ForgeWeb.Components.StepAccept
   alias ForgeWeb.Operator.Decision
 
   @tabs ~w(talk changes docs activity)
@@ -81,6 +82,7 @@ defmodule ForgeWeb.ChatLive do
     chat = Conversations.get!(id)
     repo = Projects.repo_path(project)
     branch = Jobs.chat_branch(chat)
+    step = step_view(chat, ticket)
 
     socket
     |> assign(
@@ -98,7 +100,11 @@ defmodule ForgeWeb.ChatLive do
       base_branch: Conversations.base_branch(project, ticket),
       merged: Merge.merged_chat?(chat),
       waiting: Jobs.current_wait(chat),
-      step: step_view(chat, ticket),
+      step: step,
+      # The column beside a step: the ticket's own latest version, as its page draws it, so the
+      # two pages agree (`StepAccept.aside_doc_name/1`). Built here, not in `render/1`, which runs
+      # on every streamed block.
+      step_doc: step_doc(project, ticket, step),
       # The mark of the state the step's ticket is in, for the subline the ticket's own page
       # draws: read once a load, since it parses the pinned workflow.
       step_mark: if(Jobs.Job.step?(chat) and ticket, do: mark(ticket)),
@@ -128,6 +134,25 @@ defmodule ForgeWeb.ChatLive do
     do: if(Jobs.Job.step?(chat), do: Forge.Steps.view(ticket, chat))
 
   defp step_view(_chat, nil), do: nil
+
+  defp step_doc(project, ticket, step) do
+    with true <- StepAccept.row?(step),
+         name when is_binary(name) <- StepAccept.aside_doc_name(step),
+         %{} = artifact <- Artifacts.find(ticket.id, name) do
+      doc =
+        WorkScreen.doc(
+          artifact,
+          Artifacts.versions(ticket.id, name),
+          &~p"/tickets/#{project.name}/#{ticket.number}/artifacts/#{name}/#{&1}",
+          false,
+          Forge.References.ticket_scope(project.name, ticket)
+        )
+
+      if doc.latest.body, do: doc
+    else
+      _none -> nil
+    end
+  end
 
   # The projection, from the log the page holds. The fold is pure; what the transcript's references
   # mean is not, and costs no query when the messages hold none (`Transcript.resolve/3`) and a
@@ -447,8 +472,7 @@ defmodule ForgeWeb.ChatLive do
         viewer: assigns.current_scope.user,
         fetch: fetch_command(assigns.project, assigns.chat),
         conflict: conflict(assigns.decision),
-        merge: merge(assigns.decision),
-        step_doc: ChatViews.step_doc(assigns.step, assigns.docs)
+        merge: merge(assigns.decision)
       )
 
     assigns =
@@ -469,8 +493,9 @@ defmodule ForgeWeb.ChatLive do
       context={context(@project, @ticket, @step)}
       views={views(assigns)}
       view={@tab}
-      measure="48rem"
+      measure={nil}
       fill
+      resizable
     >
       <:decision :if={@decision || @decision_error}>
         <Decision.gone :if={is_nil(@decision)} error={@decision_error} />

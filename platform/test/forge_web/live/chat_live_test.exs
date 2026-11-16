@@ -275,6 +275,32 @@ defmodule ForgeWeb.ChatLiveTest do
     assert html =~ "chat/#{chat.id}"
   end
 
+  test "every view of a chat is drawn at one width, a project's and a ticket's", %{
+    conn: conn,
+    project: project,
+    chat: chat
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+    {:ok, about} = Conversations.open(project, "why did it fail?", ticket: ticket)
+
+    for chat <- [chat, about] do
+      pages =
+        for tab <- ~w(talk changes docs activity) do
+          {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=#{tab}")
+          {tab, render(view)}
+        end
+
+      ForgeWeb.FrameAssertions.assert_one_width(pages)
+    end
+  end
+
+  test "a chat's side column can be resized", %{conn: conn, chat: chat} do
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+    assert has_element?(view, "#frame-aside-handle[role=separator][aria-controls=frame-aside]")
+    assert has_element?(view, "aside#frame-aside")
+  end
+
   test "a ticket chat says which ticket it is about", %{conn: conn, project: project} do
     {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
     {:ok, chat} = Conversations.open(project, "why did it fail?", ticket: ticket)

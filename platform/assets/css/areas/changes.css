@@ -5,10 +5,10 @@
    what the merge approval needs beside them. Also the diff rows a conversation's Changes draws,
    from the same component (`ForgeWeb.Diff.file_table/1`). */
 @layer components {
-  /* Below 1440 Changes reads in the same centred column as Steps and Docs, so switching views
-     does not move the text sideways (UX pass, B2); from 1440 the presentation and the file it
-     follows take the width side by side, and that split is the one exception. */
-  .changes { display: flex; width: 100%; min-width: 0; max-width: 46rem; flex-direction: column; gap: 16px; margin-inline: auto; }
+  /* Changes is as wide as every other view of a ticket and of a chat, the frame's whole measure
+     (ticket 48); from 1440 the presentation and the file it follows take it side by side, which is
+     Changes' own layout inside that width and not an exception to it. */
+  .changes { display: flex; width: 100%; min-width: 0; flex-direction: column; gap: 16px; }
 
   /* -- the switch: `segmented/1`'s look as links (components.css), a sub-view an address ---- */
 
@@ -18,9 +18,9 @@
 
   .changes-empty { color: var(--ink-2); font-size: 13.5px; line-height: 1.55; }
 
-  /* -- the presentation (`19d`): prose at the reading measure ---------------------------- */
+  /* -- the presentation (`19d`): prose, filling its column --------------------------------- */
 
-  .changes-pres { display: flex; min-width: 0; max-width: var(--measure); flex-direction: column; gap: 16px; }
+  .changes-pres { display: flex; min-width: 0; flex-direction: column; gap: 16px; }
   .pres { display: flex; min-width: 0; flex-direction: column; gap: 12px; }
   .pres-head {
     display: flex;
@@ -284,9 +284,6 @@
       text-transform: uppercase;
     }
 
-    .changes { max-width: none; }
-    #changes-commits { max-width: 52rem; }
-
     /* `19g`: the presentation at 680 on the left, the file it points at on the right. */
     .changes-pres-cols {
       display: grid;
@@ -363,7 +360,6 @@
     .changes-index-row:hover { background: var(--surface-1); }
     /* The file in view, by the inset edge every current place wears. */
     .changes-index-row[aria-current] { box-shadow: inset 2px 0 0 var(--ink); background: var(--surface-1); }
-    .changes-files-main { max-width: 980px; }
     /* The index carries each file's `+ −`; the patches beside it do not say it again (B21). */
     .changes-files-cols:has(.changes-index) .diff-summary .ui-diffstat { display: none; }
   }

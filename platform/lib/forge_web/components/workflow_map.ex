@@ -5,9 +5,11 @@ defmodule ForgeWeb.WorkflowMap do
 
   **The map is SVG drawn on the server** from the parsed workflow: a box per state with its job and
   budget, the states left to right in the order the workflow reaches them (`order/1`), an edge to
-  the next state as a straight arrow, a skip forward as an arc above and a loop back as an arc
-  below, approvals and queueing in the link colour, and the open tickets as dots on their states.
-  A box is a link that filters the page's tickets to that state.
+  the next state on `done` alone as a straight arrow, every other edge as one arc per pair of
+  states — a loop back below the boxes, a skip forward above, each at a depth of its own
+  (`ForgeWeb.WorkflowMap.Arcs`) — a state's transitions to itself as a line in its box, approvals
+  and queueing in the link colour, and the open tickets as dots on their states. A box is a link
+  that filters the page's tickets to that state.
   """
 
   use ForgeWeb, :html
@@ -15,6 +17,7 @@ defmodule ForgeWeb.WorkflowMap do
   alias ForgeCore.Workflow
   alias ForgeCore.Workflow.{State, Transition}
   alias ForgeWeb.{Format, Topology}
+  alias ForgeWeb.WorkflowMap.Arcs
 
   @doc """
   What a state's job is, in a few words: its prompt's file and what it produces, `chat · brief.md`
@@ -119,9 +122,17 @@ defmodule ForgeWeb.WorkflowMap do
 
   @box_w 172
   @box_h 76
+  # What a box grows by when any state retries itself: one more line of text.
+  @retries_h 16
   @gap 40
   @pad 12
-  @arc 34
+  # Clear space kept beyond the deepest arc on a side, and all there is on a side with none.
+  @margin 10
+  @bare 8
+  # A state's name is cut to this many characters: 12.5px mono at 0.6em is 7.5px a character, and
+  # the box is `@box_w` less its padding, the mark before the name and the count after it.
+  @name_chars 18
+  @name_chars_counted 15
 
   @doc """
   The map (`7g`, `7h`). `dots` is the open tickets per state, each `:waiting`, `:running`,
@@ -137,18 +148,26 @@ defmodule ForgeWeb.WorkflowMap do
   def map(assigns) do
     names = Topology.order(assigns.workflow)
     index = names |> Enum.with_index() |> Map.new()
-    edges = edges(assigns.workflow, index)
+    {nexts, arcs, retries} = edges(assigns.workflow, names, index)
 
     width = @pad * 2 + length(names) * @box_w + max(length(names) - 1, 0) * @gap
-    top = if Enum.any?(edges, &(&1.shape == :skip)), do: @arc + 14, else: 8
-    bottom = if Enum.any?(edges, &(&1.shape == :back)), do: @arc + 14, else: 8
+    {above, below} = Arcs.reaches(arcs)
+    top = if above > 0, do: above + @margin, else: @bare
+    box_h = if retries == %{}, do: @box_h, else: @box_h + @retries_h
+    bottom_edge = top + box_h
+
+    arcs = Arcs.place(arcs, &x/1, @box_w, top, bottom_edge)
 
     assigns =
       assign(assigns,
-        boxes: Enum.map(names, &box(assigns.workflow, &1, index[&1], top, assigns.dots)),
-        edges: Enum.map(edges, &place(&1, top)),
+        boxes:
+          Enum.map(
+            names,
+            &box(assigns.workflow, &1, index[&1], top, box_h, assigns.dots, retries)
+          ),
+        edges: Enum.map(nexts, &next(&1, top, box_h)) ++ arcs,
         width: width,
-        height: top + @box_h + bottom
+        height: bottom_edge + if(below > 0, do: below + @margin, else: @bare)
       )
 
     ~H"""
@@ -176,9 +195,21 @@ defmodule ForgeWeb.WorkflowMap do
           </marker>
         </defs>
 
-        <g :for={edge <- @edges} class={["wf-map-edge", edge.link && "wf-map-edge--link"]}>
+        <g
+          :for={edge <- @edges}
+          class={["wf-map-edge", edge.link && "wf-map-edge--link"]}
+          data-from={edge.from_name}
+          data-to={edge.to_name}
+        >
+          <title :if={edge[:title]}>{edge.title}</title>
           <path d={edge.d} marker-end={"url(##{@id}-head)"} />
-          <text :if={edge.label} x={edge.lx} y={edge.ly} text-anchor="middle" class="wf-map-label">
+          <text
+            :if={edge[:label]}
+            x={edge.lx}
+            y={edge.ly}
+            text-anchor="middle"
+            class="wf-map-label"
+          >
             {edge.label}
           </text>
         </g>
@@ -227,6 +258,7 @@ defmodule ForgeWeb.WorkflowMap do
 
   defp box_body(assigns) do
     ~H"""
+    <title :if={@box.title}>{@box.title}</title>
     <rect
       x={@box.x}
       y={@box.y}
@@ -237,7 +269,7 @@ defmodule ForgeWeb.WorkflowMap do
     />
     <text x={@box.x + 10} y={@box.y + 20} class="wf-map-name">
       <tspan class="wf-map-mark">{Topology.mark(@box.topology)}</tspan>
-      {@box.name}
+      {@box.label}
     </text>
     <%!-- How many open tickets rest here, in figures: the dots alone had to be counted. --%>
     <text
@@ -251,6 +283,11 @@ defmodule ForgeWeb.WorkflowMap do
     </text>
     <text x={@box.x + 10} y={@box.y + 38} class="wf-map-job">{clip(@box.job, 24)}</text>
     <text x={@box.x + 10} y={@box.y + 54} class="wf-map-job">{@box.budget || "no budget"}</text>
+    <%!-- A state that goes back to itself on an outcome says so here, not as an arc on the
+          box: the outcomes are named on hover. --%>
+    <text :if={@box.retries != []} x={@box.x + 10} y={@box.y + 70} class="wf-map-retries">
+      retries on {length(@box.retries)} {if length(@box.retries) == 1, do: "outcome", else: "outcomes"}
+    </text>
     <circle
       :for={{tone, i} <- Enum.with_index(Enum.take(@box.dots, 6))}
       cx={@box.x + 14 + i * 12}
@@ -278,86 +315,101 @@ defmodule ForgeWeb.WorkflowMap do
     if String.length(text) > max, do: String.slice(text, 0, max - 1) <> "…", else: text
   end
 
-  defp box(workflow, name, i, top, dots) do
+  defp box(workflow, name, i, top, h, dots, retries) do
     state = Workflow.state(workflow, name)
+    dots = Map.get(dots, name, [])
+    retried = Map.get(retries, name, [])
+    label = clip(name, if(dots == [], do: @name_chars, else: @name_chars_counted))
 
     %{
       name: name,
+      label: label,
       topology: ForgeWeb.Topology.of(workflow, name),
       job: job(state),
       budget: budget(state, :short),
-      dots: Map.get(dots, name, []),
+      dots: dots,
+      retries: retried,
+      # What hovering a box says that its face does not: a name that was cut, and what it retries on.
+      title:
+        [
+          label != name && name,
+          retried != [] && "Retries on " <> Enum.join(retried, ", ")
+        ]
+        |> Enum.filter(& &1)
+        |> Enum.join("\n")
+        |> case do
+          "" -> nil
+          text -> text
+        end,
       x: x(i),
       y: top,
       w: @box_w,
-      h: @box_h
+      h: h
     }
   end
 
   defp x(i), do: @pad + i * (@box_w + @gap)
 
-  # Each edge between two drawn states, with the shape its two places give it. An edge whose
-  # source or target is not reached from `initial` has no place on the map and is left out.
-  defp edges(workflow, index) do
-    for edge <- Workflow.edges(workflow),
-        from = index[edge.from],
-        to = index[edge.to],
-        not is_nil(from) and not is_nil(to) do
-      %{
-        from: from,
-        to: to,
-        shape:
-          cond do
-            to == from + 1 -> :next
-            to > from -> :skip
-            true -> :back
-          end,
-        outcome: Transition.outcome(edge),
-        link: edge.approve != [] or Transition.queues?(edge)
-      }
-    end
-    |> Enum.uniq_by(&{&1.from, &1.to, &1.shape})
+  # Every edge between two drawn states, one per pair of states however many outcomes lead along it
+  # (an edge whose source or target is not reached from `initial` has no place on the map and is
+  # left out), as `{straight arrows, arcs, retries}`:
+  #
+  #   * a state's transitions to itself are not edges but its retries, by state;
+  #   * an edge to the next state whose only outcome is `done` is the straight, unlabelled arrow;
+  #   * any other edge is an arc — below if it goes back, above if it goes forward, which includes
+  #     one to the next state that carries another outcome, since its label cannot fit the gap.
+  defp edges(workflow, names, index) do
+    placed =
+      for edge <- Workflow.edges(workflow),
+          from = index[edge.from],
+          to = index[edge.to],
+          not is_nil(from) and not is_nil(to),
+          do: {from, to, edge}
+
+    {loops, between} = Enum.split_with(placed, fn {from, to, _edge} -> from == to end)
+
+    retries =
+      loops
+      |> Enum.group_by(fn {_from, _to, edge} -> edge.from end, fn {_from, _to, edge} ->
+        Transition.outcome(edge)
+      end)
+      # `Enum.uniq/1` is an equivalent mutant for a state that runs something: the parser refuses a
+      # second transition from it on one outcome ("more than one transition from \"a\" on \"x\""),
+      # so its retries never repeat an outcome. A human state is not checked, and a workflow read
+      # back from a pin is not parsed again, so it is kept: `retries on N outcomes` must not
+      # over-count.
+      |> Map.new(fn {name, outcomes} -> {name, Enum.uniq(outcomes)} end)
+
+    pairs =
+      between
+      |> Enum.group_by(fn {from, to, _edge} -> {from, to} end, fn {_from, _to, edge} -> edge end)
+      |> Enum.sort_by(fn {pair, _edges} -> pair end)
+      |> Enum.map(fn {{from, to}, edges} ->
+        %{
+          from: from,
+          to: to,
+          from_name: Enum.at(names, from),
+          to_name: Enum.at(names, to),
+          outcomes: edges |> Enum.map(&Transition.outcome/1) |> Enum.uniq(),
+          link: Enum.any?(edges, &(&1.approve != [] or Transition.queues?(&1)))
+        }
+      end)
+
+    {nexts, arcs} =
+      Enum.split_with(
+        pairs,
+        &(&1.to == &1.from + 1 and &1.outcomes == [Workflow.default_outcome()])
+      )
+
+    {nexts, arcs, retries}
   end
 
-  defp place(%{shape: :next} = edge, top) do
-    y = top + div(@box_h, 2)
-    x1 = x(edge.from) + @box_w
-    x2 = x(edge.to)
+  defp next(edge, top, box_h) do
+    y = top + div(box_h, 2)
 
-    %{
-      d: "M#{x1},#{y} L#{x2 - 2},#{y}",
-      label: nil,
-      lx: 0,
-      ly: 0,
-      link: edge.link
-    }
-  end
-
-  defp place(%{shape: :skip} = edge, top) do
-    x1 = x(edge.from) + div(@box_w, 2)
-    x2 = x(edge.to) + div(@box_w, 2)
-    y = top
-
-    %{
-      d: "M#{x1},#{y} C#{x1},#{y - @arc} #{x2},#{y - @arc} #{x2},#{y - 2}",
-      label: "on #{edge.outcome}, skips",
-      lx: div(x1 + x2, 2),
-      ly: y - @arc + 12,
-      link: edge.link
-    }
-  end
-
-  defp place(%{shape: :back} = edge, top) do
-    x1 = x(edge.from) + div(@box_w, 2) + 10
-    x2 = x(edge.to) + div(@box_w, 2) - 10
-    y = top + @box_h
-
-    %{
-      d: "M#{x1},#{y} C#{x1},#{y + @arc} #{x2},#{y + @arc} #{x2},#{y + 2}",
-      label: "on #{edge.outcome}, back",
-      lx: div(x1 + x2, 2),
-      ly: y + @arc - 4,
-      link: edge.link
-    }
+    Map.merge(edge, %{
+      d: "M#{x(edge.from) + @box_w},#{y} L#{x(edge.to) - 2},#{y}",
+      label: nil
+    })
   end
 end

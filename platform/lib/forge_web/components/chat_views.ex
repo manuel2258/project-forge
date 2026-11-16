@@ -495,16 +495,4 @@ defmodule ForgeWeb.ChatViews do
     </article>
     """
   end
-
-  @doc """
-  The document a step's wide screen reads beside the conversation: the step's own with the newest
-  version that this conversation wrote and that has a body to render, or nil.
-  """
-  @spec step_doc(map() | nil, [map()]) :: map() | nil
-  def step_doc(nil, _docs), do: nil
-
-  def step_doc(step, docs) do
-    names = for %{own: true, version: version, name: name} <- step.documents, version, do: name
-    Enum.find(docs, &(&1.name in names and &1.latest.body != nil))
-  end
 end

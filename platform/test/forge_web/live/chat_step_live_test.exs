@@ -168,6 +168,208 @@ defmodule ForgeWeb.ChatStepLiveTest do
     assert has_element?(view, "#aside-document", "refinement.md v1")
     assert has_element?(view, "#aside-document", "The leaderboard.")
     refute has_element?(view, "#chat-aside-branch")
+    # Beside it, the line that resizes the column.
+    assert has_element?(view, "#frame-aside-handle[role=separator][aria-controls=frame-aside]")
+  end
+
+  # One width (`ui.md` § Three layouts): going from a ticket's Steps to its step's Talk moves
+  # neither the title, nor the tabs, nor the left edge of the content.
+  test "the step's Talk is drawn at the width of the ticket's views", %{
+    conn: conn,
+    chat: chat,
+    ticket: ticket,
+    project: project
+  } do
+    answered(chat, 1, %{"refinement.md" => "# Refinement\n\nThe leaderboard.\n"})
+    {:ok, talk, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+    ticket_pages =
+      for tab <- ~w(steps changes docs activity) do
+        {:ok, view, _html} =
+          live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=#{tab}")
+
+        {tab, render(view)}
+      end
+
+    ForgeWeb.FrameAssertions.assert_one_width([{"talk", render(talk)} | ticket_pages])
+  end
+
+  # Both pages draw the column beside the view by one rule (`StepAccept.aside_doc_name/1`), or
+  # going from Steps to Talk adds a column and moves the content.
+  describe "the document beside the view" do
+    defp register_with(user, workflow) do
+      {:ok, project} =
+        Projects.register(
+          %{
+            name: "stepaside-#{System.unique_integer([:positive])}",
+            repo_path: seeded_repo(%{".forge/workflow.yml" => workflow})
+          },
+          user
+        )
+
+      funded!(project)
+      {:ok, ticket} = Tickets.admit(project, %{title: "Aside"}, {:user, user.id})
+      {project, ticket}
+    end
+
+    defp aside_of(conn, path) do
+      {:ok, view, _html} = live(conn, path)
+      view |> element("#aside-document") |> render() |> Floki.parse_fragment!() |> Floki.text()
+    end
+
+    test "a step that declares nothing of its own draws the document its outcome approves", %{
+      conn: conn,
+      user: user
+    } do
+      {project, ticket} =
+        register_with(user, """
+        version: 1
+        initial: talking
+        states:
+          talking:
+            chat: true
+            prompt: agents/refine.md
+            inputs: [ticket]
+          drafting:
+            prompt: agents/plan.md
+            produces: [refinement.md]
+            budget: { turns: 5, tokens: 200k }
+          review_ready: {}
+        transitions:
+          - { from: talking, to: review_ready, approve: [refinement.md] }
+          - { from: review_ready, to: drafting }
+          - { from: drafting, to: talking }
+        limits: { ticket_tokens: 5M }
+        """)
+
+      [chat] = Jobs.step_chats_for_ticket(ticket.id)
+      answered(chat, 1, %{"refinement.md" => "# Refinement\n\nThe leaderboard.\n"})
+
+      for path <- [~p"/chats/#{chat.id}", ~p"/tickets/#{project.name}/#{ticket.number}"] do
+        text = aside_of(conn, path)
+        assert text =~ "refinement.md v1"
+        assert text =~ "The leaderboard."
+      end
+    end
+
+    test "a second visit draws what the first one wrote, at its latest version on the ticket", %{
+      conn: conn,
+      user: user
+    } do
+      {project, ticket} =
+        register_with(user, """
+        version: 1
+        initial: refining
+        states:
+          refining:
+            chat: true
+            prompt: agents/refine.md
+            inputs: [ticket]
+            produces: [refinement.md]
+          review_ready: {}
+        transitions:
+          - { from: refining, to: review_ready }
+          - { from: review_ready, to: refining }
+        limits: { ticket_tokens: 5M }
+        """)
+
+      [first] = Jobs.step_chats_for_ticket(ticket.id)
+      answered(first, 1, %{"refinement.md" => "# Refinement\n\nFirst visit.\n"})
+      {:ok, view, _html} = live(conn, ~p"/chats/#{first.id}")
+
+      render_hook(view, "decision:accept", %{
+        "outcome" => "done",
+        "seen" => %{"refinement.md" => "1"}
+      })
+
+      {:ok, _} = Forge.Engine.choose(Tickets.get!(ticket.id), user.id, "refining")
+      [_first, second] = ticket.id |> Jobs.step_chats_for_ticket() |> Enum.sort_by(& &1.attempt)
+      answered(second, 1, %{})
+
+      for path <- [~p"/chats/#{second.id}", ~p"/tickets/#{project.name}/#{ticket.number}"] do
+        text = aside_of(conn, path)
+        assert text =~ "refinement.md v1"
+        assert text =~ "First visit."
+      end
+
+      # A visit that is over has moved the ticket on, and draws no column beside it, as the
+      # ticket's own page draws none for a step it is no longer resting in.
+      {:ok, old, _html} = live(conn, ~p"/chats/#{first.id}")
+      assert has_element?(old, "#step-over", "accepted")
+      refute has_element?(old, "#aside-document")
+    end
+
+    # `alpha.md` sorts before `zeta.md`, so the ticket page's old rule (the first document its
+    # decision waits on) drew `alpha.md`; the step's own document is the one both pages draw.
+    test "the step's own document is drawn, not an approved one that sorts before it", %{
+      conn: conn,
+      user: user
+    } do
+      {project, ticket} =
+        register_with(user, """
+        version: 1
+        initial: talking
+        states:
+          talking:
+            chat: true
+            prompt: agents/refine.md
+            inputs: [ticket]
+            produces: [zeta.md]
+          drafting:
+            prompt: agents/plan.md
+            produces: [alpha.md]
+            budget: { turns: 5, tokens: 200k }
+          review_ready: {}
+        transitions:
+          - { from: talking, to: review_ready, approve: [alpha.md] }
+          - { from: review_ready, to: drafting }
+          - { from: drafting, to: talking }
+        limits: { ticket_tokens: 5M }
+        """)
+
+      [chat] = Jobs.step_chats_for_ticket(ticket.id)
+
+      answered(chat, 1, %{
+        "alpha.md" => "# Alpha\n\nThe approved one.\n",
+        "zeta.md" => "# Zeta\n\nThe step's own.\n"
+      })
+
+      for path <- [~p"/chats/#{chat.id}", ~p"/tickets/#{project.name}/#{ticket.number}"] do
+        text = aside_of(conn, path)
+        assert text =~ "zeta.md v1"
+        assert text =~ "The step's own."
+      end
+    end
+
+    test "a document the step has not written is passed over for the next one that has", %{
+      conn: conn,
+      user: user
+    } do
+      {project, ticket} =
+        register_with(user, """
+        version: 1
+        initial: talking
+        states:
+          talking:
+            chat: true
+            prompt: agents/refine.md
+            inputs: [ticket]
+            produces: [a.md, b.md]
+          review_ready: {}
+        transitions:
+          - { from: talking, to: review_ready }
+        limits: { ticket_tokens: 5M }
+        """)
+
+      [chat] = Jobs.step_chats_for_ticket(ticket.id)
+      answered(chat, 1, %{"b.md" => "# B\n\nOnly this one.\n"})
+
+      for path <- [~p"/chats/#{chat.id}", ~p"/tickets/#{project.name}/#{ticket.number}"] do
+        text = aside_of(conn, path)
+        assert text =~ "b.md v1"
+        assert text =~ "Only this one."
+      end
+    end
   end
 
   # The strip reads the ticket's jobs, its documents and a diff of its whole branch, so it is

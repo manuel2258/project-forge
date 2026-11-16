@@ -497,6 +497,259 @@ defmodule Forge.Look.BrowserTest do
     end)
   end
 
+  # The side column of a ticket and a chat is the person's to resize (`docs/design/ui.md` § Three
+  # layouts): the width is one value in this browser, kept across a reload and another chat, held
+  # to the column's and the content's minimums whatever is stored, and there is no line to drag
+  # on a screen too narrow for columns. Synthetic events, because the hook listens on the window
+  # rather than capturing a pointer, so a script can drive it.
+  describe "the resizable side column" do
+    setup %{opts: opts} do
+      built = Setups.Chats.build()
+      {login, _} = Forge.AccountsFixtures.generate_user_magic_link_token(built.users["member"])
+      %{opts: Keyword.merge(opts, login_token: login, paths: built.paths), built: built}
+    end
+
+    defp aside_width(session),
+      do:
+        Look.script(
+          session,
+          "return Math.round(document.getElementById('frame-aside').getBoundingClientRect().width)"
+        )
+
+    defp main_width(session),
+      do:
+        Look.script(
+          session,
+          "return Math.round(document.querySelector('.frame-main').getBoundingClientRect().width)"
+        )
+
+    defp stored(session),
+      do: Look.script(session, "return localStorage.getItem('forge:aside-width')")
+
+    defp on_handle(session, source),
+      do:
+        Look.script(
+          session,
+          "const h = document.getElementById('frame-aside-handle'); " <> source
+        )
+
+    defp ready(session, what) do
+      until(
+        session,
+        "const h = document.getElementById('frame-aside-handle'); return !!h && h.hasAttribute('aria-valuenow')",
+        what
+      )
+    end
+
+    defp key(session, name, shift \\ false) do
+      on_handle(
+        session,
+        "h.dispatchEvent(new KeyboardEvent('keydown', {key: '#{name}', shiftKey: #{shift}, bubbles: true, cancelable: true})); return true"
+      )
+    end
+
+    defp reload(session) do
+      Look.script(session, "location.reload(); return true")
+      Process.sleep(300)
+      ready(session, "the page to come back")
+    end
+
+    test "the line moves with the keys and the pointer, is kept, and is held to its limits", %{
+      opts: opts,
+      built: built
+    } do
+      capture_io(fn ->
+        assert :ok ==
+                 run_with(
+                   "width wide\nvisit :step_ticket",
+                   [
+                     fn session ->
+                       ready(session, "the handle")
+                       assert aside_width(session) == 400
+
+                       assert on_handle(session, "return h.getAttribute('aria-valuenow')") ==
+                                "400"
+
+                       assert stored(session) == nil
+
+                       # Left widens; Shift moves by more.
+                       key(session, "ArrowLeft")
+                       key(session, "ArrowLeft")
+                       assert aside_width(session) == 432
+                       assert stored(session) == "432"
+
+                       assert on_handle(session, "return h.getAttribute('aria-valuenow')") ==
+                                "432"
+
+                       key(session, "ArrowRight", true)
+                       assert aside_width(session) == 368
+                       assert stored(session) == "368"
+
+                       # `aria-valuemax` is what leaves the content 34rem (544px at the root's 16).
+                       assert on_handle(session, "return Number(h.getAttribute('aria-valuemax'))") ==
+                                Look.script(
+                                  session,
+                                  "return Math.floor(document.querySelector('.frame-columns').getBoundingClientRect().width) - 544"
+                                )
+
+                       # A patch of the page leaves the two attributes the hook keeps: Docs is a
+                       # patch, and the server's markup has neither of them.
+                       Look.script(
+                         session,
+                         "document.getElementById('tab-docs').click(); return true"
+                       )
+
+                       until(session, "return !!document.getElementById('docs')", "Docs to open")
+
+                       assert on_handle(session, "return h.getAttribute('aria-valuenow')") ==
+                                "368"
+
+                       assert on_handle(session, "return h.hasAttribute('aria-valuemax')") == true
+
+                       # A reload draws it at once: the early script, not the hook, set it.
+                       reload(session)
+                       assert aside_width(session) == 368
+
+                       assert Look.script(
+                                session,
+                                "return document.documentElement.style.getPropertyValue('--frame-aside-width')"
+                              ) == "368px"
+
+                       # One width for every ticket and chat.
+                       Look.script(
+                         session,
+                         "location.href = '#{built.paths["responding"]}'; return true"
+                       )
+
+                       Process.sleep(300)
+                       ready(session, "another chat's handle")
+                       assert aside_width(session) == 368
+
+                       # A drag moves the line with the pointer: the column's left edge follows it.
+                       Look.script(
+                         session,
+                         """
+                         const h = document.getElementById('frame-aside-handle');
+                         const x = document.getElementById('frame-aside').getBoundingClientRect().left;
+                         h.dispatchEvent(new PointerEvent('pointerdown', {button: 0, clientX: x, bubbles: true, cancelable: true}));
+                         window.dispatchEvent(new PointerEvent('pointermove', {clientX: x - 100}));
+                         window.dispatchEvent(new PointerEvent('pointerup', {clientX: x - 100}));
+                         return true
+                         """
+                       )
+
+                       assert aside_width(session) == 468
+                       assert stored(session) == "468"
+
+                       # Only the primary button drags: a press of another one and a move leave
+                       # the column where it is.
+                       Look.script(
+                         session,
+                         """
+                         const h = document.getElementById('frame-aside-handle');
+                         const x = document.getElementById('frame-aside').getBoundingClientRect().left;
+                         h.dispatchEvent(new PointerEvent('pointerdown', {button: 2, clientX: x, bubbles: true, cancelable: true}));
+                         window.dispatchEvent(new PointerEvent('pointermove', {clientX: x - 60}));
+                         window.dispatchEvent(new PointerEvent('pointerup', {clientX: x - 60}));
+                         return true
+                         """
+                       )
+
+                       assert aside_width(session) == 468
+
+                       # A second press before the first is released (two fingers) is one drag:
+                       # after the release nothing follows the pointer.
+                       Look.script(
+                         session,
+                         """
+                         const h = document.getElementById('frame-aside-handle');
+                         const x = document.getElementById('frame-aside').getBoundingClientRect().left;
+                         h.dispatchEvent(new PointerEvent('pointerdown', {button: 0, clientX: x, bubbles: true, cancelable: true}));
+                         h.dispatchEvent(new PointerEvent('pointerdown', {button: 0, clientX: x, bubbles: true, cancelable: true}));
+                         window.dispatchEvent(new PointerEvent('pointerup', {clientX: x}));
+                         window.dispatchEvent(new PointerEvent('pointermove', {clientX: x - 80}));
+                         return true
+                         """
+                       )
+
+                       assert aside_width(session) == 468
+
+                       assert on_handle(session, "return h.hasAttribute('data-dragging')") ==
+                                false
+
+                       # Double click puts it back.
+                       on_handle(
+                         session,
+                         "h.dispatchEvent(new MouseEvent('dblclick', {bubbles: true})); return true"
+                       )
+
+                       assert aside_width(session) == 400
+                       assert stored(session) == nil
+
+                       assert on_handle(session, "return h.getAttribute('aria-valuenow')") ==
+                                "400"
+
+                       # Never narrower than 360px, and the content never narrower than 34rem
+                       # (544px at the root's 16): a stored width from a larger window, or a
+                       # hand-edited one, is held to both when drawn.
+                       Look.script(
+                         session,
+                         "localStorage.setItem('forge:aside-width', '5000'); return true"
+                       )
+
+                       reload(session)
+                       assert aside_width(session) >= 360
+                       assert main_width(session) >= 544
+
+                       # Both fit side by side: the column was not left at 5000px, past the edge.
+                       assert aside_width(session) + main_width(session) <=
+                                Look.script(
+                                  session,
+                                  "return Math.round(document.querySelector('.frame-columns').getBoundingClientRect().width)"
+                                )
+
+                       Look.script(
+                         session,
+                         "localStorage.setItem('forge:aside-width', '10'); return true"
+                       )
+
+                       reload(session)
+                       assert aside_width(session) == 360
+
+                       # Not a whole number: ignored, the default stands.
+                       Look.script(
+                         session,
+                         "localStorage.setItem('forge:aside-width', '12abc'); return true"
+                       )
+
+                       reload(session)
+                       assert aside_width(session) == 400
+                     end
+                   ],
+                   opts
+                 )
+      end)
+    end
+
+    test "a portrait screen has no line to drag", %{opts: opts} do
+      capture_io(fn ->
+        assert :ok ==
+                 run_with(
+                   "width portrait\nvisit :step_ticket\nwait \"#title-row\"",
+                   [
+                     fn session ->
+                       assert Look.script(
+                                session,
+                                "return document.getElementById('frame-aside-handle').checkVisibility()"
+                              ) == false
+                     end
+                   ],
+                   opts
+                 )
+      end)
+    end
+  end
+
   test "a toast clears itself: gone 4.5 s after logging out put it there", %{opts: opts} do
     log_out = """
     const form = document.createElement("form")

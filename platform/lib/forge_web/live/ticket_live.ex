@@ -736,7 +736,7 @@ defmodule ForgeWeb.TicketLive do
         WorkScreen.views([{"steps", "Steps", nil}], ~p"/tickets/#{@project.name}/#{@ticket.number}")
       }
       view="steps"
-      measure="46rem"
+      measure={nil}
     >
       <%!-- Not a work screen: no view of it needs a scroller of its own. --%>
       <div id="steps">
@@ -766,8 +766,9 @@ defmodule ForgeWeb.TicketLive do
       context={{@project.name, ~p"/projects/#{@project.name}"}}
       views={views(assigns)}
       view={@view}
-      measure={if @view == "changes", do: nil, else: "46rem"}
+      measure={nil}
       fill
+      resizable
     >
       <:decision :if={@decision || @release || @decision_error}>
         <TicketViews.release_band :if={@release} ticket={@ticket} release={@release} />

@@ -28,6 +28,24 @@ defmodule ForgeWeb.Components.StepAccept do
   def row?(%{over: nil} = step), do: not nothing_yet?(step)
   def row?(_step), do: false
 
+  @doc """
+  The document a wide screen reads beside the step's view (`16i`), by name: the first of the step's
+  documents that has a version, or nil. `Forge.Steps.view/2` lists the step's own documents before
+  the ones an outcome approves, so this is an own document with a version when there is one — and
+  that order is the whole of the rule, which a test holds (`chat_step_live_test.exs`). The ticket's
+  page and the conversation's both ask it, so going from a ticket's Steps to its step's Talk never
+  adds or removes the column (`docs/design/ui.md` § The Accept area).
+  """
+  @spec aside_doc_name(map() | nil) :: String.t() | nil
+  def aside_doc_name(%{documents: documents}) do
+    case Enum.find(documents, & &1.version) do
+      nil -> nil
+      %{name: name} -> name
+    end
+  end
+
+  def aside_doc_name(nil), do: nil
+
   attr :step, :map, required: true, doc: "`Forge.Steps.view/2`"
 
   @doc "What the step says in place while it has no row: nothing yet, or over."

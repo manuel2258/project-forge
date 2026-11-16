@@ -87,6 +87,13 @@ defmodule ForgeWeb.Layouts do
     default: false,
     doc: "the content is one scroller of the page's own, given the whole height"
 
+  attr :resizable, :boolean,
+    default: false,
+    doc: """
+    the context column is the person's to resize from 1440px, by a handle on the line between it
+    and the content: a ticket's and a chat's pages only (`docs/design/ui.md` § Three layouts)
+    """
+
   slot :details, doc: "the object's details, dropped from its title"
   slot :decision, doc: "the decision row, pinned under the top bar"
   slot :composer, doc: "what sits under the content: a conversation's composer"
@@ -239,10 +246,11 @@ defmodule ForgeWeb.Layouts do
       <div :if={@decision != []} class="frame-decision">{render_slot(@decision)}</div>
 
       <main id="frame-content" class="frame-content" data-scroller>
-        <div class="frame-columns">
+        <div class={["frame-columns", (@resizable and @aside != []) && "frame-columns--resizable"]}>
           <aside :if={@list != []} class="frame-list">{render_slot(@list)}</aside>
           <%!-- The content and what sits under it share one column: from 768px the composer,
-                the question card and a dock are as wide as the content and centred with it,
+                the question card and a dock are as wide as the content, and centred with it where the page
+                has a measure,
                 and on a wide screen they stop where the columns either side begin
                 (`docs/design/ui.md` § Three layouts). --%>
           <div class="frame-main" style={@measure && "--frame-measure: #{@measure}"}>
@@ -251,7 +259,25 @@ defmodule ForgeWeb.Layouts do
             </div>
             <div :if={@composer != []} class="frame-composer">{render_slot(@composer)}</div>
           </div>
-          <aside :if={@aside != []} class="frame-aside">{render_slot(@aside)}</aside>
+          <%!-- The line between the content and the column, drawn from 1440px: a separator that
+                resizes the column, by pointer or arrow keys (`.AsideResize`, below). Its value is
+                the hook's to keep current, so a patch leaves those two alone. --%>
+          <div
+            :if={@resizable and @aside != []}
+            id="frame-aside-handle"
+            class="frame-aside-handle"
+            role="separator"
+            aria-orientation="vertical"
+            aria-controls="frame-aside"
+            aria-label="Resize the side column"
+            aria-valuemin="360"
+            tabindex="0"
+            phx-hook=".AsideResize"
+            phx-mounted={JS.ignore_attributes(["aria-valuenow", "aria-valuemax"])}
+          />
+          <aside :if={@aside != []} id={@resizable && "frame-aside"} class="frame-aside">
+            {render_slot(@aside)}
+          </aside>
         </div>
       </main>
 
@@ -268,6 +294,100 @@ defmodule ForgeWeb.Layouts do
         </.bottom_strip>
       </div>
     </div>
+
+    <%!-- The width is one value for every ticket and chat, in this browser (`forge:aside-width`),
+          set as `--frame-aside-width` on `<html>`, which LiveView never patches: it survives a
+          patch, a live navigation and a reconnect, and `root.html.heex` applies it before first
+          paint so a reload does not jump. Nothing here reaches the server. The limits are the
+          stylesheet's (`clamp()` in `frame.css`), so a width stored from a larger window is held
+          to them whatever it says; this hook only keeps its own writes inside them and the
+          separator's `aria-valuenow` true. --%>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".AsideResize">
+      const KEY = "forge:aside-width"
+      const MIN = 360
+      const MIN_MAIN_REM = 34
+
+      export default {
+        mounted() {
+          const root = document.documentElement
+          const columns = this.el.parentElement
+          const aside = () => document.getElementById("frame-aside")
+          const rem = () => parseFloat(getComputedStyle(root).fontSize) || 16
+          const max = () => Math.max(MIN, Math.floor(columns.getBoundingClientRect().width - MIN_MAIN_REM * rem()))
+          const drawn = () => Math.round(aside().getBoundingClientRect().width)
+
+          this.sync = () => {
+            this.el.setAttribute("aria-valuenow", String(drawn()))
+            this.el.setAttribute("aria-valuemax", String(max()))
+          }
+
+          const set = (px) => {
+            root.style.setProperty("--frame-aside-width", `${Math.min(Math.max(Math.round(px), MIN), max())}px`)
+            this.sync()
+          }
+
+          const store = () => {
+            try { localStorage.setItem(KEY, String(drawn())) } catch (_) {}
+          }
+
+          this.stop = null
+
+          this.el.addEventListener("pointerdown", (down) => {
+            if (down.button !== 0) return
+            down.preventDefault()
+            // A second press before the first is released (two fingers) ends the first drag, and
+            // each drag's `stop` removes its own listeners: the column would otherwise follow the
+            // pointer with nothing held. Either alone is enough, so removing only one of the two
+            // changes nothing a test can see; removing both is what the browser test catches.
+            this.stop?.()
+            // The column's right edge stays where it is; its left edge follows the pointer. Listening
+            // on the window rather than capturing the pointer keeps a drag going over the content.
+            const right = aside().getBoundingClientRect().right
+            this.el.setAttribute("data-dragging", "")
+
+            const move = (event) => set(right - event.clientX)
+            const stop = () => {
+              window.removeEventListener("pointermove", move)
+              window.removeEventListener("pointerup", stop)
+              window.removeEventListener("pointercancel", stop)
+              this.el.removeAttribute("data-dragging")
+              if (this.stop === stop) this.stop = null
+              store()
+            }
+            this.stop = stop
+
+            window.addEventListener("pointermove", move)
+            window.addEventListener("pointerup", stop)
+            window.addEventListener("pointercancel", stop)
+          })
+
+          this.el.addEventListener("dblclick", () => {
+            root.style.removeProperty("--frame-aside-width")
+            try { localStorage.removeItem(KEY) } catch (_) {}
+            this.sync()
+          })
+
+          // The line moves with the arrow it points along: left widens the column.
+          this.el.addEventListener("keydown", (event) => {
+            const step = event.shiftKey ? 64 : 16
+            const by = {ArrowLeft: step, ArrowRight: -step}[event.key]
+            if (by === undefined) return
+            event.preventDefault()
+            set(drawn() + by)
+            store()
+          })
+
+          this.observer = new ResizeObserver(() => this.sync())
+          this.observer.observe(columns)
+          this.sync()
+        },
+
+        destroyed() {
+          this.observer?.disconnect()
+          this.stop?.()
+        }
+      }
+    </script>
 
     <%!-- The viewport the frame fills. Where the browser honours the viewport's
           `interactive-widget=resizes-content`, the layout viewport shrinks with the on-screen

@@ -477,6 +477,22 @@ defmodule ForgeWeb.TicketWorkScreenTest do
     end
   end
 
+  # One width (`ui.md` § Three layouts, ticket 48): Changes was drawn across the page and the rest
+  # in a 46rem column, so a tab moved the title, the tabs and the text's left edge.
+  test "every view of a ticket is drawn at one width", %{
+    conn: conn,
+    project: project,
+    ticket: ticket
+  } do
+    pages =
+      for tab <- ~w(steps changes docs activity) do
+        {:ok, view, _html} = live(conn, page(project, ticket, "?tab=#{tab}"))
+        {tab, render(view)}
+      end
+
+    ForgeWeb.FrameAssertions.assert_one_width(pages)
+  end
+
   describe "Steps" do
     # A job that has spent nothing says nothing of it: `0 windows` beside every job that has not
     # started was the figure the row's end gave to nobody (UX pass, A11, B9).
@@ -1481,12 +1497,25 @@ defmodule ForgeWeb.TicketWorkScreenTest do
     } do
       {:ok, view, _html} = live(conn, page(project, ticket))
       refute has_element?(view, "#aside-document")
+      # No column, so no line between it and the content to drag, and no resizable layout.
+      refute has_element?(view, "#frame-aside-handle")
+      refute has_element?(view, ".frame-columns--resizable")
 
       pend_document(ticket)
       {:ok, view, _html} = live(conn, page(project, ticket, "?tab=steps"))
 
       assert has_element?(view, ".frame-aside #aside-document", "refinement.md v1")
       assert view |> element("#aside-document") |> render() =~ "<h1>Refinement</h1>"
+
+      # The line between the content and the column resizes it (`ui.md` § Three layouts): a
+      # separator, reachable by keyboard, naming what it controls.
+      assert has_element?(
+               view,
+               ~s|#frame-aside-handle[role=separator][aria-orientation=vertical][aria-controls=frame-aside][aria-label="Resize the side column"][aria-valuemin="360"][tabindex="0"]|
+             )
+
+      assert has_element?(view, "aside#frame-aside.frame-aside #aside-document")
+      assert has_element?(view, ".frame-columns.frame-columns--resizable")
     end
   end
 

@@ -274,7 +274,8 @@ model the platform did not record, no price in a currency the provider did not r
   *Details ›*, *Repository ›*), which grows to the height with its text where it was; the old 46px floor and its *no `btn-sm`* rule are replaced by
   these sizes, which are the handoff's.
 - **Spacing steps** 2, 4, 6, 8, 10, 12, 14, 16, 20, 24, 30, 40. Gutters 20 on a phone and 30 on a
-  desktop. **Reading measure 680–820px** for prose, a transcript, a presentation.
+  desktop. **Reading measure 680px** for the presentation beside its file in Changes; a ticket's and a
+  chat's views fill their column (§ Three layouts).
 - **Radii**: 4 a badge, 5 a desktop control, 6 a button, field or row, 8 a card or notice, 14 the
   outer corners of a sheet or drop panel, a pill for the queue button, a count bubble, a toast and
   the composer's field.
@@ -428,7 +429,7 @@ it on the left (`19c`).
 |---|---|---|
 | phone | below 768px | § The phone. |
 | portrait | 768–1439px | The desktop header and title row, then **the same blocks stacked in the phone's order**. An object's strip views become the title row's tabs. |
-| wide | 1440px and up | The header and title row, then columns: **a list column of 320–360px on the left and/or a context column of 360–440px on the right**, the content between them at its reading measure. |
+| wide | 1440px and up | The header and title row, then columns: **a list column of 320–360px on the left and/or a context column on the right**, the content between them, filling what they leave. The context column is 400px to begin with, 360px at least, and its width is the person's (below). |
 
 **What sits under the content belongs to its column.** The composer, the queue's question card
 and its Later · Send dock, a ticket's dock and an empty page's one button are drawn in the content
@@ -438,10 +439,27 @@ which then run the window's full height. Drawn across the window they sat 30px o
 the content they answered, a commit button 700px from the choices it committed, and a list
 column cut off after two items (UX pass, A2, B1, C18). **The content column is centred on every
 page**, and a page that asks for all of the width (`measure={nil}`) still stops at 90rem. **Every
-view of a ticket reads in one centred column** — Changes included, below 1440px, where it used to
-sit at the gutter while Steps and Docs were centred, so switching views moved the text sideways;
-from 1440px the presentation beside the file it follows is the one exception. An agent's prose
-stops at 68 characters a line.
+view of a ticket and of a chat is one width** — Steps, Changes, Docs, Activity, and Talk on a step
+(`measure={nil}`): the frame's full measure, 90rem at most, less the right-hand column where there
+is one (ticket 48; before it Steps, Docs and Activity were a 46rem column, a chat 48rem and Changes the
+width of the page from 1440px, so a tab moved the title, the tabs and the text's left edge). **The
+content fills it, from one left edge**: rows, messages, the question card and its *Send*, a choice
+row and its button, the composer. **The title row and the tabs do not move between views**, nor
+from a ticket's Steps to its step's Talk. An agent's prose is not held to 68 characters a line on
+these views — a person's decision, with the cost that a ticket with nothing waiting is up to 90rem
+of text on a wide screen. Changes' presentation beside the file it follows (`19g`) is Changes' own
+layout inside that width, not an exception to it.
+
+**The right-hand column is the person's to resize** — on a ticket and a chat, from 1440px, where
+they draw one: the document an approval or a step's Accept waits on, a chat's *What it changed*.
+**The line between the content and the column is the handle**, `col-resize` on hover, a separator
+that resizes the column, focusable, moved by the arrow keys (← widens the column; 16px, 64 with
+Shift) and put back to its 400px by a double click. **One width serves every ticket and chat**, kept
+in the browser (`localStorage` `forge:aside-width`, applied before first paint) and never sent to
+the server, so another browser starts from the default. **The column never draws below 360px and
+the content never below 34rem**: a width remembered from a larger window is held to those when
+drawn, whatever is stored. There is no handle on a phone or a portrait screen, nor on the split
+inside Changes (`19g`), which stays as it is.
 
 **The order is never changed** — wide adds columns, it never moves a block above another — so a
 person who knows the phone's page knows the desktop's. Every page has a wide and a portrait
@@ -466,7 +484,9 @@ drawn for a signed-in account only: the sign-in page tells nobody which release 
 (32px) on the right — the same list the phone's strip draws, from one definition. **On a page
 with no list or context column it takes the body's measure and centring**, so the title starts
 where the content does rather than at the window's gutter above a centred body (UX re-check #16);
-beside a list column it stays at the gutter, over the list. The decision
+beside a list column it stays at the gutter, over the list. **A ticket's and a chat's views are
+all at 90rem**, so the title row is the same on each and is not cut short on one view and whole on
+another. The decision
 row on a desktop is 56px and spans the window under it; its button is 34px.
 
 ### The title menu
@@ -1183,7 +1203,7 @@ the ticket is then — a rejection made here goes on to Steps, where its ways fo
 dropped — the table in § Steps says where each went.
 
 **On a wide screen** the document an approval or a step's Accept waits on is drawn, rendered, in
-the context column beside whichever view is open (`16i`), so it is read while deciding; below 1440
+the context column beside whichever view is open (`16i`), so it is read while deciding, at the width the person has dragged it to (§ Three layouts); below 1440
 it is a tap away on Docs. A release ticket's band (`21e`) sits where a decision row would, above
 it when both are there.
 
@@ -1591,7 +1611,8 @@ project's clone URL, with a copy button. The composer is drawn on Changes as wel
 **On a wide screen** Changes stops being a view: the branch, its commits, its commit message,
 *Merge into main* and the facts sit in the right column beside the conversation (`15f`), the
 Changes tab and the merge row are not drawn there, and a merge refused from that column says why in
-it; on a conflict the column draws the two ways out where *Merge into main* would be. End it stays in the details.
+it; on a conflict the column draws the two ways out where *Merge into main* would be. End it stays in the details. The column is
+as wide as the person has dragged it (§ Three layouts).
 
 ### Talk
 
@@ -1723,7 +1744,11 @@ step's outcome as a job's row does.
 **On a desktop** (`16h`) the row is pinned under the title row with Accept on the right, the
 question card keeps the split pane at the bottom with its own Send, and the two never touch.
 **On a wide screen** (`16i`) the document opens beside the conversation instead of over it, with
-the passage behind an open question highlighted, and Accept's panel is anchored to its button.
+the passage behind an open question highlighted, and Accept's panel is anchored to its button. **Both pages draw
+the same document beside the view** (`StepAccept.aside_doc_name/1`): the first of the step's
+documents that has a version — its own ones come first, then those an outcome approves — at its latest version on the ticket — so going from Steps
+to Talk never adds or removes the column. **Only while the step has its row**: a visit that is over
+(accepted, moved on) draws no column on either page. The column is the person's to resize (§ Three layouts).
 
 ## The project page
 
@@ -1804,6 +1829,20 @@ the open tickets as dots on their states, counted in figures in the box and each
 hover — which is what the board used to show at a glance.
 Clicking a state filters the tickets table. It is drawn on the server, as SVG, from the parsed
 workflow.
+
+**How the arcs are drawn** (ticket 48; the handoff drew one skip and one loop, which is why a real
+workflow's overprinted). **Each pair of states is one edge**, however many outcomes lead along it,
+labelled `on a, b` with every one. **A loop back is an arc below the boxes and a skip forward one
+above, each at a depth of its own wherever its span overlaps another's**: a 20px band apiece, a
+shorter arc inside (shallower than) a longer one it overlaps, so nested arcs never cross. **An
+arrow to the next state is the straight, unlabelled one only when `done` is its sole outcome**; with
+any other outcome — `reviewing → presenting` on `done` and `budget_exhausted` — it is a low arc
+above, among the skips, and no straight arrow as well, because its label cannot fit the 40px gap.
+**A state's transitions to itself are not arcs**: its box says `retries on 2 outcomes` and names
+them on hover. The labels, `back` and `skips` dropped (the side says which), sit inside their own
+arc, are never over another label, an arc or a box, and one too long for the room its arc has is
+cut with “…” and named whole on hover. **The map grows taller, not wider**, and scrolls sideways
+past the page, boxes at their size, as before.
 
 ### Proposals
 

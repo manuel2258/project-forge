@@ -135,6 +135,29 @@ defmodule ForgeWorker.ArchiveTest do
     assert Registry.lookup(ForgeWorker.Job.Registry, {:archive, context.job_dir}) == []
   end
 
+  # This runs when any job ends. Another job's archive on the machine is live, and unmounting it
+  # leaves that job with an empty mountpoint under a prompt that promises the folder.
+  #
+  # Here and not in `Job.DirTest`, which is async: this sets and then deletes the application-wide
+  # `:archive_mount` and `:archive_test_pid`, which `Job.RunnerTest`'s archive tests (async too) read
+  # while their job runs. A job that finds them gone mounts nothing, and the lifecycle assertion saw
+  # `[:slice]` and nothing after it, one run in several (the gate's, at `f07a995`).
+  @tag :tmp_dir
+  test "releases the archive of a directory it removes, and of no other", %{tmp_dir: tmp_dir} do
+    old = Path.join(tmp_dir, "11111111-1111-1111-1111-111111111111")
+    recent = Path.join(tmp_dir, "22222222-2222-2222-2222-222222222222")
+    File.mkdir_p!(Path.join(old, "home"))
+    File.mkdir_p!(Path.join(recent, "home"))
+    File.touch!(old, System.os_time(:second) - 8 * 24 * 60 * 60)
+
+    assert ForgeWorker.Job.Dir.sweep(tmp_dir, 7 * 24 * 60 * 60 * 1000) == 1
+
+    released = Path.join(old, "archive")
+    live = Path.join(recent, "archive")
+    assert_received {:unmounted, ^released}
+    refute_received {:unmounted, ^live}
+  end
+
   test "handing a job's files back releases the archive first", context do
     :ok = Archive.start(context.job_dir, @grant, "j")
     flush()

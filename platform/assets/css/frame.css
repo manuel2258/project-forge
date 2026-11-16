@@ -50,6 +50,8 @@
   }
   .frame-list,
   .frame-aside { padding: 16px var(--gutter-phone); }
+  /* Drawn from 1440px only (the wide layout below); there is no column to resize before it. */
+  .frame-aside-handle { display: none; }
 
   /* A page with a scroller of its own (a transcript, a tab body): the content is bounded and the
      page's scroller takes its height. */
@@ -231,6 +233,26 @@
     .frame-main { flex: 1 1 0%; }
     .frame-list { width: var(--column-list); min-width: 320px; flex-shrink: 0; border-right: 1px solid var(--border); }
     .frame-aside { width: var(--column-context); min-width: 360px; flex-shrink: 0; border-left: 1px solid var(--border); }
+
+    /* The context column of a ticket and a chat is the person's to resize (ticket 48). Its width
+       is `--frame-aside-width` on <html>, set by `.AsideResize` and by the early script in
+       root.html.heex from what the browser kept, between the column's minimum and what leaves the
+       content 34rem: the clamp holds a width remembered from a larger window to both, whatever
+       is stored. The `max(360px, …)` is the minimum winning on a window too narrow for both. The
+       lower bound of the clamp is an equivalent mutant: `.frame-aside`'s own `min-width: 360px`
+       holds it too, so no test can tell its removal. */
+    .frame-columns--resizable > .frame-main { min-width: 34rem; }
+    .frame-columns--resizable > .frame-aside {
+      width: clamp(360px, var(--frame-aside-width, var(--column-context)), max(360px, calc(100% - 34rem)));
+    }
+    /* The handle is the line between the two: 10px wide and pulled back by 5px a side, so it takes
+       no room and nothing moves for it, its hit area overhanging the column's 1px border a few
+       pixels each side. It has a size, since a zero-width element is not displayed. */
+    .frame-aside-handle { position: relative; z-index: 3; display: block; width: 10px; flex-shrink: 0; margin-inline: -5px; cursor: col-resize; touch-action: none; }
+    .frame-aside-handle::after { content: ""; position: absolute; top: 0; bottom: 0; left: 4px; width: 3px; background: transparent; transition: background var(--dur-fast); }
+    .frame-aside-handle:hover::after { background: var(--border-strong); }
+    .frame-aside-handle[data-dragging]::after { background: var(--ink-3); }
+    .frame-aside-handle:focus-visible::after { background: var(--ink); }
   }
 
   /* The sign-in screens: no frame, no usage, no version. */

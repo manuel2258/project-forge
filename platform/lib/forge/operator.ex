@@ -479,11 +479,14 @@ defmodule Forge.Operator do
     with :ok <- allow(chat, user, :use), do: Conversations.stop(chat)
   end
 
-  @doc "Ends a conversation."
-  @spec close_chat(Job.t(), User.t(), String.t()) :: :ok | {:error, term()}
-  def close_chat(%Job{kind: :chat} = chat, %User{} = user, reason \\ "closed") do
+  @doc """
+  A person's *End* of a conversation (`Forge.Conversations.close/2`): refused for a workflow
+  step's conversation, whoever asks, and for one already ended.
+  """
+  @spec close_chat(Job.t(), User.t()) :: :ok | {:error, term()}
+  def close_chat(%Job{kind: :chat} = chat, %User{} = user) do
     with :ok <- allow(chat, user, :use),
-         do: Conversations.close(chat, reason, actor: {:user, user.id})
+         do: Conversations.close(chat, actor: {:user, user.id})
   end
 
   @doc """
@@ -522,13 +525,6 @@ defmodule Forge.Operator do
   defp step_chat(%Job{id: id}) do
     chat = Repo.get!(Job, id)
     if Job.step?(chat), do: {:ok, chat}, else: {:error, :not_a_step}
-  end
-
-  @doc "Reopens an ended conversation."
-  @spec reopen_chat(Job.t(), User.t()) :: {:ok, Job.t()} | {:error, term()}
-  def reopen_chat(%Job{kind: :chat} = chat, %User{} = user) do
-    with :ok <- allow(chat, user, :use),
-         do: Conversations.reopen(chat, actor: {:user, user.id})
   end
 
   @doc "Merges a conversation's branch."

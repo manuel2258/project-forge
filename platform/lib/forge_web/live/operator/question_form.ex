@@ -511,8 +511,14 @@ defmodule ForgeWeb.Operator.QuestionForm do
     )
   end
 
-  defp refused(socket, id, :not_live),
-    do: Actions.refuse(socket, {:form, id}, "This conversation has stopped. Reopen it to answer.")
+  # What `Conversations.send/3` refuses with: a conversation a person ended, and a step whose
+  # step is over. A conversation merely without a machine is not refused: the answer starts it.
+  defp refused(socket, id, :ended),
+    do: Actions.refuse(socket, {:form, id}, "This conversation was ended, so it takes no answer.")
+
+  defp refused(socket, id, :step_over),
+    do:
+      Actions.refuse(socket, {:form, id}, "This step is over, so nothing more can be said in it.")
 
   defp refused(socket, id, reason),
     do: Actions.refuse(socket, {:form, id}, "Not sent: #{why(reason)}")

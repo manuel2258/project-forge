@@ -1339,11 +1339,11 @@ defmodule ForgeWeb.QueueLiveTest do
     assert since =~ "1h"
   end
 
-  # The group the ticket asks for: whether a ticket's work is on a machine or still waiting for
-  # one, at a glance from the Queue (`docs/design/ui.md` § A job waiting for a machine). Quiet,
+  # **Open tickets** (`docs/design/ui.md` § A job waiting for a machine): every open ticket that
+  # is not on hold and waits on nobody, each drawn as the project's Tickets list draws it. Quiet,
   # below everything, and in no count — so the assertions are on position, on the absence of the
-  # marks, and on the counts not moving.
-  describe "work under way" do
+  # marks, on the counts not moving, and on each row saying what the Tickets list says.
+  describe "open tickets" do
     defp on_worker(ticket) do
       {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
       [job | _] = Jobs.for_ticket(ticket.id)
@@ -1356,40 +1356,127 @@ defmodule ForgeWeb.QueueLiveTest do
       ticket
     end
 
-    defp under_way(view), do: view |> element("#queue-under-way") |> render()
+    defp open(view), do: view |> element("#queue-open") |> render()
+    defp row_of(view, ticket), do: view |> element("#queue-open-rows-#{ticket.id}") |> render()
 
-    test "a running ticket and a waiting one each get a line, and say which", %{
+    defp say(ticket, text) do
+      Repo.insert!(%Forge.Events.Event{
+        ticket_id: ticket.id,
+        project_id: ticket.project_id,
+        actor: %{"kind" => "job", "id" => nil},
+        type: "job.harness.text",
+        payload: %{"text" => text}
+      })
+    end
+
+    defp pause_spend! do
+      previous = Application.get_env(:forge, Forge.Spend, [])
+      Application.put_env(:forge, Forge.Spend, daily_tokens: 0)
+      on_exit(fn -> Application.put_env(:forge, Forge.Spend, previous) end)
+    end
+
+    test "a running ticket and a waiting one each get a row, drawn as the Tickets list does", %{
       conn: conn,
       project: project
     } do
       running = on_worker(admit(project, "Already on a machine"))
-      on_worker(admit(project, "Also on a machine"))
       waiting = admit(project, "Still queued for one")
 
       {:ok, view, _html} = live(conn, ~p"/")
 
-      # Each half says what it is once, over its titles, rather than on every line (UX pass, A9).
-      assert has_element?(view, "#under-way-running #under-way-#{running.id}")
-      assert has_element?(view, "#under-way-waiting #under-way-#{waiting.id}")
-      refute has_element?(view, "#under-way-running #under-way-#{waiting.id}")
-      refute under_way(view) =~ "Not yet on a worker."
+      assert view |> element("#queue-open .ui-eyebrow") |> render() =~ "Open tickets"
 
-      # Asymmetric on purpose: with one of each, a sentence that counted the two groups the wrong
-      # way round would read the same and nothing here would notice.
-      assert view |> element("#under-way-running .queue-quiet") |> render() =~
-               "2 tickets running on a worker."
+      # The row: the number *with its project*, the title, the compact track with the step
+      # marked, the state, and what it is doing — which differs for the two.
+      row = row_of(view, running)
+      assert row =~ "#{project.name}##{running.number}"
+      assert row =~ "Already on a machine"
+      assert row =~ "ui-track--compact"
+      assert row =~ ~r/running (\d+[smh]|&lt;1m)/
+      assert row_of(view, waiting) =~ "waiting for a machine"
+      refute row_of(view, waiting) =~ ~r/running (\d|&lt;)/
 
-      assert view |> element("#under-way-waiting .queue-quiet") |> render() =~
-               "1 ticket not yet on a worker."
-
-      # Each line leads to its ticket, and offers nothing that commits — the digest's rule.
+      # Each leads to its own project's ticket, and offers nothing that commits.
       assert has_element?(
                view,
-               ~s(#under-way-#{running.id} a[href="/tickets/#{project.name}/#{running.number}"])
+               ~s(#queue-open-rows-#{running.id}[href="/tickets/#{project.name}/#{running.number}"])
              )
 
-      refute has_element?(view, "#queue-under-way [phx-click]")
-      refute has_element?(view, "#queue-under-way form")
+      refute has_element?(view, "#queue-open [phx-click]")
+      refute has_element?(view, "#queue-open form")
+    end
+
+    # A ticket between jobs and one the cap holds are in the group: it is every open ticket that
+    # waits on nobody, not only those with work on a machine.
+    test "a ticket between jobs is a row, and so is one the spend cap holds", %{
+      conn: conn,
+      project: project
+    } do
+      between = admit(project, "Between jobs")
+      [job | _] = Jobs.for_ticket(between.id)
+      {:ok, _} = Repo.update(Forge.Jobs.Job.progress_changeset(job, %{status: :hibernated}))
+      held_by_cap = admit(project, "Held by the cap")
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      assert has_element?(view, "#queue-open-rows-#{between.id}")
+      assert row_of(view, held_by_cap) =~ "waiting for a machine"
+
+      pause_spend!()
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      # `paused · spend`, neutral — and still no item, count or badge.
+      assert row_of(view, held_by_cap) =~ "paused · spend"
+      refute row_of(view, held_by_cap) =~ "ticket-doing--info"
+      assert subline(view) == "nothing waiting"
+      refute has_element?(view, "#desktop-header .frame-queue .ui-count--accent")
+    end
+
+    # The Tickets list shows spend past half the allowance on a phone; this group always shows
+    # it, and shows nothing for a ticket that has spent nothing.
+    test "usage is shown whenever there is some, and not for a ticket that spent nothing", %{
+      conn: conn,
+      project: project
+    } do
+      spent = admit(project, "Spent a little")
+      unspent = admit(project, "Spent nothing")
+      Repo.update!(Ecto.Changeset.change(spent, usage: 12_000))
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      assert row_of(view, spent) =~ "ticket-usage"
+      refute row_of(view, spent) =~ "ticket-usage--high"
+      refute row_of(view, unspent) =~ "ticket-usage"
+    end
+
+    # The agent's own words, drawn as text and never as markup.
+    test "the latest line is escaped text", %{conn: conn, project: project} do
+      ticket = admit(project, "Talking")
+      say(ticket, "<b>bold</b> <script>alert(1)</script> and the rest")
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      row = row_of(view, ticket)
+
+      assert row =~ "agent · "
+      assert row =~ "&lt;b&gt;bold&lt;/b&gt;"
+      refute row =~ "<b>bold"
+      refute row =~ "<script"
+    end
+
+    test "newest change first, as the Tickets list orders its rows", %{
+      conn: conn,
+      project: project
+    } do
+      older = admit(project, "Changed long ago")
+      newer = admit(project, "Changed just now")
+
+      Repo.update_all(from(t in Tickets.Ticket, where: t.id == ^older.id),
+        set: [updated_at: DateTime.add(DateTime.utc_now(), -3600, :second)]
+      )
+
+      {:ok, _view, html} = live(conn, ~p"/")
+
+      assert index(html, "queue-open-rows-#{newer.id}") <
+               index(html, "queue-open-rows-#{older.id}")
     end
 
     # Below the decisions per the answered question, and below the digest because it is the
@@ -1407,26 +1494,25 @@ defmodule ForgeWeb.QueueLiveTest do
       assert index(html, "item-questions-#{decision.id}") <
                index(html, "assumption-#{question.id}")
 
-      assert index(html, "assumption-#{question.id}") < index(html, "under-way-#{moving.id}")
+      assert index(html, "assumption-#{question.id}") <
+               index(html, "queue-open-rows-#{moving.id}")
     end
 
-    # Criterion 3. Accent is the queue's mark for an item waiting on a human and is used for
-    # nothing else; neither is `mark/1`'s outline for an approval or a review. A job that is
-    # merely running, or merely held for capacity, is not a decision.
-    test "no line carries a mark or an accent", %{conn: conn, project: project} do
+    # Nothing waits here: no mark, no accent, because an open ticket is not a decision.
+    test "no row carries a mark or an accent", %{conn: conn, project: project} do
       on_worker(admit(project, "Already on a machine"))
       admit(project, "Still queued for one")
 
       {:ok, view, _html} = live(conn, ~p"/")
-      section = under_way(view)
+      section = open(view)
 
-      for class <- ["accent", "ui-row", "ui-eyebrow--", "ui-choice"] do
+      for class <- ["ui-row--accent", "ui-eyebrow--", "ui-choice", "ui-track--waiting"] do
         refute section =~ class
       end
     end
 
-    # Criterion 4. The header and the nav badge count `@items`, which these are not in: a number
-    # that answering nothing ever lowers is not a count of what is waiting.
+    # The header and the nav badge count the items, which these are not in: a number that
+    # answering nothing ever lowers is not a count of what is waiting.
     test "neither counts in the header or the nav badge", %{conn: conn, project: project} do
       ask(admit(project, "Stopped"), [blocking("backend", "Which backend?")])
 
@@ -1438,13 +1524,13 @@ defmodule ForgeWeb.QueueLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/")
 
-      assert has_element?(view, "#queue-under-way")
+      assert has_element?(view, "#queue-open")
       assert subline(view) == before_header
       assert before_header == "1 of 1 · 1 decision"
       assert view |> element("#desktop-header .frame-queue .ui-count") |> render() =~ ">1<"
     end
 
-    test "a ticket under way alone leaves the badge off entirely", %{
+    test "a ticket in the group alone leaves the badge off entirely", %{
       conn: conn,
       project: project
     } do
@@ -1452,15 +1538,15 @@ defmodule ForgeWeb.QueueLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/")
 
-      assert has_element?(view, "#queue-under-way")
+      assert has_element?(view, "#queue-open")
       assert subline(view) == "nothing waiting"
       refute has_element?(view, "#desktop-header .frame-queue .ui-count--accent")
       assert view |> element("#queue-end") |> render() =~ "Nothing needs you."
     end
 
-    # Criterion 6. A placement stick leaves the pending job on the row, so without the status
-    # filter this ticket would be drawn twice: once in accent as a decision and once quietly as
-    # though it were only waiting for a machine.
+    # A placement stick leaves the pending job on the row, so without the status filter this
+    # ticket would be drawn twice: once in accent as a decision and once quietly as though it
+    # were only waiting for a machine.
     test "a stuck ticket is drawn once, as stuck", %{conn: conn, project: project} do
       ticket = admit(project, "Nothing could hold it")
       {:ok, _stuck} = Forge.Engine.stick(ticket, "no template could hold it", :placement)
@@ -1468,31 +1554,60 @@ defmodule ForgeWeb.QueueLiveTest do
       {:ok, view, _html} = live(conn, ~p"/")
 
       assert has_element?(view, "#item-stuck-#{ticket.id}")
-      refute has_element?(view, "#under-way-#{ticket.id}")
-      refute has_element?(view, "#queue-under-way")
+      refute has_element?(view, "#queue-open-rows-#{ticket.id}")
+      refute has_element?(view, "#queue-open")
     end
 
-    # `docs/design/capacity.md` keeps a paused ticket out of the queue entirely, and the cap is
-    # node-wide: without the drop, every active ticket arrives here at once the moment it trips.
-    test "a spend-paused ticket is not in the group at all", %{conn: conn, project: project} do
-      admit(project, "Held by the cap")
-
-      {:ok, view, _html} = live(conn, ~p"/")
-      assert has_element?(view, "#queue-under-way")
-
-      previous = Application.get_env(:forge, Forge.Spend, [])
-      Application.put_env(:forge, Forge.Spend, daily_tokens: 0)
-      on_exit(fn -> Application.put_env(:forge, Forge.Spend, previous) end)
+    # An item above is not also a row: a ticket with a question is the question.
+    test "a ticket with a question waiting is the question and not a row", %{
+      conn: conn,
+      project: project
+    } do
+      ticket = admit(project, "Stopped")
+      ask(ticket, [blocking("backend", "Which backend?")])
+      other = admit(project, "Not asking")
 
       {:ok, view, _html} = live(conn, ~p"/")
 
-      refute has_element?(view, "#queue-under-way")
-      assert view |> element("#queue-end") |> render() =~ "Nothing needs you."
+      refute has_element?(view, "#queue-open-rows-#{ticket.id}")
+      assert has_element?(view, "#queue-open-rows-#{other.id}")
     end
 
-    # The failure this read was found by: a command state creates no workflow job, so the page
-    # said "Nothing needs you" while the ticket's build was on a machine.
-    test "a ticket whose build is on a machine is listed", %{conn: conn, project: project} do
+    test "a ticket on hold is never a row", %{conn: conn, project: project} do
+      held = admit(project, "Parked")
+      Repo.update!(Ecto.Changeset.change(held, held_at: DateTime.utc_now(:second)))
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      refute has_element?(view, "#queue-open-rows-#{held.id}")
+      refute has_element?(view, "#queue-open")
+    end
+
+    # The read that leaks most easily: another project's ticket, whose title and latest line a
+    # row would print.
+    test "another project's ticket is never a row", %{conn: conn} do
+      {:ok, other} =
+        Projects.register(
+          %{name: "elsewhere-#{System.unique_integer([:positive])}", repo_path: seeded_repo()},
+          Forge.AccountsFixtures.user_fixture()
+        )
+
+      hidden = admit(other, "Not yours to see")
+      say(hidden, "a private line")
+
+      {:ok, view, html} = live(conn, ~p"/")
+
+      refute has_element?(view, "#queue-open-rows-#{hidden.id}")
+      refute html =~ "Not yours to see"
+      refute html =~ "a private line"
+    end
+
+    # The failure the old group was found by: a command state creates no workflow job, so the
+    # page said "Nothing needs you" while the ticket's build was on a machine.
+    test "a ticket whose build is on a machine is a row that says running", %{
+      conn: conn,
+      project: project
+    } do
       ticket = admit(project, "Checking")
       [job | _] = Jobs.for_ticket(ticket.id)
       {:ok, _} = Repo.update(Forge.Jobs.Job.progress_changeset(job, %{status: :parked}))
@@ -1518,22 +1633,50 @@ defmodule ForgeWeb.QueueLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/")
 
-      assert has_element?(view, "#under-way-running #under-way-#{ticket.id}")
-      # A half with nothing in it is not drawn as *0 tickets*.
-      refute has_element?(view, "#under-way-waiting")
+      assert row_of(view, ticket) =~ ~r/running (\d+[smh]|&lt;1m)/
     end
 
-    test "a ticket whose current job has finished has no line", %{conn: conn, project: project} do
-      ticket = admit(project, "Done with that job")
-      [job | _] = Jobs.for_ticket(ticket.id)
-
-      {:ok, _hibernated} =
-        Repo.update(Forge.Jobs.Job.progress_changeset(job, %{status: :hibernated}))
+    # Phone and portrait draw the group once, after the end of the pass, and never while an item
+    # is on screen; landscape draws the list column's. Both copies are in the page at the end
+    # (the stylesheet shows one), and only the column's while an item is on screen.
+    test "it is drawn after the end of the pass, and not while an item is on screen", %{
+      conn: conn,
+      project: project
+    } do
+      ticket = admit(project, "Still queued for one")
+      asked = admit(project, "Stopped")
+      ask(asked, [blocking("backend", "Which backend?")])
+      assumed = ask(admit(project, "Carried on"), [non_blocking("naming", "Which name?")])
+      [question] = Repo.preload(assumed, :questions).questions
 
       {:ok, view, _html} = live(conn, ~p"/")
 
-      refute has_element?(view, "#under-way-#{ticket.id}")
-      refute has_element?(view, "#queue-under-way")
+      # While an item is on screen, only the list column's copies, both with something to show.
+      assert on_screen(view)
+      assert has_element?(view, "#queue-open #queue-open-rows-#{ticket.id}")
+      assert has_element?(view, "#queue-digest #assumption-#{question.id}")
+      refute has_element?(view, "#queue-end-open")
+      refute has_element?(view, "#queue-end-digest")
+
+      view |> element("#queue-later") |> render_click()
+
+      assert on_screen(view) == nil
+      assert has_element?(view, "#queue-end-open #queue-end-open-rows-#{ticket.id}")
+      assert has_element?(view, "#queue-end-digest #end-assumption-#{question.id}")
+      # After the end's sentence, in the item's column.
+      html = render(view)
+      assert index(html, "queue-end") < index(html, "queue-end-open")
+    end
+
+    test "the All sheet links to it with its count", %{conn: conn, project: project} do
+      ask(admit(project, "Stopped"), [blocking("backend", "Which backend?")])
+      admit(project, "One")
+      admit(project, "Two")
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      assert view |> element("#queue-all .queue-sheet-quiet") |> render() =~ "Open tickets · 2"
+      refute render(view) =~ "Under way"
     end
   end
 

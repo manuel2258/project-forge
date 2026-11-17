@@ -46,7 +46,7 @@ defmodule Forge.ConversationsTest do
       %{project: project, person: person} = context
       chat = chat_fixture(%{project: project})
 
-      assert :ok = Forge.Operator.close_chat(chat, person, "closed")
+      assert :ok = Forge.Operator.close_chat(chat, person)
 
       events = Events.for_job(chat.id)
 
@@ -59,12 +59,14 @@ defmodule Forge.ConversationsTest do
       assert Enum.filter(events, &(&1.type == "chat.close_requested")) == []
     end
 
-    test "reopening one names the person who did it", context do
+    # Sending is how a conversation with no machine is started again, and it is logged as a reopen
+    # by the sender, so who restarted it — and spent from its credential pool — can be found.
+    test "starting one again by sending names the person who sent", context do
       %{project: project, person: person} = context
       chat = chat_fixture(%{project: project})
       {:ok, _ended} = Conversations.ended(chat, nil, "idle")
 
-      assert {:ok, _chat} = Forge.Operator.reopen_chat(chat, person)
+      assert {:ok, _event} = Forge.Operator.send_chat(chat, person, "carry on")
 
       assert [reopened] = Enum.filter(Events.for_job(chat.id), &(&1.type == "chat.reopened"))
       assert reopened.actor == %{"kind" => "user", "id" => person.id}
@@ -81,7 +83,7 @@ defmodule Forge.ConversationsTest do
       {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
       chat = chat_fixture(%{project: project, status: :running, worker_id: worker.id})
 
-      assert :ok = Forge.Operator.close_chat(chat, person, "closed")
+      assert :ok = Forge.Operator.close_chat(chat, person)
 
       events = Events.for_job(chat.id)
 
@@ -1747,20 +1749,23 @@ defmodule Forge.ConversationsTest do
     # the new process answered the opening message a second time, as though new, and knew
     # nothing said after it. Two exchanges, so that a split at the *first* reply would leave the
     # second question looking unanswered and be caught.
-    test "a reopened conversation is given what was said, and nothing to answer again", %{
-      chat: chat
-    } do
+    test "a conversation carried on is given what was said, and only the new message to answer",
+         %{
+           chat: chat
+         } do
       text(chat, "It is a game.")
       {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.01))
       {:ok, _event} = Conversations.send(chat, "which engine?")
       text(chat, "Its own.")
       {:ok, chat} = Conversations.record_turn(chat, turn(2, 0.02))
       {:ok, chat} = Conversations.ended(chat, nil, "idle")
-      {:ok, chat} = Conversations.reopen(chat)
+      {:ok, _event} = Conversations.send(chat, "and the lexer?")
+      chat = Jobs.get!(chat.id)
 
       spec = assigned_spec(chat)
 
-      assert spec["prompt"] == nil
+      # The message that started it again is what it answers, and is not in the replay.
+      assert spec["prompt"] == "and the lexer?"
 
       # All four, in the order they were said, each saying who said it.
       replay = spec["replay"]
@@ -1774,16 +1779,17 @@ defmodule Forge.ConversationsTest do
       assert positions == Enum.sort(positions)
       assert replay =~ ~r/## The person[^\n]*\n\nwhich engine\?/
       assert replay =~ ~r/## You[^\n]*\n\nIts own\./
+      refute replay =~ "and the lexer?"
     end
 
-    test "what the person says after a reopen is what it answers, and not replayed", %{
+    test "what the person says after the machine is released is what it answers, not replayed", %{
       chat: chat
     } do
       text(chat, "It is a game.")
       {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.01))
       {:ok, chat} = Conversations.ended(chat, nil, "idle")
-      {:ok, chat} = Conversations.reopen(chat)
       {:ok, _event} = Conversations.send(chat, "does it still build?")
+      chat = Jobs.get!(chat.id)
 
       spec = assigned_spec(chat)
 
@@ -1795,7 +1801,7 @@ defmodule Forge.ConversationsTest do
     # Every reopen clears `out/`, resumed or cold, so a project chat's own documents
     # were gone from its view — while a ticket chat's came back as the ticket's. Now it is handed
     # what it last wrote of each, and not its proposals, which are backlog and not documents.
-    test "a reopened project chat is handed what it wrote, at its latest", %{chat: chat} do
+    test "a project chat carried on is handed what it wrote, at its latest", %{chat: chat} do
       {:ok, chat} =
         Conversations.record_turn(
           chat,
@@ -1814,7 +1820,8 @@ defmodule Forge.ConversationsTest do
         )
 
       {:ok, chat} = Conversations.ended(chat, nil, "idle")
-      {:ok, chat} = Conversations.reopen(chat)
+      {:ok, _event} = Conversations.send(chat, "go on")
+      chat = Jobs.get!(chat.id)
 
       assert [%{"name" => "notes.md", "version" => 2, "content" => "# Two\n"}] =
                assigned_spec(chat)["inputs"]
@@ -2060,7 +2067,8 @@ defmodule Forge.ConversationsTest do
     test "a reply the process never finished is replayed as cut off", %{chat: chat} do
       text(chat, "Let me look at the")
       {:ok, chat} = Conversations.ended(chat, nil, "worker_lost")
-      {:ok, chat} = Conversations.reopen(chat)
+      {:ok, _event} = Conversations.send(chat, "are you there?")
+      chat = Jobs.get!(chat.id)
 
       replay = assigned_spec(chat)["replay"]
 
@@ -2297,7 +2305,7 @@ defmodule Forge.ConversationsTest do
     # What moves a row between the two sections is a chat starting, ending, coming back and its
     # turn finishing, and each is told on the chats topic: a ticketless chat has no ticket for
     # the ticket topic to name.
-    test "starting, a turn, ending and reopening each tell the lists", %{
+    test "starting, a turn, ending and carrying on each tell the lists", %{
       project: project,
       chat: chat
     } do
@@ -2312,7 +2320,7 @@ defmodule Forge.ConversationsTest do
       {:ok, chat} = Conversations.ended(chat, nil, "idle")
       assert_receive {:chat_changed, ^chat_id, _, nil}
 
-      {:ok, _chat} = Conversations.reopen(chat)
+      {:ok, _event} = Conversations.send(chat, "again")
       assert_receive {:chat_changed, ^chat_id, _, nil}
     end
 
@@ -2334,13 +2342,13 @@ defmodule Forge.ConversationsTest do
       %{chat: chat}
     end
 
-    test "closing it finishes it; losing the machine only makes it dormant", %{chat: chat} do
+    test "closing it finishes it; losing the machine only releases it", %{chat: chat} do
       {:ok, closed} = Conversations.ended(chat, nil, "closed")
       assert closed.status == :finished
 
       {:ok, other} = Conversations.open(Projects.get!(chat.project_id), "another")
-      {:ok, dormant} = Conversations.ended(other, nil, "worker_lost")
-      assert dormant.status == :hibernated
+      {:ok, released} = Conversations.ended(other, nil, "worker_lost")
+      assert released.status == :hibernated
     end
 
     # Found on a running node: three conversations the gate could never place sat `pending` for
@@ -2377,55 +2385,64 @@ defmodule Forge.ConversationsTest do
       assert Forge.Workers.get!(worker.id).status == :idle
     end
 
-    # The machine is gone, so there is nothing for the message to reach. Recording it anyway put
-    # a message in the transcript that was never delivered and never would be — a real chat on
-    # the dev node lost a tapped answer exactly this way, and the page said nothing.
-    test "a conversation that has stopped refuses a message rather than losing it", %{chat: chat} do
-      {:ok, dormant} = Conversations.ended(chat, nil, "worker_lost")
-      before = length(Conversations.messages(dormant.id))
+    # The machine is gone, so there is nothing for the message to reach — and a message recorded
+    # with nothing to answer it is the silent drop, so sending starts the conversation again: the
+    # row goes back to waiting for a machine, and the message is what the new process answers.
+    test "a message to a conversation with no machine starts it again", %{chat: chat} do
+      {:ok, released} = Conversations.ended(chat, nil, "worker_lost")
 
-      assert {:error, :not_live} = Conversations.send(dormant, "leave-to-ticket")
+      assert {:ok, event} = Conversations.send(released, "leave-to-ticket")
 
-      # Refused *and* not written: a rejected send that still appeared in the transcript would
-      # be the same silent drop wearing an error message.
-      assert length(Conversations.messages(dormant.id)) == before
+      assert %{status: :pending, worker_id: nil, finished_at: nil} =
+               restarted = Jobs.get!(chat.id)
+
+      # The session is gone with the machine, and none was ever carried here, so the next run
+      # replays the transcript instead (cold).
+      assert is_nil(restarted.harness_session_id)
+      assert chat.id in (Jobs.pending(10) |> Enum.map(& &1.id))
+      assert event.payload == %{"text" => "leave-to-ticket"}
+      assert List.last(Conversations.messages(chat.id)).text == "leave-to-ticket"
+    end
+
+    # Logged as a reopen by the sender: who restarted it, and spent from its credential pool.
+    test "starting it again is one chat.reopened, and the message follows it", %{chat: chat} do
+      {:ok, _released} = Conversations.ended(chat, nil, "idle")
+      {:ok, message} = Conversations.send(chat, "again", actor: {:user, "someone"})
+
+      assert [reopened] = Enum.filter(Events.for_job(chat.id), &(&1.type == "chat.reopened"))
+      assert reopened.actor == %{"kind" => "user", "id" => "someone"}
+      assert reopened.seq < message.seq
+    end
+
+    # Two messages at once start it once: the second finds the row already `pending`, locked, and
+    # only records its message. The race itself is out of the sandbox's reach; what the second
+    # finds is not.
+    test "a second message to a pending row adds no second restart", %{chat: chat} do
+      {:ok, _released} = Conversations.ended(chat, nil, "idle")
+
+      {:ok, _first} = Conversations.send(chat, "one")
+      {:ok, _second} = Conversations.send(chat, "two")
+
+      events = Events.for_job(chat.id)
+      assert [_once] = Enum.filter(events, &(&1.type == "chat.reopened"))
+      assert Enum.count(events, &(&1.type == "chat.message")) == 3
     end
 
     # The caller holds whatever the page rendered with, which may be minutes old. Trusting that
-    # struct is how the guard and the operation end up disagreeing.
-    test "a stale struct saying running does not get through", %{chat: chat} do
-      {:ok, _dormant} = Conversations.ended(chat, nil, "worker_lost")
+    # struct is how the guard and the operation end up disagreeing: this one says `pending`, and
+    # the row says its machine is gone.
+    test "a stale struct saying live does not push to a machine that is gone", %{chat: chat} do
+      {:ok, _released} = Conversations.ended(chat, nil, "worker_lost")
 
       assert chat.status == :pending
-      assert {:error, :not_live} = Conversations.send(chat, "still here?")
+      assert {:ok, _event} = Conversations.send(chat, "still here?")
+      assert [_] = Enum.filter(Events.for_job(chat.id), &(&1.type == "chat.reopened"))
     end
 
-    test "reopening takes messages again", %{chat: chat} do
-      {:ok, dormant} = Conversations.ended(chat, nil, "worker_lost")
-      assert {:error, :not_live} = Conversations.send(dormant, "hello?")
-
-      {:ok, reopened} = Conversations.reopen(dormant)
-
-      assert {:ok, _event} = Conversations.send(reopened, "hello?")
-    end
-
-    test "a dormant conversation can be reopened, cold", %{chat: chat} do
-      {:ok, chat} = Conversations.ended(chat, nil, "worker_lost")
-      {:ok, chat} = Conversations.reopen(chat)
-
-      assert chat.status == :pending
-      # The session is gone with the machine: `--resume` cannot find one whose worktree no
-      # longer exists, so the next run replays the transcript instead.
-      assert is_nil(chat.harness_session_id)
-      assert is_nil(chat.worker_id)
-      assert chat.id in (Jobs.pending(10) |> Enum.map(& &1.id))
-    end
-
-    # A `reopen` is anything the socket sends, and the page draws the button only when the
-    # conversation is not live. On a running one it cleared the `worker_id` its worker reports
-    # under — every later turn failed the channel's ownership check — and queued it to be placed
-    # a second time.
-    test "a live conversation is not reopened", %{chat: chat, project: project} do
+    # A send to one that is live is a send. Restarting a running conversation cleared the
+    # `worker_id` its worker reports under — every later turn failed the channel's ownership
+    # check — and queued it to be placed a second time.
+    test "a message to a live conversation does not restart it", %{chat: chat, project: project} do
       {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
 
       {:ok, running} =
@@ -2433,9 +2450,9 @@ defmodule Forge.ConversationsTest do
         |> Jobs.Job.progress_changeset(%{status: :running, worker_id: worker.id})
         |> Repo.update()
 
-      assert {:error, :live} = Conversations.reopen(running)
-      # The row is asked, not the struct: one rendered after it stopped says nothing now.
-      assert {:error, :live} = Conversations.reopen(%{running | status: :hibernated})
+      assert {:ok, _event} = Conversations.send(running, "go on")
+      # The row is asked, not the struct: one rendered after it was released says nothing now.
+      assert {:ok, _event} = Conversations.send(%{running | status: :hibernated}, "and on")
 
       assert %{status: :running, worker_id: worker_id} = Jobs.get!(chat.id)
       assert worker_id == worker.id
@@ -2443,21 +2460,117 @@ defmodule Forge.ConversationsTest do
 
       # Waiting for a machine is live too.
       {:ok, waiting} = Conversations.open(project, "another")
-      assert {:error, :live} = Conversations.reopen(waiting)
+      assert {:ok, _event} = Conversations.send(waiting, "hello")
+      refute Enum.any?(Events.for_job(waiting.id), &(&1.type == "chat.reopened"))
     end
 
-    # The same line from the other side. An idle conversation keeps its branch; a close arriving
-    # afterwards — a stale page, a crafted event — recorded a second ending, as `closed`, and
-    # dealt with the branch as though a person had abandoned it.
-    test "a conversation that has stopped is not closed again", %{chat: chat, project: project} do
+    # An idle conversation keeps its branch; a person ending it afterwards is a decision, and is
+    # recorded as one — once. Ending it again, from a stale page or a crafted event, is refused
+    # before anything is written.
+    test "a released conversation can be ended, once", %{chat: chat, project: project} do
       {:ok, idle} = Conversations.ended(chat, nil, "idle")
-
-      assert {:error, :not_live} = Conversations.close(idle)
-      # The struct the caller holds still says pending; the row says otherwise.
-      assert {:error, :not_live} = Conversations.close(chat)
-
       assert Git.branch_exists?(Projects.repo_path(project), "chat/" <> chat.id)
-      assert [_once] = Enum.filter(Events.for_job(chat.id), &(&1.type == "chat.ended"))
+
+      assert :ok = Conversations.close(idle, actor: {:user, "someone"})
+
+      refute Git.branch_exists?(Projects.repo_path(project), "chat/" <> chat.id)
+      assert Conversations.ended?(chat)
+
+      assert {:error, :ended} = Conversations.close(idle)
+      # The struct the caller holds is from before; a second ending is told from the events.
+      assert {:error, :ended} = Conversations.close(chat)
+
+      assert [_idle, _closed] = Enum.filter(Events.for_job(chat.id), &(&1.type == "chat.ended"))
+    end
+
+    test "a conversation a person ended takes no message, and records nothing", %{chat: chat} do
+      :ok = Conversations.close(chat)
+      before = length(Events.for_job(chat.id))
+
+      assert {:error, :ended} = Conversations.send(chat, "hello?")
+
+      assert length(Events.for_job(chat.id)) == before
+      assert Jobs.get!(chat.id).status == :finished
+    end
+
+    # Told from the events, not the status: `finished` is what the idle timeout writes too, and
+    # the *newest* of ended and reopened decides, because a conversation closed before an ending
+    # was final, then reopened, then lost, still carries its old `closed`.
+    test "ended? reads the newest of ended and reopened, and not the status", %{chat: chat} do
+      refute Conversations.ended?(chat)
+
+      {:ok, _idle} = Conversations.ended(chat, nil, "idle")
+      assert Jobs.get!(chat.id).status == :finished
+      refute Conversations.ended?(chat)
+
+      {:ok, _closed} = Conversations.ended(Jobs.get!(chat.id), nil, "closed")
+      assert Conversations.ended?(chat)
+      assert Conversations.ended?(chat.id)
+      assert Conversations.ended_ids([chat.id]) == MapSet.new([chat.id])
+
+      # The old ending, then a restart, then a lost machine — which writes no `chat.ended` of its
+      # own, only `job.interrupted` — so the old `closed` is still the newest `chat.ended`, and the
+      # restart after it is what says it is not ended any more.
+      {:ok, _event} =
+        Events.append("chat.reopened", :system, %{job_id: chat.id, payload: %{"branch" => "kept"}})
+
+      refute Conversations.ended?(chat)
+
+      {:ok, _lost} = Jobs.requeue(chat.id, :worker_lost)
+      assert [_] = Enum.filter(Events.for_job(chat.id), &(&1.type == "chat.reopened"))
+      refute Conversations.ended?(chat)
+      assert Conversations.ended_ids([chat.id]) == MapSet.new()
+    end
+
+    test "Accept's ending is final and a cancelled ticket's is not", %{
+      chat: chat,
+      project: project
+    } do
+      {:ok, accepted} = Conversations.ended(chat, nil, "accepted")
+      assert Conversations.ended?(accepted)
+
+      {:ok, other} = Conversations.open(project, "another")
+      {:ok, cancelled} = Conversations.ended(other, nil, "cancelled")
+      refute Conversations.ended?(cancelled)
+    end
+
+    test "the ending says who ended it and what became of the branch", %{chat: chat} do
+      assert Conversations.ending(chat) == nil
+
+      assert :ok = Conversations.close(chat, actor: {:user, "someone"})
+
+      assert %{by: %{"kind" => "user", "id" => "someone"}, branch: branch, at: %DateTime{}} =
+               Conversations.ending(chat)
+
+      # Nothing was pushed to it, so it is on the default branch already and goes with a pin.
+      assert branch == :deleted
+    end
+
+    # A message to a released conversation is refused for exactly the reasons Reopen was.
+    test "a conversation whose machine was released is not carried on once it is ended", %{
+      chat: chat
+    } do
+      {:ok, _released} = Conversations.ended(chat, nil, "idle")
+      assert Conversations.sendable(Repo, Jobs.get!(chat.id)) == :ok
+      assert Conversations.sendable?(Jobs.get!(chat.id))
+
+      :ok = Conversations.close(chat)
+
+      assert Conversations.sendable(Repo, Jobs.get!(chat.id)) == {:error, :ended}
+      refute Conversations.sendable?(Jobs.get!(chat.id))
+    end
+
+    test "a release that is lost, or has said nothing, reads as a lost reply", %{chat: chat} do
+      {:ok, _event} = Conversations.send(chat, "anyone there?")
+      {:ok, released} = Conversations.ended(Jobs.get!(chat.id), nil, "worker_lost")
+
+      assert Conversations.lost?(released, Conversations.messages(chat.id))
+
+      text(chat, "yes")
+      {:ok, _chat} = Conversations.record_turn(Jobs.get!(chat.id), turn(1, 0.01))
+      refute Conversations.lost?(released, Conversations.messages(chat.id))
+      # A live one is working, not lost.
+      refute Conversations.lost?(chat, [%{role: :user}])
     end
 
     # `Jobs.assign/2` puts a row back to pending when the assignment cannot be pushed, and leaves
@@ -2588,15 +2701,15 @@ defmodule Forge.ConversationsTest do
       assert event.payload["reason"] == "conflict"
     end
 
-    # Nobody decided anything, so nothing is abandoned: these are dormancy, and a dormant
-    # conversation is reopened to carry on with the work that is on its branch.
+    # Nobody decided anything, so nothing is abandoned: these only release the machine, and a
+    # message carries the conversation on with the work that is on its branch.
     test "going idle or losing the machine keeps the branch", %{chat: chat, repo: repo} do
       head = push_to(repo, "chat/" <> chat.id, "NOTES.md", "a note\n")
 
       for reason <- ["idle", "worker_lost", "ended"] do
         {:ok, chat} = Conversations.ended(chat, nil, reason)
         assert {:ok, ^head} = Git.resolve(repo, "refs/heads/chat/" <> chat.id), reason
-        {:ok, _chat} = Conversations.reopen(chat)
+        {:ok, _event} = Conversations.send(chat, "carry on, " <> reason)
       end
 
       assert branch_events(chat, "chat.branch_deleted") == []
@@ -2628,18 +2741,19 @@ defmodule Forge.ConversationsTest do
       refute Git.branch_exists?(repo, "chat/" <> chat.id)
     end
 
-    # Closing is not terminal: every conversation that is not live can be reopened. A branch that
-    # is gone is made again where opening would make it, or the worker refuses the conversation
-    # minutes later for a branch that does not exist.
-    test "reopening after a close starts the branch again from the default branch", %{
+    # A branch that is gone — a merge deletes it — is made again where opening would make it when
+    # a message carries the conversation on, or the worker refuses it minutes later for a branch
+    # that does not exist.
+    test "carrying on after the branch was deleted starts it again from the default branch", %{
       chat: chat,
       repo: repo
     } do
       push_to(repo, "chat/" <> chat.id, "NOTES.md", "abandoned\n")
-      :ok = Conversations.close(chat)
+      {:ok, _idle} = Conversations.ended(chat, nil, "idle")
+      :ok = Git.delete_branch(repo, "chat/" <> chat.id)
       moved = push_to(repo, "main", "LATER.md", "the default branch moved on\n")
 
-      {:ok, _reopened} = Conversations.reopen(Jobs.get!(chat.id))
+      {:ok, _event} = Conversations.send(Jobs.get!(chat.id), "carry on")
 
       assert {:ok, ^moved} = Git.resolve(repo, "refs/heads/chat/" <> chat.id)
       assert [%{payload: %{"branch" => "recreated"}}] = branch_events(chat, "chat.reopened")
@@ -2652,40 +2766,45 @@ defmodule Forge.ConversationsTest do
       {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
       {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
       push_to(repo, "chat/" <> chat.id, "NOTES.md", "abandoned\n")
-      :ok = Conversations.close(chat)
+      {:ok, _idle} = Conversations.ended(chat, nil, "idle")
+      :ok = Git.delete_branch(repo, "chat/" <> chat.id)
       push_to(repo, "main", "LATER.md", "the default branch moved on\n")
       ticket_head = push_to(repo, ticket.branch, "WORK.md", "the ticket's work\n")
 
-      {:ok, _reopened} = Conversations.reopen(Jobs.get!(chat.id))
+      {:ok, _event} = Conversations.send(Jobs.get!(chat.id), "carry on")
 
       assert {:ok, ^ticket_head} = Git.resolve(repo, "refs/heads/chat/" <> chat.id)
     end
 
-    # Made in the reopen's own transaction, so a branch that cannot be made is a reopen that did
-    # not happen — not a pending row the worker will refuse for a branch that is not there.
+    # Made in the send's own transaction, so a branch that cannot be made is a send that did not
+    # happen — not a pending row the worker will refuse for a branch that is not there, and not a
+    # message in the transcript that nothing will answer.
     test "a branch that cannot be made again leaves the conversation where it was", %{
       project: project,
       repo: repo
     } do
       {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
       {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
-      :ok = Conversations.close(chat)
+      {:ok, _idle} = Conversations.ended(chat, nil, "idle")
+      :ok = Git.delete_branch(repo, "chat/" <> chat.id)
       :ok = Git.delete_branch(repo, ticket.branch)
+      before = length(Conversations.messages(chat.id))
 
-      assert {:error, {:branch, _reason}} = Conversations.reopen(Jobs.get!(chat.id))
+      assert {:error, {:branch, _reason}} = Conversations.send(Jobs.get!(chat.id), "carry on")
 
       assert Jobs.get!(chat.id).status == :finished
       assert branch_events(chat, "chat.reopened") == []
+      assert length(Conversations.messages(chat.id)) == before
     end
 
-    test "reopening one whose branch is still there leaves it as it stands", %{
+    test "carrying on one whose branch is still there leaves it as it stands", %{
       chat: chat,
       repo: repo
     } do
       head = push_to(repo, "chat/" <> chat.id, "NOTES.md", "kept\n")
       {:ok, chat} = Conversations.ended(chat, nil, "idle")
 
-      {:ok, _reopened} = Conversations.reopen(chat)
+      {:ok, _event} = Conversations.send(chat, "carry on")
 
       assert {:ok, ^head} = Git.resolve(repo, "refs/heads/chat/" <> chat.id)
       assert [%{payload: %{"branch" => "kept"}}] = branch_events(chat, "chat.reopened")

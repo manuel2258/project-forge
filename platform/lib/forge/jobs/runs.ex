@@ -173,10 +173,10 @@ defmodule Forge.Jobs.Runs do
   """
   @spec started([String.t()]) :: %{String.t() => DateTime.t()}
   # An equivalent mutant, kept for the round trip it saves, and matching the clause
-  # `Jobs.current_waits/1` carries for the same reason — `Forge.Queue.worker_status/1` makes both
-  # reads per page and only one of them avoided the empty case. `job_id in ^[]` selects nothing
-  # and `Map.new([])` is `%{}`, so removing this clause changes nothing a test can see: a page
-  # with nothing running would simply ask the database for the empty set.
+  # `Jobs.current_waits/1` carries for the same reason. `job_id in ^[]` selects nothing and
+  # `Map.new([])` is `%{}`, so removing this clause changes nothing a test can see: a list of
+  # tickets with nothing running (`Forge.Tickets.Doing.live/1`) would simply ask the database for
+  # the empty set.
   def started([]), do: %{}
 
   def started(job_ids) do

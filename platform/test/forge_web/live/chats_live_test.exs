@@ -494,6 +494,69 @@ defmodule ForgeWeb.ChatsLiveTest do
     assert Jobs.get(chat.id).status == :finished
   end
 
+  # A step's conversation ends with its step or its ticket, so a list that offered End on it
+  # offered what the operation then refuses.
+  test "a live step's conversation has no End on its row, and a crafted one is refused", %{
+    conn: conn,
+    user: user
+  } do
+    project = project("steps", user)
+    {:ok, ticket} = Forge.Tickets.admit(project, %{title: "Persist scores"}, :system)
+
+    step =
+      Forge.ForgeFixtures.chat_fixture(%{
+        project: project,
+        ticket_id: ticket.id,
+        state: "refining",
+        status: :running
+      })
+
+    {:ok, ordinary} = Conversations.open(project, "about the parser")
+
+    {:ok, view, _html} = live(conn, ~p"/chats")
+
+    assert has_element?(view, "#conversations-live #conversation-#{step.id}")
+    refute has_element?(view, "#chat-end-#{step.id}")
+    assert has_element?(view, "#chat-end-#{ordinary.id}")
+
+    html = render_hook(view, "end-chat", %{"id" => step.id})
+
+    assert html =~ "cannot be ended"
+    assert Jobs.get(step.id).status == :running
+    refute Enum.any?(Forge.Events.for_job(step.id), &(&1.type == "chat.close_requested"))
+  end
+
+  # Criterion 17: a conversation whose machine was released is under Earlier as an ordinary row,
+  # saying nothing about stopping; one a person ended says *ended*.
+  test "a released row says nothing about stopping, and an ended one says ended", %{
+    conn: conn,
+    user: user
+  } do
+    p = project("earlier", user)
+    {:ok, running} = Conversations.open(p, "still going")
+    {:ok, idle} = Conversations.open(p, "gone idle")
+    {:ok, _idle} = Conversations.ended(idle, nil, "idle")
+    {:ok, lost} = Conversations.open(p, "lost its machine")
+    {:ok, _lost} = Conversations.ended(lost, nil, "worker_lost")
+    {:ok, ended} = Conversations.open(p, "ended by hand")
+    :ok = Conversations.close(ended)
+
+    {:ok, view, _html} = live(conn, ~p"/chats")
+
+    assert has_element?(view, "#conversations-live #conversation-#{running.id}")
+
+    for chat <- [idle, lost, ended] do
+      assert has_element?(view, "#conversations-earlier #conversation-#{chat.id}")
+    end
+
+    for chat <- [idle, lost] do
+      row = view |> element("#conversation-#{chat.id}") |> render()
+      refute row =~ ~r/stopped|hibernated|finished|dormant|interrupted|ended/
+    end
+
+    assert view |> element("#conversation-#{ended.id}") |> render() =~ "ended"
+  end
+
   # An ended one is not a machine and has nothing to stop.
   test "a conversation that has already ended offers no way to end it", %{conn: conn, user: user} do
     {:ok, chat} = Conversations.open(project("parser", user), "about the parser")

@@ -219,7 +219,7 @@ defmodule ForgeWeb.TicketViews do
 
   # No by-hand transition is offered while a step's conversation is live: Accept is the way out
   # (`docs/design/conversations.md` § A conversation that is a step).
-  defp step_live?(%{current: true, dormant: false}), do: true
+  defp step_live?(%{current: true, live: true}), do: true
   defp step_live?(_step), do: false
 
   defp blocking(%{questions: {blocking, _assumed}}), do: blocking
@@ -770,7 +770,7 @@ defmodule ForgeWeb.TicketViews do
         <p class="min-w-0 break-words text-sm">
           This step is a conversation.
           <.link navigate={~p"/chats/#{@step.chat.id}"} class="text-link hover:underline">
-            {if @step.dormant, do: "Open it to reopen it", else: "Talk to the agent"} ›
+            Talk to the agent ›
           </.link>
         </p>
         <p

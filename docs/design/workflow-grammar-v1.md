@@ -629,7 +629,7 @@ states:
   end the conversation, and the ticket stays in the step. Its spend is added to the ticket's
   cost and is seen by the cap on later jobs; the cap never ends the chat (§ `limits.ticket_tokens`).
 - **A visit is one conversation.** A ticket returning to the step over a backward edge opens a
-  new one, which is told it is a return. Reopening a dormant conversation is not a new visit.
+  new one, which is told it is a return. Carrying a conversation on with a message is not a new visit.
 - **Not a changeset step.** A chat commits to its own branch, so `changeset` and `commit-message`
   are not produced here; what a step conversation commits never reaches the ticket's branch.
 - **Every other rule applies unchanged** (reachability, each outcome having an edge, `approve`

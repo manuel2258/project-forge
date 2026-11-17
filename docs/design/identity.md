@@ -267,8 +267,8 @@ That was a description of the intended design before it was a description of the
 found seven human writes reaching their context directly — a conversation answered from the
 queue with an id off the wire, everything on the settings page, admitting a ticket, opening a
 chat — with nothing but a LiveView mount in front of them, which is the page again. They are
-`Operator` functions now: `admit/3`, `open_chat/4`, `send_chat/4`, `stop_chat/2`, `close_chat/3`,
-`reopen_chat/2`, `merge_chat/2`, `set_model/3`, `issue_token/3`, `revoke_token/3`.
+`Operator` functions now: `admit/3`, `open_chat/4`, `send_chat/4`, `stop_chat/2`, `close_chat/2`,
+`merge_chat/2`, `set_model/3`, `issue_token/3`, `revoke_token/3`.
 
 **Membership is guarded where it is changed, which is `Forge.Projects`**, not in `Operator`.
 Two rules live there because they are about the membership table itself: a caller needs

@@ -31,7 +31,7 @@ outside `Operator` altogether (§ Operations).
   (`ticket-types.md` § Releases).
 - `open_chat(project, user, text, opts)`, `send_chat(chat, user, text, opts)`,
   `answer_chat(chat, user, reply, answers)`, `stop_chat(chat, user)`,
-  `close_chat(chat, user, reason)`, `reopen_chat(chat, user)`, `merge_chat(chat, user)` — a
+  `close_chat(chat, user)`, `merge_chat(chat, user)` — a
   conversation's life; see `design/conversations.md`.
 - `set_model(project, user, model)`, `issue_token(project, user, opts)`,
   `revoke_token(project, user, token_id)` — project settings, which need the admin capability.

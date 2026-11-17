@@ -82,12 +82,16 @@ defmodule Forge.PrivilegeTest do
       assert Enum.map(Conversations.messages(chat.id), & &1.text) == ["which backend?"]
     end
 
-    test "an outsider cannot stop, close or reopen one", %{project: project, outsider: outsider} do
+    test "an outsider cannot stop, end or carry on one", %{project: project, outsider: outsider} do
       chat = chat_fixture(%{project: project, status: :running})
+      released = chat_fixture(%{project: project, status: :hibernated})
 
       assert {:error, :forbidden} = Operator.stop_chat(chat, outsider)
       assert {:error, :forbidden} = Operator.close_chat(chat, outsider)
-      assert {:error, :forbidden} = Operator.reopen_chat(chat, outsider)
+      # Sending is what starts one with no machine again, as Reopen did: the same check.
+      assert {:error, :forbidden} = Operator.send_chat(released, outsider, "let me in")
+      assert Conversations.messages(released.id) == []
+      assert Forge.Jobs.get!(released.id).status == :hibernated
     end
 
     test "an outsider cannot open one on someone else's project", %{

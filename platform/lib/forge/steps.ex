@@ -11,7 +11,7 @@ defmodule Forge.Steps do
 
   import Ecto.Query, only: [from: 2]
 
-  alias Forge.{Artifacts, Conversations, Engine, Events, Jobs, Repo, Tickets}
+  alias Forge.{Artifacts, Conversations, Engine, Events, Repo, Tickets}
   alias Forge.Jobs.Job
   alias Forge.Tickets.Ticket
   alias ForgeCore.Workflow
@@ -42,7 +42,7 @@ defmodule Forge.Steps do
           documents: [document()],
           outcomes: [outcome()],
           in_flight: boolean(),
-          dormant: boolean(),
+          live: boolean(),
           missing: [String.t()],
           ready: boolean()
         }
@@ -99,7 +99,7 @@ defmodule Forge.Steps do
       documents: documents,
       outcomes: outcomes,
       in_flight: in_flight,
-      dormant: not Conversations.live?(chat),
+      live: Conversations.live?(chat),
       missing: missing,
       ready:
         over == nil and not in_flight and missing == [] and
@@ -213,8 +213,4 @@ defmodule Forge.Steps do
       {:error, _errors} -> false
     end
   end
-
-  @doc "The live conversation of the ticket's current chat step, or nil."
-  @spec live(Ticket.t()) :: Job.t() | nil
-  def live(%Ticket{id: id, state: state}), do: Jobs.live_step(id, state)
 end

@@ -95,7 +95,7 @@ defmodule ForgeWeb.ChatViews do
         {elem(@chat_error, 1)}
       </.error_note>
 
-      <section :if={@live} id="chat-ending">
+      <section :if={@can_end} id="chat-ending">
         <.confirm
           id="chat-end"
           label="End it"
@@ -106,7 +106,7 @@ defmodule ForgeWeb.ChatViews do
           phx-click="close"
         />
         <p id="ending-copy" class="mt-2 text-[12.5px]/[1.5] text-ink-2">
-          It holds a worker until it ends or goes idle. If you end it, {ForgeWeb.Conversations.ending_rule()}; going idle does not.
+          {if @live, do: "It holds a worker until it ends or goes idle. "}If you end it, {ForgeWeb.Conversations.ending_rule()}; going idle does not. Ending is final: it takes no more messages.
         </p>
       </section>
     </div>
@@ -175,14 +175,15 @@ defmodule ForgeWeb.ChatViews do
   # -- Talk ------------------------------------------------------------------------------------
 
   @doc """
-  The transcript, pinned to the bottom; on a stopped conversation dimmed, since nothing more will
-  be said in it until it is reopened (`15d`).
+  The transcript, pinned to the bottom. A conversation whose machine was released is drawn as one
+  holding a machine — nothing says it stopped (`15d`, `docs/design/ui.md` § Talk) — and one that
+  lost its reply says so once, quietly, after the person's last message.
   """
   def talk(assigns) do
     ~H"""
     <.scroll_pane id="messages-pane" height={nil} class="py-4">
       <ol
-        class={["chat-messages", not @live && "chat-messages--stopped"]}
+        class="chat-messages"
         id="messages"
         data-scroll-items
       >
@@ -196,6 +197,12 @@ defmodule ForgeWeb.ChatViews do
       </ol>
 
       <p :if={@messages == []} class="text-sm text-ink-3">Nothing said yet.</p>
+
+      <%!-- The person's message was the last word and its machine went before a reply came. Quiet:
+            the composer is still there, and sending carries it on (`conversations.md` § Lifetime). --%>
+      <p :if={@lost} id="chat-lost" class="mt-4 text-sm/[1.55] text-ink-2">
+        The reply was lost with its machine; send again to carry on.
+      </p>
 
       <%!-- A conversation that has not started yet says why, where the reply will appear: the
             scheduler's sentence, the latest since it last started (docs/design/ui.md § A job
@@ -211,27 +218,27 @@ defmodule ForgeWeb.ChatViews do
   @doc """
   What sits under the content (`15a`), from the top down: the last reply's question card in the
   split pane, the plan band, the now line with Stop, the step's status, then the composer — or,
-  on a stopped conversation, the reopen sentence and Reopen in its place (`15d`).
+  on an ended conversation, the line saying so in its place (`15d`).
   """
   def dock(assigns) do
     ~H"""
     <div class="chat-dock">
-      <%!-- A send or a reopen refused: under the conversation it belongs to, above what to do. --%>
+      <%!-- A send refused: under the conversation it belongs to, above what to do. --%>
       <.error_note :if={match?({:dock, _}, @chat_error)} id="chat-error">
         {elem(@chat_error, 1)}
       </.error_note>
-      <%!-- A card's Send refused whose card has gone — the conversation stopped, or the questions
+      <%!-- A card's Send refused whose card has gone — the conversation ended, or the questions
             were answered elsewhere: drawn where the card stood. --%>
       <OperatorActions.refused
-        :if={not (@questions != [] && @live && @tab == "talk")}
+        :if={not (@questions != [] && @sendable && @tab == "talk")}
         id="questions-refusal"
         refusal={@refusal}
         at={[:questions]}
       />
-      <%!-- Gone when the conversation is, for the same reason the box is: the card's Send is a
-            send button, and one offered on a dead conversation takes a tap and loses it. What it
+      <%!-- Gone when sending is refused, for the same reason the box is: the card's Send is a send
+            button, and one offered where the context refuses takes a tap and loses it. What it
             asked stays legible in the transcript. --%>
-      <section :if={@questions != [] && @live && @tab == "talk"} id="answer-rows">
+      <section :if={@questions != [] && @sendable && @tab == "talk"} id="answer-rows">
         <.split_pane id="chat-pane">
           <.question_form
             id={"chat-#{@chat_id}-#{@reply}"}
@@ -259,7 +266,7 @@ defmodule ForgeWeb.ChatViews do
       <%!-- While the agent is responding a typed message interrupts it, and the button says so:
             *Interrupt and send* names what it costs — the turn already spent on is spent
             (`docs/design/conversations.md` § Turns). With nothing typed it is still Send. --%>
-      <form :if={@live} id="say" phx-change="draft" phx-submit="send" class="chat-say">
+      <form :if={@sendable} id="say" phx-change="draft" phx-submit="send" class="chat-say">
         <%!-- Drawn with the button that says so, from the same assigns, so what is sent is what
               the button named. --%>
         <input :if={interrupts?(@responding, @draft)} type="hidden" name="interrupt" value="true" />
@@ -279,18 +286,13 @@ defmodule ForgeWeb.ChatViews do
         </p>
       </form>
 
-      <section :if={not @live and not step_over?(@step)} id="reopen" class="chat-reopen">
-        <p id="reopen-copy" class="text-sm/[1.55] text-ink-2">
-          This conversation has stopped. Reopening starts a new process on a new machine: it is
-          given everything said here to read, and answers the next thing you say.
-          <%= if @branch_exists do %>
-            It works on its branch as it stands.
-          <% else %>
-            Its branch is gone — a merge deletes it, and so does ending — so it starts one again
-            from <span class="font-mono text-[12.5px]">{@base_branch}</span> as it stands now.
-          <% end %>
+      <%!-- Ended by a person: read-only for good, and the line says what became of the branch.
+            Where it was kept, Merge is the decision row's, as for any branch. --%>
+      <section :if={@ending} id="chat-ended" class="chat-ended">
+        <p class="text-sm/[1.55] text-ink-2">
+          Ended {Format.ago_phrase(@ending.at, @at)} by {who(@ending.by, @viewer.id)}. It takes no
+          more messages. {branch_words(@ending, @branch_exists, @merged)}
         </p>
-        <.button type="button" variant="primary" fill phx-click="reopen">Reopen</.button>
       </section>
     </div>
     """
@@ -300,8 +302,22 @@ defmodule ForgeWeb.ChatViews do
   @spec interrupts?(boolean(), String.t() | nil) :: boolean()
   def interrupts?(responding, draft), do: responding and String.trim(draft || "") != ""
 
-  defp step_over?(%{over: over}), do: over != nil
-  defp step_over?(nil), do: false
+  defp who(%{"kind" => "user", "id" => me}, me), do: "you"
+  defp who(%{"kind" => "user"}, _me), do: "someone"
+  defp who(%{"kind" => "job"}, _me), do: "the agent"
+  defp who(_actor, _me), do: "forge"
+
+  # What became of the branch, from the events the ending wrote (`Conversations.ending/1`).
+  defp branch_words(%{branch: :deleted}, _exists, _merged), do: "Its branch was deleted."
+
+  defp branch_words(%{branch: :kept}, true, true),
+    do: "Its branch was kept, and what it holds is already on the default branch."
+
+  defp branch_words(%{branch: :kept}, true, _merged),
+    do: "Its branch was kept, because it would not merge cleanly."
+
+  defp branch_words(%{branch: :kept}, false, _merged), do: "Its branch was kept, and is gone now."
+  defp branch_words(%{branch: :gone}, _exists, _merged), do: "Its branch was already gone."
 
   attr :plan, :list, required: true
 
@@ -347,7 +363,7 @@ defmodule ForgeWeb.ChatViews do
         </span>
       </.notice>
 
-      <.ways_out live={@live} fetch={@fetch} />
+      <.ways_out live={@sendable} fetch={@fetch} />
 
       <p class="text-sm text-ink-3">The files and commits are below, unchanged.</p>
     </section>
@@ -446,7 +462,7 @@ defmodule ForgeWeb.ChatViews do
           <p class="text-sm/[1.55] text-danger">
             It does not merge cleanly: {Enum.join(@merge.conflict, ", ")}.
           </p>
-          <.ways_out live={@live} fetch={@fetch} prefix="aside-" />
+          <.ways_out live={@sendable} fetch={@fetch} prefix="aside-" />
         </div>
         <.error_note :if={@error} id="aside-merge-error">
           {@error}

@@ -640,8 +640,8 @@ assignment of a job it is still stopping as *already running*, it is the old bug
 push's `failed` finishing the re-run as an error — until the machine is updated. Only a run
 identity carried in the protocol would close it. A `result` is not dropped: it is the
 run's answer, which a job that finished while the socket was down still owes (`Jobs.complete/2`).
-Nor is a dormant chat's ending, which `Conversations.ended/4` records as before: dormant is
-`hibernated`, not one of the statuses above.
+Nor is the ending of a chat that has lost its machine, which `Conversations.ended/4` records as
+before: that is `hibernated`, not one of the statuses above.
 
 That ordering — commit, then ack — is the one that fails safely. Acking first and crashing loses
 the job's outcome while the worker believes it is delivered. Committing first and crashing costs a
@@ -694,7 +694,7 @@ against the platform's rows for this worker:
 jobs, keeps its terminal messages until they are acked, and redials within seconds; the platform
 only has to not throw the work away before it does. So at boot `Forge.Jobs.recover/0` touches
 only what no machine can ever report: a job left `running` on a row that is `destroyed`, or
-missing, or no row at all. Those go back to the queue — a conversation dormant — and their git
+missing, or no row at all. Those go back to the queue — a conversation without its machine — and their git
 credentials are revoked (**a held ticket's job goes back to the queue and stays there**: `Forge.Jobs.pending/2` does not offer it, so a restart does not set it running). Every other `running` job is left as it is, credential and open run
 included, and what becomes of it is the worker's to say at its rejoin, by the rules above: listed,
 it runs on in place; not listed, it is re-queued; never back, the unreachable sweep re-queues it
@@ -738,7 +738,7 @@ platform stops waiting (`Workers.sweep_unreachable/0`), and what it does next de
 machine it is:
 
 - **A managed worker** has its running jobs re-queued — a workflow job to `pending`, a chat to
-  dormant — and its machine destroyed through the driver. The row is marked `destroyed` only once
+  hibernated — and its machine destroyed through the driver. The row is marked `destroyed` only once
   the driver says the machine went: a refusal keeps the row, with the driver's words in
   `last_error`, and the next sweep tries again, because the row is the platform's claim that
   nothing is billing (`docs/design/provisioning.md` § Whose account). A row naming a provider

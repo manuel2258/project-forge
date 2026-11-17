@@ -2,12 +2,13 @@ defmodule Forge.Look.Setups.Chats do
   @moduledoc """
   The chats (`docs/design/ui.md` § Chats, § The Accept area): one project, `game`, holding a
   conversation responding on a machine of the member's with its plan half done and a branch to
-  merge (`15a`, `15e`, `15f`, `18e`), one stopped whose branch is gone (`15d`), one idle whose
-  branch conflicts with `main` (`15c`), and a ticket resting in a chat step whose document is at v2
+  merge (`15a`, `15e`, `15f`, `18e`), one whose machine was released by the idle timeout, drawn as one
+  holding a machine (`15d`, ticket 53), one ended by hand with its branch deleted, one whose reply was
+  lost with its machine, one idle whose branch conflicts with `main` (`15c`), and a ticket resting in a chat step whose document is at v2
   with one question open (`16e`–`16i`). The project has three secrets, so a new chat offers them
   as chips (`12d`); their values are made up.
 
-  Users: `member`. Paths: `list`, `new`, `responding`, `changes`, `stopped`, `conflict`,
+  Users: `member`. Paths: `list`, `new`, `responding`, `changes`, `released`, `ended`, `lost`, `conflict`,
   `conflict_changes`, `step`, `step_ticket`.
   """
 
@@ -66,7 +67,9 @@ defmodule Forge.Look.Setups.Chats do
       })
 
     {step, step_chat} = step!(game, member)
-    stopped = stopped!(game)
+    released = released!(game)
+    ended = ended!(game, member)
+    lost = lost!(game)
     conflict = conflict!(game)
     responding = responding!(game, machine)
 
@@ -77,7 +80,9 @@ defmodule Forge.Look.Setups.Chats do
         "new" => "/chats/new",
         "responding" => "/chats/#{responding.id}",
         "changes" => "/chats/#{responding.id}?tab=changes",
-        "stopped" => "/chats/#{stopped.id}",
+        "released" => "/chats/#{released.id}",
+        "ended" => "/chats/#{ended.id}",
+        "lost" => "/chats/#{lost.id}",
         "conflict" => "/chats/#{conflict.id}",
         "conflict_changes" => "/chats/#{conflict.id}?tab=changes",
         "step" => "/chats/#{step_chat.id}",
@@ -147,8 +152,9 @@ defmodule Forge.Look.Setups.Chats do
     ]
   end
 
-  # 15d: answered, then stopped going idle; ending deleted its branch, so reopening starts one.
-  defp stopped!(project) do
+  # 15d, as ticket 53 draws it: answered, then its machine released by the idle timeout, and its
+  # branch gone — nothing on the page says it stopped, and sending carries it on.
+  defp released!(project) do
     {:ok, chat} = Conversations.open(project, "Ideas for a two-player mode")
     run!(chat)
     said(chat, "Split screen is the cheap one. Online needs a server we do not have yet.")
@@ -163,6 +169,28 @@ defmodule Forge.Look.Setups.Chats do
         Jobs.chat_branch(chat)
       ])
 
+    chat
+  end
+
+  # Ended by the member: read-only for good, its branch dealt with and said.
+  defp ended!(project, member) do
+    {:ok, chat} = Conversations.open(project, "Sketch the settings screen")
+    run!(chat)
+    said(chat, "Three groups: sound, controls, accessibility. Want the wireframe as a doc?")
+    turn(chat, 1, "0.02")
+    :ok = Conversations.close(Jobs.get(chat.id), actor: {:user, member.id})
+    chat
+  end
+
+  # The person's message was the last word, and the machine went before a reply came.
+  defp lost!(project) do
+    {:ok, chat} = Conversations.open(project, "Why does the menu music stutter?")
+    run!(chat)
+    said(chat, "It decodes on the main thread. Moving it to a task should fix it.")
+    turn(chat, 1, "0.02")
+    {:ok, _} = Conversations.send(Jobs.get(chat.id), "Try it, and tell me what the profile says.")
+    running!(chat, nil)
+    {:ok, _} = Jobs.requeue(chat.id, :worker_lost)
     chat
   end
 

@@ -31,7 +31,8 @@ defmodule Mix.Tasks.Forge.Chat do
   recorded, the conversation's branch is deleted unless it would not merge cleanly, and work on
   it that was never merged goes with it. The page and the chats list confirm before they close;
   this does not. Merge what you want to keep first, from the conversation's page. A conversation
-  that has already stopped is refused rather than closed again.
+  that has already been ended, and a workflow step's conversation, are refused: the one is over for
+  good and the other ends with its step.
   """
 
   use Mix.Task
@@ -75,7 +76,7 @@ defmodule Mix.Tasks.Forge.Chat do
   end
 
   defp dispatch(["close", id], opts) do
-    case on_node(opts, Conversations, :close, [Conversations.get!(id), "closed"]) do
+    case on_node(opts, Conversations, :close, [Conversations.get!(id)]) do
       :ok ->
         Mix.shell().info(
           "closing #{id}; the last turn finishes first, then its branch is deleted unless it " <>

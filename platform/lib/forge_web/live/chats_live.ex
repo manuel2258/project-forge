@@ -131,7 +131,19 @@ defmodule ForgeWeb.ChatsLive do
          :ok <- Operator.close_chat(chat, socket.assigns.current_scope.user) do
       {:noreply, load(socket)}
     else
-      _other -> {:noreply, socket}
+      # Refused in words, as a toast: a row drawn before the rule, or an event nobody drew a
+      # control for. The list is read again so the row stops offering it.
+      {:error, :step} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "A step's conversation cannot be ended: it ends with its step.")
+         |> load()}
+
+      {:error, :ended} ->
+        {:noreply, socket |> put_flash(:info, "That conversation was already ended.") |> load()}
+
+      _other ->
+        {:noreply, socket}
     end
   end
 

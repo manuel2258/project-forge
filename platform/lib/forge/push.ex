@@ -112,6 +112,11 @@ defmodule Forge.Push do
     )
   end
 
+  defp describe(%{kind: :chat, project: project, detail: %{lost: true} = detail}) do
+    {"Reply lost on #{project.name}", detail.text, "/chats/#{detail.chat_id}?tab=talk",
+     "chat-#{detail.chat_id}"}
+  end
+
   defp describe(%{kind: :chat, project: project, detail: detail}) do
     {"Reply on #{project.name}", detail.text || "It replied.",
      "/chats/#{detail.chat_id}?tab=talk", "chat-#{detail.chat_id}"}
@@ -157,6 +162,26 @@ defmodule Forge.Push do
   @spec chat_reply(Job.t()) :: :ok
   def chat_reply(%Job{kind: :chat} = chat) do
     chat |> Queue.for_chat() |> Enum.each(&waiting/1)
+  end
+
+  @doc """
+  Pushes a step conversation whose reply was lost with its machine, when it is now waiting on a
+  person (`docs/design/conversations.md` § Lifetime): the person's message was the last word and
+  its machine went before a reply came, so the ticket is a queue item and the project is told,
+  as for anything that starts waiting on a person.
+
+  **Only the lost item pushes.** A machine lost after the agent had already replied leaves the
+  item the reply made, which pushed when it was made and has not changed; an ordinary
+  conversation is in no queue, so there is nothing to push. A machine released by the idle
+  timeout or the spend cap pushes nothing at all — it does not come through here
+  (`Forge.Conversations.ended/4`).
+  """
+  @spec lost_reply(Job.t()) :: :ok
+  def lost_reply(%Job{kind: :chat} = chat) do
+    chat
+    |> Queue.for_chat()
+    |> Enum.filter(&match?(%{detail: %{lost: true}}, &1))
+    |> Enum.each(&waiting/1)
   end
 
   @doc """

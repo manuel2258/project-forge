@@ -143,7 +143,7 @@ Only one of them is the operator's.
 |---|---|---|
 | A job's own budget | **the workflow** — a retry, or an edge onward to a person | outcome `budget_exhausted` on the job row with `· turns`, `· tokens` or `· wall clock` beside it, nowhere else |
 | Ticket allowance | **a human** — raise it or reroute | sticks the ticket, enters the queue, drawn in accent |
-| Daily spend cap | **time**, or the operator raising it | `paused · spend 6h 12m` in the ticket's subline, neutral, counting down to midnight UTC; the project's ticket list draws `paused · spend` without the countdown. **Never in the queue** |
+| Daily spend cap | **time**, or the operator raising it | `paused · spend 6h 12m` in the ticket's subline, neutral, counting down to midnight UTC; the project's ticket list and the queue's **Open tickets** draw `paused · spend` without the countdown. **Never an item in the queue, never counted, never pushed** |
 | Window capacity | **time** | `PAUSED · CAPACITY 1h 12m`, neutral, on the ticket and the project's ticket list, **never in the queue**. Not built (§ Engine support) |
 
 **The first row is the workflow's, not the engine's.** What happens to a job that ran out is an
@@ -180,9 +180,11 @@ not failing at it. Nothing rounds them down or hides
 the overshoot — a figure the operator cannot reconcile against the run is worse than one that
 reads a few cents over.
 
-Keeping the pauses out of the queue is load-bearing. A paused ticket in the inbox trains the
+Keeping the pauses out of the queue's *items* is load-bearing. A paused ticket in the inbox trains the
 operator to open items they cannot act on, which is the exact failure the thesis is written
-against. The daily cap is the platform's own rather than the provider's — it is what the operator
+against. **Open tickets is not the inbox**: it lists every open ticket that waits on nobody, counts
+towards nothing and is never pushed, so a ticket the cap holds is drawn there, `paused · spend` and
+neutral, and asks nothing of anyone (`ui.md` § A job waiting for a machine). The daily cap is the platform's own rather than the provider's — it is what the operator
 sets so a bad night cannot cost a month — but it is resolved the same way, by a clock, so it is
 drawn the same way. The countdown is to the next UTC midnight.
 

@@ -560,9 +560,13 @@ defmodule Forge.SessionCarryTest do
       %{chat: chat}
     end
 
-    # Stopped the way an idle timeout leaves one: hibernated, with its session on the row.
-    defp dormant(chat),
-      do: chat.id |> Jobs.get!() |> Ecto.Changeset.change(status: :hibernated) |> Repo.update!()
+    # Released the way an idle timeout leaves one: hibernated, with its session on the row, and
+    # carried on the way a person does it: by sending a message.
+    defp carried_on(chat) do
+      chat.id |> Jobs.get!() |> Ecto.Changeset.change(status: :hibernated) |> Repo.update!()
+      {:ok, _event} = Conversations.send(chat, "carry on")
+      {:ok, Jobs.get!(chat.id)}
+    end
 
     defp turn(chat, turn, harness),
       do: Conversations.record_turn(Jobs.get!(chat.id), %{"turn" => turn, "harness" => harness})
@@ -576,15 +580,15 @@ defmodule Forge.SessionCarryTest do
       assert Jobs.get!(chat.id).session_blob == %{"key" => key, "version" => "2.1.284"}
     end
 
-    # `docs/design/conversations.md` § Lifetime: reopening keeps the session, and the new process
+    # `docs/design/conversations.md` § Lifetime: a send that starts it again keeps the session, and the new process
     # resumes it as a fork — its turns are numbered from one again.
-    test "reopened, resumes its carried session as a fork", %{chat: chat} do
+    test "carried on, resumes its carried session as a fork", %{chat: chat} do
       key = "job/#{chat.id}/session-abc/2.jsonl"
 
       {:ok, _chat} =
         turn(chat, 1, %{"session_id" => "s1", "session_blob" => key, "version" => "2.1.284"})
 
-      {:ok, reopened} = Conversations.reopen(dormant(chat))
+      {:ok, reopened} = carried_on(chat)
 
       assert reopened.harness_session_id == "s1"
       assert Jobs.resume_source(reopened) == {"s1", %{"key" => key, "version" => "2.1.284"}, true}
@@ -592,7 +596,7 @@ defmodule Forge.SessionCarryTest do
 
     # The turn's `cost_usd` is the process's own figure; the session's total is what a reopen's
     # process starts from, so that is what is kept with the file.
-    test "reopened, is told the session's total and not the turn's own cost", %{chat: chat} do
+    test "carried on, is told the session's total and not the turn's own cost", %{chat: chat} do
       key = "job/#{chat.id}/session-abc/2.jsonl"
 
       {:ok, _chat} =
@@ -605,14 +609,14 @@ defmodule Forge.SessionCarryTest do
           "session_cost_usd" => 0.51
         })
 
-      {:ok, reopened} = Conversations.reopen(dormant(chat))
+      {:ok, reopened} = carried_on(chat)
 
       assert {"s1", %{"key" => ^key, "cost_usd" => 0.51}, true} = Jobs.resume_source(reopened)
     end
 
-    test "with no session carried, reopened, resumes nothing", %{chat: chat} do
+    test "with no session carried, carried on, resumes nothing", %{chat: chat} do
       {:ok, _chat} = turn(chat, 1, %{"session_id" => "s1"})
-      {:ok, reopened} = Conversations.reopen(dormant(chat))
+      {:ok, reopened} = carried_on(chat)
 
       assert Jobs.resume_source(reopened) == nil
     end

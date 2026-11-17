@@ -3,8 +3,9 @@ defmodule Forge.Look.Setups.Queue do
   The queue with one item of each kind (`docs/design/ui.md` § The queue): an approval with a
   changeset and the message it will commit (`18a`), two blocking questions on `brief.md` v2 with
   what the agent said (`13b`), a ticket stuck after running out of turns with its error and closing
-  words (`13c`), and a chat asking a question; two tickets under way and one assumption, for the
-  end of the pass (`13d`). The member last looked at the questions' ticket a day ago, and three
+  words (`13c`), and a chat asking a question; for the end of the pass (`13d`), one assumption and
+  **Open tickets** (ticket 53): two waiting for a machine, one running on one with its usage and
+  latest line, and one with a long title and a latest line that is markup. The member last looked at the questions' ticket a day ago, and three
   things happened since.
 
   Users: `member`. Paths: `queue`, `approval`, `questions`, `stuck`, `chat`, `end`.
@@ -35,6 +36,9 @@ defmodule Forge.Look.Setups.Queue do
 
     for title <- ["Persist the high score table", "Score flickers on resize"],
         do: {:ok, _} = Tickets.admit(project, %{title: title}, {:user, member.id})
+
+    running!(project, member)
+    hostile!(project, member)
 
     looked!(member, questions)
 
@@ -169,6 +173,41 @@ defmodule Forge.Look.Setups.Queue do
       })
 
     chat
+  end
+
+  # Open tickets: running on a machine, with usage and the agent's latest line.
+  defp running!(project, member) do
+    {:ok, ticket} =
+      Tickets.admit(project, %{title: "Replace the sprite sheet loader"}, {:user, member.id})
+
+    [job] = Jobs.for_ticket(ticket.id)
+    {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
+    started = DateTime.add(DateTime.utc_now(:second), -260)
+
+    job
+    |> Jobs.Job.progress_changeset(%{status: :running, worker_id: worker.id, started_at: started})
+    |> Repo.update!()
+
+    Repo.insert!(%Jobs.Run{job_id: job.id, worker_id: worker.id, started_at: started})
+    ticket |> Ecto.Changeset.change(usage: 38_000) |> Repo.update!()
+    said!(ticket, job, "Reading the loader's callers before I change its signature.")
+  end
+
+  # A long title and a latest line that is markup: cut where the Tickets list cuts, and text.
+  defp hostile!(project, member) do
+    {:ok, ticket} =
+      Tickets.admit(
+        project,
+        %{
+          title:
+            "Rework the whole leaderboard pipeline so that weekly resets, regional boards and " <>
+              "friends-only views all read from one materialised table instead of three"
+        },
+        {:user, member.id}
+      )
+
+    [job] = Jobs.for_ticket(ticket.id)
+    said!(ticket, job, "<b>Plan:</b> <script>alert(1)</script> start with the table.")
   end
 
   defp assumption!(project, member) do

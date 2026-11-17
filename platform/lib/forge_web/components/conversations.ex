@@ -11,7 +11,6 @@ defmodule ForgeWeb.Conversations do
   use Phoenix.Component
   use ForgeWeb, :verified_routes
 
-  import ForgeWeb.Indicators
   import ForgeWeb.UI.Decisions, only: [confirm: 1]
 
   alias ForgeWeb.Format
@@ -190,7 +189,9 @@ defmodule ForgeWeb.Conversations do
             <span :if={@project and summary.ticket} aria-hidden="true">·</span>
             <span :if={summary.ticket}>#{summary.ticket.number}{step(summary)}</span>
             <span :if={summary.waiting} class="text-accent">· waiting on you</span>
-            <.job_status :if={not summary.live} status={summary.chat.status} />
+            <%!-- Nothing says a conversation stopped: a released one is an ordinary row, and the
+                  only word is the ending a person chose (`docs/design/ui.md` § Chats). --%>
+            <span :if={summary.ended} class="chat-row-ended">· ended</span>
           </span>
 
           <%!-- The last thing said, which is what tells one conversation from another at a glance
@@ -207,7 +208,8 @@ defmodule ForgeWeb.Conversations do
           </span>
         </.link>
 
-        <%!-- Only a live one, and worded as the conversation's own page words it: a
+        <%!-- Only a live one that is not a step's (a step ends with its step or its ticket), and
+              worded as the conversation's own page words it: a
               conversation cannot be deleted at all (`conversations.md` § Lifetime), so the
               affordance a list can offer is the one that stops it costing something — which
               also deletes its branch, and the confirm says so. The confirm names this row's
@@ -216,7 +218,7 @@ defmodule ForgeWeb.Conversations do
         <%!-- A quiet word in danger ink at the row's top right, beside the time: a full button
               on a line of its own made every live row 56px taller (UX pass, B17). --%>
         <.confirm
-          :if={@ending && summary.live}
+          :if={@ending && summary.live && not summary.step}
           id={"chat-end-#{summary.chat.id}"}
           label="End"
           act="End it"

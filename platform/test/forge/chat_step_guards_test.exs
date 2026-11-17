@@ -198,7 +198,7 @@ defmodule Forge.ChatStepGuardsTest do
     assert {:error, :already_accepted} = accept(chat, user, "done", seen)
   end
 
-  test "a reopen is refused in the window between Accept's commit and its new visit", context do
+  test "a send is refused in the window between Accept's commit and its new visit", context do
     %{ticket: ticket} = context
     chat = ready(context)
 
@@ -210,8 +210,8 @@ defmodule Forge.ChatStepGuardsTest do
         payload: %{}
       })
 
-    :ok = Conversations.close(Repo.get!(Job, chat.id), "idle")
-    assert {:error, :step_over} = Conversations.reopen(Repo.get!(Job, chat.id))
+    {:ok, _released} = Conversations.ended(Repo.get!(Job, chat.id), nil, "idle")
+    assert {:error, :step_over} = Conversations.send(Repo.get!(Job, chat.id), "carry on")
   end
 
   describe "a document the step's edge approves but the step does not write" do

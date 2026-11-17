@@ -1762,9 +1762,10 @@ defmodule Forge.Jobs do
   `current_wait/1` for many jobs at once, as `%{job_id => Event}`: only the jobs whose latest
   such event is a wait are in it, so a missing key means "not waiting, or never has".
 
-  One query rather than one per job, for a page that asks about every pending job it can see
-  (`Forge.Queue.worker_status/1`). It does **not** filter by status, because it is given ids and
-  not rows; `current_wait/1` is the clause that holds the `:pending` half of the contract.
+  One query for any number of jobs. Its one caller now is `current_wait/1`, with a single id; the
+  queue's old under-way group asked about every pending job it could see. It does **not** filter by
+  status, because it is given ids and not rows; `current_wait/1` is the clause that holds the
+  `:pending` half of the contract.
   """
   @spec current_waits([String.t()]) :: %{String.t() => Event.t()}
   # An equivalent mutant, kept for the round trip it saves: `job_id in ^[]` selects nothing and
@@ -2063,7 +2064,7 @@ defmodule Forge.Jobs do
   session, which the machine may not find.
 
   A job's is re-queued fresh (`docs/design/claude-code-events.md` § Resume). A conversation's
-  session is forgotten, so that the next reopen starts cold rather than being refused again
+  session is forgotten, so that the next send starts it cold rather than being refused again
   (`Forge.Conversations.ended/4`).
   """
   @spec resume_refused?(Job.t(), Result.t()) :: boolean()
@@ -2732,12 +2733,19 @@ defmodule Forge.Jobs do
       {:ok, %{job: job}} ->
         Tokens.revoke_for_job(job.id)
         Events.notify_changed(job)
+        lost_reply(job)
         {:ok, job}
 
       {:error, step, reason, _changes} ->
         {:error, {step, reason}}
     end
   end
+
+  # A conversation whose machine is gone may have been in the middle of answering: if the
+  # person's message is its last word it is now waiting on them, and a step's is a queue item they
+  # are told about (`Forge.Push.lost_reply/1`). After the commit, as every push is.
+  defp lost_reply(%Job{kind: :chat} = chat), do: Forge.Push.lost_reply(chat)
+  defp lost_reply(%Job{}), do: :ok
 
   @doc "Jobs a worker is supposed to be running."
   @spec running_on(String.t()) :: [Job.t()]
@@ -2748,7 +2756,7 @@ defmodule Forge.Jobs do
   On boot: the work a previous node left `running` that no machine can ever report on — on a
   worker row that is `destroyed`, or on none (a deleted row nils `worker_id`) — is dealt with. A
   job is re-queued — its spec still holds and nothing is watching it. A conversation is **not**:
-  it goes dormant.
+  it loses its machine and waits for its person.
 
   **Every other running job is left exactly as it is**, its credential and its open run with it
   (`docs/design/worker-channel.md` § A platform restart). Its machine is still running it, and
@@ -2773,7 +2781,7 @@ defmodule Forge.Jobs do
       )
 
     Enum.each(jobs, fn job ->
-      {:ok, _} =
+      {:ok, %{job: interrupted}} =
         Multi.new()
         |> Multi.update(:job, Job.progress_changeset(job, %{status: interrupted_status(job)}))
         |> Runs.close(job.id, DateTime.utc_now(:second))
@@ -2786,6 +2794,7 @@ defmodule Forge.Jobs do
       # Whatever machine was running it may still be up and reachable; see `requeue/2`.
       Tokens.revoke_for_job(job.id)
       Events.notify_changed(job)
+      lost_reply(interrupted)
     end)
 
     Commands.recover()
@@ -2793,11 +2802,12 @@ defmodule Forge.Jobs do
   end
 
   @doc """
-  What a running job becomes when the run under it is gone: pending for a job, dormant for a
+  What a running job becomes when the run under it is gone: pending for a job, hibernated for a
   conversation.
 
   `:hibernated` already means "stopped without an outcome" and is already excluded from
-  `Workers.promised/1`, so a dormant chat neither schedules itself nor counts against a worker.
+  `Workers.promised/1`, so a conversation without its machine neither schedules itself nor counts
+  against a worker.
   """
   @spec interrupted_status(Job.t()) :: :pending | :hibernated
   def interrupted_status(%Job{kind: :chat}), do: :hibernated

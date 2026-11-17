@@ -214,8 +214,7 @@ defmodule Forge.Conversations do
   @doc """
   The branch a conversation's own is made from: the ticket's as it stands for a ticket chat, the
   default branch for a project chat (`docs/design/conversations.md` § Context). Opening makes it
-  from here, and so does a reopen that finds it gone — and the page says which it will be, from
-  this and not a copy of it.
+  from here, and so does a send that starts a conversation again and finds it gone.
   """
   @spec base_branch(Projects.Project.t(), Tickets.Ticket.t() | nil) :: String.t()
   def base_branch(project, nil), do: project.default_branch
@@ -256,12 +255,13 @@ defmodule Forge.Conversations do
   defp enough(_key, value), do: {:ok, value}
 
   @doc """
-  Whether this conversation can still be spoken to: it holds a machine, or is waiting for one.
+  Whether this conversation holds a machine or is waiting for one. It is not whether it can be
+  spoken to — a conversation without a machine is started again by a message (`send/3`,
+  `sendable/2`) — but it still decides what a conversation *is* doing: whether `send/3` pushes to
+  a machine or starts one, and whether an ordinary conversation is in the queue.
 
-  Here rather than in each caller because it decides three different things — whether `send/2`
-  accepts, whether the page shows a send box or a reopen button, and whether the queue lists it —
-  and three copies of it would be three chances for a surface to offer something the context then
-  refuses. `CLAUDE.md`: a guard must use the same model as the operation it guards.
+  Here rather than in each caller because three copies of it would be three chances to disagree.
+  `CLAUDE.md`: a guard must use the same model as the operation it guards.
   """
   @live_statuses [:pending, :running]
 
@@ -276,33 +276,57 @@ defmodule Forge.Conversations do
   @spec live_statuses() :: [atom()]
   def live_statuses, do: @live_statuses
 
+  @closed "closed"
+  # A step ended by Accept: over for good, so it ends as `closed` does (status, branch), but the
+  # reason says who ended it (`docs/design/conversations.md` § A conversation that is a step).
+  @accepted "accepted"
+  # A step stopped because its ticket was cancelled: not an ending, its branch is kept and a send
+  # after a restore carries it on.
+  @cancelled "cancelled"
+  # The reasons `ended?/1` counts: a person's *End* and Accept.
+  @final_reasons [@closed, @accepted]
+
   @doc """
-  Sends a message to a running conversation.
+  Sends a message to a conversation, and carries it on when it holds no machine.
 
   `:force` interrupts the turn in flight first; without it the message waits for the current turn
   to end. Both are recorded before either reaches the worker, because the log is the conversation
   and a message nobody can see is a message that was lost.
 
-  **A conversation that is not live is refused, and nothing is written.** Its machine is gone, so
-  there is nothing for the message to reach; recording it anyway would put a message in the
-  transcript that was never delivered and never will be, which is the silent drop
-  `docs/poc-plan.md` § Definition of usable rules out. Reopening is what takes a message again.
+  **The row is read under `FOR UPDATE`, not taken from the caller's struct.** A page rendered a
+  minute ago holds a conversation that may have changed since, and a stale struct saying
+  `running` is exactly the case this exists to refuse.
+
+  - **A live row** (`live?/1`) records the message and pushes it to its machine.
+  - **A row with no machine starts again**, when `sendable/2` allows it: in the same transaction
+    it does what Reopen did before there was none — `pending`, no `worker_id`, no `finished_at`,
+    the session kept, a branch that is gone made again — logs `chat.reopened` with the sender as
+    its actor, and records the message, which is what the new process answers (`opening/1`). It
+    pushes nothing: there is no machine to push to
+    (`docs/design/conversations.md` § Lifetime).
+  - **A refused send records nothing**: `{:error, :ended}` for a conversation a person ended and
+    `{:error, :step_over}` for a step conversation whose step is no longer the ticket's. A message
+    in the transcript that was never delivered is the silent drop `docs/poc-plan.md` § Definition
+    of usable rules out.
+
+  **Two sends at once start it once**: the second finds the row `pending` under the lock and only
+  records its message.
   """
   @spec send(Job.t(), String.t(), keyword()) ::
-          {:ok, Event.t()} | {:error, :not_live} | {:error, term()}
+          {:ok, Event.t()} | {:error, :ended | :step_over} | {:error, term()}
   def send(%Job{kind: :chat} = chat, text, opts \\ []) do
-    # Read the status from the row rather than from the caller's struct. A page rendered a minute
-    # ago holds a conversation that may have ended since, and a stale struct saying `running` is
-    # exactly the case this exists to refuse.
-    if live?(Repo.one(from j in Job, where: j.id == ^chat.id, select: j.status)),
-      do: do_send(chat, text, opts),
-      else: {:error, :not_live}
-  end
-
-  defp do_send(%Job{kind: :chat} = chat, text, opts) do
     actor = actor(opts)
 
     Multi.new()
+    # Equivalent mutant: the race this lock closes (two sends reaching a released row at the same
+    # moment) needs two connections committing between each other's read and write, which the
+    # suite's sandbox does not give; `a second message to a pending row adds no second restart`
+    # covers what the second send finds once the first has committed.
+    |> Multi.run(:row, fn repo, _changes ->
+      {:ok, repo.one!(from j in Job, where: j.id == ^chat.id, lock: "FOR UPDATE")}
+    end)
+    |> Multi.run(:path, fn repo, %{row: row} -> path_of(repo, row) end)
+    |> Multi.merge(fn %{row: row, path: path} -> carry_on(path, row, chat, actor) end)
     |> Events.log(:message, "chat.message", actor, %{
       ticket_id: chat.ticket_id,
       job_id: chat.id,
@@ -310,54 +334,211 @@ defmodule Forge.Conversations do
     })
     |> Repo.transaction()
     |> case do
-      {:ok, %{message: event}} ->
-        if Keyword.get(opts, :force, false), do: push(chat, "interrupt", %{})
-
-        push(chat, "message", %{
-          "job_id" => chat.id,
-          "message_id" => to_string(event.seq),
-          "text" => text
-        })
+      {:ok, %{message: event, path: path} = changes} ->
+        told(path, chat, event, changes, opts)
 
         Events.notify_job(chat.id, event)
         Events.notify_chat(chat)
         {:ok, event}
+
+      {:error, :path, reason, _changes} ->
+        {:error, reason}
 
       {:error, step, reason, _changes} ->
         {:error, {step, reason}}
     end
   end
 
+  # A live conversation is sent to; one with no machine is started again if `sendable/2` allows it.
+  defp path_of(repo, row) do
+    if live?(row), do: {:ok, :live}, else: with(:ok <- sendable(repo, row), do: {:ok, :restart})
+  end
+
+  # What a send does once it is committed. A conversation started again has no machine to push to,
+  # and says so to the lists instead; a live one is pushed to, interrupting first when asked.
+  defp told(:restart, _chat, _event, %{job: job}, _opts), do: Events.notify_changed(job)
+
+  defp told(:live, chat, event, _changes, opts) do
+    if Keyword.get(opts, :force, false), do: push(chat, "interrupt", %{})
+
+    push(chat, "message", %{
+      "job_id" => chat.id,
+      "message_id" => to_string(event.seq),
+      "text" => event.payload["text"]
+    })
+  end
+
+  defp carry_on(:live, _row, _chat, _actor), do: Multi.new()
+
+  # The session is kept: the new process resumes it as a fork when its file was carried, and
+  # starts cold with the replay when it was not (`docs/design/conversations.md` § Lifetime).
+  defp carry_on(:restart, row, chat, actor) do
+    Multi.new()
+    |> Multi.update(
+      :job,
+      Job.progress_changeset(row, %{status: :pending, worker_id: nil, finished_at: nil})
+    )
+    |> Multi.run(:branch, fn _repo, _changes -> restore_branch(chat) end)
+    |> Events.log(:reopened, "chat.reopened", actor, fn %{branch: branch} ->
+      %{ticket_id: chat.ticket_id, job_id: chat.id, payload: %{"branch" => branch}}
+    end)
+  end
+
+  @doc """
+  Whether a person ended this conversation for good (`docs/design/conversations.md` § Lifetime,
+  *Ending is final*): the newest of its `chat.ended` and `chat.reopened` events is a `chat.ended`
+  whose reason is `closed` or `accepted`.
+
+  **Read from the events, not the status**: `finished` is also what the idle timeout writes, and
+  it has to be the newest of the two, because a conversation closed before an ending was final,
+  then reopened and then lost still carries its old `closed`.
+  """
+  @spec ended?(Job.t() | String.t()) :: boolean()
+  def ended?(%Job{id: id}), do: ended?(id)
+  def ended?(job_id) when is_binary(job_id), do: job_id in ended_ids([job_id])
+
+  @doc "`ended?/1` for a list of conversations, in one query: the ids of those that were ended."
+  @spec ended_ids([String.t()]) :: MapSet.t(String.t())
+  def ended_ids(job_ids), do: ended_ids(Repo, job_ids)
+
+  defp ended_ids(_repo, []), do: MapSet.new()
+
+  defp ended_ids(repo, job_ids) do
+    repo.all(
+      from e in Event,
+        where: e.job_id in ^job_ids and e.type in ["chat.ended", "chat.reopened"],
+        distinct: e.job_id,
+        order_by: [asc: e.job_id, desc: e.seq],
+        select: {e.job_id, e.type, fragment("? ->> 'reason'", e.payload)}
+    )
+    |> then(fn rows ->
+      for {id, "chat.ended", reason} <- rows, reason in @final_reasons, into: MapSet.new(), do: id
+    end)
+  end
+
+  @typedoc "How a conversation was ended, for its page: when, who, and what became of its branch."
+  @type ending :: %{
+          at: DateTime.t(),
+          by: map(),
+          branch: :deleted | :kept | :gone,
+          head: String.t() | nil
+        }
+
+  @doc """
+  When and by whom an ended conversation was ended, and what became of its branch, read from its
+  events — or nil when it was not ended (`ended?/1`).
+
+  `by` is the actor of the person's request (`chat.close_requested`, written when a machine had
+  to be asked) or, for a conversation with no machine to ask, of the ending itself. `branch` is
+  `chat.branch_deleted` or `chat.branch_kept`, recorded after the ending; `:gone` when it was
+  already gone and neither was written.
+  """
+  @spec ending(Job.t()) :: ending() | nil
+  def ending(%Job{id: id}) do
+    with true <- ended?(id),
+         %Event{} = ended <- Events.latest_for_job(id, "chat.ended") do
+      requested = Events.latest_for_job(id, "chat.close_requested")
+      branch = branch_after(id, ended.seq)
+
+      %{
+        at: ended.inserted_at,
+        by: if(requested && requested.seq < ended.seq, do: requested.actor, else: ended.actor),
+        branch: branch.kind,
+        head: branch.head
+      }
+    else
+      _not_ended -> nil
+    end
+  end
+
+  defp branch_after(id, seq) do
+    Repo.one(
+      from e in Event,
+        where: e.job_id == ^id and e.seq > ^seq,
+        where: e.type in ["chat.branch_deleted", "chat.branch_kept"],
+        order_by: [desc: e.seq],
+        limit: 1
+    )
+    |> case do
+      %Event{type: "chat.branch_deleted", payload: payload} ->
+        %{kind: :deleted, head: payload["head"]}
+
+      %Event{type: "chat.branch_kept", payload: payload} ->
+        %{kind: :kept, head: payload["head"]}
+
+      nil ->
+        %{kind: :gone, head: nil}
+    end
+  end
+
+  @doc """
+  Whether a conversation's reply was lost with its machine: it holds none, and the person's
+  message — or nothing at all — is the last word of `messages` (`messages/1`), so no reply came
+  (`docs/design/conversations.md` § Lifetime). The page says so in one quiet line, and a step's
+  is a queue item.
+
+  One whose last word is the agent's is not lost: its machine was merely released. **It does not
+  ask whether a person ended it**, because both callers — the page and the queue — have asked
+  `sendable/2` first, and a conversation that cannot be sent to has no reply to lose; asking here
+  as well was a query on every streamed block of the page.
+  """
+  @spec lost?(Job.t(), [message()]) :: boolean()
+  def lost?(%Job{} = chat, messages),
+    do: not live?(chat) and (messages == [] or List.last(messages).role == :user)
+
+  @doc """
+  Whether a message may be sent to this conversation: `:ok`, or why not — `{:error, :step_over}`
+  for a step conversation whose step is no longer the ticket's, `{:error, :ended}` for one a
+  person ended.
+
+  **The one check** the page's composer, the queue and `send/3` all ask, so a surface never offers
+  what the context then refuses (`CLAUDE.md`: a guard must use the same model as the operation
+  it guards). A live conversation is not asked: it can be spoken to whatever its step says.
+  """
+  @spec sendable(Ecto.Repo.t() | module(), Job.t()) :: :ok | {:error, :step_over | :ended}
+  def sendable(repo, %Job{} = row) do
+    with {:ok, _open} <- step_still_open(repo, row) do
+      if row.id in ended_ids(repo, [row.id]), do: {:error, :ended}, else: :ok
+    end
+  end
+
+  @doc """
+  Whether a page should draw a composer: the conversation is live, or `sendable/2` allows a
+  message to start it again.
+  """
+  @spec sendable?(Job.t()) :: boolean()
+  def sendable?(%Job{} = chat), do: live?(chat) or sendable(Repo, chat) == :ok
+
   @doc "Ends the turn in flight without sending anything. The conversation stays open."
   @spec stop(Job.t()) :: :ok
   def stop(%Job{kind: :chat} = chat), do: push(chat, "interrupt", %{"job_id" => chat.id})
 
   @doc """
-  Ends the conversation: the harness's stdin closes, the last turn finishes, and the machine is
+  A person's *End*: the harness's stdin closes, the last turn finishes, and the machine is
   released. The transcript and the events stay; the branch goes unless it would not merge
-  cleanly, once the ending is recorded (`ended/3`, and `docs/design/conversations.md`
-  § Lifetime). Closing is how a person abandons a conversation, and it is not terminal: a closed
-  conversation can be reopened.
+  cleanly, once the ending is recorded (`ended/4`, and `docs/design/conversations.md` § Lifetime).
+  Ending is how a person abandons a conversation, and it is final: an ended conversation takes no
+  message (`send/3`).
 
-  **A conversation that is not live is refused**, `{:error, :not_live}`, on the row's status and
-  not the caller's struct, as `send/3` is. The page offers End only on a live one, but an event is
-  anything the socket sends: a close on one that had stopped went to a machine no longer running
-  it, or — with no worker on the row — recorded a second ending and dealt with the branch of a
-  conversation that was already dormant, which nobody decided.
+  **A step conversation cannot be ended**, `{:error, :step}`, whoever asks and whatever the
+  caller's struct says, and **one already ended is refused**, `{:error, :ended}`; both before any
+  event is written or the branch is touched. A step ends with its step (`end_step/2`) or its
+  ticket (`cancel_step/2`).
 
   **A conversation with no process is ended here rather than asked to end itself**, and whether
   it has one is its status. `live?/1` counts `:pending`, so a chat waiting for a worker is one
-  the page offers to close — and every other message to a conversation is a push, which for a
+  the page offers to end — and every other message to a conversation is a push, which for a
   chat with no `worker_id` logs that it was not delivered and returns `:ok`. Closing through that
   path left the row pending for ever with nothing said: a conversation the gate could never place
   could also never be got rid of. So when there is nobody to tell, the platform records the
   ending itself, which is what the worker's report would have caused anyway. It used to ask
   whether the row named a worker, and a pending row can name one: `Jobs.assign/2` puts a row back
-  to `:pending` when the assignment cannot be pushed, and leaves the worker it chose.
+  to `:pending` when the assignment cannot be pushed, and leaves the worker it chose. A
+  conversation whose machine was released is not live and is ended the same way.
 
-  `opts` carries `:actor` — who is ending it, for the event. A person closing their own
+  `opts` carries `:actor` — who is ending it, for the event. A person ending their own
   conversation and a machine reporting that it stopped are different facts, and only the caller
-  that authorised the person can tell them apart (`Operator.close_chat/3`).
+  that authorised the person can tell them apart (`Operator.close_chat/2`).
 
   **A running conversation is ended by its worker, so the request is logged here and the ending
   there.** The platform cannot write `chat.ended` on this path: the worker finishes its turn
@@ -365,8 +546,22 @@ defmodule Forge.Conversations do
   act, and `chat.close_requested` is where the log keeps it — which is also the only record if
   the worker never reports back (§ Ending one).
   """
-  @spec close(Job.t(), String.t(), keyword()) :: :ok | {:error, :not_live} | {:error, term()}
-  def close(%Job{kind: :chat} = chat, reason \\ "closed", opts \\ []) do
+  @spec close(Job.t(), keyword()) :: :ok | {:error, :step | :ended} | {:error, term()}
+  def close(%Job{kind: :chat} = chat, opts \\ []) do
+    # The row, not the caller's struct: a page drawn before this rule, or an event crafted by hand,
+    # carries whatever it likes.
+    row = Repo.get!(Job, chat.id)
+
+    cond do
+      Job.step?(row) -> {:error, :step}
+      ended?(row.id) -> {:error, :ended}
+      true -> finish(chat, @closed, opts)
+    end
+  end
+
+  # What every ending a person or the engine asks for shares: `close/2`'s *End*, Accept and a
+  # cancelled ticket, each with the reason that says who ended it.
+  defp finish(chat, reason, opts) do
     case Repo.one(from j in Job, where: j.id == ^chat.id, select: {j.status, j.worker_id}) do
       {:running, worker_id} when is_binary(worker_id) ->
         # Told, like every other event this module writes. Without it two members with the
@@ -386,9 +581,7 @@ defmodule Forge.Conversations do
         deliver(worker_id, chat.id, "close", %{"reason" => reason})
 
       {status, _worker_id} ->
-        if live?(status),
-          do: ended_here(chat, status, reason, opts),
-          else: {:error, :not_live}
+        ended_here(chat, status, reason, opts)
     end
   end
 
@@ -399,7 +592,7 @@ defmodule Forge.Conversations do
   defp ended_here(chat, seen, reason, opts) do
     case ended(chat, nil, reason, Keyword.merge(opts, expect: seen)) do
       {:ok, _chat} -> :ok
-      {:error, {:row, {:changed, _now}}} -> close(chat, reason, opts)
+      {:error, {:row, {:changed, _now}}} -> finish(chat, reason, opts)
       {:error, _reason} = error -> error
     end
   end
@@ -1122,25 +1315,22 @@ defmodule Forge.Conversations do
     )
   end
 
-  @closed "closed"
-  # A step ended by Accept: over for good, so it ends as `closed` does (status, branch), but the
-  # reason says who ended it (`docs/design/conversations.md` § A conversation that is a step).
-  @accepted "accepted"
-
   @doc """
-  Records that a conversation stopped, and why. It is not over: a reopen resumes the session it
-  carried, and starts cold with the replay when it carried none (`docs/design/conversations.md`
-  § Lifetime).
+  Records that a conversation's machine is gone, and why. Only `closed` and `accepted` end it
+  (`ended?/1`): the next message resumes the session it carried, and starts cold with the replay
+  when it carried none (`docs/design/conversations.md` § Lifetime).
 
   `expect: status` records it only if the row still has the status the caller read, and answers
   `{:error, {:row, {:changed, now}}}` otherwise (`close/2`).
 
-  `result:` is the run's result as the worker reported it. A dormant one whose resume the harness
+  `result:` is the run's result as the worker reported it. One whose resume the harness
   refused (`Forge.Jobs.resume_refused?/2`) forgets the session it was asked to resume, or every
-  reopen would ask for it again and be refused again: the next one starts cold, with the replay.
+  send would ask for it again and be refused again: the next one starts cold, with the replay.
 
-  A chat that was closed is finished; one that lost its machine or its platform is dormant, and
-  the difference is whether anyone asked for it.
+  A chat that was closed or went idle is finished; one that lost its machine or its platform is
+  `hibernated`, and the difference is whether anyone asked for it — which is not whether it is
+  ended: the status reads the same for *End* and for the idle timeout, so `ended?/1` reads the
+  reason.
 
   **A closed one has its branch dealt with here, and nowhere earlier** (`Merge.abandon_chat/1`).
   A conversation with a machine finishes its last turn and pushes it before the worker reports
@@ -1251,70 +1441,7 @@ defmodule Forge.Conversations do
     :ok
   end
 
-  @doc """
-  Reopens a conversation that is not live: back in the queue. One that is live is refused,
-  `{:error, :live}`.
-
-  The machine is usually gone, but the harness session is not: its file was uploaded after every
-  turn, and the new process restores it and resumes it as a fork (`Forge.Jobs.resume_source/1`).
-  When there is no file, or it fails the worker's check, the process starts cold with the branch
-  as it stands and the conversation so far, replayed (`opening/1`) — which is composed either way,
-  since only the worker knows which it will be.
-
-  **A branch that is gone is made again**, where opening would make it — the default branch or
-  the ticket's, as it stands now — and in the same transaction, the way `open/3` does: a worker
-  handed a branch that does not exist refuses the conversation minutes later. Closing deletes a
-  conversation's branch and a merge does too, and neither makes it one that cannot be reopened.
-
-  `opts` carries `:actor`, as `close/3` does: reopening is a person's act, and the log says whose.
-  """
-  @spec reopen(Job.t(), keyword()) :: {:ok, Job.t()} | {:error, :live} | {:error, term()}
-  def reopen(%Job{kind: :chat} = chat, opts \\ []) do
-    Multi.new()
-    |> Multi.run(:dormant, fn repo, _changes -> dormant(repo, chat) end)
-    |> Multi.run(:step, fn repo, _changes -> step_still_open(repo, chat) end)
-    |> Multi.update(:job, fn %{dormant: row} ->
-      # The session is kept: the reopen resumes it as a fork when its file was carried, and starts
-      # cold with the replay when it was not (`docs/design/conversations.md` § Lifetime).
-      Job.progress_changeset(row, %{
-        status: :pending,
-        worker_id: nil,
-        finished_at: nil
-      })
-    end)
-    |> Multi.run(:branch, fn _repo, _changes -> restore_branch(chat) end)
-    |> Events.log(:reopened, "chat.reopened", actor(opts), fn %{branch: branch} ->
-      %{ticket_id: chat.ticket_id, job_id: chat.id, payload: %{"branch" => branch}}
-    end)
-    |> Repo.transaction()
-    |> case do
-      {:ok, %{job: chat}} ->
-        Events.notify_changed(chat)
-        {:ok, chat}
-
-      {:error, :dormant, :live, _changes} ->
-        {:error, :live}
-
-      {:error, :step, :step_over, _changes} ->
-        {:error, :step_over}
-
-      {:error, step, reason, _changes} ->
-        {:error, {step, reason}}
-    end
-  end
-
-  # **A live conversation is not reopened**, and the row says whether it is live — locked, so a
-  # scheduler marking it running cannot slip between the question and the write. Reopening one
-  # that is running cleared the `worker_id` its worker is still reporting under: every turn it
-  # sent after that failed the channel's ownership check for ever, and the scheduler placed the
-  # conversation a second time. The page offers Reopen only when `live?/1` says no; an event off
-  # the socket is not the page.
-  defp dormant(repo, chat) do
-    row = repo.one!(from j in Job, where: j.id == ^chat.id, lock: "FOR UPDATE")
-    if live?(row), do: {:error, :live}, else: {:ok, row}
-  end
-
-  # **A step's conversation is reopened only while its step is the ticket's** — the ticket open,
+  # **A step's conversation is carried on only while its step is the ticket's** — the ticket open,
   # still in that state, this the latest visit, and Accept not pressed. After any of those the
   # step is over, and a conversation in it would be talking to nobody about nothing.
   defp step_still_open(repo, %Job{} = chat) do
@@ -1338,20 +1465,22 @@ defmodule Forge.Conversations do
   end
 
   @doc """
-  Ends a step's conversation because the person accepted it: closed like any conversation, with
-  the reason `accepted`, or recorded as ended here when it has no process to tell — a dormant one
-  is accepted too (`docs/design/conversations.md` § A conversation that is a step).
+  Ends a step's conversation because the person accepted it: ended like any conversation, with
+  the reason `accepted`, or recorded as ended here when it has no process to tell — one whose
+  machine was released is accepted too (`docs/design/conversations.md` § A conversation that is a
+  step).
   """
   @spec end_step(Job.t(), keyword()) :: :ok | {:error, term()}
-  def end_step(%Job{} = chat, opts \\ []) do
-    case close(chat, @accepted, opts) do
-      {:error, :not_live} ->
-        with {:ok, _chat} <- ended(chat, nil, @accepted, opts), do: :ok
+  def end_step(%Job{} = chat, opts \\ []), do: finish(chat, @accepted, opts)
 
-      other ->
-        other
-    end
-  end
+  @doc """
+  Stops a step's conversation because its ticket was cancelled, its branch kept
+  (`docs/design/conversations.md` § A conversation that is a step). That is not an ending: the
+  reason `cancelled` is not one `ended?/1` counts, and a message sent once the ticket is restored
+  carries the conversation on.
+  """
+  @spec cancel_step(Job.t(), keyword()) :: :ok | {:error, term()}
+  def cancel_step(%Job{} = chat, opts \\ []), do: finish(chat, @cancelled, opts)
 
   @doc "Whether Accept ended this step's conversation."
   @spec accepted?(String.t()) :: boolean()
@@ -2056,6 +2185,8 @@ defmodule Forge.Conversations do
           ticket: Tickets.Ticket.t() | nil,
           live: boolean(),
           waiting: boolean(),
+          ended: boolean(),
+          step: boolean(),
           said: {:user | :agent, String.t()} | nil,
           first: String.t() | nil,
           at: DateTime.t()
@@ -2124,6 +2255,7 @@ defmodule Forge.Conversations do
     tickets = by_id(Tickets.Ticket, Enum.reject(Enum.map(chats, & &1.ticket_id), &is_nil/1))
     said = last_said(Enum.map(chats, & &1.id))
     first = first_said(Enum.map(chats, & &1.id))
+    ended = ended_ids(Enum.map(chats, & &1.id))
 
     chats
     |> Enum.map(fn chat ->
@@ -2136,6 +2268,10 @@ defmodule Forge.Conversations do
         live: live?(chat),
         # Waiting on a person is the agent having spoken last, which is what the queue reads too.
         waiting: live?(chat) and match?({:agent, _text}, last),
+        # Told from the events, not the status (`ended?/1`), in the one query above. A list draws
+        # *End* on a live row that is not a step's, and *ended* on one a person ended.
+        ended: chat.id in ended,
+        step: Job.step?(chat),
         said: last,
         # What the person opened it with: a conversation has no title, and this is what a list
         # names it by (`title/3`).

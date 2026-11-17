@@ -324,7 +324,7 @@ defmodule Forge.Secrets do
   @doc """
   How many of the project's live conversations name each secret — running, or waiting to be
   placed — by `Forge.Conversations.live_statuses/0`, so the two cannot disagree about what live is.
-  A dormant one holds nothing until it is reopened.
+  One whose machine was released holds nothing until a message starts it again.
   """
   @spec held_by_conversations(Project.t()) :: %{String.t() => pos_integer()}
   def held_by_conversations(%Project{id: project_id}) do

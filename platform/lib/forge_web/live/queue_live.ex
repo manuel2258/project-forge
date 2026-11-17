@@ -26,11 +26,13 @@ defmodule ForgeWeb.QueueLive do
   The whole queue is the **All** sheet on a phone and the list column from 768px — every item in
   the pass's order, decided ones dimmed with `✓` — and beneath the items, two groups that wait
   on nobody and count towards nothing: **Not waiting on you**, the questions agents did not stop
-  for (`docs/design/ui.md` § Not waiting on you), and **Under way**, the tickets whose work is on
-  a machine or waiting for one, read from `Queue.worker_status/1` rather than `Queue.items/1`
-  (§ A job waiting for a machine). A ticket the spend cap or a rate-limited pool holds is in
-  neither: `worker_status/1` drops it, as `docs/design/capacity.md` keeps a paused ticket out of
-  the queue entirely. An assumption asked in the same document as a blocking question is in that
+  for (`docs/design/ui.md` § Not waiting on you), and **Open tickets**, every open ticket that is
+  not on hold and has nothing waiting on a person, each drawn as the project's Tickets list draws
+  it (`ForgeWeb.ProjectTickets`, § A job waiting for a machine), read from `Queue.open_tickets/2`
+  rather than `Queue.items/1`. A ticket the spend cap holds is in it, `paused · spend`: never an
+  item, never counted, never pushed (`docs/design/capacity.md`). **Where they are drawn depends on
+  the width**: from 1440px in the list column under the decisions, below it once, after the end of
+  the pass, and only when no item is on screen (`queue.css`). An assumption asked in the same document as a blocking question is in that
   document's card instead, optional (§ The question card).
   """
 
@@ -39,13 +41,13 @@ defmodule ForgeWeb.QueueLive do
   import ForgeWeb.Operator.QuestionForm, only: [question_form: 1, split_pane: 1]
 
   alias Forge.{Artifacts, Engine, Events, Jobs, Projects, Queue, Tickets}
-  alias Forge.Tickets.Past
-  alias Forge.Tickets.Views
+  alias Forge.Tickets.{Doing, Past, Views}
   alias ForgeCore.Workflow
 
   alias ForgeWeb.{
     Diff,
     Format,
+    ProjectTickets,
     PushEvents,
     QueuePass,
     QueuePast,
@@ -103,6 +105,7 @@ defmodule ForgeWeb.QueueLive do
 
     queue = Queue.items(user)
     accounts = Queue.waiting_accounts(user)
+    named = user |> Projects.list() |> Map.new(&{&1.id, &1.name})
     {waiting, assumed} = queue |> named_projects() |> Enum.split_with(&Queue.waiting?/1)
 
     {joined, digest} =
@@ -122,7 +125,8 @@ defmodule ForgeWeb.QueueLive do
     |> assign(
       pass: pass,
       digest: digest,
-      under_way: user |> Queue.worker_status() |> named_projects(),
+      open: open_rows(user, queue),
+      projects: named,
       # The queue button's count, computed by the same function over the same reads
       # (`Forge.Queue.count/2`): an item decided in this pass is no longer waiting once it is read
       # again, so it is not counted, and one decided elsewhere is not either.
@@ -130,6 +134,18 @@ defmodule ForgeWeb.QueueLive do
       now: DateTime.utc_now()
     )
     |> detail()
+  end
+
+  # Open tickets, drawn as the project's Tickets list draws them: the same rows, from the same reads
+  # (`Forge.Tickets.Doing.facts/2`), over every project the viewer is in. `items` is the queue just
+  # read, so a ticket is never both an item and a row.
+  defp open_rows(user, items) do
+    tickets = Queue.open_tickets(user, items)
+
+    ProjectTickets.rows(
+      tickets,
+      Map.merge(Doing.facts(tickets), %{items: items, now: DateTime.utc_now()})
+    )
   end
 
   # The accounts waiting on a node admin, as one item (UX pass, A23): they are counted as decisions
@@ -607,8 +623,8 @@ defmodule ForgeWeb.QueueLive do
           <div id="queue-decisions" class="queue-rows">
             <.row :for={item <- @rows} id={"item-#{item.key}"} item={item} pass={@pass} now={@now} />
           </div>
-          <.digest digest={@digest} now={@now} />
-          <.under_way under_way={@under_way} now={@now} />
+          <.digest id="queue-digest" prefix="" digest={@digest} now={@now} />
+          <.open_tickets id="queue-open" open={@open} projects={@projects} now={@now} />
         </div>
       </:list>
 
@@ -639,6 +655,17 @@ defmodule ForgeWeb.QueueLive do
           at={~w(retry transition)}
         />
         <.ending :if={!@item} pass={@pass} left={@left} now={@now} />
+        <%!-- Below 1440px the two quiet groups are drawn here, after the end of the pass, and not in
+              the list column; from 1440px the column's are drawn and these are not (`queue.css`).
+              Never while an item is on screen. --%>
+        <.digest :if={!@item} id="queue-end-digest" prefix="end-" digest={@digest} now={@now} />
+        <.open_tickets
+          :if={!@item}
+          id="queue-end-open"
+          open={@open}
+          projects={@projects}
+          now={@now}
+        />
       </div>
 
       <.sheet id="queue-all" label="Every item in the queue" title={sheet_title(@rows, @decisions)}>
@@ -650,8 +677,8 @@ defmodule ForgeWeb.QueueLive do
             pass={@pass}
             now={@now}
           />
-          <.link :if={@under_way != []} patch={~p"/?item=end"} class="queue-sheet-quiet">
-            Under way · {length(@under_way)}
+          <.link :if={@open != []} patch={~p"/?item=end"} class="queue-sheet-quiet">
+            Open tickets · {length(@open)}
           </.link>
           <.link :if={@digest != []} patch={~p"/?item=end"} class="queue-sheet-quiet">
             Not waiting on you · {length(@digest)}
@@ -1396,6 +1423,8 @@ defmodule ForgeWeb.QueueLive do
     """
   end
 
+  attr :id, :string, required: true
+  attr :prefix, :string, required: true, doc: "for the ids of the lines: the group is drawn twice"
   attr :digest, :list, required: true
   attr :now, :any, required: true
 
@@ -1404,11 +1433,11 @@ defmodule ForgeWeb.QueueLive do
   # § Not waiting on you.
   defp digest(assigns) do
     ~H"""
-    <section :if={@digest != []} id="queue-digest" class="queue-quiet-group">
+    <section :if={@digest != []} id={@id} class="queue-quiet-group">
       <.eyebrow>Not waiting on you</.eyebrow>
       <p class="queue-quiet">{digest_sentence(@digest)}</p>
       <ul>
-        <li :for={item <- @digest} id={"assumption-#{item.question.id}"}>
+        <li :for={item <- @digest} id={"#{@prefix}assumption-#{item.question.id}"}>
           <.link navigate={destination(item)} class="queue-quiet-line">
             <span class="queue-quiet-head">
               <span>{item.question.text}</span>
@@ -1423,32 +1452,25 @@ defmodule ForgeWeb.QueueLive do
     """
   end
 
-  attr :under_way, :list, required: true
+  attr :id, :string, required: true
+  attr :open, :list, required: true
+  attr :projects, :map, required: true
   attr :now, :any, required: true
 
-  # The digest's register, for the digest's reason — see the moduledoc. Grouped by the half of the
-  # axis each is on, the group saying it once over its titles, where every line used to repeat
-  # *Not yet on a worker.* (UX pass, A9).
-  defp under_way(assigns) do
-    assigns = assign(assigns, groups: under_way_groups(assigns.under_way))
-
+  # The Tickets list's own rows (`ForgeWeb.ProjectTickets.list/1`), each naming its project and
+  # linking into it, usage whenever there is one. One list, newest change first, with no cap: the
+  # rows come ordered from `ProjectTickets.rows/2`, and nothing here decides which are shown.
+  defp open_tickets(assigns) do
     ~H"""
-    <section :if={@under_way != []} id="queue-under-way" class="queue-quiet-group">
-      <.eyebrow>Under way</.eyebrow>
-      <div :for={{group, items} <- @groups} id={"under-way-#{group}"} class="queue-quiet-sub">
-        <p class="queue-quiet">{under_way_sentence(group, items)}</p>
-        <ul>
-          <li :for={item <- items} id={"under-way-#{item.ticket.id}"}>
-            <.link navigate={destination(item)} class="queue-quiet-line">
-              <span class="queue-quiet-head">
-                <span>{item.ticket.title}</span>
-                <span class="queue-quiet-age">{Format.ago(item.since, @now)}</span>
-              </span>
-              <span class="queue-quiet-ref">{item.project}#{item.ticket.number}</span>
-            </.link>
-          </li>
-        </ul>
-      </div>
+    <section :if={@open != []} id={@id} class="queue-quiet-group">
+      <.eyebrow>Open tickets</.eyebrow>
+      <ProjectTickets.list
+        id={"#{@id}-rows"}
+        rows={@open}
+        named={@projects}
+        usage_always
+        now={@now}
+      />
     </section>
     """
   end
@@ -1521,24 +1543,6 @@ defmodule ForgeWeb.QueueLive do
     |> hd()
     |> String.slice(0, 160)
   end
-
-  # The two halves of one axis — on a machine, or not yet — which is the distinction the ticket
-  # asked for, each counted apart: telling the two apart at a glance is what this group is for, and
-  # one total would hide it. Running first, and a half with nothing in it is left out.
-  # **Neither names a cause.** "Waiting for a worker" did, and got it wrong: of the reasons the
-  # scheduler records for a pending job most are about getting it a machine, but waiting a turn
-  # behind a sibling command is not, and a template the platform refused needs a person rather
-  # than room. *Why* it is waiting is the sentence on the ticket's own timeline
-  # (`docs/design/ui.md` § A job waiting for a machine), which is the one place that knows.
-  defp under_way_groups(items) do
-    {running, waiting} = Enum.split_with(items, &(&1.kind == :on_worker))
-    Enum.reject([{"running", running}, {"waiting", waiting}], &match?({_group, []}, &1))
-  end
-
-  defp under_way_sentence("running", items), do: tickets(items, "running on a worker")
-  defp under_way_sentence("waiting", items), do: tickets(items, "not yet on a worker")
-
-  defp tickets(items, what), do: "#{length(items)} #{noun(length(items), "ticket")} #{what}."
 
   defp digest_sentence([_one]), do: "1 assumption was stated and work continued."
 

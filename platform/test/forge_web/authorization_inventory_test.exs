@@ -168,7 +168,6 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"chat_live.ex", "chat:questions:send"} => :member,
     {"chat_live.ex", "stop"} => :member,
     {"chat_live.ex", "close"} => :member,
-    {"chat_live.ex", "reopen"} => :member,
     {"chat_live.ex", "draft"} => :local,
     {"chat_live.ex", "ask"} => :local,
     # The paths are read from the page's own decision, never the wire; it only fills the draft.

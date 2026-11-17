@@ -783,17 +783,17 @@ defmodule ForgeWeb.WorkerChannelTest do
       assert_push "interrupt", %{"job_id" => ^chat_id}
     end
 
-    test "a close reaches the machine as a push, with its reason", %{
+    test "a close reaches the machine as a push", %{
       worker: w,
       token: t,
       chat: chat
     } do
       {:ok, _reply, _socket} = join_with_chat(w, t, chat)
 
-      :ok = Conversations.close(chat, "operator closed it")
+      :ok = Conversations.close(chat)
 
       chat_id = chat.id
-      assert_push "close", %{"job_id" => ^chat_id, "reason" => "operator closed it"}
+      assert_push "close", %{"job_id" => ^chat_id, "reason" => "closed"}
     end
 
     # A reopened conversation resumes the session it carried (`docs/design/conversations.md`

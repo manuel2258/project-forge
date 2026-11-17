@@ -430,11 +430,15 @@ ticket chat is given for a refused move.
   names each one it dropped in the turn's `refused_documents` so the page says so, and does not
   set the finished conversation running again (the check is made under the ticket's lock Accept
   holds).
-- **No ceiling.** No turns, no cost budget. The day's cap and the idle timeout still pause or end
-  it, and the ticket stays in the step; a dormant one reopens. A lost machine or restart makes it
-  dormant, never re-queued (§ Lifetime).
-- **Accept** (`Operator.accept_step/4`, `Engine.accept/5`) is the only way out while the
-  conversation is live. In one transaction under the ticket's lock it requires that the ticket is
+- **No ceiling.** No turns, no cost budget. The day's cap holds it and the idle timeout releases
+  its machine, and the ticket stays in the step; the next message sent carries it on (§ Lifetime).
+  A lost machine or restart releases it too, and it is never re-queued by itself.
+- **A step conversation cannot be ended.** It has no *End it* and `Conversations.close/2` refuses
+  it, `{:error, :step}`, for everyone, a node admin included, before it writes anything: ending
+  one only ever left the ticket stuck in the step with nobody to talk to. It ends with its step
+  (Accept) or its ticket (cancel), and **Stop**, which interrupts the turn in flight, ends a turn
+  and not the conversation.
+- **Accept** (`Operator.accept_step/4`, `Engine.accept/5`) is the way out of the step. In one transaction under the ticket's lock it requires that the ticket is
   open and in this step, that this is not an already accepted conversation and is the visit's
   latest step chat (in that order, so a second press on a visit the ticket has since come back to
   says *accepted*), that
@@ -445,10 +449,13 @@ ticket chat is given for a refused move.
   approved at the shown versions, and logs `step.accepted` (who, outcome, `to`, versions). The
   pressing user's standing is read again from the database, not taken from the page. After the
   commit the chat is ended with reason `accepted`, which ends a conversation as `closed` does:
-  its branch is abandoned and the machine released. A dormant one is accepted the same way.
-- **Cancel and restore.** Cancelling the ticket ends a live step chat with reason `cancelled`,
-  dormant with its branch kept; restoring leaves it reopenable. `reopen/2` is refused when the
-  ticket is not open, no longer in the step, or the visit was accepted or left.
+  its branch is abandoned and the machine released. One whose machine was released is accepted the
+  same way.
+- **Cancel and restore.** Cancelling the ticket stops a live step chat with reason `cancelled`
+  (`Conversations.cancel_step/2`), its branch kept. That is not an ending: restoring the ticket
+  leaves the conversation one a message carries on. While the ticket is cancelled a send is
+  refused, and so it is when the ticket is no longer in the step, or the visit was accepted or
+  left (`Conversations.sendable/2`, § Lifetime).
 - **Secrets** are the state's `secrets`, not the person's pick: the scheduler treats a step like a
   job, so one the project has not set keeps it from starting (before a machine, as for a job) and
   is recorded as its wait reason, `no_secret`, drawn on both pages: on the conversation's, and on
@@ -608,19 +615,21 @@ have moved, which is why a refusal says so rather than the manifest pretending t
   worse — a conversation nobody closed stalls the queue until it times out. The idle timeout is
   what bounds it, so the timeout is not a nicety.
 - **Idle is measured from the last human message.** When it fires, the harness process ends and
-  the machine is released. The conversation is not over: its messages persist in the event log
-  and it can be reopened.
-- **Reopening resumes the session, and falls back to a cold start.** The machine is usually
+  the machine is released, and that is all: nothing on the conversation's page says it stopped,
+  its composer stays, and the next message sent starts it again on a machine. Its messages
+  persist in the event log.
+- **Sending resumes the session, and falls back to a cold start.** The machine is usually
   gone, and with it the harness's session file — but the worker uploads that file after every
   turn, and the platform keeps the latest as the row's
-  `session_blob` (`docs/design/claude-code-events.md` § Resume). So `reopen/1` keeps the row's
-  session, and the new process restores the file and runs `--resume` with `--fork-session`: the
+  `session_blob` (`docs/design/claude-code-events.md` § Resume). So a send to a conversation
+  with no machine keeps the row's session (it is what `reopen/2` was, and there is no longer a
+  Reopen), and the new process restores the file and runs `--resume` with `--fork-session`: the
   agent has the whole conversation it had, tool calls and all, under a new session id — new
   because turns are numbered from one in every process and `record_turn/2` tells a re-sent turn
   from a new one by `(session, turn)`. Its opening is a short continuation — it was stopped and is
   resumed, the branch and where it stands — followed by what the person said since, or held for
   the next message as a cold reopen's is. After every turn rather than at the end, because a
-  conversation goes dormant when its worker is lost (below), when nothing is left to upload
+  conversation loses its machine when its worker is lost (below), when nothing is left to upload
   anything — and a turn cut short is not one to resume into.
 
   **When there is no session to restore, or the one there fails its check, reopening is cold**:
@@ -630,7 +639,7 @@ have moved, which is why a refusal says so rather than the manifest pretending t
   download, or a first turn that never ended; the rest of this bullet is that path. A file that
   passed the check and that the harness still refused ends the process before its first turn,
   and nothing re-queues a conversation, so the platform forgets that session when the process
-  ends (`Conversations.ended/4`, `Jobs.resume_refused?/2`): the reopen after it is cold, rather
+  ends (`Conversations.ended/4`, `Jobs.resume_refused?/2`): the send after it starts cold, rather
   than refused the same way again.
 
   **The replay is the projection, split at the agent's last reply.** `Conversations.opening/1`
@@ -688,41 +697,50 @@ have moved, which is why a refusal says so rather than the manifest pretending t
   it stood after the last turn that ended, as it does after a timeout. A workflow job is re-queued because nothing is watching it and its spec is
   enough to run it again — a conversation has a person in it, who can say what was lost. It is
   the exception, and the sweeps that make it happen are minutes long.
-- **A conversation goes dormant, it is never re-queued.** `Jobs.recover/0`,
+- **A conversation that loses its machine is never re-queued.** `Jobs.recover/0`,
   `Workers.sweep_unreachable/0` and a machine that says it is unhealthy put a running job back in
   the queue, which for a chat would mean
   every platform restart silently starting conversations nobody is in — each taking a slice and
   spending the day's allowance on a greeting. A chat goes `:hibernated` instead, which already
-  means "stopped without an outcome" and is already excluded from `Workers.promised/1`. It shows
-  as interrupted and waits for a person. A restart of the platform alone loses nothing: a chat
+  means "stopped without an outcome" and is already excluded from `Workers.promised/1`. Its page
+  says nothing of it, as for an idle timeout, and **a reply lost with its machine is said once**:
+  when the person's message is the last word and no reply came, one quiet line — *The reply was
+  lost with its machine; send again to carry on.* — and the conversation waits for a person, who
+  carries it on by sending. For a step conversation that is a queue item waiting on the person,
+  and the project is notified as for anything that starts waiting on one (`Push.lost_reply/1`,
+  called after `Jobs.requeue/2` and `Jobs.recover/0`). A machine released by the idle timeout or
+  the spend cap sends none: the agent's reply already did. A restart of the platform alone loses nothing: a chat
   whose machine rejoins with it still running carries on where it was, and only one on a machine
-  that is gone goes dormant (`docs/design/worker-channel.md` § A platform restart).
-- **A conversation that is not live refuses a message; it does not record one.** `send/3` reads
-  the status from the row — not from the caller's struct, which a page rendered minutes ago — and
-  answers `{:error, :not_live}` without writing. Recording it would put a message in the
-  transcript that was never delivered and never will be: the silent drop `docs/poc-plan.md`
-  § Definition of usable rules out, wearing the transcript's authority.
+  that is gone loses it (`docs/design/worker-channel.md` § A platform restart).
+- **A message to a conversation that holds no machine starts it again.** `Conversations.send/3`
+  reads the row under `FOR UPDATE`, not the caller's struct, which a page rendered minutes ago
+  holds stale. A live row (`pending` or `running`) records the message and pushes it, as ever. A
+  row with no machine asks `sendable/2`, and when that allows it does in one transaction what
+  `reopen/2` did: sets it `pending`, clears `worker_id` and `finished_at`, keeps the session,
+  restores a branch that is gone, logs `chat.reopened` with the sender as its actor — so who
+  restarted it, and spent from its credential pool, can be found — and records the message,
+  which is what the new process answers (`opening/1`). It pushes nothing: there is nobody to
+  push to. **Two sends at once start it once**: the second finds the row `pending` under the
+  lock and only records. A refused send records nothing, because a message in the transcript
+  that was never delivered is the silent drop `docs/poc-plan.md` § Definition of usable rules
+  out. While it waits for a machine it says so, with the scheduler's reason, and a day held back
+  by the spend cap is the same: the message is recorded and waits, and the page says why.
 
-  **Every affordance that sends is gone at the same moment**, and that is one rule rather than
-  two. The send box was already swapped for Reopen; the one-tap answer rows were not, and an
-  answer row *is* a send button — a real conversation on the dev node was tapped after it had
-  stopped, and the tap was recorded and lost. The question form that replaced them goes with the
-  send box in the same way: its Send is a send button too. `Conversations.live?/1` is the single definition
-  the page, the queue and `send/3` all read, because a surface offering what the context then
-  refuses is the trap `CLAUDE.md` names: a guard must use the same model as the operation it
-  guards. What the reply *asked* stays legible either way — it is in the transcript, which is
-  where it was said.
-- **Reopening refuses a live conversation, and ending refuses one that is not.** The same line,
-  asked the same way: the status read from the row, not the caller's struct, and `live?/1`.
-  The page draws Reopen only on one side of it and End only on the other, but an event is
-  anything the socket sends. A `reopen` on a running conversation set it `:pending` and cleared
-  its `worker_id`, so every turn its worker then reported was refused by the channel's ownership
-  check for ever, and the scheduler placed the conversation a second time. A close on one that
-  had stopped either went to a machine no longer running it, or — with no worker on the row —
-  recorded a second ending and dealt with the branch of a conversation that was already dormant,
-  a decision nobody took. `reopen/1` answers `{:error, :live}` and `close/2`
-  `{:error, :not_live}`, through `Forge.Operator` as everything a person does, and the page says
-  so rather than acting.
+  **One check says whether a message may be sent**, `Conversations.sendable/2` (and
+  `sendable?/1` for a page): the conversation is **not ended** (`:ended`, below), and for a step
+  its step is still the ticket's — the ticket open, still in the state, this the latest visit,
+  and Accept not pressed (`:step_over`). The page draws the composer and the answer rows by it,
+  the queue lists a released step conversation by it, and `send/3` acts on it, so a surface
+  never offers what the context then refuses (`CLAUDE.md`: a guard must use the same model as
+  the operation it guards). What the reply *asked* stays legible either way — it is in the
+  transcript, where it was said.
+- **Ending refuses a step and an ended conversation, and a send refuses an ended one.**
+  `close/2` answers `{:error, :step}` for a step, whoever asks, and `{:error, :ended}` for one
+  already ended, both before any event is written or the branch is touched; it takes no reason,
+  because a person's *End* is always `closed`. Accept ends a step with `accepted` and cancelling
+  the ticket with `cancelled`, through a private ending `close/2` shares. The page draws *End it*
+  only on an ordinary conversation that has not been ended, but an event is anything the socket
+  sends.
 
   **Who ended it is recorded where they acted, which is not always where it ended.** A
   `:running` conversation is ended by its worker: the platform asks, the worker finishes its turn
@@ -796,18 +814,30 @@ have moved, which is why a refusal says so rather than the manifest pretending t
   reason. Each outcome is an event — `chat.branch_deleted` or `chat.branch_kept`, with the head —
   so the sha of discarded work is in the log for as long as the object database still holds it.
 
-  **Closing is not terminal.** Every conversation that is not live can be reopened, a closed one
-  included, so closing ends the branch and not the conversation. A reopen whose branch is gone
-  makes it again where opening would — the default branch, or the ticket's, as it stands now —
-  in the same transaction as the reopen, as `open/3` does, because a worker handed a branch that
-  does not exist refuses the conversation minutes later. That also repairs a conversation merged
-  and then reopened, whose branch `perform_chat/2` had deleted and which the worker used to
-  refuse. `chat.reopened` says which (`kept` or `recreated`), the page says so beside Reopen,
-  and the replay's manifest tells the new process that its checkout may not hold what the earlier
-  replies describe (§ Lifetime, above).
+  **Ending is final.** A conversation ended with *End* is read-only for good: its page keeps the
+  transcript and says it was ended and what became of its branch (`chat.branch_deleted` or
+  `chat.branch_kept`), and offers no composer and no Reopen — there is none. It is told from a
+  conversation whose machine was merely released **by the events, not the status**
+  (`Conversations.ended?/1`): the newest of its `chat.ended` and `chat.reopened` is a `chat.ended`
+  whose reason is `closed` or `accepted`. The status cannot say it, since `finished` is also what
+  the idle timeout writes, and it has to be the *newest* of the two, because a conversation closed
+  before this change, reopened, then lost still carries its old `closed`. This holds for
+  conversations ended before this change, which could be reopened until now. A conversation ended
+  by `cancelled`, the idle timeout, the spend cap, a token budget or a lost machine is **not**
+  ended. A branch kept stays mergeable where it was kept.
 
-  Two things this leaves, stated. A close asked for whose worker is lost before it reports is
-  swept as a lost machine, and keeps its branch — the person's decision never reached `ended/3`.
+  **A send that restarts a conversation makes its branch again** where opening would — the default
+  branch, or the ticket's, as it stands now — in the same transaction, as `open/3` does, because a
+  worker handed a branch that does not exist refuses the conversation minutes later. That also
+  repairs a conversation merged and then carried on, whose branch `perform_chat/2` had deleted.
+  `chat.reopened` says which (`kept` or `recreated`), and the replay's manifest tells the new
+  process that its checkout may not hold what the earlier replies describe (§ Lifetime, above).
+
+  Three things this leaves, stated. A close asked for whose worker is lost before it reports is
+  swept as a lost machine, and keeps its branch — the person's decision never reached `ended/3`;
+  it is not ended, and a send carries it on. A message sent just as a conversation ends can go
+  unanswered; the lost-reply line covers it. And the two send-versus-assignment windows above
+  are still not closed.
   And a pin written by a merge that conflicted (`perform_chat/2` pins before it tries) is not
   removed by a later abandon, so the commit it names stays reachable.
 
@@ -839,10 +869,10 @@ the baseline the assignment names off each turn's figure and reports the rest as
 tokens, is read when the conversation is assigned — `remaining_today/0`, in `Jobs.assignment/4` —
 and passed as `max_tokens`; **no harness is given a flag for it** (`--max-budget-usd` is gone). The
 worker counts the process's calls as they stream (`ForgeWorker.Job.Meter`) and, past `max_tokens`,
-kills it; its result says `token budget reached` and the conversation goes dormant
+kills it; its result says `token budget reached` and the conversation's machine is released
 (`Conversations.ended/4`, on the platform, from the worker's result), as reaching the old flag ended the turn. That the session is kept for
-a reopen is the path any hibernation takes, and is not separately tested. It is not refreshed as the day's spend moves: usage elsewhere on the node after the
-conversation started does not lower it, and a reopen is what reads it again. The cap is therefore
+the next send is the path any hibernation takes, and is not separately tested. It is not refreshed as the day's spend moves: usage elsewhere on the node after the
+conversation started does not lower it, and a send that starts it again is what reads it again. The cap is therefore
 enforced twice: by the worker, at the figure it started with, and by the node, which assigns
 nothing once the day is gone.
 
@@ -944,6 +974,14 @@ so closing a conversation is closing the pipe, not killing anything.
 **A conversation waiting on a human appears in the queue**, as its own kind, with the project or
 ticket it belongs to. It is literally what the queue is for: something that will not move until a
 person acts.
+
+**A step conversation whose agent spoke last is waiting on you whether or not it holds a machine.**
+With no stopped state, the idle timeout, the spend cap and a lost machine release the machine and
+change nothing about whose turn it is, so `Forge.Queue.for_chat/1` asks that a *step's*
+conversation be live no longer — only that its step still be the ticket's (`sendable/2`). An
+ordinary conversation still has to be live: one whose machine has gone leaves the queue, as it
+always did, though it no longer reads as stopped. A step whose last word is the person's and which
+holds no machine is the lost reply (§ Lifetime), an item of the same kind that says so.
 
 **Every completed reply pushes.** Not every token — a turn ending is the event. This is where
 `decisions.md`'s push rule first widened past blocking questions, and it now names a

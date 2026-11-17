@@ -532,9 +532,9 @@ defmodule ForgeWeb.ChatLiveTest do
                ~s(href="/workers/#{machine.id}")
     end
 
-    # `worker_id` outlives the run, so a stopped conversation still names its last machine on
-    # its row; it holds none, and the details say so.
-    test "a stopped conversation holds none", %{conn: conn, chat: chat} do
+    # `worker_id` outlives the run, so a conversation whose machine was released still names its
+    # last machine on its row; it holds none, and the details say so.
+    test "a conversation whose machine was released holds none", %{conn: conn, chat: chat} do
       {:ok, _chat} = Conversations.ended(chat, nil, "idle")
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
 
@@ -740,25 +740,133 @@ defmodule ForgeWeb.ChatLiveTest do
     end
   end
 
-  test "a stopped conversation offers to reopen instead of a box to type in", %{
+  # Criterion 11: when the idle timeout takes the machine back nothing on the page says it
+  # stopped — no Reopen, no dimmed transcript, no "stopped" — and the composer stays, as on a
+  # conversation holding a machine.
+  test "a conversation whose machine was released is drawn as one holding a machine", %{
     conn: conn,
     chat: chat
   } do
+    text(chat, "Here it is.")
+    turn(chat, 1)
     {:ok, _chat} = Conversations.ended(chat, nil, "idle")
 
     {:ok, view, html} = live(conn, ~p"/chats/#{chat.id}")
 
-    assert html =~ "Reopen"
-    refute has_element?(view, "#draft")
+    assert has_element?(view, "#draft")
+    assert has_element?(view, "#say")
+    refute html =~ "Reopen"
+    refute html =~ "stopped"
+    refute html =~ "chat-messages--stopped"
+    refute has_element?(view, "#reopen")
+    refute has_element?(view, "#chat-ended")
+    refute has_element?(view, "#chat-lost")
+    assert has_element?(view, "#top-bar .ui-top-title > .ui-top-sub", "waiting on you")
+  end
 
-    # What reopening does, said where the button is. It said the rest of the conversation was
-    # not replayed, which stopped being true when the replay was built.
-    copy = view |> element("#reopen-copy") |> render()
-    assert copy =~ "given everything said here to read"
-    refute copy =~ "not replayed"
+  # Sending is how it is carried on: the message is recorded and the conversation goes back to
+  # waiting for a machine, saying so, with nothing else for the person to do.
+  test "sending from the page starts a released conversation again", %{conn: conn, chat: chat} do
+    {:ok, _chat} = Conversations.ended(chat, nil, "idle")
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
 
-    view |> element("button", "Reopen") |> render_click()
+    view |> form("#say", %{"text" => "and the lexer?"}) |> render_change()
+    view |> form("#say", %{"text" => "and the lexer?"}) |> render_submit()
+
     assert Conversations.get!(chat.id).status == :pending
+    assert List.last(Conversations.messages(chat.id)).text == "and the lexer?"
+    assert has_element?(view, "#top-bar .ui-top-title > .ui-top-sub", "waiting for a machine")
+    assert has_element?(view, "#draft")
+  end
+
+  # The person's message was the last word and the machine went before a reply came: one quiet
+  # line, the composer stays, and sending carries on. Not for one whose last word is the agent's.
+  test "a reply lost with its machine says so once, and keeps the composer", %{
+    conn: conn,
+    chat: chat
+  } do
+    {:ok, _event} = Conversations.send(chat, "anyone there?")
+    {:ok, _chat} = Conversations.ended(Conversations.get!(chat.id), nil, "worker_lost")
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+    assert view |> element("#chat-lost") |> render() =~
+             "The reply was lost with its machine; send again to carry on."
+
+    assert has_element?(view, "#draft")
+    refute render(view) =~ "Reopen"
+  end
+
+  test "a reply that came is not lost when the machine goes", %{conn: conn, chat: chat} do
+    text(chat, "Here it is.")
+    turn(chat, 1)
+    {:ok, _chat} = Conversations.ended(chat, nil, "worker_lost")
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+    refute has_element?(view, "#chat-lost")
+  end
+
+  # Ending is final (criterion 10): the transcript stays, a line says it was ended and what became
+  # of its branch, and there is no composer, no answer rows and no Reopen.
+  test "an ended conversation is read-only, and says what became of its branch", %{
+    conn: conn,
+    chat: chat,
+    user: user
+  } do
+    text(chat, "Here it is.")
+    turn(chat, 1)
+
+    :ok = Forge.Operator.close_chat(chat, user)
+
+    {:ok, view, html} = live(conn, ~p"/chats/#{chat.id}")
+
+    assert html =~ "Here it is."
+    assert has_element?(view, "#chat-ended", "Ended")
+    assert view |> element("#chat-ended") |> render() =~ "by you"
+    assert view |> element("#chat-ended") |> render() =~ "Its branch was deleted"
+    refute has_element?(view, "#draft")
+    refute has_element?(view, "#say")
+    refute has_element?(view, "#answer-rows")
+    refute html =~ "Reopen"
+    refute has_element?(view, "#chat-ending")
+    assert has_element?(view, "#top-bar .ui-top-title > .ui-top-sub", "ended")
+  end
+
+  # A send to one that was ended — a page drawn before, a crafted event — is refused in words and
+  # records nothing.
+  test "a send to an ended conversation is refused in words and records nothing", %{
+    conn: conn,
+    chat: chat
+  } do
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    :ok = Conversations.close(chat)
+    before = length(Forge.Events.for_job(chat.id))
+
+    html = render_hook(view, "send", %{"text" => "hello?"})
+
+    assert html =~ "This conversation was ended"
+    assert has_element?(view, ".chat-dock #chat-error[role=alert]")
+    assert length(Forge.Events.for_job(chat.id)) == before
+    refute Enum.any?(Conversations.messages(chat.id), &(&1.text == "hello?"))
+  end
+
+  test "an ended conversation whose branch was kept says so", %{
+    conn: conn,
+    chat: chat,
+    project: project
+  } do
+    head =
+      commit_to(Projects.repo_path(project), "chat/" <> chat.id, %{"README.md" => "mine\n"}, "x")
+
+    commit_to(Projects.repo_path(project), "main", %{"README.md" => "theirs\n"}, "y")
+    assert head
+    :ok = Conversations.close(chat)
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+    assert view |> element("#chat-ended") |> render() =~
+             "was kept, because it would not merge cleanly"
   end
 
   # Ending deletes the branch, and ending is the one control on the page that does. The
@@ -774,44 +882,9 @@ defmodule ForgeWeb.ChatLiveTest do
     assert view |> element("#ending-copy") |> render() =~ "If you end it, #{rule}"
   end
 
-  # Closing is not terminal: the branch it deleted is made again on reopen, from where opening
-  # made it — and the page says which, beside the button, rather than the new process finding a
-  # checkout without the work its replies describe.
-  test "a stopped conversation says where a deleted branch starts again", %{
-    conn: conn,
-    chat: chat,
-    project: project
-  } do
-    :ok = Conversations.close(chat)
-
-    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
-    copy = view |> element("#reopen-copy") |> render()
-
-    assert copy =~ "Its branch is gone"
-    assert copy =~ project.default_branch
-    refute copy =~ "on its branch as it stands"
-  end
-
-  # Where the page says a deleted branch comes back from is where the reopen makes it — one
-  # definition, `Conversations.base_branch/2` — and for a ticket chat that is the ticket's branch.
-  test "a stopped ticket chat says its branch starts again from the ticket's", %{
-    conn: conn,
-    project: project
-  } do
-    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
-    {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
-    :ok = Conversations.close(chat)
-
-    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
-    copy = view |> element("#reopen-copy") |> render()
-
-    assert copy =~ ticket.branch
-    refute copy =~ ">#{project.default_branch}<"
-  end
-
-  # A merge deletes the branch too, and a conversation merged and then left idle was told its
-  # branch "was deleted when it ended" — which it was not; it ended with nothing to delete.
-  test "a merged conversation that stopped is not told its ending deleted the branch", %{
+  # A merge deletes the branch too, and a conversation merged and then ended was told its ending
+  # deleted it — which it did not; it ended with nothing to delete.
+  test "a merged conversation that was ended is not told its ending deleted the branch", %{
     conn: conn,
     chat: chat,
     project: project
@@ -819,13 +892,13 @@ defmodule ForgeWeb.ChatLiveTest do
     wrote(chat, 1, %{"commit-message" => "Nothing to see here\n"})
     {:ok, _result} = Forge.Merge.perform_chat(chat)
     refute Forge.Git.branch_exists?(Projects.repo_path(project), "chat/" <> chat.id)
-    {:ok, _chat} = Conversations.ended(chat, nil, "idle")
+    :ok = Conversations.close(chat)
 
     {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
-    copy = view |> element("#reopen-copy") |> render()
+    copy = view |> element("#chat-ended") |> render()
 
-    assert copy =~ "a merge deletes it"
-    refute copy =~ "deleted when it ended"
+    assert copy =~ "already gone"
+    refute copy =~ "was deleted"
   end
 
   # Every ticket change on the node reaches the page on the global topic, and a handler on one
@@ -841,15 +914,15 @@ defmodule ForgeWeb.ChatLiveTest do
     {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
 
     {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
-    assert has_element?(view, "#draft")
+    assert has_element?(view, "#top-bar .ui-top-title > .ui-top-sub", "waiting for a machine")
 
     stop_quietly(chat)
 
     send(view.pid, {:ticket_changed, other.id})
-    assert has_element?(view, "#draft")
+    assert has_element?(view, "#top-bar .ui-top-title > .ui-top-sub", "waiting for a machine")
 
     send(view.pid, {:ticket_changed, ticket.id})
-    refute has_element?(view, "#draft")
+    assert has_element?(view, "#top-bar .ui-top-title > .ui-top-sub", "idle")
   end
 
   # A project chat has no ticket, and its changes are announced under `nil`.
@@ -864,10 +937,10 @@ defmodule ForgeWeb.ChatLiveTest do
     stop_quietly(chat)
 
     send(view.pid, {:ticket_changed, ticket.id})
-    assert has_element?(view, "#draft")
+    assert has_element?(view, "#top-bar .ui-top-title > .ui-top-sub", "waiting for a machine")
 
     send(view.pid, {:ticket_changed, nil})
-    refute has_element?(view, "#draft")
+    assert has_element?(view, "#top-bar .ui-top-title > .ui-top-sub", "idle")
   end
 
   defp stop_quietly(chat) do
@@ -875,24 +948,23 @@ defmodule ForgeWeb.ChatLiveTest do
       chat |> Jobs.Job.progress_changeset(%{status: :hibernated}) |> Forge.Repo.update()
   end
 
-  # The page draws Reopen only when the conversation is not live, but an event is anything the
-  # socket sends. Reopened while running, a conversation lost the `worker_id` its worker reports
-  # under; the context refuses, and the page says so rather than crashing or pretending.
-  test "a reopen sent to a live conversation is refused, and said", %{conn: conn, chat: chat} do
+  test "a send from a stale page to a live conversation keeps its worker", %{
+    conn: conn,
+    chat: chat
+  } do
     {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
 
     {:ok, _running} =
       chat
       |> Jobs.Job.progress_changeset(%{status: :running, worker_id: worker.id})
       |> Forge.Repo.update()
 
-    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
-    refute has_element?(view, ~s(button[phx-click="reopen"]))
+    render_hook(view, "send", %{"text" => "go on"})
 
-    render_hook(view, "reopen", %{})
-    assert has_element?(view, "#chat-error[role=alert]", "still live")
     assert %{status: :running, worker_id: worker_id} = Jobs.get!(chat.id)
     assert worker_id == worker.id
+    refute Enum.any?(Forge.Events.for_job(chat.id), &(&1.type == "chat.reopened"))
   end
 
   # The usage lines written out in the details are facts on the facts' edge: with nothing
@@ -936,52 +1008,57 @@ defmodule ForgeWeb.ChatLiveTest do
     assert view |> element("#chat-facts") |> render() =~ "42%"
   end
 
-  # And the other way: End is drawn only while it is live, so a close arriving after it stopped
-  # is a stale page or a crafted event. It was a match on `:ok` that took the view down.
-  test "a close sent to a stopped conversation is refused, and said", %{conn: conn, chat: chat} do
-    {:ok, _chat} = Conversations.ended(chat, nil, "idle")
-
+  # End is drawn on an ordinary conversation that has not been ended, so a close arriving after it
+  # was is a stale page or a crafted event. It was a match on `:ok` that took the view down.
+  test "a close sent to an ended conversation is refused, and said", %{conn: conn, chat: chat} do
     {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
-    refute has_element?(view, ~s(button[phx-click="close"]))
+    :ok = Conversations.close(chat)
+    before = length(Forge.Events.for_job(chat.id))
 
     render_hook(view, "close", %{})
     # Said in the details, where End was pressed, and not in the dock.
-    assert has_element?(view, "#chat-details #chat-ending-error[role=alert]", "already stopped")
+    assert has_element?(view, "#chat-details #chat-ending-error[role=alert]", "already ended")
     refute has_element?(view, "#chat-error")
-    assert Jobs.get!(chat.id).status == :finished
+    assert length(Forge.Events.for_job(chat.id)) == before
   end
 
-  # Remaking the branch is a git write and can fail. The page says so rather than crashing.
-  test "a reopen that cannot make its branch again says so", %{conn: conn, project: project} do
-    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
-    {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
-    :ok = Conversations.close(chat)
-    :ok = Forge.Git.delete_branch(Projects.repo_path(project), ticket.branch)
-
-    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
-
-    view |> element("button", "Reopen") |> render_click()
-    assert has_element?(view, ".chat-dock #chat-error[role=alert]", "Could not reopen")
-    assert Conversations.get!(chat.id).status == :finished
-  end
-
-  test "a stopped conversation whose branch is kept says it carries on from it", %{
-    conn: conn,
-    chat: chat
-  } do
+  # An idle conversation keeps its branch and offers End, as one holding a machine does.
+  test "a released conversation can still be ended from its page", %{conn: conn, chat: chat} do
     {:ok, _chat} = Conversations.ended(chat, nil, "idle")
 
     {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
-    copy = view |> element("#reopen-copy") |> render()
+    assert has_element?(view, ~s(#chat-end[phx-click="close"]), "End it")
 
-    assert copy =~ "on its branch as it stands"
-    refute copy =~ "was deleted"
+    render_hook(view, "close", %{})
+
+    assert Conversations.ended?(chat)
+    assert has_element?(view, "#chat-ended")
+    refute has_element?(view, "#draft")
   end
 
-  # The box was already swapped for Reopen; the answer rows were not, and an answer row *is* a
-  # send button. A real chat on the dev node was tapped this way after it had stopped, and the
-  # tap was recorded and never delivered.
-  test "a stopped conversation takes its answer rows away with the box", %{
+  # Remaking the branch is a git write and can fail. The page says so rather than crashing, and
+  # nothing was recorded.
+  test "a send that cannot make its branch again says so", %{conn: conn, project: project} do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+    {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+    {:ok, _chat} = Conversations.ended(chat, nil, "idle")
+    repo = Projects.repo_path(project)
+    :ok = Forge.Git.delete_branch(repo, "chat/" <> chat.id)
+    :ok = Forge.Git.delete_branch(repo, ticket.branch)
+    before = length(Conversations.messages(chat.id))
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+    view |> form("#say", %{"text" => "carry on"}) |> render_submit()
+    assert has_element?(view, ".chat-dock #chat-error[role=alert]", "Could not send")
+    assert Conversations.get!(chat.id).status == :finished
+    assert length(Conversations.messages(chat.id)) == before
+  end
+
+  # The answer rows are a send button, so they follow the same rule as the box: drawn exactly when a
+  # send would be taken. A released conversation takes one — it starts it again — and an ended
+  # one does not, so its rows go and what it asked stays readable where it was said.
+  test "a released conversation keeps its answer rows, and an ended one loses them", %{
     conn: conn,
     chat: chat
   } do
@@ -999,17 +1076,21 @@ defmodule ForgeWeb.ChatLiveTest do
     {:ok, _chat} = Conversations.ended(chat, nil, "worker_lost")
 
     {:ok, view, html} = live(conn, ~p"/chats/#{chat.id}")
+    assert has_element?(view, "#answer-rows form")
+    refute html =~ "Reopen"
 
+    :ok = Conversations.close(Conversations.get!(chat.id))
+    {:ok, view, html} = live(conn, ~p"/chats/#{chat.id}")
+
+    refute has_element?(view, "#answer-rows")
     refute has_element?(view, "button", "postgres")
-    assert html =~ "Reopen"
-
     # What it asked is still readable — it is in the reply above, which is where it was said.
     assert html =~ "Which backend should it use?"
   end
 
-  # Between the render and the tap. The page says so and stops offering it, rather than
-  # accepting the tap into nothing.
-  test "a conversation that stops under the page refuses the tap and swaps to reopen", %{
+  # Between the render and the tap: it is ended while the page is open. The page says so and stops
+  # offering it, rather than accepting the tap into nothing.
+  test "a conversation that is ended under the page refuses the tap", %{
     conn: conn,
     chat: chat
   } do
@@ -1026,8 +1107,8 @@ defmodule ForgeWeb.ChatLiveTest do
     assert has_element?(view, "#answer-rows form")
     reply = Conversations.reply_ref(Conversations.messages(chat.id))
 
-    # It ends while the page is open. The view is subscribed, so the form goes on its own.
-    {:ok, _chat} = Conversations.ended(chat, nil, "worker_lost")
+    # It is ended while the page is open. The view is subscribed, so the form goes on its own.
+    :ok = Conversations.close(Conversations.get!(chat.id))
     refute has_element?(view, "#answer-rows form")
 
     # A client that did not get that far still sends the event — a phone asleep in a pocket,
@@ -1041,14 +1122,39 @@ defmodule ForgeWeb.ChatLiveTest do
         "answers" => %{"backend" => %{"choice" => "postgres"}}
       })
 
-    # The refusal's own sentence: the stopped page says "This conversation has stopped" anyway.
-    assert html =~ "Reopen it to answer."
-    assert html =~ "Reopen"
+    assert html =~ "This conversation was ended, so it takes no answer."
 
     refute Enum.any?(
              Conversations.messages(chat.id),
              &(&1.role == :user and &1.text =~ "postgres")
            )
+  end
+
+  # A tap on an answer row of a conversation whose machine was released starts it again, with the
+  # answer as what it replies to.
+  test "an answer to a released conversation starts it again", %{conn: conn, chat: chat} do
+    text(chat, """
+    ```question
+    key: backend
+    text: Which backend should it use?
+    options: [{label: postgres, detail: About postgres}, {label: sqlite, detail: About sqlite}]
+    ```
+    """)
+
+    turn(chat, 1)
+    {:ok, _chat} = Conversations.ended(chat, nil, "idle")
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    reply = Conversations.reply_ref(Conversations.messages(chat.id))
+
+    render_click(view, "chat:questions:send", %{
+      "form" => "chat-#{chat.id}-#{reply}",
+      "chat" => chat.id,
+      "reply" => reply,
+      "answers" => %{"backend" => %{"choice" => "postgres"}}
+    })
+
+    assert Conversations.get!(chat.id).status == :pending
+    assert List.last(Conversations.messages(chat.id)).text =~ "postgres"
   end
 
   # The card also goes when its questions are answered in another tab while the conversation is

@@ -11,7 +11,19 @@ defmodule Forge.ChatStepTest do
   import Forge.ForgeFixtures
   import Forge.GitFixtures
 
-  alias Forge.{Artifacts, Conversations, Engine, Events, Jobs, Operator, Repo, Steps, Tickets}
+  alias Forge.{
+    Artifacts,
+    Conversations,
+    Engine,
+    Events,
+    Jobs,
+    Operator,
+    Queue,
+    Repo,
+    Steps,
+    Tickets
+  }
+
   alias Forge.Jobs.Job
 
   @workflow """
@@ -138,7 +150,7 @@ defmodule Forge.ChatStepTest do
     assert Tickets.get!(ticket.id).usage == 10_000
   end
 
-  test "no by-hand transition while it is live, and one once it is dormant", %{
+  test "no by-hand transition while it is live, and one once its machine is released", %{
     ticket: ticket,
     user: user,
     chat: chat
@@ -148,7 +160,7 @@ defmodule Forge.ChatStepTest do
                outcome: "needs_more"
              )
 
-    :ok = Conversations.close(chat, "idle")
+    {:ok, _released} = Conversations.ended(Repo.get!(Job, chat.id), nil, "idle")
     assert %Job{status: :finished} = Repo.get!(Job, chat.id)
 
     assert {:ok, %{state: "review_ready"}} =
@@ -157,13 +169,13 @@ defmodule Forge.ChatStepTest do
              )
   end
 
-  test "a step is never run again as a job, live or dormant", %{
+  test "a step is never run again as a job, live or released", %{
     ticket: ticket,
     user: user,
     chat: chat
   } do
     assert {:error, {:no_job_in, "refining"}} = Engine.retry(Tickets.get!(ticket.id), user.id)
-    :ok = Conversations.close(chat, "idle")
+    {:ok, _released} = Conversations.ended(Repo.get!(Job, chat.id), nil, "idle")
     assert {:error, {:no_job_in, "refining"}} = Engine.retry(Tickets.get!(ticket.id), user.id)
     refute Engine.retryable?(Tickets.get!(ticket.id))
     assert Repo.all(from j in Job, where: j.ticket_id == ^ticket.id and j.kind == :workflow) == []
@@ -355,18 +367,18 @@ defmodule Forge.ChatStepTest do
       assert Tickets.get!(ticket.id).state == "refining"
     end
 
-    test "a dormant conversation can be accepted if its documents exist", %{
+    test "a conversation whose machine was released can be accepted if its documents exist", %{
       user: user,
       chat: chat,
       seen: seen
     } do
-      :ok = Conversations.close(Repo.get!(Job, chat.id), "idle")
+      {:ok, _released} = Conversations.ended(Repo.get!(Job, chat.id), nil, "idle")
       assert {:ok, %{state: "planning"}} = accept(chat, user, "done", seen)
     end
 
-    test "it cannot be reopened once the step is accepted", %{user: user, chat: chat, seen: seen} do
+    test "it takes no message once the step is accepted", %{user: user, chat: chat, seen: seen} do
       {:ok, _} = accept(chat, user, "done", seen)
-      assert {:error, :step_over} = Conversations.reopen(Repo.get!(Job, chat.id))
+      assert {:error, :step_over} = Conversations.send(Repo.get!(Job, chat.id), "carry on")
     end
   end
 
@@ -383,7 +395,7 @@ defmodule Forge.ChatStepTest do
     assert view.missing == ["refinement.md"]
   end
 
-  test "returning to the step opens a new visit, and reopening does not", %{
+  test "returning to the step opens a new visit, and a message to the old one does not", %{
     ticket: ticket,
     user: user,
     chat: chat
@@ -395,8 +407,8 @@ defmodule Forge.ChatStepTest do
     assert [%Job{attempt: 1}, %Job{attempt: 2} = second] = Jobs.step_chats_for_ticket(back.id)
     assert Conversations.opened_step(second.id)["entered"]["from"] == "review_ready"
 
-    # The first visit is over; a reopen of it is refused and is not a new visit.
-    assert {:error, :step_over} = Conversations.reopen(Repo.get!(Job, chat.id))
+    # The first visit is over; a message to it is refused and is not a new visit.
+    assert {:error, :step_over} = Conversations.send(Repo.get!(Job, chat.id), "carry on")
     assert length(Jobs.step_chats_for_ticket(back.id)) == 2
   end
 
@@ -423,7 +435,7 @@ defmodule Forge.ChatStepTest do
   } do
     chat = answered(chat, 1, %{"refinement.md" => "# R\n"})
     seen = seen(ticket, ["refinement.md"])
-    :ok = Conversations.close(Repo.get!(Job, chat.id), "idle")
+    {:ok, _released} = Conversations.ended(Repo.get!(Job, chat.id), nil, "idle")
 
     {:ok, _} =
       Engine.choose(Tickets.get!(ticket.id), user.id, "review_ready", outcome: "needs_more")
@@ -432,8 +444,8 @@ defmodule Forge.ChatStepTest do
 
     assert {:error, :superseded} = accept(chat, user, "done", seen)
 
-    # Back in the step, but not the visit this conversation was: only the newer visit is reopened.
-    assert {:error, :step_over} = Conversations.reopen(Repo.get!(Job, chat.id))
+    # Back in the step, but not the visit this conversation was: only the newer visit takes a message.
+    assert {:error, :step_over} = Conversations.send(Repo.get!(Job, chat.id), "carry on")
   end
 
   test "a conversation cannot be accepted after the ticket has left its step", %{
@@ -443,7 +455,7 @@ defmodule Forge.ChatStepTest do
   } do
     chat = answered(chat, 1, %{"refinement.md" => "# R\n"})
     seen = seen(ticket, ["refinement.md"])
-    :ok = Conversations.close(Repo.get!(Job, chat.id), "idle")
+    {:ok, _released} = Conversations.ended(Repo.get!(Job, chat.id), nil, "idle")
 
     {:ok, _} =
       Engine.choose(Tickets.get!(ticket.id), user.id, "review_ready", outcome: "needs_more")
@@ -451,7 +463,7 @@ defmodule Forge.ChatStepTest do
     assert {:error, {:not_in_step, "refining"}} = accept(chat, user, "done", seen)
 
     # Nothing accepted it and no newer visit exists: only the ticket's state says the step is over.
-    assert {:error, :step_over} = Conversations.reopen(Repo.get!(Job, chat.id))
+    assert {:error, :step_over} = Conversations.send(Repo.get!(Job, chat.id), "carry on")
   end
 
   test "a step waiting for the person's reply is the ticket waiting on a person", %{
@@ -484,16 +496,244 @@ defmodule Forge.ChatStepTest do
     assert Steps.refusal(:something_new) =~ "Could not accept"
   end
 
-  test "cancelling stops the conversation, and restoring leaves it reopenable", %{
+  # Cancelling is not ending: the conversation stops with its branch kept, a message to it is
+  # refused while the ticket is cancelled, and once the ticket is restored a message carries the
+  # same conversation on.
+  test "cancelling stops the conversation, and restoring lets a message carry it on", %{
     ticket: ticket,
     user: user,
     chat: chat
   } do
     {:ok, cancelled} = Engine.cancel(ticket, user.id)
     assert %Job{status: :hibernated} = Repo.get!(Job, chat.id)
-    assert {:error, :step_over} = Conversations.reopen(Repo.get!(Job, chat.id))
+    refute Conversations.ended?(chat.id)
+    before = length(Events.for_job(chat.id))
+    assert {:error, :step_over} = Conversations.send(Repo.get!(Job, chat.id), "carry on")
+    assert length(Events.for_job(chat.id)) == before
 
     {:ok, _restored} = Engine.restore(cancelled, user.id)
-    assert {:ok, %Job{status: :pending}} = Conversations.reopen(Repo.get!(Job, chat.id))
+    assert {:ok, _event} = Conversations.send(Repo.get!(Job, chat.id), "carry on")
+    assert %Job{status: :pending} = Repo.get!(Job, chat.id)
+  end
+
+  # Ending one only ever left the ticket stuck in the step with nobody to talk to, so it is
+  # refused at the operation, for everyone, before anything is written.
+  test "a step's conversation cannot be ended, by a member or a node admin", %{
+    project: project,
+    ticket: ticket,
+    user: user,
+    chat: chat
+  } do
+    # A node admin who is a member of the project: the rule is not one a role can lift.
+    admin =
+      project |> member_fixture() |> Ecto.Changeset.change(node_admin: true) |> Repo.update!()
+
+    before = Events.for_job(chat.id)
+
+    assert {:error, :step} = Conversations.close(chat)
+    assert {:error, :step} = Forge.Operator.close_chat(chat, user)
+    assert {:error, :step} = Forge.Operator.close_chat(chat, admin)
+
+    # The caller's struct is not believed either: a step is a step by its row.
+    assert {:error, :step} = Conversations.close(%{chat | state: nil})
+
+    assert Events.for_job(chat.id) == before
+    assert %Job{status: status} = Repo.get!(Job, chat.id)
+    assert status in [:pending, :running]
+    assert Tickets.get!(ticket.id).state == "refining"
+  end
+
+  test "Accept still ends a step's conversation, for good", %{
+    user: user,
+    chat: chat,
+    ticket: ticket
+  } do
+    chat = answered(chat, 1, %{"refinement.md" => "# R\n"})
+    {:ok, _} = accept(chat, user, "done", seen(ticket, ["refinement.md"]))
+
+    assert Conversations.ended?(chat.id)
+    assert %Job{status: :finished} = Repo.get!(Job, chat.id)
+  end
+
+  test "a released step conversation whose agent spoke last is the ticket waiting on a person", %{
+    ticket: ticket,
+    chat: chat
+  } do
+    run!(chat)
+
+    :ok =
+      Jobs.record_harness_event(chat.id, %{
+        type: "job.harness.text",
+        payload: %{text: "What should it do?", parent_tool_use_id: nil}
+      })
+
+    {:ok, _} = Conversations.record_turn(Repo.get!(Job, chat.id), turn(1))
+    {:ok, _released} = Conversations.ended(Repo.get!(Job, chat.id), nil, "idle")
+
+    assert [%{kind: :chat, detail: %{lost: false}}] =
+             Forge.Queue.for_ticket(Tickets.get!(ticket.id))
+  end
+
+  describe "a step conversation without a machine, in the queue" do
+    setup %{user: user} do
+      Forge.Push.TestSender.watch()
+      key = fn bytes -> Base.url_encode64(:crypto.strong_rand_bytes(bytes), padding: false) end
+
+      {:ok, _} =
+        Forge.Push.subscribe(user, %{
+          "endpoint" => "https://push.example/step",
+          "keys" => %{"p256dh" => key.(65), "auth" => key.(16)}
+        })
+
+      :ok
+    end
+
+    defp reply!(chat, text) do
+      :ok =
+        Jobs.record_harness_event(chat.id, %{
+          type: "job.harness.text",
+          payload: %{text: text, parent_tool_use_id: nil}
+        })
+
+      {:ok, chat} = Conversations.record_turn(Repo.get!(Job, chat.id), turn(1))
+      chat
+    end
+
+    defp running!(chat) do
+      {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
+
+      chat
+      |> Job.progress_changeset(%{status: :running, worker_id: worker.id})
+      |> Repo.update!()
+    end
+
+    # With no stopped state a conversation whose agent spoke last is waiting on you whether or not
+    # it holds a machine: the idle timeout changes nothing about whose turn it is.
+    test "released with the agent's reply last, it is still waiting on you, once", %{
+      user: user,
+      ticket: ticket,
+      chat: chat
+    } do
+      reply!(chat, "What should it do?")
+      assert Queue.count(user) == 1
+
+      {:ok, released} = Conversations.ended(Repo.get!(Job, chat.id), nil, "idle")
+      refute Conversations.live?(released)
+
+      assert [%{kind: :chat, detail: %{lost: false, chat_id: id}}] = Queue.items(user)
+      assert id == chat.id
+      assert Queue.count(user) == 1
+      assert [%{kind: :chat}] = Queue.for_ticket(Tickets.get!(ticket.id))
+
+      # It is an item, so it is not also a row in Open tickets.
+      refute ticket.id in Enum.map(Queue.open_tickets(user, Queue.items(user)), & &1.id)
+    end
+
+    # Criterion 19: the agent's reply already sent a notification and the wait it started has not
+    # changed, so a machine released by the idle timeout sends none.
+    test "the idle timeout pushes nothing", %{chat: chat} do
+      reply!(chat, "What should it do?")
+      assert_receive {:push, _endpoint, _payload, _opts}, 2_000
+
+      {:ok, _released} = Conversations.ended(Repo.get!(Job, chat.id), nil, "idle")
+
+      refute_receive {:push, _endpoint, _payload, _opts}, 300
+    end
+
+    # The same promise seen from the push watch, which reads the ticket on every change and pushes
+    # what is new: the released conversation's item has the key the reply's item had, so a machine
+    # released changes nothing it would tell anyone.
+    test "the push watch sees a released conversation's item as the one it already told", %{
+      ticket: ticket,
+      chat: chat
+    } do
+      chat = reply!(chat, "What should it do?")
+      assert_receive {:push, _endpoint, _payload, _opts}, 2_000
+
+      seen = Forge.Push.Watch.changed(%{}, ticket.id)
+      assert_receive {:push, _endpoint, _payload, _opts}, 2_000
+
+      {:ok, _released} = Conversations.ended(chat, nil, "idle")
+
+      assert Forge.Push.Watch.changed(seen, ticket.id) == seen
+      refute_receive {:push, _endpoint, _payload, _opts}, 300
+    end
+
+    test "the step moving on takes it out of the queue", %{user: user, chat: chat, ticket: ticket} do
+      chat = reply!(chat, "What should it do?")
+      {:ok, _released} = Conversations.ended(chat, nil, "idle")
+      assert Queue.count(user) == 1
+
+      {:ok, _} =
+        Engine.choose(Tickets.get!(ticket.id), user.id, "review_ready", outcome: "needs_more")
+
+      assert Queue.for_chat(Repo.get!(Job, chat.id)) == []
+      assert Enum.filter(Queue.items(user), &(&1.kind == :chat)) == []
+    end
+
+    # The person's message is the last word and no reply came: the conversation says so, is not
+    # started again by itself, and for a step is a queue item and a notification.
+    test "a reply lost with its machine is an item that says so, and pushes", %{
+      user: user,
+      chat: chat
+    } do
+      chat = running!(chat)
+      {:ok, _event} = Conversations.send(chat, "go on")
+      refute_receive {:push, _endpoint, _payload, _opts}, 100
+
+      {:ok, lost} = Jobs.requeue(chat.id, :worker_lost)
+
+      assert lost.status == :hibernated
+      assert [%{kind: :chat, detail: %{lost: true, text: text}}] = Queue.items(user)
+      assert text =~ "lost with its machine"
+      assert Queue.count(user) == 1
+
+      assert_receive {:push, _endpoint, payload, _opts}, 2_000
+      assert payload["title"] =~ "lost"
+
+      # Never re-queued by itself: the platform restart's sweep leaves it where it is.
+      assert Repo.get!(Job, chat.id).status == :hibernated
+      assert {:ok, _event} = Conversations.send(Repo.get!(Job, chat.id), "go on")
+      assert Repo.get!(Job, chat.id).status == :pending
+      assert Enum.filter(Queue.items(user), &(&1.detail[:lost] == true)) == []
+    end
+
+    test "a platform restart that loses the machine says it too", %{user: user, chat: chat} do
+      chat = running!(chat)
+      {:ok, _event} = Conversations.send(chat, "go on")
+
+      # A worker row that is gone, which is what `recover/0` looks for.
+      Repo.update_all(Forge.Workers.Worker, set: [status: :destroyed])
+      assert 1 = Jobs.recover()
+
+      assert [%{kind: :chat, detail: %{lost: true}}] = Queue.items(user)
+      assert_receive {:push, _endpoint, _payload, _opts}, 2_000
+    end
+
+    # A machine lost after the agent had replied leaves the item the reply made, which pushed when
+    # it was made: nothing new has started waiting.
+    test "a machine lost after the reply pushes nothing more", %{chat: chat} do
+      chat = running!(chat)
+      reply!(chat, "What should it do?")
+      assert_receive {:push, _endpoint, _payload, _opts}, 2_000
+
+      {:ok, _lost} = Jobs.requeue(chat.id, :worker_lost)
+
+      refute_receive {:push, _endpoint, _payload, _opts}, 300
+    end
+
+    test "an ordinary conversation that lost its reply is in no queue and pushes nothing", %{
+      project: project,
+      user: user
+    } do
+      {:ok, plain} = Conversations.open(project, "hello")
+      plain = running!(plain)
+      {:ok, _event} = Conversations.send(plain, "go on")
+
+      {:ok, _lost} = Jobs.requeue(plain.id, :worker_lost)
+
+      assert Enum.filter(Queue.items(user), &(&1.detail[:chat_id] == plain.id)) == []
+      refute_receive {:push, _endpoint, _payload, _opts}, 300
+    end
   end
 end

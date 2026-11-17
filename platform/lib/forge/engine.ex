@@ -961,12 +961,12 @@ defmodule Forge.Engine do
     Enum.each(live, &Forge.Git.Tokens.revoke_for_job(&1.id))
   end
 
-  # A cancelled ticket's step conversation is stopped and left dormant, its branch kept, so that
-  # restoring the ticket leaves it reopenable (`docs/design/conversations.md` § A conversation
+  # A cancelled ticket's step conversation is stopped, its branch kept, so that restoring the
+  # ticket leaves it one a message carries on (`docs/design/conversations.md` § A conversation
   # that is a step). After the commit, for the reason the jobs' pushes are.
   defp stop_step_chats(%Ticket{id: id}, user_id) do
     for chat <- Jobs.live_step_chats(id) do
-      Forge.Conversations.close(chat, "cancelled", actor: actor(user_id))
+      Forge.Conversations.cancel_step(chat, actor: actor(user_id))
     end
 
     :ok
@@ -1490,7 +1490,7 @@ defmodule Forge.Engine do
 
   defp retryable(%Ticket{} = ticket, workflow) do
     case Workflow.state(workflow, ticket.state) do
-      # A chat step is never run again as a job: its conversation is reopened, and a new visit
+      # A chat step is never run again as a job: a message carries its conversation on, and a new visit
       # comes only from the workflow's own edges.
       %State{chat: true} -> {:error, {:no_job_in, ticket.state}}
       %State{prompt: prompt} when is_binary(prompt) -> queued_or_live(ticket)

@@ -67,9 +67,6 @@ defmodule ForgeWeb.Components.StepAccept do
       <p :if={@step.over == nil and @step.in_flight} id="step-waiting">
         Waiting for the reply to finish.
       </p>
-      <p :if={@step.over == nil and @step.dormant} id="step-dormant" class={@wrap}>
-        The conversation has stopped. Reopen it to go on.
-      </p>
     </section>
     """
   end
@@ -112,10 +109,6 @@ defmodule ForgeWeb.Components.StepAccept do
       class={["text-sm text-ink-2", @wrap]}
     >
       Not written yet: {Enum.join(@step.missing, ", ")}. Ask the agent for it.
-    </p>
-
-    <p :if={@step.dormant} id="step-dormant" class={["text-sm text-ink-2", @wrap]}>
-      The conversation has stopped. You can still accept what it wrote, or reopen it to go on.
     </p>
 
     <div :if={blocked_all?(@step)} id="step-blocked" class="flex min-w-0 flex-col gap-1 text-sm">

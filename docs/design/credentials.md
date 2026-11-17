@@ -317,8 +317,8 @@ without a reset time: the reason is recorded once, and the soonest reset can mov
 
 **What it leaves alone.** A resumed run gets its state's budget again, as a job resuming after a
 question already does; the ticket allowance and the daily cap, which include the stopped run's
-cost, bound the total. A conversation is not re-queued by itself: a person is in it, it goes
-dormant as it does on any ending that was not the person's, and the pick applies when it is
+cost, bound the total. A conversation is not re-queued by itself: a person is in it, it loses
+its machine as it does on any ending that was not the person's, and the pick applies when it is
 opened again.
 
 ## Spend
@@ -587,8 +587,8 @@ with OpenAI: the first job is the check*. A refused Codex credential fails jobs 
 Claude token; nothing marks or skips it.
 
 **Holding a login.** A hold is a live run (`job_runs.exclusive` and a partial unique index), so it
-ends however the run ends — result, cancel, lost machine, platform restart, a chat going dormant
-or closed. A conversation holds its login from process start to end, not only while answering.
+ends however the run ends — result, cancel, lost machine, platform restart, a chat losing its machine
+or being ended. A conversation holds its login from process start to end, not only while answering.
 
 **A login comes back.** `Credentials.renew/3`, inside the result's transaction before the run
 closes, keeps a returned login only from the holder's worker, while live, for a `returns` kind,

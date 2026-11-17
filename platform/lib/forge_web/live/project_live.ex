@@ -126,19 +126,16 @@ defmodule ForgeWeb.ProjectLive do
     current = if tip, do: Tickets.types(project, at: tip), else: Tickets.types(project)
     places = Map.new(queue, fn {entry, place} -> {entry.ticket_id, place} end)
     now = DateTime.utc_now()
-    ids = Enum.map(open, & &1.id)
 
     rows =
-      ProjectTickets.rows(open, %{
-        items:
-          Enum.filter(Queue.items(socket.assigns.current_scope.user), &(&1.project.id == id)),
-        live: Doing.live(ids),
-        said: Doing.said(ids),
-        places: places,
-        paused: Forge.Spend.paused?(),
-        milestones: Milestones.names(id),
-        now: now
-      })
+      ProjectTickets.rows(
+        open,
+        Map.merge(Doing.facts(open, places: places), %{
+          items:
+            Enum.filter(Queue.items(socket.assigns.current_scope.user), &(&1.project.id == id)),
+          now: now
+        })
+      )
 
     assign(socket,
       project: project,
@@ -1243,7 +1240,7 @@ defmodule ForgeWeb.ProjectLive do
           <.state_label :if={@summary.live and not @summary.waiting} state="running">
             live
           </.state_label>
-          <.state_label :if={not @summary.live} state="idle">{@summary.chat.status}</.state_label>
+          <.state_label :if={@summary.ended} state="idle">ended</.state_label>
           <span>{Format.ago(@summary.at, @now)}</span>
           <span :if={proposals_on(@proposed, @summary.chat.id)}>
             {proposals_on(@proposed, @summary.chat.id)}

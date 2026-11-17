@@ -2110,7 +2110,7 @@ defmodule Forge.Workers do
 
   @doc """
   Puts back in the queue every job the platform believes is running on this machine, and returns
-  them: a workflow job and a command to `pending`, a chat to dormant (`Forge.Jobs.requeue/2`).
+  them: a workflow job and a command to `pending`, a chat to hibernated, its machine lost (`Forge.Jobs.requeue/2`).
 
   **The one way a machine loses its jobs** — lost past the timeout, retired, or saying its systemd
   stopped answering (`docs/design/worker-channel.md` § When the machine goes away). Each differs

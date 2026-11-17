@@ -55,7 +55,6 @@
      parent runs; `Reopen` and the shown-once block's button fill the width instead. */
   .ui-btn--fill { flex: 1 1 0%; min-height: var(--ui-btn-h); max-height: var(--ui-btn-h); }
   .shown-once > .ui-btn--fill,
-  .chat-reopen > .ui-btn--fill { flex: 0 0 auto; width: 100%; }
 
   .ui-btn--primary { background: var(--ink); color: var(--bg); }
   .ui-btn--decision { background: var(--accent); color: var(--on-accent); font-weight: 600; }

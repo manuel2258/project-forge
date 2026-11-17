@@ -243,6 +243,30 @@ defmodule ForgeWeb.ProjectLiveTest do
     refute has_element?(view, "#conversation-#{chat.id} .ui-row-latest")
   end
 
+  # The project page's Chats draws its own rows, and says what `/chats` says: nothing about a
+  # machine having stopped, and *ended* for a conversation a person ended.
+  test "a released conversation's row says nothing about stopping; an ended one says ended", %{
+    conn: conn,
+    project: project
+  } do
+    {:ok, idle} = Conversations.open(project, "gone idle")
+    {:ok, _idle} = Conversations.ended(idle, nil, "idle")
+    {:ok, lost} = Conversations.open(project, "lost its machine")
+    {:ok, _lost} = Conversations.ended(lost, nil, "worker_lost")
+    {:ok, ended} = Conversations.open(project, "ended by hand")
+    :ok = Conversations.close(ended)
+
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}?view=chats")
+
+    for chat <- [idle, lost] do
+      row = view |> element("#conversation-#{chat.id}") |> render()
+      refute row =~ ~r/finished|hibernated|stopped|dormant/
+      refute row =~ "ended"
+    end
+
+    assert view |> element("#conversation-#{ended.id}") |> render() =~ "ended"
+  end
+
   # A chat with no ticket is told on the chats topic only.
   test "an unscoped chat's end redraws the page", %{conn: conn, project: project} do
     {:ok, chat} = Conversations.open(project, "about the parser")

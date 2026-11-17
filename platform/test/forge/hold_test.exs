@@ -17,6 +17,9 @@ defmodule Forge.HoldTest do
   alias Forge.Jobs.Job
   alias Forge.MergeQueue.Entry
 
+  # What the queue page's Open tickets group draws, for the viewer: never a ticket on hold.
+  defp open_tickets(user), do: Forge.Queue.open_tickets(user, Forge.Queue.items(user))
+
   setup do
     repo = seeded_repo()
 
@@ -196,11 +199,11 @@ defmodule Forge.HoldTest do
       held = Tickets.get!(held.id)
       assert held.state == "refining"
       assert %{"to" => "talking"} = held.held_transition
-      assert Forge.Steps.live(held) == nil
+      assert Forge.Steps.chat_for(held) == nil
 
       {:ok, released} = Operator.release(held, user)
       assert released.state == "talking"
-      assert %Job{kind: :chat, state: "talking"} = Forge.Steps.live(released)
+      assert %Job{kind: :chat, state: "talking"} = Forge.Steps.chat_for(released)
     end
   end
 
@@ -529,7 +532,7 @@ defmodule Forge.HoldTest do
       ticket = admit!(project, user, on_hold: true)
       refute Enum.any?(Forge.Queue.items(user), &(&1.ticket && &1.ticket.id == ticket.id))
       assert Forge.Queue.for_ticket(ticket) == []
-      assert Forge.Queue.worker_status(user) == []
+      refute Enum.any?(open_tickets(user), &(&1.id == ticket.id))
     end
 
     test "choosing neither is refused and writes nothing", %{project: project, user: user} do
@@ -669,11 +672,11 @@ defmodule Forge.HoldTest do
         })
 
       ticket = admit!(project, user)
-      assert Enum.any?(Forge.Queue.worker_status(user), &(&1.ticket.id == ticket.id))
+      assert Enum.any?(open_tickets(user), &(&1.id == ticket.id))
 
       {:ok, held} = Operator.hold(ticket, user)
 
-      assert Forge.Queue.worker_status(user) == []
+      refute Enum.any?(open_tickets(user), &(&1.id == ticket.id))
       refute Enum.any?(Forge.Queue.items(user), &(&1.ticket && &1.ticket.id == ticket.id))
       assert Forge.Queue.for_ticket(held) == []
 
@@ -755,7 +758,7 @@ defmodule Forge.HoldTest do
 
       {:ok, _} = Operator.hold(Tickets.get!(ticket.id), user)
       assert summary.().running == 0
-      assert Forge.Queue.worker_status(user) == []
+      refute Enum.any?(open_tickets(user), &(&1.id == ticket.id))
     end
   end
 end

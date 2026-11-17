@@ -59,6 +59,83 @@ defmodule Forge.Tickets.DoingTest do
     end
   end
 
+  describe "live, for the queue's rows as well as the project's" do
+    # The two rules the old under-way group had and the list lacked, now carried by the one read
+    # both pages share: a running row's age is the current run's, from the run ledger.
+    test "a running job is aged from the run it is in, not the run it first had" do
+      ticket = ticket_fixture()
+      {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
+      first = DateTime.add(DateTime.utc_now(:second), -36_000, :second)
+      current = DateTime.add(DateTime.utc_now(:second), -60, :second)
+
+      job = job_fixture(%{ticket: ticket, worker_id: worker.id, status: :running})
+      Repo.update!(Ecto.Changeset.change(job, started_at: first))
+
+      Repo.insert!(%Forge.Jobs.Run{
+        job_id: job.id,
+        worker_id: worker.id,
+        started_at: first,
+        finished_at: DateTime.add(first, 600, :second)
+      })
+
+      Repo.insert!(%Forge.Jobs.Run{job_id: job.id, worker_id: worker.id, started_at: current})
+
+      assert %{status: :running, started_at: ^current} = Doing.live([ticket.id])[ticket.id]
+    end
+
+    test "a running job with no open run keeps its own start" do
+      ticket = ticket_fixture()
+      {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
+      started = DateTime.add(DateTime.utc_now(:second), -60, :second)
+
+      job_fixture(%{ticket: ticket, worker_id: worker.id, status: :running})
+      |> Ecto.Changeset.change(started_at: started)
+      |> Repo.update!()
+
+      assert %{started_at: ^started} = Doing.live([ticket.id])[ticket.id]
+    end
+
+    # A pending job carries a `started_at` from a run that is over, and is not aged from it.
+    test "a pending job's started_at is left as it is" do
+      ticket = ticket_fixture()
+      started = DateTime.add(DateTime.utc_now(:second), -60, :second)
+
+      job_fixture(%{ticket: ticket})
+      |> Ecto.Changeset.change(started_at: started)
+      |> Repo.update!()
+
+      assert %{status: :pending, started_at: ^started} = Doing.live([ticket.id])[ticket.id]
+    end
+
+    # `kind` is what says whether the spend cap gates it: a workflow job is, a command is not.
+    test "carries the kind and the id of the job it picked" do
+      ticket = ticket_fixture()
+      job_fixture(%{ticket: ticket, status: :parked})
+      command = job_fixture(%{ticket: ticket, kind: :command, state: "check", attempt: 2})
+
+      assert %{id: id, kind: :command} = Doing.live([ticket.id])[ticket.id]
+      assert id == command.id
+    end
+  end
+
+  describe "facts" do
+    test "are the live work, the last lines, the pause and the merge queue's places" do
+      ticket = ticket_fixture()
+      job_fixture(%{ticket: ticket})
+      event!(ticket, "job.harness.text", %{"text" => "On it."})
+
+      facts = Doing.facts([ticket])
+
+      assert %{status: :pending} = facts.live[ticket.id]
+      assert {"On it.", _at} = facts.said[ticket.id]
+      assert facts.paused == false
+      assert facts.places == %{}
+      assert facts.milestones == %{}
+
+      assert %{places: %{"x" => :given}} = Doing.facts([ticket], places: %{"x" => :given})
+    end
+  end
+
   describe "said" do
     test "is the agent's newest line, not its first" do
       ticket = ticket_fixture()

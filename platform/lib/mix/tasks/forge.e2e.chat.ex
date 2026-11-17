@@ -137,12 +137,12 @@ defmodule Mix.Tasks.Forge.E2e.Chat do
     end)
 
     # A cleanup for a run whose closing step failed before it closed anything. After one that
-    # passed, the conversation has already stopped, and closing it again is refused — which here
+    # passed, the conversation has already been ended, and ending it again is refused — which here
     # is the nothing there is left to do.
     unless opts[:keep] do
-      case Conversations.close(chat, "e2e") do
+      case Conversations.close(chat) do
         :ok -> :ok
-        {:error, :not_live} -> :ok
+        {:error, :ended} -> :ok
       end
     end
   end
@@ -326,7 +326,7 @@ defmodule Mix.Tasks.Forge.E2e.Chat do
 
   defp closing_releases(chat) do
     worker_id = Jobs.get!(chat.id).worker_id
-    :ok = Conversations.close(chat, "e2e")
+    :ok = Conversations.close(chat)
 
     await(fn -> Jobs.get!(chat.id).status in [:finished, :hibernated] end, @machine_timeout) ||
       fail("it never stopped")

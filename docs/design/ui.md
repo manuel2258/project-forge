@@ -686,7 +686,7 @@ sign-in page's titled refusal, `21n`, is the one other). The operator's shared e
 details for re-pin, integrate, cancel and restore; the ways forward for running again and moving
 on, on the ticket and in the queue; the merge queue for *Take out*; a question card's foot for its
 Send. A page's own refusals sit by their button — an account's row, a machine's row, the push
-switch on the queue and on You, End and Reopen in a chat. A refusal that comes back to the sign-in
+switch on the queue and on You, and End in a chat. A refusal that comes back to the sign-in
 page across a redirect — a dead link, a provider that failed, a session that ran out — carries
 the `:sign_in_error` flash, which only that page reads and draws under its field; a provider's own
 registered refusal carries `:oidc_refusal` instead, drawn titled above its button (`21n`). Both
@@ -1081,18 +1081,24 @@ at every width and an option is a 34px row (`2d`).
 
 **The pass ends somewhere definite** (`13d`): what was decided in it, what was left for later with
 a way back to it — each a row as the *All* sheet draws it, which leads back to the item — and then
-the two quiet groups, **Under way** and **Not waiting on you**, which count towards nothing. When
+the two quiet groups, **Open tickets** and **Not waiting on you**, which count towards nothing. When
 nothing is left, an eyebrow in `--success`, *End of queue*, and a sentence phrased as completion —
 *Nothing needs you. Work continues without you.* — head it; the same block, alone, is the empty
 queue. **When items were left for later it does not say done**: the eyebrow is neutral, *End of
 the pass*, and the sentence counts them, *4 left for later.* Every other empty state names what
-would fill it rather than announcing absence. *Under way* says each half once — *2 tickets running
-on a worker.*, *5 tickets not yet on a worker.* — over its titles, rather than on every line.
+would fill it rather than announcing absence. **Open tickets** is one list, with no halves and no
+sentence per half: every open ticket of the viewer's projects that is not on hold and has nothing
+waiting on a person, newest change first, each drawn as the project's Tickets list draws an open
+ticket (§ A job waiting for a machine). **Where the two groups are drawn depends on the width**:
+below 1440px, on a phone and a portrait desktop (by width alone: a landscape window narrower than 1440px draws these too), they are drawn once, after the end of the pass,
+under its sentence in the item's column, and only when no item is on screen; from 1440px
+(landscape) they stay in the left column under the decisions. The *All* sheet links to each —
+*Open tickets · N*, *Not waiting on you · N*.
 
 **All N**, the top bar's right end on a phone (where another page links to its parent, which the
 queue has none of), opens the whole queue as a sheet (`13e`), so the end is in reach at a glance: every item
 in the pass's order, each with its kind, age, title, ticket and step, decided ones dimmed with `✓`,
-then the two quiet groups. Tapping a row jumps the pass to it. **A row's kicker is the kind
+then a link to each of the two quiet groups. Tapping a row jumps the pass to it. **A row's kicker is the kind
 alone** — *2 blocking questions*, *approval* — with its age right-aligned and never wrapped; where
 the item is, the document and its version or the transition, is the row's latest line, said once.
 
@@ -1121,14 +1127,14 @@ and writes nothing. A dead render carries none, nor does another page, so a new 
 ### What the queue counts
 
 **A ticket on hold never appears in the queue for being on hold, and no push is sent for holding
-one.** It is never in the under-way group or the project summaries' count of running work (the Tickets list's *Running* shows it only while a run it started is finishing, § Tickets). A decision waiting on a
+one.** It is never in the Open tickets group or the project summaries' count of running work (the Tickets list's *Running* shows it only while a run it started is finishing, § Tickets). A decision waiting on a
 ticket that has started — a blocking question, a pending approval, a stuck ticket — reaches the
 queue and the push as on any ticket; a ticket admitted on hold and never started has none
 (`Forge.Queue.for_ticket/1`).
 
 **The queue button's count is the number of items the queue page draws** for the viewer: questions
 grouped per document version, approvals, stuck tickets, conversations waiting on their reader — and
-not assumptions, not the two under-way kinds. **For a node admin it also counts accounts waiting
+not assumptions, not an open ticket drawn in **Open tickets**. **For a node admin it also counts accounts waiting
 for approval** (`12i`): an account waiting on an admin is a decision, and without it in the count
 nobody would know to look. **The queue lists them where the count says they are**: one item,
 *2 accounts wait to be approved.*, whose way on is *Review the accounts ›* to Accounts, where each
@@ -1193,42 +1199,36 @@ event stream, where it is a line like any other.
 
 **It is not amber**, even when the answer is a template nobody has assigned. Amber is the queue's
 mark for a human decision, and neither a job running nor a job not yet on a machine is that: the
-queue draws a ticket resting on either quietly, under **Under way** at the end of the pass —
-the same shape § Not waiting on you gives an assumption, counted towards nothing and never pushed.
-Which of the two a ticket is in is `Job.status` and `worker_id` on its live job and nothing else;
-the rules below say what else the group reads, and what for. A ticket that no template could ever
-hold is stuck instead of merely pending, and is an item that way; stuck excludes the quiet line
-rather than sharing it. A conversation in the same position waits on a person and is drawn quietly
-all the same — the gap `provisioning.md` § The gate records, not a rule.
+queue draws a ticket resting on either quietly, in **Open tickets** — the same shape § Not waiting
+on you gives an assumption, counted towards nothing and never pushed. The group is **every open
+ticket that is not on hold and has no queue item waiting on a person**, and each is drawn as the
+project's Tickets list draws it (§ Tickets): the three-line row, with the ticket's number *and its
+project* (`forge#53`) and a link into that project, the compact workflow track with the current
+step marked, the state, what it is doing with its age (*running 4m*, *queued 2/5*, *paused ·
+spend*, *waiting for a machine*), and the agent's latest line as escaped text. **Its usage is
+always shown** when there is one, where the phone's project row shows it only past half of its
+allowance. It is one list, newest change first, every ticket listed with no cap and no *N more*,
+and absent rather than empty when there is nothing to show. A stuck ticket, a question, an approval,
+a ticket resting in a human state and a conversation waiting on its reader are items above, not
+here, and a ticket on hold is in neither unless something on it waits on a person. It is
+`Forge.Queue.open_tickets/2`, read by the page alone; `Forge.Queue.items/1` is what the JSON API,
+the CLI and the push digest are built on, and none of them has a kind for it.
 
-Four rules, each of which the group broke first:
+Two rules the Tickets list and this group share (`Forge.Tickets.Doing.live/1`), each of which the
+old group had and the list lacked:
 
-- **It is the ticket's live work, and a command is work.** A command state's job *is* a command
-  (`commands.md` § An invocation is a job) and an agent that invoked one parks while it runs, so a
-  read of workflow jobs alone left the queue saying *Nothing needs you* while a build was on a
-  machine. Nor is it the ticket's newest row: a command is created after the agent that invoked
-  it, and a batch is inserted in declared order, so the newest row is routinely one that has
-  already finished while its siblings run. It is a running job with a worker if the ticket has
-  one, else a pending job — running first, because a ticket is on a machine the moment any of its
-  work is.
-- **A paused ticket is still never here.** The daily spend cap and a rate-limited credential pool
-  both leave a job pending with its ticket active, and `capacity.md` keeps both out of the queue
-  because an item the operator cannot act on is what the queue exists not to contain. The group
-  drops them, asking `Forge.Spend` and the wait the scheduler recorded. The cap is drawn
-  `paused · spend` in its place; the rate limit is drawn nowhere at all, because that surface is
-  not built (`capacity.md` § Engine support), so such a ticket is in no operator surface but the
-  reason sentence in its own Steps. **That is a gap, not a treatment** — `capacity.md`'s to
-  close, and not a reason to put a ticket nobody can act on back in the queue. The cap gates a
-  workflow job only: a command takes no spend gate, so a pending one is not dropped.
-- **Neither line names a cause.** *Running on a worker* and *Not yet on a worker* are the two
-  halves of one axis. *Waiting for a worker* named a cause and got it wrong: most of the reasons a
-  job is pending are about getting it a machine, but waiting a turn behind a sibling command is
-  not, and a refused template needs a person. The sentence above is where a cause is stated,
-  because it is the one place that knows which cause.
-- **The age of a running line is the current run's**, from the run ledger — not `jobs.started_at`,
-  which keeps the first run's start for the life of the job, and not the row's age. A job answered
-  at 19:00 after stopping on a question at 09:10 read ten hours old a minute into its second run
-  under either.
+- **The age of a running row is the current run's**, from the run ledger — not `jobs.started_at`,
+  which keeps the first run's start for the life of the job. A job answered at 19:00 after
+  stopping on a question at 09:10 read ten hours old a minute into its second run under it.
+- **The spend cap gates a workflow job and not a command.** `paused · spend` is drawn only when the
+  pending live job is a workflow job: `Jobs.assign_command/2` takes no spend gate, so a pending
+  command is placed at the next pass whatever the cap says.
+
+**A ticket the day's spend cap holds is in the group**, drawn `paused · spend` and neutral. It is
+still never an item, never counted and never pushed (`capacity.md` § Four exhaustions): the group
+asks nothing of anyone, which is the reason an item the operator cannot act on stays out of the
+inbox. A ticket held by a rate-limited credential pool is drawn *waiting for a machine*, as the
+Tickets list draws it; that surface is not built (`capacity.md` § Engine support).
 
 ## The ticket
 
@@ -1606,10 +1606,13 @@ reload, woken by conversations it can show (`Events.subscribe_chats/0`: a messag
 and ticket, and a list matches that before it reads anything) and, on a project's Chats, by a
 change to a ticket of a project the viewer is in, which is what draws a workflow step's chat the
 moment its ticket enters the step. A row moves as things are said, and a conversation starting,
-ending or going idle moves it between the sections. Because a row can move under a finger, *End*
+ending or going idle moves it between the sections. **Nothing on a row says a conversation stopped**:
+one whose machine was released — idle, the spend cap, a lost machine — is under *Earlier* as an
+ordinary row, and one that was ended with *End* says *ended*. Because a row can move under a finger, *End*
 names the conversation it will end — its project where the list names projects, its ticket, and
 the start of the last thing said (`End parser #12 "why does…"?`) — and confirming ends the row that
-was tapped, whatever has moved since. *End* is a quiet word in danger ink at the row's top right,
+was tapped, whatever has moved since. *End* is drawn on a live row that is not a workflow step's — a step conversation cannot be ended
+— and is a quiet word in danger ink at the row's top right,
 beside its time, not a button on a line of its own; asked, its sentence and buttons take the row's
 width under it.
 
@@ -1648,7 +1651,7 @@ it.
 ### A chat
 
 `/chats/:id`, `15a`–`15f`, `18e`. The top bar: the conversation's title over its subline (its
-state, *responding · turn N*, *waiting on you*, *idle*, *waiting for a machine*, *stopped 2h ago*),
+state, *responding · turn N*, *waiting on you*, *idle*, *waiting for a machine*, or *ended* — never *stopped*),
 and its project or ticket on the right. **A conversation has no stored title**: it is called by the
 first line of what the person opened it with, a workflow step's by its ticket, and one with nothing
 said yet *Chat* (`Forge.Conversations.title/3`) — on its page and on every list. Tapping the title
@@ -1658,7 +1661,8 @@ machines pages are the owner's (`identity.md` § Workers); none when it holds no
 lines written out, what it has spent, the secrets it holds by name (*holds `STRIPE_TEST_KEY`*, and
 for one picked when it was opened and deleted since, *`GONE_KEY` was deleted and this conversation
 no longer holds it* in warning, from its latest run — `secrets.md` § Conversations), and **End it**
-with its confirm and the ending rule in its words. Views: Talk · Changes · Docs · Activity.
+with its confirm and the ending rule in its words — on an ordinary conversation that has not been
+ended, and never on a workflow step's, which ends with its step or its ticket. Views: Talk · Changes · Docs · Activity.
 
 **The merge is a neutral decision row** (`18e`): `⑂` the branch, its size and commits, Merge in
 outline, because nothing is waiting on anyone. Its panel shows the commit message read-only and
@@ -1751,9 +1755,18 @@ the composer, the now line, the plan band, and any open question's card.
   — a question's own words, a decision's note — is the same box with Enter a new line at every
   pointer and no hint (§ The affordance rule). **The composer only replies**: no decision is ever in
   its row.
-- **A stopped conversation** (`15d`) has no composer — a Send offered there would take a tap and
-  lose the message. The transcript dims slightly, the reopen sentence takes the composer's place in
-  both its variants, branch kept or branch gone, and **Reopen** takes the dock.
+- **A conversation whose machine was released** (`15d`, a deviation from the vendored screen,
+  which draws a stopped conversation with Reopen) **is drawn as one holding a machine**: its
+  composer stays, its transcript is not dimmed, and nothing says it stopped. Sending is how it is
+  carried on, and while it waits for a machine it says so with the scheduler's reason. **There is
+  no Reopen anywhere.**
+- **An ended conversation** is read-only for good: the transcript, a line (`#chat-ended`) saying
+  when and by whom it was ended and what became of its branch — deleted, or kept, with *Merge*
+  where it was kept — and no composer, no answer rows and no Reopen. A message sent to it anyway is
+  refused in words and records nothing.
+- **A reply lost with its machine** is one quiet line (`#chat-lost`) after the person's last
+  message — *The reply was lost with its machine; send again to carry on.* — and the composer
+  stays.
 
 ## The Accept area
 
@@ -1794,7 +1807,6 @@ States, each saying what to do rather than going blank:
 | Ready | the documents with versions, the outcome rows, Accept |
 | Refused | why in words, inside the panel (no version of X, the step has moved on, the outcome has no edge or its `max` is spent, a newer version arrived) and what to do |
 | Every way out blocked | no outcome can be taken now, and for each one why: no edge, `max` spent, or an approved document nobody has written; no button |
-| Dormant | the conversation is stopped with **Reopen**; Accept still works if the documents exist; never "run again" |
 
 The outcome pick and an open confirm live in a form with an `id` and `phx-change`, so they survive
 a reconnect (§ A reconnect is not a reload). Outcome, state and document names are text, cut to the
@@ -3162,7 +3174,8 @@ previous note describes it.
   button; with a conflict, *Resolve ›* still goes to the two ways out.
 - **A decision row's tile** is `changeset` or `doc` by the pin, not the pinned artifact's file type
   (§ Artifact types).
-- **Chats**: *End* is drawn on `/chats` only, not on a ticket's or a project's Chats.
+- **Chats**: *End* is drawn on `/chats` only, not on a ticket's or a project's Chats, and on a
+  live row that is not a workflow step's.
 - **The ticket's details**: *Cancel ticket* is a quiet button in danger red, not outlined red
   (§ The affordance rule).
 - **Docs**: a row does not say where its version is pinned, and the approvable group is headed

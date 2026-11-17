@@ -856,8 +856,5 @@ defmodule ForgeWeb.Operator.Decision do
 
   defp step_meta(%{in_flight: true}), do: "waiting for the reply to finish"
 
-  defp step_meta(%{dormant: true, state: state}),
-    do: "step #{state} · the conversation has stopped"
-
   defp step_meta(%{state: state, visit: visit}), do: "step #{state} · visit #{visit}"
 end

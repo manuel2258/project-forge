@@ -13,12 +13,17 @@ defmodule Forge.Tickets.Doing do
   import Ecto.Query, only: [from: 2]
 
   alias Forge.Events.Event
-  alias Forge.Jobs.Job
+  alias Forge.Jobs.{Job, Runs}
   alias Forge.Repo
   alias Forge.Tickets.Ticket
 
-  @typedoc "A ticket's live work: the job on a machine, or waiting for one."
+  @typedoc """
+  A ticket's live work: the job on a machine, or waiting for one. `started_at` is the start of
+  the run it is in *now* when it is running (`live/1`).
+  """
   @type live :: %{
+          id: String.t(),
+          kind: :workflow | :command,
           status: :running | :pending,
           attempt: pos_integer() | nil,
           started_at: DateTime.t() | nil,
@@ -27,9 +32,16 @@ defmodule Forge.Tickets.Doing do
 
   @doc """
   The live job of each ticket: one running if it has one, else one pending, newest within the
-  class — the rule `Forge.Queue`'s under-way group uses, for the same reason (a ticket is on a
-  machine the moment any of its work is). Workflow jobs and commands only: a ticket's chat step
-  is drawn as the conversation it is, not as the ticket running.
+  class — a ticket is on a machine the moment any of its work is. Workflow jobs and commands only:
+  a ticket's chat step is drawn as the conversation it is, not as the ticket running.
+
+  **A running job's `started_at` is its current run's**, from the run ledger
+  (`Forge.Jobs.Runs.started/1`), not `jobs.started_at`, which keeps the first run's start for the
+  life of the job: a job answered at 19:00 after stopping on a question at 09:10 would read ten
+  hours old a minute into its second run. The column is the fallback for a running row whose run
+  the ledger does not have. `kind` says whether the spend cap gates it: a workflow job is, a
+  command takes no spend gate (`Jobs.assign_command/2`), so only a pending *workflow* job is
+  `paused · spend` (`ForgeWeb.ProjectTickets`).
   """
   @spec live([String.t()]) :: %{String.t() => live()}
   def live([]), do: %{}
@@ -41,7 +53,9 @@ defmodule Forge.Tickets.Doing do
         where: j.kind in [:workflow, :command],
         where: j.status in [:running, :pending],
         select: %{
+          id: j.id,
           ticket_id: j.ticket_id,
+          kind: j.kind,
           status: j.status,
           attempt: j.attempt,
           started_at: j.started_at,
@@ -50,12 +64,62 @@ defmodule Forge.Tickets.Doing do
     )
     |> Enum.group_by(& &1.ticket_id)
     |> Map.new(fn {id, jobs} -> {id, pick(jobs)} end)
+    |> current_run()
+  end
+
+  defp current_run(picked) do
+    runs = Runs.started(for {_ticket, %{status: :running, id: id}} <- picked, do: id)
+
+    Map.new(picked, fn
+      {ticket_id, %{status: :running, id: id} = job} ->
+        {ticket_id, %{job | started_at: runs[id] || job.started_at}}
+
+      other ->
+        other
+    end)
   end
 
   defp pick(jobs) do
     {running, pending} = Enum.split_with(jobs, &(&1.status == :running))
     class = if running != [], do: running, else: pending
     class |> Enum.max_by(& &1.inserted_at, DateTime) |> Map.delete(:ticket_id)
+  end
+
+  @doc """
+  The reads a list of ticket rows draws from besides the queue's items and the clock
+  (`ForgeWeb.ProjectTickets.rows/2`), for `tickets` of one project or of several: `:live`,
+  `:said`, `:paused`, `:places` (the merge queue's, per project) and `:milestones` (their names,
+  by id). **One function for the project page and the queue page**, so a ticket is drawn the same
+  on both from the same reads, and neither has a second copy of what makes a row.
+
+  `places:` is what a caller that already read the merge queue passes, so it is not read twice.
+  """
+  @spec facts([Ticket.t()], keyword()) :: %{
+          live: map(),
+          said: map(),
+          paused: boolean(),
+          places: map(),
+          milestones: map()
+        }
+  def facts(tickets, opts \\ []) do
+    ids = Enum.map(tickets, & &1.id)
+    projects = tickets |> Enum.map(& &1.project_id) |> Enum.uniq()
+
+    %{
+      live: live(ids),
+      said: said(ids),
+      paused: Forge.Spend.paused?(),
+      places: Keyword.get_lazy(opts, :places, fn -> places(projects) end),
+      milestones:
+        projects |> Enum.map(&Forge.Milestones.names/1) |> Enum.reduce(%{}, &Map.merge/2)
+    }
+  end
+
+  defp places(project_ids) do
+    for project_id <- project_ids,
+        {entry, place} <- Forge.MergeQueue.with_places(project_id),
+        into: %{},
+        do: {entry.ticket_id, place}
   end
 
   @doc """

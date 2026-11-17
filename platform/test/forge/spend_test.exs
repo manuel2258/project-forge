@@ -245,6 +245,34 @@ defmodule Forge.SpendTest do
       end
     end
 
+    # Criterion 15 of ticket 53: a conversation held back by the day's cap behaves like any other
+    # that is carried on. The message is recorded and waits, and the conversation says why.
+    test "a message to a released conversation is held by the cap, recorded, and says why", %{
+      user: user,
+      worker: worker
+    } do
+      spend!(admit(user, ticket_tokens: 5_000_000), 400_000, started: true)
+      ticket = admit(user, ticket_tokens: 5_000_000)
+      project = Projects.get!(ticket.project_id)
+      serve!(worker, project)
+      funded!(project)
+      {:ok, chat} = Forge.Conversations.open(project, "hello")
+      {:ok, _released} = Forge.Conversations.ended(chat, nil, "idle")
+      Application.put_env(:forge, Forge.Spend, daily_tokens: 200_000)
+
+      assert {:ok, _event} = Forge.Conversations.send(chat, "carry on")
+      start_supervised!(Forge.Jobs.Scheduler)
+      assert Forge.Jobs.Scheduler.tick() == 0
+
+      assert %{status: :pending} = Repo.get!(Job, chat.id)
+      assert List.last(Forge.Conversations.messages(chat.id)).text == "carry on"
+
+      assert [%{payload: %{"reason" => "spend_paused", "text" => text}}] =
+               chat.id |> Forge.Events.for_job() |> Enum.filter(&(&1.type == "job.waiting"))
+
+      assert text =~ "midnight"
+    end
+
     test "counts what live jobs are budgeted to spend, not only what is recorded", %{user: user} do
       ticket = admit(user, ticket_tokens: 5_000_000)
       Application.put_env(:forge, Forge.Spend, daily_tokens: 200_000)

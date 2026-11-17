@@ -19,7 +19,7 @@ defmodule ForgeWeb.ChatLive do
 
   alias Forge.{Artifacts, Conversations, Events, Git, Jobs, Merge, Operator, Projects, Tickets}
   alias Forge.Git.Url
-  alias ForgeWeb.{ChatViews, Diff, Format, JobStream, TicketViews, Transcript, WorkScreen}
+  alias ForgeWeb.{ChatViews, Diff, JobStream, TicketViews, Transcript, WorkScreen}
   alias ForgeWeb.Components.StepAccept
   alias ForgeWeb.Operator.Decision
 
@@ -96,8 +96,12 @@ defmodule ForgeWeb.ChatLive do
       # What a merge of this branch would say, from the definition the merge itself reads
       # (`Forge.Merge.commit_message/1`).
       commit_message: Merge.commit_message(chat),
-      # Where a reopen makes a deleted branch again, from the definition the reopen uses.
-      base_branch: Conversations.base_branch(project, ticket),
+      # Whether a message may be sent now — the one check `Conversations.send/3` asks, so the
+      # composer is drawn exactly when a send would be taken — and whether a person ended it for
+      # good, with how. Read once a load: each is a query, and `render/1` runs on every block
+      # (`lost` in `render/1` is in memory: `Conversations.lost?/2` asks nothing).
+      sendable: Conversations.sendable?(chat),
+      ending: Conversations.ending(chat),
       merged: Merge.merged_chat?(chat),
       waiting: Jobs.current_wait(chat),
       step: step,
@@ -307,36 +311,19 @@ defmodule ForgeWeb.ChatLive do
     {:noreply, socket}
   end
 
-  # The page offers End only while the conversation is live, and the context refuses one that is
-  # not, so a stale page or a crafted event is told rather than crashing the view.
+  # The page offers End only on an ordinary conversation that has not been ended, and the context
+  # refuses a step's and an ended one, so a page drawn before that rule or a crafted event is told
+  # rather than crashing the view.
   def handle_event("close", _params, socket) do
     case Operator.close_chat(socket.assigns.chat, socket.assigns.current_scope.user) do
       :ok ->
         {:noreply, assign(socket, chat_error: nil)}
 
-      {:error, :not_live} ->
-        {:noreply,
-         socket
-         |> assign(chat_error: {:details, "This conversation has already stopped."})
-         |> load()}
-    end
-  end
+      {:error, :step} ->
+        {:noreply, socket |> assign(chat_error: {:details, refusal(:step)}) |> load()}
 
-  def handle_event("reopen", _params, socket) do
-    case Operator.reopen_chat(socket.assigns.chat, socket.assigns.current_scope.user) do
-      {:ok, _chat} ->
-        {:noreply, socket |> assign(chat_error: nil) |> load()}
-
-      # Reopening a live one would take its worker away from under it. The page offers Reopen
-      # only when it is not live; this is a stale page, or an event nobody drew a button for.
-      {:error, :live} ->
-        {:noreply,
-         socket |> assign(chat_error: {:dock, "This conversation is still live."}) |> load()}
-
-      # Remaking a deleted branch is a git write, and it can fail — a ticket branch that is gone
-      # too. Said, rather than a crash that reads as the page breaking.
-      {:error, reason} ->
-        {:noreply, assign(socket, chat_error: {:dock, "Could not reopen: #{inspect(reason)}"})}
+      {:error, :ended} ->
+        {:noreply, socket |> assign(chat_error: {:details, refusal(:close_ended)}) |> load()}
     end
   end
 
@@ -405,22 +392,31 @@ defmodule ForgeWeb.ChatLive do
     end
   end
 
-  # It can have ended between the render and the tap. Reloading is what swaps the send box for the
-  # reopen button, so the page stops offering what it cannot do rather than only saying so. The
-  # question form's Send takes the same road through `Operator.answer_chat/4` and is reloaded the
-  # same way.
+  # It can have ended, or its step can be over, between the render and the tap. Reloading is what
+  # takes the send box away, so the page stops offering what it cannot do rather than only saying
+  # so. The question form's Send takes the same road through `Operator.answer_chat/4` and is
+  # reloaded the same way. A conversation that holds no machine is started again by the send
+  # itself, which is the page's concern only in what it then says: it waits for a machine.
   defp deliver(socket, text, opts) do
     case Operator.send_chat(socket.assigns.chat, socket.assigns.current_scope.user, text, opts) do
       {:ok, _event} ->
         {:noreply, socket |> assign(draft: "", chat_error: nil) |> load()}
 
-      {:error, :not_live} ->
-        {:noreply,
-         socket
-         |> assign(chat_error: {:dock, "This conversation has stopped. Reopen it to say that."})
-         |> load()}
+      {:error, reason} when reason in [:ended, :step_over] ->
+        {:noreply, socket |> assign(chat_error: {:dock, refusal(reason)}) |> load()}
+
+      # Remaking a deleted branch is a git write, and it can fail — a ticket branch that is gone
+      # too. Said, rather than a crash that reads as the page breaking.
+      {:error, reason} ->
+        {:noreply, assign(socket, chat_error: {:dock, "Could not send: #{inspect(reason)}"})}
     end
   end
+
+  # Refusals in words, for the page and for an event nobody drew a button for.
+  defp refusal(:ended), do: "This conversation was ended. Start a new one to say that."
+  defp refusal(:step_over), do: "This step is over, so nothing more can be said in it."
+  defp refusal(:step), do: "A step's conversation cannot be ended: it ends with its step."
+  defp refusal(:close_ended), do: "This conversation was already ended."
 
   # The queue asks the same thing of the same reply, so the asking lives in `Conversations`. What
   # was *said* (`Conversations.said/1`), because that is the reading `Operator.answer_chat/4`
@@ -436,9 +432,11 @@ defmodule ForgeWeb.ChatLive do
   # Waiting on *you*: the agent finished a turn and said something — the queue's reading, from
   # the same messages (`Conversations.said/1`), so the page and the queue agree. A reply still
   # being spoken is not waiting on anyone, and neither is a turn that only acted.
-  defp waiting?(%{status: status}, messages) do
-    case {status, messages |> Conversations.said() |> List.last()} do
-      {status, %{role: :assistant, turn: turn}} when status in [:running, :pending] -> turn != nil
+  # Whether it holds a machine does not matter: one released by the idle timeout is waiting on you
+  # the same (`subline/1` leaves out one a person ended).
+  defp waiting?(messages) do
+    case messages |> Conversations.said() |> List.last() do
+      %{role: :assistant, turn: turn} -> turn != nil
       _other -> false
     end
   end
@@ -468,6 +466,9 @@ defmodule ForgeWeb.ChatLive do
         reply: reply(messages),
         responding: responding?(assigns.chat, messages),
         live: live?(assigns.chat),
+        can_end: not Jobs.Job.step?(assigns.chat) and is_nil(assigns.ending),
+        lost:
+          assigns.sendable and Conversations.lost?(assigns.chat, Conversations.said(messages)),
         title: page_heading(assigns, messages),
         viewer: assigns.current_scope.user,
         fetch: fetch_command(assigns.project, assigns.chat),
@@ -556,7 +557,7 @@ defmodule ForgeWeb.ChatLive do
 
   # Under the title: a step's ticket, its state and visit, as the ticket's own page says it; a
   # conversation's own state otherwise — responding and on which turn, waiting on you, idle,
-  # waiting for a machine, or stopped and when.
+  # waiting for a machine, or ended.
   # The ticket's own subline — its number, the state's mark and name, and its status when it is
   # not active — and the step's visit after it: built from less, it dropped the mark the ticket's
   # page draws for the same ticket (UX pass, B28).
@@ -570,19 +571,18 @@ defmodule ForgeWeb.ChatLive do
     |> Enum.join(" · ")
   end
 
-  defp subline(%{chat: chat, live: live, responding: responding, messages: messages}) do
+  # Nothing says a conversation stopped: one whose machine was released is idle, and the only
+  # ending a person sees is the one they chose.
+  defp subline(%{chat: chat, responding: responding, messages: messages, ending: ending}) do
     "chat · " <>
       cond do
         responding -> "▸ responding · turn #{chat.turns + 1}"
-        waiting?(chat, messages) -> "waiting on you"
+        ending -> "ended"
+        waiting?(messages) -> "waiting on you"
         chat.status == :pending -> "waiting for a machine"
-        live -> "idle"
-        true -> stopped(chat)
+        true -> "idle"
       end
   end
-
-  defp stopped(%{finished_at: %DateTime{} = at}), do: "stopped " <> Format.ago_phrase(at)
-  defp stopped(_chat), do: "stopped"
 
   # A step's conversation carries its ticket's strip, with the ticket's counts
   # (`TicketViews.strip_of/4`, the job page's too): Talk is this page, and every other view is the

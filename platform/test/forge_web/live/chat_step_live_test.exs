@@ -698,7 +698,7 @@ defmodule ForgeWeb.ChatStepLiveTest do
     refute has_element?(view, "button", "Run refining again")
   end
 
-  test "a stuck ticket is offered no by-hand move while its conversation is live, and is once dormant",
+  test "a stuck ticket is offered no by-hand move while its conversation is live, and is once released",
        %{conn: conn, chat: chat, project: project, ticket: ticket} do
     chat = answered(chat, 1, %{"refinement.md" => "# R\n"})
     {:ok, _} = Forge.Engine.stick(Tickets.get!(ticket.id), "cost cap")
@@ -706,25 +706,57 @@ defmodule ForgeWeb.ChatStepLiveTest do
     {:ok, live_view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
     refute has_element?(live_view, ~s(#ways-forward input[value^="to:"]))
 
-    :ok = Conversations.close(Repo.get!(Job, chat.id), "idle")
-    {:ok, dormant, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
-    assert has_element?(dormant, ~s(#ways-forward input[value^="to:"]))
+    {:ok, _released} = Conversations.ended(Repo.get!(Job, chat.id), nil, "idle")
+    {:ok, released, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+    assert has_element?(released, ~s(#ways-forward input[value^="to:"]))
   end
 
-  test "a dormant step offers Reopen and not a run again", %{
+  # Nothing reads as stopped (criterion 11): the composer stays, there is no Reopen anywhere, and
+  # the sentence that said the step's conversation had stopped is gone from both pages.
+  test "a step whose machine was released draws as one holding a machine", %{
     conn: conn,
     chat: chat,
     project: project,
     ticket: ticket
   } do
     chat = answered(chat, 1, %{})
-    :ok = Conversations.close(chat, "idle")
-    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
-    assert has_element?(view, "button[phx-click=reopen]", "Reopen")
-    assert has_element?(view, "#step-status #step-dormant")
+    {:ok, _released} = Conversations.ended(chat, nil, "idle")
+    {:ok, view, html} = live(conn, ~p"/chats/#{chat.id}")
 
-    {:ok, page, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+    assert has_element?(view, "#draft")
+    refute has_element?(view, "button[phx-click=reopen]")
+    refute has_element?(view, "#step-dormant")
+    refute html =~ "Reopen"
+    refute html =~ "has stopped"
+
+    {:ok, page, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
     refute has_element?(page, "button", "Run refining again")
+    refute has_element?(page, "#step-dormant")
+    refute html =~ "Reopen"
+    refute html =~ "has stopped"
+    assert has_element?(page, "#step-card", "Talk to the agent")
+  end
+
+  # The step's own page draws no End it, on the conversation's page or the ticket's.
+  test "a step's conversation is offered no End it, and a crafted end is refused in words", %{
+    conn: conn,
+    chat: chat
+  } do
+    {:ok, view, html} = live(conn, ~p"/chats/#{chat.id}")
+
+    refute has_element?(view, ~s(button[phx-click="close"]))
+    refute has_element?(view, "#chat-ending")
+    refute html =~ "End it"
+
+    render_hook(view, "close", %{})
+
+    assert has_element?(view, "#chat-details #chat-ending-error[role=alert]", "cannot be ended")
+    assert Repo.get!(Job, chat.id).status in [:pending, :running]
+
+    refute Enum.any?(
+             Forge.Events.for_job(chat.id),
+             &(&1.type in ["chat.ended", "chat.close_requested"])
+           )
   end
 
   test "a step whose only way out is spent says so, and draws no button", %{
@@ -878,15 +910,10 @@ defmodule ForgeWeb.ChatStepLiveTest do
     assert view |> element("#decision-error") |> render() =~ "ui-error-note"
   end
 
-  test "the paragraphs that carry document names wrap at phone width", %{conn: conn, chat: chat} do
+  test "the paragraph that carries document names wraps at phone width", %{conn: conn, chat: chat} do
     answered(chat, 1, %{})
     {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
     assert view |> element("#step-nothing-yet") |> render() =~ "overflow-wrap:anywhere"
-
-    answered(chat, 2, %{})
-    :ok = Conversations.close(Repo.get!(Job, chat.id), "idle")
-    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
-    assert view |> element("#step-dormant") |> render() =~ "overflow-wrap:anywhere"
   end
 
   test "an accept pressed after the page has no step is a redraw, not a crash", %{

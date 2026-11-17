@@ -132,8 +132,9 @@ defmodule ForgeWeb.ProjectTickets do
         {"running #{Format.lasted(job.started_at || job.inserted_at, facts.now)}#{attempt(job)}",
          "info", :running}
 
-      {nil, %{status: :pending}} ->
-        if facts.paused,
+      {nil, %{status: :pending} = job} ->
+        # The cap gates a workflow job and not a command (`Forge.Tickets.Doing.live/1`).
+        if facts.paused and job.kind == :workflow,
           do: {"paused · spend", nil, :idle},
           else: {"waiting for a machine", nil, :running}
 
@@ -189,7 +190,18 @@ defmodule ForgeWeb.ProjectTickets do
   @doc "The rows as three-line list rows (`7a`)."
   attr :id, :string, required: true
   attr :rows, :list, required: true
-  attr :project, :string, required: true
+  attr :project, :string, default: nil, doc: "The project's name, for rows of one project."
+
+  attr :named, :map,
+    default: nil,
+    doc:
+      "Project names by id, for rows of several projects (the queue's Open tickets): each row " <>
+        "reads `forge#53`, links into its own project and takes its DOM id from the ticket's id."
+
+  attr :usage_always, :boolean,
+    default: false,
+    doc: "Draw the usage whenever there is one, not only past half the allowance."
+
   attr :now, :any, required: true
 
   def list(assigns) do
@@ -197,8 +209,8 @@ defmodule ForgeWeb.ProjectTickets do
     <ol id={@id} class="ticket-rows">
       <li :for={row <- @rows}>
         <.link
-          id={"#{@id}-#{row.ticket.number}"}
-          navigate={~p"/tickets/#{@project}/#{row.ticket.number}"}
+          id={if @named, do: "#{@id}-#{row.ticket.id}", else: "#{@id}-#{row.ticket.number}"}
+          navigate={~p"/tickets/#{project_of(row, @project, @named)}/#{row.ticket.number}"}
           class={[
             "ui-row ticket-row",
             row.waiting && "ui-row--accent",
@@ -207,7 +219,9 @@ defmodule ForgeWeb.ProjectTickets do
         >
           <div class="ui-row-body">
             <div class="ticket-row-head">
-              <span class="ticket-row-number">#{row.ticket.number}</span>
+              <span class="ticket-row-number">
+                {if @named, do: project_of(row, @project, @named)}#{row.ticket.number}
+              </span>
               <span class="ui-row-title ticket-row-title">{row.ticket.title}</span>
               <span :if={row.ticket.ticket_type} class="ui-type-badge">{row.ticket.ticket_type}</span>
               <span :if={row.milestone} class="ticket-milestone">{row.milestone}</span>
@@ -225,7 +239,10 @@ defmodule ForgeWeb.ProjectTickets do
               <span class={["ticket-doing", row.doing_tone && "ticket-doing--#{row.doing_tone}"]}>
                 {row.doing}
               </span>
-              <span :if={row.usage && row.usage_high} class="ticket-usage ticket-usage--high">
+              <span
+                :if={row.usage && (row.usage_high || @usage_always)}
+                class={["ticket-usage", row.usage_high && "ticket-usage--high"]}
+              >
                 {row.usage}
               </span>
             </div>
@@ -241,6 +258,10 @@ defmodule ForgeWeb.ProjectTickets do
     </ol>
     """
   end
+
+  # The project a row belongs to: the one the list is of, or — in a list of several — its own.
+  defp project_of(_row, project, nil), do: project
+  defp project_of(row, _project, named), do: Map.fetch!(named, row.ticket.project_id)
 
   @doc "The rows as one table (`7g`, `7h`): the phone's three lines as columns."
   attr :id, :string, required: true

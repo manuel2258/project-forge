@@ -1059,7 +1059,7 @@ none the three git steps do not happen**: the transcript still goes to the store
 still carries a sha, but it is the branch head the run started from rather than one the run
 made. The platform records the sha and puts a workflow job back to
 `pending`, to resume from that commit wherever it is placed next; a conversation goes
-`hibernated` — dormant — until a person reopens it. A workflow job used to be set `hibernated`
+`hibernated` — without its machine — until a person's message starts it again. A workflow job used to be set `hibernated`
 too, and nothing ever moved one on: the scheduler places only `pending` jobs, so the ticket sat
 with no job running and nothing in the queue to say so.
 
@@ -1077,7 +1077,7 @@ same machine, which dropped that assignment as *already running* (`docs/design/w
 worker that is lost or swept re-queues its running jobs to `pending`
 (`Workers.sweep_unreachable/0`) rather than hibernating them. A conversation is the exception the
 other way: every chat ends by sending `hibernated`, and one whose run is lost is set `hibernated` —
-dormant — by the platform (`docs/design/conversations.md` § Lifetime).
+without its machine — by the platform (`docs/design/conversations.md` § Lifetime).
 
 Resume reconstructs from the branch and the manifest, never from the conversation. The spec is
 immutable and already in the row; inputs are re-pinned at run time as they are today; the worktree
@@ -1399,7 +1399,7 @@ two signals marks the machine unhealthy (`ForgeWorker.Health`):
 3. **The platform stops placing work on it at once** — `Workers.assignable/3` passes over a row with
    `unhealthy_at` set, and the channel puts back in the queue an assignment that reaches it after
    the mark — and treats its running jobs exactly as a lost machine's, through the same
-   `requeue_running/2`: a chat goes dormant and can be reopened, a workflow job and a command go
+   `requeue_running/2`: a chat loses its machine and a message carries it on, a workflow job and a command go
    back to `pending`, and each job's `job.interrupted` says `worker_unhealthy`.
 4. **It answers whether the machine should reboot**: yes for a managed machine that has not been
    told to within the hour (`reboot_interval_ms`), and the time it said so is kept on the row as

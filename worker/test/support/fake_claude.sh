@@ -356,16 +356,22 @@ case "${FAKE_SCENARIO:-success}" in
     emit '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":40,"duration_ms":99,"total_cost_usd":1.5,"session_id":"sess-42"}'
     exit 1
     ;;
-  # A run that never stops spending: each call weighs 50,000 and the result is never reached, so
-  # only forge's own count can end it. Slow enough for the stop to land between two calls.
+  # A run that spends past a budget and then never reaches its result, so only forge's own count
+  # can end it: each call weighs 50,000, and it makes exactly three — the third is the first to
+  # pass the 120,000 the test gives it — and then waits to be stopped. **It does not go on
+  # spending while the stop is on its way**: a fake that made a call every 50 ms for as long as it
+  # lived made the test's exact usage figure depend on how late the kill landed, and on a busy
+  # machine it landed ten calls late. The figure the test reads is now the calls made up to the one
+  # that passed the budget, which the fake decides and the machine does not. The 50 ms between the
+  # first calls stays, so that a stop that came too early still lands before the third call on a
+  # machine that is not busy; on one that is, such a stop goes unseen, and nothing fails that
+  # should not.
   runaway)
-    i=0
-    while [ "$i" -lt 400 ]; do
-      i=$((i + 1))
+    for i in 1 2 3; do
       emit "{\"type\":\"assistant\",\"message\":{\"id\":\"r$i\",\"usage\":{\"output_tokens\":10000},\"content\":[{\"type\":\"text\",\"text\":\"call $i\"}]}}"
-      sleep 0.05
+      [ "$i" = 3 ] || sleep 0.05
     done
-    emit "$result_success"
+    sleep 60
     ;;
   max_budget)
     # A runaway: it spends up to whatever budget it was handed and the harness stops it there.

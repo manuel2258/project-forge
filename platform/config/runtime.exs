@@ -21,7 +21,7 @@ if System.get_env("PHX_SERVER") do
 end
 
 # Only when PORT is actually set. The generated line defaults it to 4000, and because
-# runtime.exs is evaluated last that default overrode config/test.exs's 4002 — so the whole
+# runtime.exs is evaluated last that default overrode config/test.exs's port — so the whole
 # suite refused to start whenever a dev node was running on this machine, which is exactly when
 # somebody is most likely to run it.
 if port = System.get_env("PORT") do

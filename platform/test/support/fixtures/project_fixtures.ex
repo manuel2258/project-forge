@@ -42,7 +42,12 @@ defmodule Forge.ProjectFixtures do
   branch to start `branch` at instead of its own head.
   """
   def commit_files!(repo, branch, files, opts \\ []) do
-    work = Path.join(System.tmp_dir!(), "look-commit-#{System.unique_integer([:positive])}")
+    work =
+      Path.join(
+        System.tmp_dir!(),
+        "#{System.pid()}-look-commit-#{System.unique_integer([:positive])}"
+      )
+
     index = work <> ".index"
     env = [{"GIT_INDEX_FILE", index} | identity(opts)]
     git = fn args -> git!(repo, work, args, env) end

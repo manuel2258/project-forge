@@ -34,7 +34,10 @@ defmodule ForgeWorker.Archive.Server do
 
   @doc """
   Starts a server. Options: `:path` (the socket), `:remove_dir` (a directory made for it, removed
-  with it), `:cache_dir`, `:config` (`Client.config/0`), `:job_id`, `:name` (a `GenServer` name).
+  with it), `:cache_dir`, `:config` (`Client.config/0`), `:job_id`, `:name` (a `GenServer` name), and
+  `:clock`, a function of no arguments that says the time in milliseconds, which only a test sets:
+  how long a listing is believed is the time that passes, and a test of it that waited for time to
+  pass failed whenever the machine was slow enough to let the interval go by in the middle.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, Keyword.take(opts, [:name]))
@@ -90,6 +93,7 @@ defmodule ForgeWorker.Archive.Server do
       job_id: Keyword.get(opts, :job_id),
       cache_dir: cache_dir,
       ttl_ms: Application.get_env(:forge_worker, :archive_listing_ttl_ms, @default_ttl_ms),
+      clock: Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end),
       time: System.os_time(:second),
       fids: %{},
       listings: %{},
@@ -222,12 +226,12 @@ defmodule ForgeWorker.Archive.Server do
       case {result, state.listings} do
         {{:ok, body}, _listings} ->
           data = if key == :root, do: Tree.root(body), else: Tree.ticket(body)
-          %{state | listings: Map.put(state.listings, key, %{data: data, at: now()})}
+          %{state | listings: Map.put(state.listings, key, %{data: data, at: state.clock.()})}
 
         # A refresh that failed keeps what there was, for another interval, rather than taking a
         # folder away because the platform blinked; a first fetch that failed is an error.
         {{:error, _errno}, %{^key => held}} ->
-          %{state | listings: Map.put(state.listings, key, %{held | at: now()})}
+          %{state | listings: Map.put(state.listings, key, %{held | at: state.clock.()})}
 
         {{:error, errno}, _listings} ->
           log(state, "listing #{inspect(key)} failed: #{errno}")
@@ -271,15 +275,13 @@ defmodule ForgeWorker.Archive.Server do
     %{state | failed: Map.delete(state.failed, wait)}
   end
 
-  defp now, do: System.monotonic_time(:millisecond)
-
   defp log(state, text) do
     Log.line("archive.failed", :warning, text, job_id: state.job_id)
   end
 
   # Only what is within its interval counts as fetched, so that an old listing is asked for again.
   defp listings(state) do
-    cutoff = now() - state.ttl_ms
+    cutoff = state.clock.() - state.ttl_ms
     state.listings |> Enum.reject(fn {_key, %{at: at}} -> at < cutoff end) |> Map.new()
   end
 

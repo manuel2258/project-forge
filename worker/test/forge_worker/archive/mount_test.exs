@@ -35,12 +35,12 @@ defmodule ForgeWorker.Archive.MountTest do
     File.mkdir_p!(dir)
     on_exit(fn -> File.rm_rf!(dir) end)
 
-    refute Mount.None.serves?()
+    refute Mount.None.serves?("/x")
     assert Mount.None.mount(nil, dir) == :ok
     assert File.ls!(dir) == ["README.md"]
     assert File.read!(Path.join(dir, "README.md")) =~ "not mounted"
     assert Mount.None.unmount(dir) == :ok
-    assert Mount.NineP.serves?()
+    assert Mount.NineP.serves?("/x")
   end
 
   test "unmounting what is not mounted is not an error" do

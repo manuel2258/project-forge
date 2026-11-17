@@ -14,15 +14,17 @@ defmodule Forge.Look.BrowserTest do
   alias Forge.Look.{Guard, Setups, Steps}
 
   @png <<137, 80, 78, 71, 13, 10, 26, 10>>
-  # `localhost`, because the test endpoint's configured host is and LiveView refuses a socket whose
-  # origin is another.
-  @base "http://localhost:4002"
-
   setup do
     token = Guard.generate()
     Guard.put_token(token)
     on_exit(fn -> Guard.put_token(nil) end)
-    dir = Path.join(System.tmp_dir!(), "forge-look-test-#{System.unique_integer([:positive])}")
+
+    dir =
+      Path.join(
+        System.tmp_dir!(),
+        "#{System.pid()}-forge-look-test-#{System.unique_integer([:positive])}"
+      )
+
     File.mkdir_p!(dir)
     on_exit(fn -> File.rm_rf!(dir) end)
 
@@ -30,11 +32,21 @@ defmodule Forge.Look.BrowserTest do
     {login, _} = Forge.AccountsFixtures.generate_user_magic_link_token(built.users["member"])
 
     %{
-      opts: [base_url: @base, token: token, login_token: login, paths: built.paths, wait: 1_500],
+      opts: [
+        base_url: base_url(),
+        token: token,
+        login_token: login,
+        paths: built.paths,
+        wait: 1_500
+      ],
       dir: dir,
       user: built.users["member"]
     }
   end
+
+  # `localhost`, because the test endpoint's configured host is and LiveView refuses a socket whose
+  # origin is another; the port is the one this run's endpoint was given (`Forge.TestEndpoint`).
+  defp base_url, do: Forge.TestEndpoint.base_url("localhost")
 
   defp run(source, opts), do: Look.run(elem(Steps.parse(source), 1), opts)
 

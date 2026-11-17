@@ -70,6 +70,26 @@ defmodule ForgeWorker.Job.RunnerStreamingTest do
     {pid, spec}
   end
 
+  # Until the fake has taken `text` as a message (`test/support/fake_claude.sh` writes each to
+  # `fake-messages.txt` as it reads it). What a test used to sleep for, on the guess that the
+  # harness would have read it by then.
+  defp await_taken(pid, text, attempts \\ 3_000) do
+    path = Path.join(:sys.get_state(pid).job_dir, "fake-messages.txt")
+
+    cond do
+      File.exists?(path) and File.read!(path) =~ text -> :ok
+      attempts == 0 -> flunk("the harness never took #{inspect(text)}")
+      true -> Process.sleep(10) && await_taken(pid, text, attempts - 1)
+    end
+  end
+
+  defp wait_spawned(pid) do
+    unless is_port(:sys.get_state(pid).port) do
+      Process.sleep(5)
+      wait_spawned(pid)
+    end
+  end
+
   # **Forge stops a conversation past what was left of the day** (`docs/design/capacity.md` §
   # Stopping a job already running). The fake's reply weighs 150 weighted tokens, so a ceiling of
   # 100 is passed by the first reply: the process is killed and the result says why.
@@ -98,15 +118,20 @@ defmodule ForgeWorker.Job.RunnerStreamingTest do
 
   # A reopened conversation with nothing waiting holds its prompt until someone writes; its
   # harness is silent because it has been given nothing, and that is not a harness failing to
-  # start. The watch begins when the prompt goes down, not when the process does: held for twice
-  # the limit, it is neither noticed nor stopped. Once the message is down it is watched like any
+  # start. The watch begins when the prompt goes down, not when the process does: while it is held
+  # the runner is not timing it at all (`waiting_since` is still nil), which is what the test
+  # reads, where it used to sleep for twice the limit and see nothing happen. Once the message is
+  # down it is watched like any
   # other, so whether a notice follows then depends on how fast the harness answers, which under
   # a loaded test run is not fast enough to assert on.
   test "a held prompt is not a harness that never started", context do
     {pid, _spec} =
       chat(context, hold_prompt: true, start_notice_ms: 100, start_timeout_ms: 200)
 
-    Process.sleep(400)
+    # Spawned, and holding its prompt: the runner is not timing it. That it is not is the state's
+    # to say; a sleep of twice the limit showed it only if the machine kept time.
+    wait_spawned(pid)
+    assert :sys.get_state(pid).waiting_since == nil
     assert Process.alive?(pid)
     refute_received {:event, %{type: "job.harness.starting"}}
 
@@ -352,7 +377,7 @@ defmodule ForgeWorker.Job.RunnerStreamingTest do
     assert_receive {:turn, _job_id, 1, _}, 5_000
 
     Runner.send_message(pid, "SLOW please")
-    Process.sleep(200)
+    await_taken(pid, "SLOW please")
     assert Runner.interrupt(pid) == :ok
 
     assert_receive {:turn, _job_id, 2, cut}, 5_000

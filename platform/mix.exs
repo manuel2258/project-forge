@@ -65,7 +65,12 @@ defmodule Forge.MixProject do
 
   def cli do
     [
-      preferred_envs: [precommit: :test, check: :test, "forge.look": :test]
+      preferred_envs: [
+        precommit: :test,
+        check: :test,
+        "check.static": :test,
+        "forge.look": :test
+      ]
     ]
   end
 
@@ -183,7 +188,12 @@ defmodule Forge.MixProject do
       # `test --cover` and not `test`: the threshold in `project/0` is a ratchet, and a ratchet
       # that is not part of the gate is a number nobody reads. See `CLAUDE.md` § Coverage for the
       # rule about which way it may move.
-      check: [
+      #
+      # **`check.static` is everything before the tests**, a name of its own because `bin/check`
+      # runs the tests as partitions side by side (`mix test --partitions 3 --cover`, then
+      # `mix test.coverage`) and not as the one process `check` runs here, which is what a person
+      # at a terminal gets. Both end in the same threshold.
+      "check.static": [
         "compile --warnings-as-errors",
         "format --check-formatted",
         "credo --strict",
@@ -192,9 +202,9 @@ defmodule Forge.MixProject do
         # that has not built them (a fresh clone, a command machine, any ticket that never ran
         # `bin/look`), with "LiveView did not connect".
         "tailwind forge",
-        "esbuild forge",
-        "test --cover"
-      ]
+        "esbuild forge"
+      ],
+      check: ["check.static", "test --cover"]
     ]
   end
 end

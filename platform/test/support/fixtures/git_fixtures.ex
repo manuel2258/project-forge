@@ -48,8 +48,9 @@ defmodule Forge.GitFixtures do
 
   A mirror push is fast-forward only, on both ends — the far side's own `pre-receive` enforces it
   too — so the destination needs a common ancestor with whatever `source` is about to push.
-  `seeded_repo/1` gives two independently-called destinations a common ancestor only by accident:
-  its root commit carries no explicit `GIT_AUTHOR_DATE`, so two calls collide only when they land
+  `seeded_repo/1` gives two calls with the same `files` the same root commit, since it builds each
+  once and copies it, but two with different `files` none; and before it did that, only by accident:
+  its root commit carries no explicit `GIT_AUTHOR_DATE`, so two calls collided only when they landed
   in the same wall-clock second. Copying `main` alone, rather than `git clone --bare`'s every
   branch, is deliberate too: `ForgeWeb.GitHttpTest`'s `source` already has a `ticket/1` branch by
   the time it calls this, and its test proving a ticket branch does *not* reach the mirror would
@@ -65,11 +66,11 @@ defmodule Forge.GitFixtures do
 
   @doc """
   The platform's own git URL for `repo` as this test run serves it. Built from the endpoint's
-  configured port rather than written out, so a run on another `PORT` — two suites side by side
-  on one machine — reaches its own server and not the other's.
+  bound port (`Forge.TestEndpoint`), which the kernel picks for each run, so two suites side by
+  side on one machine reach their own servers and not each other's.
   """
   def platform_git_url(repo) do
-    "http://127.0.0.1:#{ForgeWeb.Endpoint.config(:http)[:port]}/git/#{repo}.git"
+    "http://127.0.0.1:#{Forge.TestEndpoint.port()}/git/#{repo}.git"
   end
 
   @doc """
@@ -78,24 +79,69 @@ defmodule Forge.GitFixtures do
 
   `files` overrides or adds paths; a path mapped to `nil` is left out of the commit, which is
   how to seed a repository that is pushed but missing something.
+
+  **Made once per distinct `files` in a run, and copied** (`seed_template/1`): it was `git init`,
+  `add`, `commit` and `push` for every one of its 140-odd call sites' tests. One measured run
+  (the suite on two cores beside another job's load, `git` replaced by a script that timed it) made 69 000 git calls
+  taking 304 s of process wall time, 140 s of them `init`, `add`, `commit` and `push`, of which
+  this is one of several callers; the saving was not measured on its own. The copy is a repository
+  of its own, which no test shares with another — and the same commit, so two calls with the same
+  `files` now always have a common root (`mirror_target/1`).
   """
   def seeded_repo(files \\ %{}) do
     bare = Path.join(tmp_dir("bare"), "project.git")
-    work = tmp_dir("work")
-    :ok = Git.init_bare(bare)
+    File.cp_r!(seed_template(seed_files(files)), bare)
+    bare
+  end
 
-    files =
-      Map.merge(
-        %{
-          "README.md" => "# Game\n",
-          ".forge/workflow.yml" => File.read!(@workflow),
-          ".forge/agents/refine.md" => "Refine the ticket into a crisp problem statement.\n",
-          ".forge/agents/plan.md" => "Write a plan.\n",
-          ".forge/agents/implement.md" => "Implement the plan.\n",
-          ".forge/agents/verify.md" => "Verify the implementation.\n"
-        },
-        files
-      )
+  defp seed_files(files) do
+    Map.merge(
+      %{
+        "README.md" => "# Game\n",
+        ".forge/workflow.yml" => File.read!(@workflow),
+        ".forge/agents/refine.md" => "Refine the ticket into a crisp problem statement.\n",
+        ".forge/agents/plan.md" => "Write a plan.\n",
+        ".forge/agents/implement.md" => "Implement the plan.\n",
+        ".forge/agents/verify.md" => "Verify the implementation.\n"
+      },
+      files
+    )
+  end
+
+  # The cache is a directory of this VM's own (`System.pid/0` in its name, as `tmp_dir/1`'s are:
+  # suites and partitions side by side share the system temporary directory), removed when the
+  # suite ends (`drop_seed_cache/0`, from `test_helper.exs`). A template is built beside its
+  # final name and renamed into it, so a copy never sees half of one; `:global.trans/2` makes two
+  # async tests that want the same one build it once.
+  defp seed_template(files) do
+    key = :sha256 |> :crypto.hash(:erlang.term_to_binary(files)) |> Base.encode16(case: :lower)
+    template = Path.join(seed_cache(), key)
+
+    :global.trans({{__MODULE__, key}, self()}, fn ->
+      unless File.dir?(template) do
+        building = template <> ".building"
+        File.rm_rf!(building)
+        build_seed(files, building)
+        File.rename!(building, template)
+      end
+    end)
+
+    template
+  end
+
+  defp seed_cache do
+    dir = Path.join(System.tmp_dir!(), "#{System.pid()}-forge-seed-cache")
+    File.mkdir_p!(dir)
+    dir
+  end
+
+  @doc "Removes what `seeded_repo/1` kept for the run. Called once, when the suite is over."
+  def drop_seed_cache, do: File.rm_rf!(seed_cache())
+
+  defp build_seed(files, bare) do
+    work = Path.join(Path.dirname(bare), Path.basename(bare) <> "-work")
+    File.mkdir_p!(work)
+    :ok = Git.init_bare(bare)
 
     files
     |> Enum.reject(fn {_path, content} -> is_nil(content) end)
@@ -120,7 +166,7 @@ defmodule Forge.GitFixtures do
     ])
 
     git!(work, ["push", "-q", bare, "main"])
-    bare
+    File.rm_rf!(work)
   end
 
   @doc """

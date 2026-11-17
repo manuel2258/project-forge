@@ -4,8 +4,6 @@ defmodule Forge.Look.GuardTest do
 
   alias Forge.Look.Guard
 
-  @base "http://127.0.0.1:4002"
-
   setup do
     token = Guard.generate()
     Guard.put_token(token)
@@ -22,7 +20,11 @@ defmodule Forge.Look.GuardTest do
         do: headers,
         else: [{"connection", "close"} | headers]
 
-    Req.get!(@base <> path, headers: headers, retry: false, redirect: false)
+    Req.get!(Forge.TestEndpoint.base_url("127.0.0.1") <> path,
+      headers: headers,
+      retry: false,
+      redirect: false
+    )
   end
 
   @upgrade [

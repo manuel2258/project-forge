@@ -5,8 +5,8 @@ defmodule ForgeWorker.ArchiveTest.LeavingSlice do
 
   @impl ForgeWorker.Slice
   def leave(_owner, paths) do
-    send(Application.fetch_env!(:forge_worker, :archive_test_pid), {:left, paths})
-    :ok
+    # Once, to whoever watches the first of them: a call is for one job's directories.
+    ForgeWorker.RecordingMount.tell(hd(paths), {:left, paths})
   end
 
   @impl ForgeWorker.Slice
@@ -35,7 +35,8 @@ defmodule ForgeWorker.ArchiveTest do
   the directory is prepared, gone with the job, and gone before the files are handed back.
   """
 
-  # Application environment: the mount in use and who hears of it.
+  # Not async, as before: `:platform_url` below is application-wide. The mount is not: it is told
+  # the root of this test's own directory (`ForgeWorker.RecordingMount`).
   use ExUnit.Case, async: false
 
   import ForgeWorker.Fixtures
@@ -45,24 +46,11 @@ defmodule ForgeWorker.ArchiveTest do
   @grant %{url: "http://platform.test", token: "secret-token"}
 
   setup do
-    Application.put_env(:forge_worker, :archive_mount, RecordingMount)
-    Application.put_env(:forge_worker, :archive_test_pid, self())
-
-    on_exit(fn ->
-      for key <- [
-            :archive_mount,
-            :archive_test_pid,
-            :archive_test_mount,
-            :archive_test_serves,
-            :platform_url
-          ],
-          do: Application.delete_env(:forge_worker, key)
-    end)
-
     root = tmp_dir("archive")
     job_dir = Path.join(root, "job")
     File.mkdir_p!(job_dir)
-    %{job_dir: job_dir}
+    RecordingMount.watch(root)
+    %{root: root, job_dir: job_dir}
   end
 
   test "it is a folder beside the rest, named once", %{job_dir: job_dir} do
@@ -119,7 +107,7 @@ defmodule ForgeWorker.ArchiveTest do
   end
 
   test "a mount that fails is an error and leaves no server", context do
-    Application.put_env(:forge_worker, :archive_test_mount, {:error, :boom})
+    RecordingMount.watch(context.root, mount: {:error, :boom})
 
     assert Archive.start(context.job_dir, @grant, "j") == {:error, :boom}
     assert_received {:mounted, socket, _}
@@ -128,7 +116,7 @@ defmodule ForgeWorker.ArchiveTest do
   end
 
   test "a machine with no mount has one file saying so and no server", context do
-    Application.put_env(:forge_worker, :archive_mount, ForgeWorker.Archive.Mount.None)
+    RecordingMount.unwatch(context.root)
 
     assert Archive.start(context.job_dir, @grant, "j") == :ok
     assert File.ls!(Archive.dir(context.job_dir)) == ["README.md"]
@@ -137,13 +125,10 @@ defmodule ForgeWorker.ArchiveTest do
 
   # This runs when any job ends. Another job's archive on the machine is live, and unmounting it
   # leaves that job with an empty mountpoint under a prompt that promises the folder.
-  #
-  # Here and not in `Job.DirTest`, which is async: this sets and then deletes the application-wide
-  # `:archive_mount` and `:archive_test_pid`, which `Job.RunnerTest`'s archive tests (async too) read
-  # while their job runs. A job that finds them gone mounts nothing, and the lifecycle assertion saw
-  # `[:slice]` and nothing after it, one run in several (the gate's, at `f07a995`).
   @tag :tmp_dir
   test "releases the archive of a directory it removes, and of no other", %{tmp_dir: tmp_dir} do
+    RecordingMount.watch(tmp_dir)
+
     old = Path.join(tmp_dir, "11111111-1111-1111-1111-111111111111")
     recent = Path.join(tmp_dir, "22222222-2222-2222-2222-222222222222")
     File.mkdir_p!(Path.join(old, "home"))

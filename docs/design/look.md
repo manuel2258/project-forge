@@ -191,9 +191,11 @@ default, is switched off for the same reason and for the noise.
 
 **Two looks at once on one machine** share no port and no database: each has its own namespace,
 so each has its own loopback, and each its own postgres. The gate's browser test is the exception
-— it runs outside any namespace on the suite's endpoint on 4002 and chromedriver is on the
-machine's shared loopback for its seconds, as the suite's endpoint already is. That is the class
-the open proposal *Jobs on one machine share a loopback* names, a worker change for every job and
+— it runs outside any namespace on the suite's endpoint, on a port the kernel picked for that run
+(`Forge.TestEndpoint`, and not a fixed one, so that two suites on a machine cannot collide on it),
+and chromedriver is on the machine's shared loopback for its seconds, as the suite's endpoint
+already is. A port that changes each run is not a port another job cannot reach, so nothing here is
+closed. That is the class the open proposal *Jobs on one machine share a loopback* names, a worker change for every job and
 not this note's.
 
 Chromium's own sandbox is on. `FORGE_LOOK_NO_SANDBOX=1` turns it off, for a machine that refuses

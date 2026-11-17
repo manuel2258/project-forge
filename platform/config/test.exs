@@ -30,8 +30,13 @@ end
 # git endpoint: a real `git clone` against a real socket is the only honest proof of it. Tests
 # that run a job are `async: false`, and `Forge.DataCase.setup_sandbox/1` shares the connection
 # for those, so the request process sees the test's data.
+#
+# **A port the kernel picks.** It was 4002, one name on the loopback every job on a machine shares,
+# so a second suite there died at boot with `:eaddrinuse`. `test/test_helper.exs` publishes what
+# was bound (`Forge.TestEndpoint`); a `PORT` in the environment still sets one
+# (`config/runtime.exs`).
 config :forge, ForgeWeb.Endpoint,
-  http: [ip: {127, 0, 0, 1}, port: 4002],
+  http: [ip: {127, 0, 0, 1}, port: 0],
   secret_key_base: "r9SkKtYQxa5nfNBAIjrrB0CK9osMfY223Mzy75zOxWYusuvAaHxPslIeH3VkiV8z",
   server: true
 
@@ -64,10 +69,15 @@ config :forge, Forge.Mailer, adapter: Swoosh.Adapters.Test
 # Disable swoosh api client as it is only required for production adapters
 config :swoosh, :api_client, false
 
-# Tests drive jobs explicitly; the scheduler stays off and data lives under tmp/test.
-config :forge, Forge.Jobs, data_dir: "tmp/test", run_jobs: false
+# Tests drive jobs explicitly; the scheduler stays off and data lives under tmp/test. A partition
+# of the suite (`mix test --partitions N`, which is how `bin/check` runs it) has a directory of its
+# own, as it has a database of its own above: they run side by side in one checkout, and two of
+# them writing one directory would each find the other's files.
+config :forge, Forge.Jobs,
+  data_dir: "tmp/test#{System.get_env("MIX_TEST_PARTITION")}",
+  run_jobs: false
 
-config :forge, Forge.Storage, dir: "tmp/test/store"
+config :forge, Forge.Storage, dir: "tmp/test#{System.get_env("MIX_TEST_PARTITION")}/store"
 
 # No machine is created in tests; the fake records what the platform asked for.
 config :forge, Forge.Provider,

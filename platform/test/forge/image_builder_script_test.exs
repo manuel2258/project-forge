@@ -15,7 +15,12 @@ defmodule Forge.ImageBuilderScriptTest do
   @script Path.expand("../../priv/hetzner/image-builder.sh", __DIR__)
 
   setup do
-    dir = Path.join(System.tmp_dir!(), "builder-#{System.unique_integer([:positive])}")
+    dir =
+      Path.join(
+        System.tmp_dir!(),
+        "#{System.pid()}-builder-#{System.unique_integer([:positive])}"
+      )
+
     File.mkdir_p!(dir)
     on_exit(fn -> File.rm_rf!(dir) end)
 

@@ -55,7 +55,7 @@ defmodule ForgeWorker.HealthTest do
     test "two failures in a row make the machine unhealthy, and say why" do
       {name, _pid} = start(probe: probe([{:error, "timed out"}]), probe_ms: 10)
 
-      assert_receive {:unhealthy, reason}, 2_000
+      assert_receive {:unhealthy, reason}, 10_000
       assert reason == "PID 1 did not answer twice in a row: timed out"
       assert Health.unhealthy(name) == reason
     end
@@ -65,7 +65,7 @@ defmodule ForgeWorker.HealthTest do
       answers = [{:error, "slow"}, :ok, {:error, "slow"}, :ok, {:error, "slow"}, :ok]
       {name, _pid} = start(probe: probe(answers), probe_ms: 10)
 
-      for _answer <- answers, do: assert_receive({:probed, _}, 2_000)
+      for _answer <- answers, do: assert_receive({:probed, _}, 10_000)
       refute_received {:unhealthy, _}
       assert Health.unhealthy(name) == nil
     end
@@ -84,10 +84,10 @@ defmodule ForgeWorker.HealthTest do
         start(probe: probe([hang]), probe_ms: 10, probe_deadline_ms: 50)
 
       # Asked while its probe hangs, it answers at once.
-      assert_receive {:hanging, first}, 2_000
+      assert_receive {:hanging, first}, 10_000
       assert Health.unhealthy(name) == nil
 
-      assert_receive {:unhealthy, "PID 1 did not answer twice in a row: " <> why}, 2_000
+      assert_receive {:unhealthy, "PID 1 did not answer twice in a row: " <> why}, 10_000
       assert why =~ "did not return within 50ms"
 
       # And the one given up on is ended, not left hanging for the life of the worker.
@@ -110,14 +110,14 @@ defmodule ForgeWorker.HealthTest do
     test "a slice with nothing to ask is asked once and never again" do
       {_name, _pid} = start(probe: probe([:none]), probe_ms: 10)
 
-      assert_receive {:probed, :none}, 2_000
+      assert_receive {:probed, :none}, 10_000
       refute_receive {:probed, _}, 200
     end
 
     test "an unhealthy machine is asked nothing more" do
       {name, _pid} = start(probe: probe([{:error, "gone"}]), probe_ms: 10)
 
-      assert_receive {:unhealthy, _}, 2_000
+      assert_receive {:unhealthy, _}, 10_000
       assert_receive {:probed, _}, 100
       flush_probes()
       refute_receive {:probed, _}, 200
@@ -152,7 +152,7 @@ defmodule ForgeWorker.HealthTest do
     test "happens on the platform's yes, on a machine a driver made" do
       {name, _pid} = start([])
       Health.answered({:ok, %{"reboot" => true, "why" => "told to reboot"}}, name)
-      assert_receive :rebooted, 1_000
+      assert_receive :rebooted, 10_000
     end
 
     # **The guard that matters most here.** A machine somebody provisioned by hand is their own
@@ -201,7 +201,7 @@ defmodule ForgeWorker.HealthTest do
       log =
         capture_log(fn ->
           Health.answered({:ok, %{"reboot" => true}}, name)
-          assert_receive :tried, 1_000
+          assert_receive :tried, 10_000
           :sys.get_state(name)
         end)
 

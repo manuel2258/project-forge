@@ -178,6 +178,18 @@ defmodule ForgeWorker.LinkTest.UserSlice do
   defdelegate probe(), to: ForgeWorker.Slice.Direct
 end
 
+defmodule ForgeWorker.LinkTest.LogToTest do
+  @moduledoc """
+  A `:logger` handler that sends each line, formatted as the logger would, to the test that added
+  it, so that a test can wait for the line instead of for time.
+  """
+
+  def log(event, %{config: %{pid: pid}}) do
+    text = event |> :logger_formatter.format(%{template: [:msg]}) |> IO.chardata_to_string()
+    send(pid, {:logged, text})
+  end
+end
+
 defmodule ForgeWorker.LinkTest do
   @moduledoc """
   The worker's end of the protocol, against a simulated platform: what it says on joining,
@@ -317,7 +329,30 @@ defmodule ForgeWorker.LinkTest do
     refute request =~ ~s("effort")
   end
 
-  defp wait_until(fun, attempts \\ 100) do
+  # What `ForgeWorker.LinkTest.LogToTest` was sent, up to and including the line that says `text`
+  # and whatever else had arrived by then.
+  defp logged_until(text, seen \\ "") do
+    receive do
+      {:logged, line} ->
+        seen = seen <> line
+
+        if seen =~ text,
+          do: seen <> drain_logged(),
+          else: logged_until(text, seen)
+    after
+      10_000 -> flunk("nothing logged said #{inspect(text)}; the log so far: #{seen}")
+    end
+  end
+
+  defp drain_logged(seen \\ "") do
+    receive do
+      {:logged, line} -> drain_logged(seen <> line)
+    after
+      0 -> seen
+    end
+  end
+
+  defp wait_until(fun, attempts \\ 1_500) do
     cond do
       fun.() -> :ok
       attempts == 0 -> flunk("condition not met in time")
@@ -684,13 +719,13 @@ defmodule ForgeWorker.LinkTest do
     connect_and_assert_join(client, @topic, %{}, :ok)
     assert_push(@topic, "ready", %{})
 
-    assert_push(@topic, "stats", first, _ref, 2_000)
+    assert_push(@topic, "stats", first, _ref, 10_000)
     refute Map.has_key?(first, "cpu")
     assert first["memory_total"] > 0
     assert first["memory_used"] <= first["memory_total"]
     assert first["disk_used"] <= first["disk_total"]
 
-    assert_push(@topic, "stats", second, _ref, 2_000)
+    assert_push(@topic, "stats", second, _ref, 10_000)
     assert is_float(second["cpu"])
   end
 
@@ -1555,7 +1590,7 @@ defmodule ForgeWorker.LinkTest do
       take_push("unhealthy")
       reply(client, last_push_ref(), {:ok, %{"reboot" => true, "why" => "told to reboot"}})
 
-      assert_receive :rebooted, 2_000
+      assert_receive :rebooted, 10_000
       wait_until(fn -> Link.unacked() == [] end)
     end
 
@@ -1673,7 +1708,7 @@ defmodule ForgeWorker.LinkTest do
       take_push("unhealthy")
 
       send(client, {:runner, "j-1", self()})
-      assert_receive {:"$gen_cast", :cancel}, 1_000
+      assert_receive {:"$gen_cast", :cancel}, 10_000
     end
 
     test "a healthy machine's join says nothing of it", context do
@@ -2261,7 +2296,7 @@ defmodule ForgeWorker.LinkTest do
       assert_push(@topic, "log", %{"type" => "job.abandoned", "job_id" => "j-1", "message" => why})
 
       assert why =~ "no longer has it running here"
-      assert_receive {:"$gen_cast", :cancel}, 1_000
+      assert_receive {:"$gen_cast", :cancel}, 10_000
 
       push(client, @topic, "cancel", %{"job_id" => "j-1", "reason" => "retired"})
       refute_push(@topic, "log", %{"type" => "job.abandoned"}, 300)
@@ -3062,17 +3097,19 @@ defmodule ForgeWorker.LinkTest do
     Application.put_env(:forge_worker, :crashing_harness_test, self())
     on_exit(fn -> Application.delete_env(:forge_worker, :crashing_harness_test) end)
 
-    log =
-      ExUnit.CaptureLog.capture_log(fn ->
-        job = origin |> assignment() |> with_credential("sk-ant-oat01-never-in-a-log")
-        push(client, @topic, "assign", job)
-        assert_receive :crashing, 10_000
-        # The report is written by the process that died, after it died.
-        Process.sleep(300)
-      end)
+    # Every line the logger is given, sent here as it is written, so that the test waits for the
+    # report of the crash and not for a time it hopes is long enough — the report is written by
+    # the runner as it dies, which a busy machine does late.
+    handler = :"log_to_#{System.unique_integer([:positive])}"
+    :ok = :logger.add_handler(handler, ForgeWorker.LinkTest.LogToTest, %{config: %{pid: self()}})
+    on_exit(fn -> :logger.remove_handler(handler) end)
 
-    # The crash was reported, or the refutation below proves nothing.
-    assert log =~ "this driver cannot build a command"
+    job = origin |> assignment() |> with_credential("sk-ant-oat01-never-in-a-log")
+    push(client, @topic, "assign", job)
+    assert_receive :crashing, 10_000
+    log = logged_until("this driver cannot build a command")
+
+    # The crash was reported (above), or the refutation below proves nothing.
     refute log =~ "sk-ant-oat01-never-in-a-log"
   end
 
@@ -3160,13 +3197,7 @@ defmodule ForgeWorker.LinkTest do
   # `nil` in `Link.start_runner/4` leaves a job with no folder and nothing else failing.
   test "a workflow job is given its archive, and one with no token is not", context do
     %{client: client, origin: origin} = context
-    Application.put_env(:forge_worker, :archive_mount, ForgeWorker.RecordingMount)
-    Application.put_env(:forge_worker, :archive_test_pid, self())
-
-    on_exit(fn ->
-      for key <- [:archive_mount, :archive_test_pid],
-          do: Application.delete_env(:forge_worker, key)
-    end)
+    ForgeWorker.RecordingMount.watch(context.root)
 
     connect_and_assert_join(client, @topic, %{}, :ok)
     assert_push(@topic, "ready", %{})
@@ -4096,13 +4127,7 @@ defmodule ForgeWorker.LinkTest do
     # The archive's grant is the third thing a chat takes by its own route to the runner.
     test "a chat is given its archive", context do
       %{client: client, origin: origin} = context
-      Application.put_env(:forge_worker, :archive_mount, ForgeWorker.RecordingMount)
-      Application.put_env(:forge_worker, :archive_test_pid, self())
-
-      on_exit(fn ->
-        for key <- [:archive_mount, :archive_test_pid],
-            do: Application.delete_env(:forge_worker, key)
-      end)
+      ForgeWorker.RecordingMount.watch(context.root)
 
       connect_and_assert_join(client, @topic, %{}, :ok)
       assert_push(@topic, "ready", %{})

@@ -336,7 +336,12 @@ defmodule Forge.SecretsTest do
   # A project whose repository has no commit yet — what a new one is until its first push — has
   # no workflow, and so names nothing: not the same answer as a workflow that is refused.
   test "a repository with no commit receives nothing yet" do
-    bare = Path.join(System.tmp_dir!(), "empty-#{System.unique_integer([:positive])}.git")
+    bare =
+      Path.join(
+        System.tmp_dir!(),
+        "#{System.pid()}-empty-#{System.unique_integer([:positive])}.git"
+      )
+
     :ok = Forge.Git.init_bare(bare)
     on_exit(fn -> File.rm_rf!(bare) end)
 

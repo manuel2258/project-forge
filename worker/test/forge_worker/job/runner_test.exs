@@ -167,11 +167,54 @@ defmodule ForgeWorker.Job.RunnerTest do
     end
   end
 
+  # **Until the harness is running, as a fact the test can see and not a pause it hopes is long
+  # enough.** `sleep 200` before a cancel was a guess about how fast this machine starts a shell.
+  # The suspected cost of a wrong guess — not reproduced here, a cancel made at once ended in a few
+  # milliseconds — is a cancel that reaches the runner before the harness leads its process group:
+  # its TERM goes to a group that is not there yet (`Exec.signal/2` ignores the failure) and the job
+  # ends only when `grace_ms` passes and the KILL does, which outlasts a short `await/1`. The waits
+  # before a cancel below are for one of these.
+  #
+  # `await_started/0` is for a harness that says so (`init`); `await_stderr/3` for one that only
+  # writes to stderr, as the real one does while `nix develop` builds.
+  defp await_started do
+    assert_receive {:event, %{type: "job.harness.started"}}, 30_000
+  end
+
+  defp await_stderr(pid, text, attempts \\ 3_000) do
+    path = Dir.stderr_path(:sys.get_state(pid).job_dir)
+
+    cond do
+      File.exists?(path) and File.read!(path) =~ text -> :ok
+      attempts == 0 -> flunk("the harness never wrote #{inspect(text)} to stderr")
+      true -> Process.sleep(10) && await_stderr(pid, text, attempts - 1)
+    end
+  end
+
+  # Every event up to and including the first that `fun` accepts, in order, and waiting for it.
+  # What comes after is for `events/0`, which a test appends: this does not consume the rest.
+  defp events_until(fun) do
+    receive do
+      {:event, event} ->
+        if fun.(event), do: [event], else: [event | events_until(fun)]
+    after
+      30_000 -> flunk("the event the test waits for never came")
+    end
+  end
+
+  # The runner has spawned its harness and is timing how long it takes to start.
+  defp waiting_to_start(pid) do
+    if :sys.get_state(pid).waiting_since == nil do
+      Process.sleep(5)
+      waiting_to_start(pid)
+    end
+  end
+
   test "the slice is told the environment the process will need", context do
     pid = run(context, "success", slice: RecordingSlice, slice_opts: %{reply_to: self()})
 
     assert_receive {:slice_prepared, opts}
-    assert {:ok, %Result{}} = Runner.await(pid, 5_000)
+    assert {:ok, %Result{}} = Runner.await(pid, 30_000)
 
     # A slice that starts the process somewhere else — which is what a transient unit is — sees
     # nothing of the runner's own environment, so everything the harness needs has to be here.
@@ -196,7 +239,7 @@ defmodule ForgeWorker.Job.RunnerTest do
 
   test "a successful run converges with the declared outcome and full accounting", context do
     pid = run(context, "success")
-    assert {:ok, %Result{} = result} = Runner.await(pid, 5_000)
+    assert {:ok, %Result{} = result} = Runner.await(pid, 30_000)
 
     assert result.status == :finished
     assert result.outcome == :converged
@@ -233,7 +276,7 @@ defmodule ForgeWorker.Job.RunnerTest do
 
   test "the harness receives the composed prompt, the credential and the budget flags", context do
     pid = run(context, "success")
-    {:ok, result} = Runner.await(pid, 5_000)
+    {:ok, result} = Runner.await(pid, 30_000)
     job_dir = job_dir(result)
 
     prompt = File.read!(Path.join(job_dir, "fake-prompt.txt"))
@@ -256,7 +299,7 @@ defmodule ForgeWorker.Job.RunnerTest do
     System.put_env("FORGE_TEST_LEAK", "must-not-leak")
     on_exit(fn -> System.delete_env("FORGE_TEST_LEAK") end)
 
-    {:ok, result} = context |> run("success") |> Runner.await(5_000)
+    {:ok, result} = context |> run("success") |> Runner.await(30_000)
     job_dir = job_dir(result)
     env = File.read!(Path.join(job_dir, "fake-env-all.txt"))
 
@@ -275,17 +318,17 @@ defmodule ForgeWorker.Job.RunnerTest do
   test "the harness is told its memory ceiling, and nothing when there is none", context do
     ceiling = 2 * 1024 ** 3
     opts = [slice_opts: %{memory_max: ceiling}]
-    {:ok, result} = context |> run("success", opts) |> Runner.await(5_000)
+    {:ok, result} = context |> run("success", opts) |> Runner.await(30_000)
     env = File.read!(Path.join(job_dir(result), "fake-env-all.txt"))
     assert env =~ "FORGE_MEMORY_MAX=#{ceiling}\n"
 
-    {:ok, result} = context |> run("success") |> Runner.await(5_000)
+    {:ok, result} = context |> run("success") |> Runner.await(30_000)
     refute File.read!(Path.join(job_dir(result), "fake-env-all.txt")) =~ "FORGE_MEMORY_MAX"
   end
 
   test "a credential given as a function is resolved at spawn time", context do
     opts = [harness_opts: [executable: fake_executable(), credential: fn -> {:oauth, "tok"} end]]
-    {:ok, result} = context |> run("success", opts) |> Runner.await(5_000)
+    {:ok, result} = context |> run("success", opts) |> Runner.await(30_000)
     job_dir = job_dir(result)
 
     assert File.read!(Path.join(job_dir, "fake-env.txt")) ==
@@ -293,15 +336,15 @@ defmodule ForgeWorker.Job.RunnerTest do
   end
 
   test "a final line without a newline is still parsed", context do
-    {:ok, result} = context |> run("noeol") |> Runner.await(5_000)
+    {:ok, result} = context |> run("noeol") |> Runner.await(30_000)
     assert result.outcome == :converged
     assert result.harness["subtype"] == "success"
   end
 
   test "a resumed run keeps earlier outputs and transcripts", context do
     spec = spec()
-    {:ok, first} = context |> run("success", spec: spec) |> Runner.await(5_000)
-    {:ok, second} = context |> run("noeol", spec: spec) |> Runner.await(5_000)
+    {:ok, first} = context |> run("success", spec: spec) |> Runner.await(30_000)
+    {:ok, second} = context |> run("noeol", spec: spec) |> Runner.await(30_000)
 
     assert Path.basename(first.transcript_path) == "transcript-1.jsonl"
     assert Path.basename(second.transcript_path) == "transcript-2.jsonl"
@@ -311,7 +354,7 @@ defmodule ForgeWorker.Job.RunnerTest do
   # The link uploads the transcript by its path, and the job's user owns every name in the job
   # directory: there, it could be a link to a file only the worker may read by the time it is.
   test "the transcript is written where the job cannot reach, not in its directory", context do
-    {:ok, result} = context |> run("success") |> Runner.await(5_000)
+    {:ok, result} = context |> run("success") |> Runner.await(30_000)
     job_dir = job_dir(result)
 
     refute String.starts_with?(result.transcript_path, job_dir <> "/")
@@ -321,12 +364,12 @@ defmodule ForgeWorker.Job.RunnerTest do
   end
 
   test "a declared outcome other than done is reported as such", context do
-    {:ok, result} = context |> run("plan_invalid") |> Runner.await(5_000)
+    {:ok, result} = context |> run("plan_invalid") |> Runner.await(30_000)
     assert {:converged, "plan_invalid"} = {result.outcome, result.declared_outcome}
   end
 
   test "a blocking question makes the job wait instead of finishing", context do
-    {:ok, result} = context |> run("blocking") |> Runner.await(5_000)
+    {:ok, result} = context |> run("blocking") |> Runner.await(30_000)
     assert result.status == :waiting
     assert [%Question{key: "backend", blocking: true}] = result.questions
     assert result.outcome == nil
@@ -336,7 +379,7 @@ defmodule ForgeWorker.Job.RunnerTest do
   # stopped by its account's limit from one that failed (`docs/design/credentials.md` § A limit
   # reached mid-run). The last one, not the first: the warning before it permitted.
   test "a run stopped by its limit carries the report that stopped it", context do
-    {:ok, result} = context |> run("rate_limited") |> Runner.await(5_000)
+    {:ok, result} = context |> run("rate_limited") |> Runner.await(30_000)
     assert result.outcome == :error
 
     assert result.harness["rate_limit"] == %{
@@ -345,12 +388,12 @@ defmodule ForgeWorker.Job.RunnerTest do
              "rate_limit_type" => "five_hour"
            }
 
-    {:ok, result} = context |> run("success") |> Runner.await(5_000)
+    {:ok, result} = context |> run("success") |> Runner.await(30_000)
     assert result.harness["rate_limit"] == nil
   end
 
   test "harness budget stops are budget_exhausted", context do
-    {:ok, result} = context |> run("max_turns") |> Runner.await(5_000)
+    {:ok, result} = context |> run("max_turns") |> Runner.await(30_000)
     assert result.outcome == :budget_exhausted
     assert result.exit_status == 1
     assert result.harness["cost_usd"] == 1.5
@@ -358,7 +401,9 @@ defmodule ForgeWorker.Job.RunnerTest do
 
   # **Forge stops the run itself, during the run** (`docs/design/capacity.md` § Stopping a job
   # already running): the fake never reaches its result and spends 50,000 a call, so only the
-  # meter can end it, and it ends it once the budget has been passed, not before.
+  # meter can end it, and it ends it once the budget has been passed, not before. The fake makes
+  # three calls and then waits (`runaway` in `fake_claude.sh`), so the figure below is the calls
+  # made up to the one that passed the budget, however late the stop arrives.
   test "a run past its token budget is stopped before its result", context do
     spec = %{spec() | budget: %{turns: 40, tokens: 120_000}}
     {:ok, result} = context |> run("runaway", spec: spec) |> Runner.await(10_000)
@@ -376,7 +421,7 @@ defmodule ForgeWorker.Job.RunnerTest do
 
   test "a run exactly at its budget is not over it", context do
     spec = %{spec() | budget: %{turns: 40, tokens: 3150}}
-    {:ok, result} = context |> run("success", spec: spec) |> Runner.await(5_000)
+    {:ok, result} = context |> run("success", spec: spec) |> Runner.await(30_000)
 
     assert result.killed == nil
     assert result.outcome == :converged
@@ -388,14 +433,14 @@ defmodule ForgeWorker.Job.RunnerTest do
   # the same outcome from the same code path, so without this the whole distinction could be
   # dropped between the runner and the wire and the suite would stay green.
   test "a budget stop reports which ceiling stopped it, and nothing else does", context do
-    {:ok, turns} = context |> run("max_turns") |> Runner.await(5_000)
+    {:ok, turns} = context |> run("max_turns") |> Runner.await(30_000)
     assert turns.exhausted == :turns
 
-    {:ok, cost} = context |> run("max_budget") |> Runner.await(5_000)
+    {:ok, cost} = context |> run("max_budget") |> Runner.await(30_000)
     assert cost.outcome == :budget_exhausted
     assert cost.exhausted == :tokens
 
-    {:ok, converged} = context |> run("success") |> Runner.await(5_000)
+    {:ok, converged} = context |> run("success") |> Runner.await(30_000)
     assert converged.outcome == :converged
     assert converged.exhausted == nil
   end
@@ -407,7 +452,7 @@ defmodule ForgeWorker.Job.RunnerTest do
     spec = spec()
     seed_output(context.root, spec, "written by the run that was killed")
 
-    {:ok, result} = context |> run("max_turns", spec: spec) |> Runner.await(5_000)
+    {:ok, result} = context |> run("max_turns", spec: spec) |> Runner.await(30_000)
 
     assert result.documents == %{}
     assert "plan.md" in result.missing
@@ -427,7 +472,7 @@ defmodule ForgeWorker.Job.RunnerTest do
         ]
       )
 
-    {:ok, result} = Runner.await(pid, 5_000)
+    {:ok, result} = Runner.await(pid, 30_000)
 
     assert Map.has_key?(result.documents, "plan.md")
     assert result.missing == []
@@ -461,7 +506,7 @@ defmodule ForgeWorker.Job.RunnerTest do
           ]
         )
 
-      {:ok, result} = Runner.await(pid, 5_000)
+      {:ok, result} = Runner.await(pid, 30_000)
       job_dir = job_dir(result)
       prompt = File.read!(Path.join(job_dir, "fake-prompt.txt"))
 
@@ -477,7 +522,9 @@ defmodule ForgeWorker.Job.RunnerTest do
     end
 
     test "a cold start gets the whole prompt, and no --resume", %{spec: spec} = context do
-      {:ok, result} = context |> run("success", spec: spec, head: "c0ffee") |> Runner.await(5_000)
+      {:ok, result} =
+        context |> run("success", spec: spec, head: "c0ffee") |> Runner.await(30_000)
+
       job_dir = job_dir(result)
       prompt = File.read!(Path.join(job_dir, "fake-prompt.txt"))
 
@@ -500,7 +547,7 @@ defmodule ForgeWorker.Job.RunnerTest do
 
     test "parks with what it asked for, and nothing is decided", context do
       pid = run(context, "invokes", spec: invoking_spec())
-      assert {:ok, %Result{} = result} = Runner.await(pid, 5_000)
+      assert {:ok, %Result{} = result} = Runner.await(pid, 30_000)
 
       assert result.status == :parked
       assert result.outcome == nil
@@ -518,7 +565,7 @@ defmodule ForgeWorker.Job.RunnerTest do
       pid = run(context, "invokes_badly", spec: invoking_spec())
 
       assert {:ok, %Result{status: :parked, invocations: [], invocation_error: reason}} =
-               Runner.await(pid, 5_000)
+               Runner.await(pid, 30_000)
 
       assert reason =~ "invoke.json must be a non-empty JSON array"
     end
@@ -527,7 +574,7 @@ defmodule ForgeWorker.Job.RunnerTest do
     # and the run ends as if it were not there.
     test "is ignored where the state may not invoke", context do
       pid = run(context, "invokes")
-      assert {:ok, %Result{status: :finished, outcome: :converged}} = Runner.await(pid, 5_000)
+      assert {:ok, %Result{status: :finished, outcome: :converged}} = Runner.await(pid, 30_000)
       assert Path.wildcard(Path.join([context.root, "*", "invoke.json"])) == []
     end
 
@@ -536,7 +583,7 @@ defmodule ForgeWorker.Job.RunnerTest do
       pid = run(context, "invokes_over_budget", spec: invoking_spec())
 
       assert {:ok, %Result{status: :finished, outcome: :budget_exhausted}} =
-               Runner.await(pid, 5_000)
+               Runner.await(pid, 30_000)
     end
 
     # Each half of "clean" on its own: an error flag on a success, and an error subtype without
@@ -544,7 +591,7 @@ defmodule ForgeWorker.Job.RunnerTest do
     test "does not park a run that errored, whichever way it says so", context do
       for scenario <- ["invokes_is_error", "invokes_error_subtype"] do
         pid = run(context, scenario, spec: invoking_spec())
-        assert {:ok, %Result{status: :finished}} = Runner.await(pid, 5_000), scenario
+        assert {:ok, %Result{status: :finished}} = Runner.await(pid, 30_000), scenario
       end
     end
 
@@ -555,7 +602,7 @@ defmodule ForgeWorker.Job.RunnerTest do
       pid =
         run(context, "reads_logs", spec: invoking_spec(), command_logs: [{"1-build.log", source}])
 
-      assert {:ok, %Result{documents: %{"plan.md" => plan}}} = Runner.await(pid, 5_000)
+      assert {:ok, %Result{documents: %{"plan.md" => plan}}} = Runner.await(pid, 30_000)
       assert plan.raw =~ "compiled 3 files"
     end
   end
@@ -567,7 +614,7 @@ defmodule ForgeWorker.Job.RunnerTest do
       pid = run(context, "shots", spec: spec)
 
       assert {:ok, %Result{status: :finished, outcome: :converged} = result} =
-               Runner.await(pid, 5_000)
+               Runner.await(pid, 30_000)
 
       assert %{"shots/home.png" => %{"path" => home}, "shots/menu.png" => %{"path" => _menu}} =
                result.blobs
@@ -582,7 +629,7 @@ defmodule ForgeWorker.Job.RunnerTest do
       spec = spec(%{produces: ["plan.md", "shots/*"], may_invoke: %{"build" => %{"max" => 1}}})
       pid = run(context, "invokes_with_shots", spec: spec)
 
-      assert {:ok, %Result{status: :parked, blobs: blobs}} = Runner.await(pid, 5_000)
+      assert {:ok, %Result{status: :parked, blobs: blobs}} = Runner.await(pid, 30_000)
       assert blobs == %{}
     end
   end
@@ -590,7 +637,7 @@ defmodule ForgeWorker.Job.RunnerTest do
   # It said it started, so what went wrong is not that it never did: the reason stays the plain
   # fact, and stderr's last line is not dressed up as the cause.
   test "a crash without a result is an error, and odd lines still become events", context do
-    {:ok, result} = context |> run("crash") |> Runner.await(5_000)
+    {:ok, result} = context |> run("crash") |> Runner.await(30_000)
     assert result.outcome == :error
     assert result.reason == "harness produced no result message"
     types = Enum.map(events(), & &1.type)
@@ -601,7 +648,7 @@ defmodule ForgeWorker.Job.RunnerTest do
   # It never said it started and never said why it ended, so what it wrote to stderr last is the
   # only thing that can (`docs/design/claude-code-events.md` § A harness that never starts).
   test "a harness that exits before it starts says so, with stderr's last line", context do
-    {:ok, result} = context |> run("no_start") |> Runner.await(5_000)
+    {:ok, result} = context |> run("no_start") |> Runner.await(30_000)
     assert result.outcome == :error
 
     assert result.reason ==
@@ -609,7 +656,7 @@ defmodule ForgeWorker.Job.RunnerTest do
   end
 
   test "a harness that never authenticated says so in the reason", context do
-    {:ok, result} = context |> run("unauthenticated") |> Runner.await(5_000)
+    {:ok, result} = context |> run("unauthenticated") |> Runner.await(30_000)
 
     # The half that was missing: the parser reads `result` off the message, and the runner used
     # to drop it on the floor when it narrowed the result for `Outcome.decide`. The job then
@@ -622,12 +669,12 @@ defmodule ForgeWorker.Job.RunnerTest do
 
   test "undeclared and invalid outputs are errors", context do
     {:ok, result} =
-      context |> run("undeclared", max_corrections: 0) |> Runner.await(5_000)
+      context |> run("undeclared", max_corrections: 0) |> Runner.await(30_000)
 
     assert {:error, "undeclared outputs: notes.md"} = {result.outcome, result.reason}
 
     {:ok, result} =
-      context |> run("invalid_document", max_corrections: 0) |> Runner.await(5_000)
+      context |> run("invalid_document", max_corrections: 0) |> Runner.await(30_000)
 
     assert {:error, "invalid documents: plan.md (front_matter: is not closed by a --- line)"} =
              {result.outcome, result.reason}
@@ -642,22 +689,26 @@ defmodule ForgeWorker.Job.RunnerTest do
     pid =
       run(context, "hang",
         extra_env: [{"FORGE_GIT_TOKEN", {:secret, "tok-never-shown"}}],
-        secrets: secrets
+        secrets: secrets,
+        grace_ms: 200
       )
+
+    # After the spawn, which is where the secrets were once copied into the state.
+    await_started()
 
     state = inspect(:sys.get_state(pid), limit: :infinity, printable_limit: :infinity)
     refute state =~ "tok-never-shown"
     refute state =~ "sk_never_shown"
 
     Runner.cancel(pid)
-    {:ok, _result} = Runner.await(pid, 5_000)
+    {:ok, _result} = Runner.await(pid, 30_000)
   end
 
   # Stopped before it started is stopped, and says so: a cancel is the reason, not the harness's
   # having exited, which it did only because it was told to.
   test "a harness cancelled before it started is cancelled, not one that exited", context do
-    pid = run(context, "never_starts")
-    Process.sleep(200)
+    pid = run(context, "never_starts", grace_ms: 200)
+    await_stderr(pid, "android-sdk")
     Runner.cancel(pid)
 
     {:ok, result} = Runner.await(pid, 15_000)
@@ -677,7 +728,7 @@ defmodule ForgeWorker.Job.RunnerTest do
           resume_session: "sess-nowhere"
         ]
       )
-      |> Runner.await(5_000)
+      |> Runner.await(30_000)
 
     assert result.exit_status == 1
     assert result.reason == "harness error: error_during_execution"
@@ -788,7 +839,7 @@ defmodule ForgeWorker.Job.RunnerTest do
          context do
       ending = %{memory: reading(peak: 2 * @gib, oom_kills: 2, current: nil)}
 
-      {:ok, result} = context |> run("success", scripted([nil], ending)) |> Runner.await(5_000)
+      {:ok, result} = context |> run("success", scripted([nil], ending)) |> Runner.await(30_000)
 
       assert result.harness["memory"] ==
                %{"ceiling" => 2 * @gib, "peak" => 2 * @gib, "oom_kills" => 2}
@@ -798,7 +849,7 @@ defmodule ForgeWorker.Job.RunnerTest do
     end
 
     test "nothing read is no memory at all", context do
-      {:ok, result} = context |> run("success") |> Runner.await(5_000)
+      {:ok, result} = context |> run("success") |> Runner.await(30_000)
       assert result.harness["memory"] == nil
       assert memory_events() == []
     end
@@ -811,7 +862,7 @@ defmodule ForgeWorker.Job.RunnerTest do
         memory: reading(oom_kills: 1, peak: 2 * @gib)
       }
 
-      {:ok, result} = context |> run("crash", scripted([nil], ending)) |> Runner.await(5_000)
+      {:ok, result} = context |> run("crash", scripted([nil], ending)) |> Runner.await(30_000)
       assert result.reason == "the harness was killed at its 2 GiB memory ceiling"
     end
 
@@ -824,7 +875,7 @@ defmodule ForgeWorker.Job.RunnerTest do
             %{exit: %{code: "exited", status: "1"}, memory: reading(oom_kills: 3)},
             %{exit: %{code: "killed", status: "TERM"}, memory: reading(oom_kills: 3)}
           ] do
-        {:ok, result} = context |> run("crash", scripted([nil], ending)) |> Runner.await(5_000)
+        {:ok, result} = context |> run("crash", scripted([nil], ending)) |> Runner.await(30_000)
         assert result.reason == "harness produced no result message", inspect(ending)
       end
     end
@@ -856,8 +907,8 @@ defmodule ForgeWorker.Job.RunnerTest do
     # Stopped by the platform is stopped, whatever the unit counted on the way out.
     test "a harness cancelled is cancelled, whatever its unit counted", context do
       ending = %{exit: %{code: "killed", status: "KILL"}, memory: reading(oom_kills: 1)}
-      pid = run(context, "hang", scripted([nil], ending))
-      Process.sleep(200)
+      pid = run(context, "hang", scripted([nil], ending) ++ [grace_ms: 200])
+      await_started()
       Runner.cancel(pid)
 
       {:ok, result} = Runner.await(pid, 15_000)
@@ -868,7 +919,7 @@ defmodule ForgeWorker.Job.RunnerTest do
     # that.
     test "a harness that produced its result is not one killed at its ceiling", context do
       ending = %{exit: %{code: "killed", status: "KILL"}, memory: reading(oom_kills: 1)}
-      {:ok, result} = context |> run("success", scripted([nil], ending)) |> Runner.await(5_000)
+      {:ok, result} = context |> run("success", scripted([nil], ending)) |> Runner.await(30_000)
       refute result.reason =~ "memory ceiling"
     end
 
@@ -877,7 +928,7 @@ defmodule ForgeWorker.Job.RunnerTest do
     test "the last line a harness that never started gives is the slice's", context do
       ending = %{last_line: "error: flake does not provide attribute 'devShells.env'"}
 
-      {:ok, result} = context |> run("no_start", scripted([nil], ending)) |> Runner.await(5_000)
+      {:ok, result} = context |> run("no_start", scripted([nil], ending)) |> Runner.await(30_000)
 
       assert result.reason ==
                "the harness exited with status 1 before it started; stderr: " <>
@@ -905,7 +956,7 @@ defmodule ForgeWorker.Job.RunnerTest do
         health: health
       ]
 
-      {:ok, _result} = context |> run("no_start", opts) |> Runner.await(5_000)
+      {:ok, _result} = context |> run("no_start", opts) |> Runner.await(30_000)
 
       # Already here when the result came back: the link withholds a result it hears of after.
       assert_received {:unhealthy, ^reason}
@@ -914,7 +965,7 @@ defmodule ForgeWorker.Job.RunnerTest do
 
     test "a run that simply failed says nothing of the machine", context do
       health = health()
-      {:ok, _result} = context |> run("no_start", health: health) |> Runner.await(5_000)
+      {:ok, _result} = context |> run("no_start", health: health) |> Runner.await(30_000)
 
       refute_received {:unhealthy, _}
       assert ForgeWorker.Health.unhealthy(health) == nil
@@ -922,14 +973,24 @@ defmodule ForgeWorker.Job.RunnerTest do
   end
 
   describe "a harness that never starts" do
+    # **The notice and the give-up are driven, not timed.** Both are decided by the clock, so
+    # with a 100 ms notice and a limit of any size that a busy machine can overshoot, the first
+    # check came after the limit and the only event was the one that gave up (a limit of 350 ms
+    # failed that way, and so, less often, did 1 500). The limit is out of reach here instead, the
+    # test waits for the notice to be *seen*, and then makes the limit pass by setting it to 0: the
+    # next check finds the harness has waited too long.
     test "is reported while it waits, with its stderr, and stopped at the limit", context do
-      {:ok, result} =
-        context
-        # The limit is generous because the assertion below needs a notice *before* it: on a loaded
-        # machine a 350 ms limit was reached before the first 100 ms notice was sent, and the only
-        # event was the one that gave up.
-        |> run("never_starts", start_notice_ms: 100, start_timeout_ms: 1_500, grace_ms: 200)
-        |> Runner.await(5_000)
+      pid =
+        run(context, "never_starts",
+          start_notice_ms: 100,
+          start_timeout_ms: :timer.hours(1),
+          grace_ms: 200
+        )
+
+      first = events_until(&(&1.type == "job.harness.starting"))
+      await_stderr(pid, "android-sdk")
+      :sys.replace_state(pid, fn state -> %{state | start_timeout_ms: 0} end)
+      {:ok, result} = Runner.await(pid, 30_000)
 
       assert result.outcome == :error
 
@@ -941,46 +1002,66 @@ defmodule ForgeWorker.Job.RunnerTest do
       assert result.reason =~
                Regex.compile!("\\Athe harness had not started after \\ds" <> tail <> "\\z")
 
-      starting = Enum.filter(events(), &(&1.type == "job.harness.starting"))
-      assert [%{payload: %{gave_up: false, stderr: stderr}} | _] = starting
+      starting = Enum.filter(first ++ events(), &(&1.type == "job.harness.starting"))
+      assert [%{payload: %{gave_up: false}}] = Enum.take(starting, 1)
+      # The give-up is after the stderr was written, so it carries it.
+      assert %{payload: %{gave_up: true, stderr: stderr}} = List.last(starting)
       assert stderr =~ "android-sdk"
-      assert %{payload: %{gave_up: true}} = List.last(starting)
       assert Enum.count(starting, & &1.payload.gave_up) == 1
     end
 
     # The reason quotes stderr's last line and the event carries its tail, not its head: a
-    # `nix develop` writes far more than the tail, and what it was stuck on is at the end.
+    # `nix develop` writes far more than the tail, and what it was stuck on is at the end. The
+    # check is made when the test says, once the last line is written, and not when a timer
+    # happens to fire during the 400 lines before it.
     test "the tail of a long stderr is what is quoted", context do
-      {:ok, result} =
-        context
-        |> run("long_stderr", start_notice_ms: 100, start_timeout_ms: 300, grace_ms: 100)
-        |> Runner.await(5_000)
+      pid =
+        run(context, "long_stderr",
+          start_notice_ms: :timer.hours(1),
+          start_timeout_ms: 0,
+          grace_ms: 100
+        )
+
+      await_stderr(pid, "the last thing it said")
+      waiting_to_start(pid)
+      send(pid, {:start_check, 0})
+      {:ok, result} = Runner.await(pid, 30_000)
 
       assert result.reason =~ "stderr: the last thing it said"
 
       assert [%{payload: %{stderr: stderr}} | _] =
                Enum.filter(events(), &(&1.type == "job.harness.starting"))
 
+      assert stderr =~ "the last thing it said"
       assert byte_size(stderr) <= 2048
       refute stderr =~ "early line 1 of"
     end
 
     # `hang` says it started and then works on, well past the limit: a long job, not a stuck one.
-    # Only the wall clock stops it, and nothing reports it as waiting to start.
+    # Only the wall clock stops it, and nothing reports it as waiting to start. The check is made
+    # after the harness has said it started, by the test, with a limit it has long passed — a
+    # timer could fire before the harness's first line on a busy machine, which is the one case
+    # this test is not about — and the wall clock is the test's too.
     test "one that has started is never reported or stopped for it, however long it runs",
          context do
-      {:ok, result} =
-        context
-        |> run("hang",
-          start_notice_ms: 50,
-          start_timeout_ms: 100,
-          wall_clock_ms: 600,
+      pid =
+        run(context, "hang",
+          start_notice_ms: :timer.hours(1),
+          start_timeout_ms: 0,
+          wall_clock_ms: :timer.hours(1),
           grace_ms: 100
         )
-        |> Runner.await(5_000)
+
+      await_started()
+      send(pid, {:start_check, 0})
+      # The check is a message before this call, so it was handled when this answers.
+      _state = :sys.get_state(pid)
+      assert Enum.filter(events(), &(&1.type == "job.harness.starting")) == []
+
+      send(pid, :wall_clock)
+      {:ok, result} = Runner.await(pid, 30_000)
 
       assert result.killed == :wall_clock
-      assert Enum.filter(events(), &(&1.type == "job.harness.starting")) == []
     end
   end
 
@@ -997,7 +1078,7 @@ defmodule ForgeWorker.Job.RunnerTest do
     names = ["prompt.md", "correction-1.md"]
     Enum.each(names, &File.ln_s!(victim, Path.join(job_dir, &1)))
 
-    {:ok, _result} = context |> run("fixes_when_resumed", spec: spec) |> Runner.await(5_000)
+    {:ok, _result} = context |> run("fixes_when_resumed", spec: spec) |> Runner.await(30_000)
 
     assert File.read!(victim) == "untouched"
 
@@ -1011,7 +1092,7 @@ defmodule ForgeWorker.Job.RunnerTest do
     # fixes it, and the platform hears one result: here, a job waiting on its question.
     test "a document that does not parse is fixed on the same session before anything is reported",
          context do
-      {:ok, result} = context |> run("fixes_when_resumed") |> Runner.await(5_000)
+      {:ok, result} = context |> run("fixes_when_resumed") |> Runner.await(30_000)
 
       assert result.status == :waiting
       assert [%Question{key: "split", blocking: true}] = result.questions
@@ -1035,7 +1116,7 @@ defmodule ForgeWorker.Job.RunnerTest do
       secrets = sealed_secrets(%{"STRIPE_TEST_KEY" => "sk_test_round-two"}, "runner-secrets")
 
       {:ok, result} =
-        context |> run("fixes_when_resumed", secrets: secrets) |> Runner.await(5_000)
+        context |> run("fixes_when_resumed", secrets: secrets) |> Runner.await(30_000)
 
       assert result.harness["corrections"] == 1
       job_dir = job_dir(result)
@@ -1048,7 +1129,7 @@ defmodule ForgeWorker.Job.RunnerTest do
     # The platform adds a result's cost and turns to the job once. Reporting only the last
     # process's would lose what the first spent.
     test "the result reports what every round spent, and how many corrections ran", context do
-      {:ok, result} = context |> run("fixes_when_resumed") |> Runner.await(5_000)
+      {:ok, result} = context |> run("fixes_when_resumed") |> Runner.await(30_000)
 
       assert result.harness["corrections"] == 1
       assert result.harness["turns"] == 6
@@ -1058,7 +1139,7 @@ defmodule ForgeWorker.Job.RunnerTest do
     end
 
     test "one transcript holds every round, in order", context do
-      {:ok, result} = context |> run("fixes_when_resumed") |> Runner.await(5_000)
+      {:ok, result} = context |> run("fixes_when_resumed") |> Runner.await(30_000)
 
       inits =
         result.transcript_path
@@ -1071,7 +1152,7 @@ defmodule ForgeWorker.Job.RunnerTest do
 
     test "a run that stays broken is corrected at most max_corrections times, then fails",
          context do
-      {:ok, result} = context |> run("invalid_document") |> Runner.await(5_000)
+      {:ok, result} = context |> run("invalid_document") |> Runner.await(30_000)
 
       assert result.outcome == :error
       assert result.reason =~ "invalid documents: plan.md"
@@ -1089,7 +1170,7 @@ defmodule ForgeWorker.Job.RunnerTest do
 
     test "max_corrections: 0 reports the first failure as it is", context do
       {:ok, result} =
-        context |> run("invalid_document", max_corrections: 0) |> Runner.await(5_000)
+        context |> run("invalid_document", max_corrections: 0) |> Runner.await(30_000)
 
       assert result.outcome == :error
       refute Map.has_key?(result.harness, "corrections")
@@ -1100,7 +1181,7 @@ defmodule ForgeWorker.Job.RunnerTest do
     # start with, so none is started — the budget is the job's, not each process's.
     test "a correction is not started on a spent budget", context do
       spec = %{spec() | budget: %{turns: 3, tokens: 400_000}}
-      {:ok, result} = context |> run("invalid_document", spec: spec) |> Runner.await(5_000)
+      {:ok, result} = context |> run("invalid_document", spec: spec) |> Runner.await(30_000)
 
       assert result.outcome == :error
       assert Enum.filter(events(), &(&1.type == "job.harness.correction")) == []
@@ -1122,7 +1203,7 @@ defmodule ForgeWorker.Job.RunnerTest do
       {:ok, result} =
         context
         |> run("success", harness_opts: resumed(9.0), extra_env: [{"FAKE_CARRY", "9.0"}])
-        |> Runner.await(5_000)
+        |> Runner.await(30_000)
 
       # Exactly, not within a delta: `9.0421 - 9.0` is 0.04210000000000029 in floating point, and
       # the platform stores the float it is given (`Decimal.from_float/1`) in an unbounded column.
@@ -1134,7 +1215,7 @@ defmodule ForgeWorker.Job.RunnerTest do
     # baseline off, and `nil - 9.0` would raise in the middle of building the result and lose it.
     test "a resumed run that reports no total reports none, and is not lost", context do
       {:ok, result} =
-        context |> run("crash", harness_opts: resumed(9.0)) |> Runner.await(5_000)
+        context |> run("crash", harness_opts: resumed(9.0)) |> Runner.await(30_000)
 
       assert %Result{} = result
       assert result.harness["cost_usd"] == nil
@@ -1147,7 +1228,7 @@ defmodule ForgeWorker.Job.RunnerTest do
       opts = Keyword.delete(resumed(9.0), :resume_session)
 
       {:ok, result} =
-        context |> run("success", harness_opts: opts) |> Runner.await(5_000)
+        context |> run("success", harness_opts: opts) |> Runner.await(30_000)
 
       assert_in_delta result.harness["cost_usd"], 0.0421, 1.0e-9
       assert_in_delta result.harness["session_cost_usd"], 0.0421, 1.0e-9
@@ -1159,7 +1240,7 @@ defmodule ForgeWorker.Job.RunnerTest do
       log =
         ExUnit.CaptureLog.capture_log(fn ->
           {:ok, result} =
-            context |> run("success", harness_opts: resumed(9.0)) |> Runner.await(5_000)
+            context |> run("success", harness_opts: resumed(9.0)) |> Runner.await(30_000)
 
           assert result.harness["cost_usd"] == 0
           assert_in_delta result.harness["session_cost_usd"], 0.0421, 1.0e-9
@@ -1177,7 +1258,7 @@ defmodule ForgeWorker.Job.RunnerTest do
           harness_opts: resumed(9.0),
           extra_env: [{"FAKE_CARRY", "9.0"}]
         )
-        |> Runner.await(5_000)
+        |> Runner.await(30_000)
 
       assert result.harness["corrections"] == 2
       assert_in_delta result.harness["cost_usd"], 3 * 0.0421, 1.0e-9
@@ -1194,7 +1275,7 @@ defmodule ForgeWorker.Job.RunnerTest do
           harness_opts: resumed(15.48),
           extra_env: [{"FAKE_CARRY", "15.48"}]
         )
-        |> Runner.await(5_000)
+        |> Runner.await(30_000)
 
       assert result.harness["corrections"] == 2
       assert result.harness["usage"] == 3 * 3150
@@ -1207,7 +1288,7 @@ defmodule ForgeWorker.Job.RunnerTest do
     # not have been stopped.
     test "a correction is given what is left of the budget, not the whole of it", context do
       spec = %{spec() | budget: %{turns: 40, tokens: 7_000}}
-      {:ok, result} = context |> run("invalid_document", spec: spec) |> Runner.await(5_000)
+      {:ok, result} = context |> run("invalid_document", spec: spec) |> Runner.await(30_000)
 
       assert result.harness["corrections"] == 2
       assert result.killed == :tokens
@@ -1216,7 +1297,7 @@ defmodule ForgeWorker.Job.RunnerTest do
 
     # The correction's turns are still what is left: the harness is given `--max-turns` for them.
     test "a correction is given the turns that are left", context do
-      {:ok, result} = context |> run("fixes_when_resumed") |> Runner.await(5_000)
+      {:ok, result} = context |> run("fixes_when_resumed") |> Runner.await(30_000)
       args = File.read!(Path.join(job_dir(result), "fake-args.txt"))
 
       assert args =~ "--max-turns 37"
@@ -1229,7 +1310,7 @@ defmodule ForgeWorker.Job.RunnerTest do
       pid = run(context, "result_then_linger", grace_ms: 200)
       assert_receive {:event, %{type: "job.harness.finished"}}, 5_000
       Runner.cancel(pid)
-      {:ok, result} = Runner.await(pid, 5_000)
+      {:ok, result} = Runner.await(pid, 30_000)
 
       assert result.outcome == :cancelled
       assert result.killed == :operator
@@ -1246,7 +1327,7 @@ defmodule ForgeWorker.Job.RunnerTest do
                      5_000
 
       Runner.cancel(pid)
-      {:ok, result} = Runner.await(pid, 5_000)
+      {:ok, result} = Runner.await(pid, 30_000)
 
       assert result.killed == :operator
       assert result.outcome == :cancelled
@@ -1264,7 +1345,7 @@ defmodule ForgeWorker.Job.RunnerTest do
           start_timeout_ms: 300,
           grace_ms: 100
         )
-        |> Runner.await(5_000)
+        |> Runner.await(30_000)
 
       assert result.reason =~ "the harness had not started after 0s"
       assert result.harness["corrections"] == 1
@@ -1275,9 +1356,9 @@ defmodule ForgeWorker.Job.RunnerTest do
 
     test "a run that is cancelled is not corrected", context do
       pid = run(context, "hang", grace_ms: 200)
-      Process.sleep(100)
+      await_started()
       Runner.cancel(pid)
-      {:ok, result} = Runner.await(pid, 5_000)
+      {:ok, result} = Runner.await(pid, 30_000)
 
       assert result.outcome == :cancelled
       assert Enum.filter(events(), &(&1.type == "job.harness.correction")) == []
@@ -1285,22 +1366,22 @@ defmodule ForgeWorker.Job.RunnerTest do
   end
 
   test "the wall clock kills a hung harness and reports budget_exhausted", context do
-    started = System.monotonic_time(:millisecond)
-
+    # Bounded by `await/1`'s thirty seconds and not by an elapsed time asserted after it: a `hang`
+    # that ignored its wall clock would run for a minute and fail the await, and an elapsed time
+    # under three seconds failed on a machine busy enough to start a shell slowly.
     {:ok, result} =
-      context |> run("hang", wall_clock_ms: 300, grace_ms: 200) |> Runner.await(5_000)
+      context |> run("hang", wall_clock_ms: 300, grace_ms: 200) |> Runner.await(30_000)
 
     assert result.killed == :wall_clock
     assert result.outcome == :budget_exhausted
     assert result.exhausted == :wall_clock
-    assert System.monotonic_time(:millisecond) - started < 3_000
   end
 
   test "cancel stops the harness and reports cancelled", context do
     pid = run(context, "hang", grace_ms: 200)
-    Process.sleep(100)
+    await_started()
     Runner.cancel(pid)
-    {:ok, result} = Runner.await(pid, 5_000)
+    {:ok, result} = Runner.await(pid, 30_000)
 
     assert result.killed == :operator
     assert result.outcome == :cancelled
@@ -1324,7 +1405,7 @@ defmodule ForgeWorker.Job.RunnerTest do
     assert_receive {:wrapped, "nix", ["develop", ".#implement", "--command" | rest]}
     assert ["/bin/sh", "-c", _loader, "forge-secrets", _file, executable | _flags] = rest
     assert executable == fake_executable()
-    {:ok, _result} = Runner.await(pid, 5_000)
+    {:ok, _result} = Runner.await(pid, 30_000)
   end
 
   test "without it the harness is run as it is", context do
@@ -1332,7 +1413,7 @@ defmodule ForgeWorker.Job.RunnerTest do
 
     assert_receive {:wrapped, "/bin/sh", ["-c", _loader, "forge-secrets", _file, executable | _]}
     assert executable == fake_executable()
-    {:ok, _result} = Runner.await(pid, 5_000)
+    {:ok, _result} = Runner.await(pid, 30_000)
 
     # A harness given no secret at all is started as it is.
     pid =
@@ -1344,7 +1425,7 @@ defmodule ForgeWorker.Job.RunnerTest do
 
     assert_receive {:wrapped, executable, _args}
     assert executable == fake_executable()
-    {:ok, _result} = Runner.await(pid, 5_000)
+    {:ok, _result} = Runner.await(pid, 30_000)
   end
 
   # A slice that cannot be made is a job that cannot run. The alternative — starting the
@@ -1384,81 +1465,59 @@ defmodule ForgeWorker.Job.RunnerTest do
     ref = Process.monitor(pid)
     assert {:ok, %{outcome: :error}} = Runner.await(pid)
     # And having handed it over, it goes.
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 10_000
   end
 
   test "the runner exits after the job ends", context do
     pid = run(context, "success")
     ref = Process.monitor(pid)
-    {:ok, _} = Runner.await(pid, 5_000)
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+    {:ok, _} = Runner.await(pid, 30_000)
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 10_000
   end
 
   # `docs/design/archive.md` § The worker's side: the folder is there before the harness starts and
   # gone when the job ends, and a job that is promised one and cannot have it does not start.
   describe "the archive" do
-    setup do
-      Application.put_env(:forge_worker, :archive_mount, ForgeWorker.RecordingMount)
-      Application.put_env(:forge_worker, :archive_test_pid, self())
-
-      on_exit(fn ->
-        for key <- [:archive_mount, :archive_test_pid, :archive_test_mount],
-            do: Application.delete_env(:forge_worker, key)
-      end)
+    setup context do
+      # Told of this test's own folders only: the mount is the suite's one, routed by root, and
+      # nothing is written to the application environment for another test's runner to read.
+      ForgeWorker.RecordingMount.watch(context.root)
     end
 
     @grant %{url: "http://platform.test", token: "secret-token"}
 
     test "is mounted before the harness starts and released when the job ends", context do
       pid = run(context, "success", archive: @grant)
-      assert {:ok, %Result{} = result} = Runner.await(pid, 5_000)
+      assert {:ok, %Result{} = result} = Runner.await(pid, 30_000)
 
       # Released as the job starts (what an earlier run left), mounted, and released as it ends.
       folder = Path.join(job_dir(result), "archive")
 
       assert [{:unmounted, ^folder}, {:mounted, _socket, ^folder}, {:unmounted, ^folder}] =
-               mounts(context.root)
+               mounts()
 
       assert result.outcome == :converged
     end
 
-    # Only this test's own mounts, as `mounts/1` below: `:archive_test_pid` is application-wide, so
-    # another async test's job that ends while it is set reports its unmount here too, which
-    # failed the exact-list assertion on `lifecycle/1` one run in several.
-    defp lifecycle(root) do
+    # What happened, in order, as this test's mailbox has it: the mount tells only of the folders
+    # under this test's own root (`ForgeWorker.RecordingMount`), so every message here is its own.
+    defp lifecycle do
       receive do
-        {:slice_prepared, _} ->
-          [:slice | lifecycle(root)]
-
-        {:mounted, _, folder} ->
-          if String.starts_with?(folder, root <> "/"),
-            do: [:mounted | lifecycle(root)],
-            else: lifecycle(root)
-
-        {:unmounted, folder} ->
-          if String.starts_with?(folder, root <> "/"),
-            do: [:unmounted | lifecycle(root)],
-            else: lifecycle(root)
+        {:slice_prepared, _} -> [:slice | lifecycle()]
+        {:mounted, _, _folder} -> [:mounted | lifecycle()]
+        {:unmounted, _folder} -> [:unmounted | lifecycle()]
       after
         0 -> []
       end
     end
 
-    # Only the folders under `root`, this test's own. `:archive_test_pid` is application-wide and
-    # this module runs async, so every other test's job that ends while it is set reports its
-    # unmount here too — which failed the exact-list assertion above one run in several.
-    defp mounts(root) do
+    defp mounts do
       receive do
-        {:mounted, _, folder} = message -> keep(message, folder, root)
-        {:unmounted, folder} = message -> keep(message, folder, root)
+        {:mounted, _, _folder} = message -> [message | mounts()]
+        {:unmounted, _folder} = message -> [message | mounts()]
       after
         0 -> []
       end
-    end
-
-    defp keep(message, folder, root) do
-      rest = mounts(root)
-      if String.starts_with?(folder, root <> "/"), do: [message | rest], else: rest
     end
 
     # `Slice.Systemd.prepare/1` hands the job directory to the job's user with a recursive `chown`,
@@ -1471,23 +1530,23 @@ defmodule ForgeWorker.Job.RunnerTest do
           archive: @grant
         )
 
-      assert {:ok, _result} = Runner.await(pid, 5_000)
-      assert lifecycle(context.root) == [:slice, :unmounted, :mounted, :unmounted]
+      assert {:ok, _result} = Runner.await(pid, 30_000)
+      assert lifecycle() == [:slice, :unmounted, :mounted, :unmounted]
     end
 
     test "is not made for a job with no grant", context do
       pid = run(context, "success")
-      assert {:ok, _result} = Runner.await(pid, 5_000)
+      assert {:ok, _result} = Runner.await(pid, 30_000)
 
       refute_received {:mounted, _, _}
       refute File.exists?(Path.join([context.root, spec().job_id, "archive"]))
     end
 
     test "that cannot be mounted ends the job with nothing started", context do
-      Application.put_env(:forge_worker, :archive_test_mount, {:error, :boom})
+      ForgeWorker.RecordingMount.watch(context.root, mount: {:error, :boom})
       pid = run(context, "success", archive: @grant)
 
-      assert {:ok, result} = Runner.await(pid, 5_000)
+      assert {:ok, result} = Runner.await(pid, 30_000)
       assert result.outcome == :error
       assert result.exit_status == nil
       assert events() == []

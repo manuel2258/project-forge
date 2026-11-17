@@ -123,9 +123,36 @@ Run before every commit, from the repository root:
 bin/check
 ```
 
-It lints the shell (shellcheck, shfmt) and runs `mix check` in every project: compile with
-warnings as errors, format check, Credo strict, tests with coverage. A commit that does not pass
-the gate is not made.
+It lints the shell (shellcheck, shfmt) and runs `mix check` in `core` and `worker`: compile with
+warnings as errors, format check, Credo strict, tests with coverage. In `platform` it runs the
+same checks, but the tests as **three partitions side by side** (`mix check.static`, then
+`mix test --partitions 3 --cover` three times at once, then `mix test.coverage`, which is where
+the coverage floor is now checked — a partitioned `--cover` run exports its coverage and reports
+none). Each partition also has a `TMPDIR` of its own.
+`mix check` in `platform` is still the one-process version, which is what to run by hand. A commit
+that does not pass the gate is not made.
+
+**Two suites on one machine do not collide on the endpoint.** The platform suite's endpoint
+listens on a port the kernel picks (`port: 0` in `platform/config/test.exs`; `Forge.TestEndpoint`
+publishes it to everything that builds a URL to it), where it used to take 4002 on the loopback
+every job on a machine shares and the second suite died at boot with `:eaddrinuse`. Each partition
+has a database (`forge_test<N>`), a data directory (`tmp/test<N>`) and, under `bin/check`, a
+`TMPDIR` of its own. No test dials the endpoint on a number written down: one that does asks
+`Forge.TestEndpoint` (the other port numbers in the tests are in URLs and arguments that are compared or validated, except port 1, which a few tests and Chromium's `--proxy-server` dial on purpose as an address with nothing on it).
+**Not covered:** when `bin/check` can log in to an operator's own postgres on 5432 it uses it, and
+two gates then share `forge_test1..3` as they shared `forge_test` before — the gate's own throwaway
+postgres, which is what a machine with nothing on 5432 gets, is per run. This also does not close *Jobs on one
+machine share a loopback*: the endpoint and chromedriver are still on the shared loopback, on a
+port that changes each run.
+
+**A test that waits does not wait for time.** The worker suite's `assert_receive_timeout` is 3 s
+(`worker/test/test_helper.exs`), not ExUnit's 100 ms, which a busy machine overran on `LinkTest`'s
+wait for `ready`. A timing a test asserts is driven by the test (`start_check` is sent by it, a
+clock is a function it holds). A test that leaves a harness running has it killed before its
+directory is removed (`ForgeWorker.Fixtures.reap/1`), and no test writes the archive mount to the
+application environment, which concurrent tests share: `test_helper.exs` sets the routing mount
+once, and it answers each test for the root that test registers
+(`ForgeWorker.RecordingMount.watch/2`).
 
 It installs Hex and starts a throwaway postgres first, when the machine has neither — a command
 pool's machine has the devshell and nothing else, and without both the gate died before compiling

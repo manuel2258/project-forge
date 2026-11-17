@@ -112,16 +112,20 @@ defmodule ForgeWorker.Archive.ServerTest do
     }
   end
 
-  defp start_server(%{dir: dir}) do
+  # `clock` is a test's own time, in milliseconds, which moves when the test says so
+  # (`Server.start_link/1`'s `:clock`). Not given, the server keeps real time.
+  defp start_server(%{dir: dir}, clock \\ nil) do
     path = Path.join(dir, "a.sock")
     cache = Path.join(dir, "cache")
 
     {:ok, pid} =
       Server.start_link(
-        path: path,
-        cache_dir: cache,
-        config: %{url: "http://platform.test", token: fn -> "tok" end},
-        job_id: "j"
+        [
+          path: path,
+          cache_dir: cache,
+          config: %{url: "http://platform.test", token: fn -> "tok" end},
+          job_id: "j"
+        ] ++ if(clock, do: [clock: fn -> Agent.get(clock, & &1) end], else: [])
       )
 
     {:ok, socket} = :gen_tcp.connect({:local, path}, 0, [:binary, active: false, packet: :raw])
@@ -331,7 +335,7 @@ defmodule ForgeWorker.Archive.ServerTest do
     {111, _, _} = walk(socket, 1, 2, ["1", "plan.md"])
 
     :ok = send_t(socket, 12, 7, <<2::32-little, 0::32-little>>)
-    assert_receive {:held, held}, 3_000
+    assert_receive {:held, held}, 10_000
 
     # The kernel gives up on the open and flushes it; the flush is answered at once.
     assert {109, 8, <<>>} = t(socket, 108, 8, <<7::16-little>>)
@@ -408,7 +412,8 @@ defmodule ForgeWorker.Archive.ServerTest do
   test "a ticket in flight shows a new version after the interval, and an open folder keeps what it listed",
        context do
     Application.put_env(:forge_worker, :archive_listing_ttl_ms, 150)
-    {_pid, socket, _path, _cache} = start_server(context)
+    {:ok, clock} = Agent.start_link(fn -> 0 end)
+    {_pid, socket, _path, _cache} = start_server(context, clock)
     attach(socket)
 
     {111, _, _} = walk(socket, 1, 2, ["1"])
@@ -417,10 +422,14 @@ defmodule ForgeWorker.Archive.ServerTest do
     refute "plan.v002.md" in first
 
     Agent.update(context.extra, fn _ -> [entry("plan.v002.md", @ref_old, "old")] end)
-    # Within the interval nothing is asked again.
+
+    # Within the interval nothing is asked again, and the interval's last millisecond is within it.
+    Agent.update(clock, fn _ -> 149 end)
     {111, _, _} = walk(socket, 1, 3, ["1"])
+    Agent.update(clock, fn _ -> 150 end)
+    {111, _, _} = walk(socket, 1, 5, ["1"])
     assert length(requests(context)) == 2
-    Process.sleep(250)
+    Agent.update(clock, fn _ -> 301 end)
 
     {111, _, _} = walk(socket, 1, 4, ["1", "plan.v002.md"])
     {13, _, _} = lopen(socket, 4)
@@ -432,16 +441,25 @@ defmodule ForgeWorker.Archive.ServerTest do
 
   test "a refresh that fails keeps what was listed", context do
     Application.put_env(:forge_worker, :archive_listing_ttl_ms, 100)
-    {_pid, socket, _path, _cache} = start_server(context)
+    {:ok, clock} = Agent.start_link(fn -> 0 end)
+    {_pid, socket, _path, _cache} = start_server(context, clock)
     attach(socket)
     {111, _, _} = walk(socket, 1, 2, ["1", "plan.md"])
 
+    test = self()
+
     Application.put_env(:forge_worker, :req_options,
-      plug: fn conn -> Plug.Conn.send_resp(conn, 500, "") end
+      plug: fn conn ->
+        send(test, :asked)
+        Plug.Conn.send_resp(conn, 500, "")
+      end
     )
 
-    Process.sleep(200)
+    Agent.update(clock, fn _ -> 200 end)
     {111, _, _} = walk(socket, 1, 3, ["1", "plan.md"])
+
+    # And it did ask: the interval had passed, and it is the platform's refusal that was kept from.
+    assert_receive :asked
   end
 
   # -- the connection ----------------------------------------------------------------------------
@@ -464,7 +482,7 @@ defmodule ForgeWorker.Archive.ServerTest do
     ref = Process.monitor(pid)
     :gen_tcp.close(socket)
 
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 10_000
     refute File.exists?(path)
   end
 
@@ -473,7 +491,7 @@ defmodule ForgeWorker.Archive.ServerTest do
     ref = Process.monitor(pid)
     :gen_tcp.send(socket, <<1, 0, 0, 0, 0>>)
 
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 10_000
   end
 
   test "a client that asks for another protocol is told there is none", context do

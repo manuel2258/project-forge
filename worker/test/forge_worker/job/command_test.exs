@@ -168,7 +168,7 @@ defmodule ForgeWorker.Job.CommandTest do
     end
   end
 
-  defp eventually(check, tries \\ 50) do
+  defp eventually(check, tries \\ 1_000) do
     cond do
       check.() -> true
       tries == 0 -> false

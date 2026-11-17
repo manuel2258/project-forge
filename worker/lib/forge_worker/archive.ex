@@ -41,7 +41,7 @@ defmodule ForgeWorker.Archive do
     File.rm_rf!(folder)
     File.mkdir_p!(folder)
 
-    if mount.serves?() do
+    if mount.serves?(folder) do
       socket_dir = make_socket_dir()
       socket = Path.join(socket_dir, "s")
 

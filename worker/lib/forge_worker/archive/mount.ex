@@ -14,8 +14,12 @@ defmodule ForgeWorker.Archive.Mount do
   @doc "Removes the mount at `dir`; a `dir` that is not mounted is not an error."
   @callback unmount(dir :: Path.t()) :: :ok | {:error, term()}
 
-  @doc "Whether there is a server to start: `None` has none."
-  @callback serves?() :: boolean()
+  @doc """
+  Whether there is a server to start for the folder `dir`: `None` has none. Every implementation in
+  production answers the same for every folder; the argument is there so that a test's mount can
+  answer for the folders of its own test and for no other's (`ForgeWorker.RecordingMount`).
+  """
+  @callback serves?(dir :: Path.t()) :: boolean()
 
   @doc "The module in use on this machine."
   @spec impl() :: module()
@@ -59,7 +63,7 @@ defmodule ForgeWorker.Archive.Mount do
     @behaviour ForgeWorker.Archive.Mount
 
     @impl true
-    def serves?, do: true
+    def serves?(_dir), do: true
 
     @impl true
     def mount(socket, dir) do
@@ -105,7 +109,7 @@ defmodule ForgeWorker.Archive.Mount do
     """
 
     @impl true
-    def serves?, do: false
+    def serves?(_dir), do: false
 
     @impl true
     def mount(_socket, dir) do

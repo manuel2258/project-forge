@@ -13,7 +13,7 @@ defmodule Forge.MirrorTest do
   describe "validate_url/1" do
     test "accepts the two transports that cannot reach the filesystem" do
       assert :ok = Mirror.validate_url("https://github.com/you/game.git")
-      assert :ok = Mirror.validate_url("http://127.0.0.1:4002/git/game.git")
+      assert :ok = Mirror.validate_url("http://127.0.0.1:4999/git/game.git")
     end
 
     # `ext::` exists to run a command. This is the one that is a remote shell in a text field.

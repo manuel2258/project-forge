@@ -22,7 +22,7 @@ defmodule Forge.OidcTest do
   alias Forge.Accounts.Oidc
   alias Forge.FakeIssuer
 
-  @redirect_uri "http://localhost:4002/auth/oidc/test/callback"
+  @redirect_uri "http://localhost:4999/auth/oidc/test/callback"
 
   setup do
     FakeIssuer.install()

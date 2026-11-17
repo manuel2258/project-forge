@@ -34,9 +34,9 @@ defmodule Forge.GitCredentialsTest do
 
   # A non-default port is part of the key git matches on, so it has to be in the line.
   test "carries a non-default port", %{project: project} do
-    :ok = Credentials.put(project, "local", "forge", "tok", "http://127.0.0.1:4002/git/y.git")
+    :ok = Credentials.put(project, "local", "forge", "tok", "http://127.0.0.1:4999/git/y.git")
 
-    assert File.read!(Credentials.path(project, "local")) == "http://forge:tok@127.0.0.1:4002\n"
+    assert File.read!(Credentials.path(project, "local")) == "http://forge:tok@127.0.0.1:4999\n"
   end
 
   # The file is the secret. A mode that let anything else read it would make the move pointless.

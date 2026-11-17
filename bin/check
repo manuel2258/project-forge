@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Quality gate for the whole repository. Runs in every Mix project:
 #   compile --warnings-as-errors, format --check-formatted, credo --strict, test --cover
+# (the platform's tests run as three partitions at once; see below)
 #
 # The coverage threshold lives in each project's mix.exs and is a floor that only moves up.
 # CLAUDE.md § Coverage has the rule; lowering it is a human's call, not an agent's.
@@ -57,7 +58,125 @@ if ! PGPASSWORD=postgres psql -h localhost -p 5432 -U postgres -d postgres -tAc 
   forge_test_postgres_start
 fi
 
-for project in core worker platform; do
+for project in core worker; do
   echo "==> $project"
   (cd "$project" && mix deps.get > /dev/null && mix check)
 done
+
+# The platform's tests are most of the gate's time and almost all of it serial: 127 of the suite's
+# 194 files were `async: false` when this was written, which one BEAM runs one after another on
+# one core while the machine's other cores stand idle. So they run as three partitions of the same suite (`mix test
+# --partitions 3`) side by side, each against a database and a directory of its own
+# (`platform/config/test.exs`), a temporary directory (`TMPDIR`, below) and a port the kernel picks
+# (`Forge.TestEndpoint`) — the last of which could not have been done while the endpoint sat on 4002. On two cores the suite cannot finish in
+# less than half its CPU time however it is split. Ticket 52 measured it without coverage on two
+# cores: 522 s in one process, 365 s as two partitions and 322 s as three, which is the last that
+# pays.
+#
+# A partitioned `--cover` run exports its coverage and reports none (Mix, `test.ex`): the threshold
+# in `platform/mix.exs` is checked by `mix test.coverage`, which merges the exports, so the floor is
+# still the gate's and still fails a run below it (exit 3).
+echo "==> platform"
+(
+  cd platform
+  mix deps.get > /dev/null
+  mix check.static
+
+  # **A second compile, in a new VM, before the partitions.** On a checkout that has not been built
+  # (every command job's) the compile inside `check.static` is not the last word: the next `mix`
+  # to run recompiles `forge_core` and the 31 modules of `forge` that depend on it, as measured on
+  # a cold build (`mix compile` after `check.static` printed "Compiling 31 files"; warm, never).
+  # Left to the partitions, each did it at the same moment in the same `_build` — a cold run showed
+  # "redefining module" warnings from it. A compile in `check.static` itself does not help, since
+  # it is the same VM. Why the first compile leaves them stale I did not find out.
+  env MIX_ENV=test mix compile
+
+  partitions=3
+  logs="$(mktemp -d)"
+  rm -rf cover
+
+  # A partition's log is printed **as it finishes**, and every log not yet printed is printed when
+  # this script is stopped (the command's timeout sends TERM). Printing them all at the end, after
+  # waiting for all three, left a gate killed at its timeout with none of the suite's output: no
+  # failure already seen and no test name, only a count of dots.
+  printed=" "
+  pids=()
+  show() {
+    echo "==> platform tests, partition $1 of $partitions"
+    cat "$logs/$1.log"
+    printed="$printed$1 "
+  }
+  # shellcheck disable=SC2329 # invoked by the trap below
+  stopped() {
+    kill "${pids[@]}" 2> /dev/null || true
+    for i in $(seq 1 "$partitions"); do
+      case "$printed" in *" $i "*) ;; *) show "$i" ;; esac
+    done
+    rm -rf "$logs"
+    exit 143
+  }
+  trap stopped TERM INT
+  trap 'rm -rf "$logs"' EXIT
+
+  # A partition started by itself would build, and race the others to it: the compile is done once,
+  # above, and each of these finds nothing to do.
+  #
+  # **Each has a `TMPDIR` of its own**, because some tests look at the system temporary directory
+  # for what a request left behind (`plug-*/forge-download-*` must be empty after a download), which
+  # another partition's request is writing into at that moment.
+  for i in $(seq 1 "$partitions"); do
+    mkdir "$logs/tmp$i"
+    (
+      status=0
+      TMPDIR="$logs/tmp$i" MIX_TEST_PARTITION="$i" \
+        mix test --partitions "$partitions" --cover > "$logs/$i.log" 2>&1 || status=$?
+      # Written aside and moved into place: the file exists from the moment a redirection opens it,
+      # before its content does, and a wait loop that read it there saw "" and failed a good gate.
+      echo "$status" > "$logs/$i.rc.tmp"
+      mv "$logs/$i.rc.tmp" "$logs/$i.rc"
+    ) &
+    pids+=("$!")
+  done
+
+  # Waits in this shell, in short sleeps, and not in a subshell with a `sleep 120` of its own: that
+  # one outlived the script by up to two minutes and held its stdout open, so `bin/check | tail`
+  # did not return when the gate had. Every two minutes it says how far each partition has got.
+  failed=0
+  seconds=0
+  while [ "$(echo "$printed" | wc -w)" -lt "$partitions" ]; do
+    sleep 2
+    seconds=$((seconds + 2))
+    for i in $(seq 1 "$partitions"); do
+      # A wrapper that was itself killed (the memory ceiling takes whatever it picks) writes no
+      # status, and the loop would wait for one until the command's timeout.
+      if [ ! -f "$logs/$i.rc" ] && ! kill -0 "${pids[$((i - 1))]}" 2> /dev/null &&
+        [ ! -f "$logs/$i.rc" ]; then
+        echo 255 > "$logs/$i.rc.tmp"
+        mv "$logs/$i.rc.tmp" "$logs/$i.rc"
+      fi
+      if [ -f "$logs/$i.rc" ]; then
+        case "$printed" in *" $i "*) ;; *)
+          show "$i"
+          [ "$(cat "$logs/$i.rc")" = 0 ] || failed=1
+          ;;
+        esac
+      fi
+    done
+    if [ $((seconds % 120)) = 0 ]; then
+      for i in $(seq 1 "$partitions"); do
+        echo "    partition $i: $(tr -cd . < "$logs/$i.log" | wc -c) dots so far"
+      done
+    fi
+  done
+  [ "$failed" = 0 ] || exit 1
+
+  # `mix test.coverage` with nothing to merge prints an error and exits 0, which would pass a gate
+  # that never looked at the floor.
+  exports="$(find cover -maxdepth 1 -name '*.coverdata' | wc -l)"
+  if [ "$exports" -ne "$partitions" ]; then
+    echo "expected $partitions coverage exports in platform/cover, found $exports" >&2
+    exit 1
+  fi
+
+  mix test.coverage
+)

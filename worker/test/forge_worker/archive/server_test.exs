@@ -8,6 +8,7 @@ defmodule ForgeWorker.Archive.ServerTest do
   # The Req plug and the intervals are the application's environment, which is global.
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
   import ForgeWorker.Fixtures
 
   alias ForgeWorker.Archive.Server
@@ -40,7 +41,7 @@ defmodule ForgeWorker.Archive.ServerTest do
     )
 
     on_exit(fn ->
-      for key <- [:req_options, :archive_listing_ttl_ms],
+      for key <- [:req_options, :archive_listing_ttl_ms, :archive_retry],
           do: Application.delete_env(:forge_worker, key)
     end)
 
@@ -316,6 +317,90 @@ defmodule ForgeWorker.Archive.ServerTest do
     assert read_all(socket, 2) == @plan
   end
 
+  # A bound of 40 ms, so that the read waits for real and still ends within the test.
+  test "a read that gave up waiting is a timeout, and one line says which file and what status",
+       context do
+    Application.put_env(:forge_worker, :archive_retry, bound_ms: 40)
+    {_pid, socket, _path, cache} = start_server(context)
+    attach(socket)
+    Agent.update(context.content, fn _ -> {:status, 429} end)
+
+    log =
+      capture_log(fn ->
+        assert errno(open(socket, 2, ["1", "plan.md"])) == @etimedout
+      end)
+
+    lines = log |> String.split("\n") |> Enum.filter(&String.contains?(&1, "gave up"))
+    assert [line] = lines
+    assert line =~ "ticket 1 plan.md"
+    assert line =~ "429"
+    refute log =~ "tok"
+    assert File.ls!(cache) == []
+
+    # The platform is back: the same read is asked again, nothing is logged, and the bytes arrive.
+    Agent.update(context.content, fn _ -> :ok end)
+
+    log =
+      capture_log(fn ->
+        {13, _, _} = open(socket, 2, ["1", "plan.md"])
+        assert read_all(socket, 2) == @plan
+      end)
+
+    refute log =~ "gave up"
+  end
+
+  test "a wait that ends well writes nothing", context do
+    Application.put_env(:forge_worker, :archive_retry, bound_ms: 10_000, jitter: fn _ -> 0 end)
+    {:ok, left} = Agent.start_link(fn -> 1 end)
+    {_pid, socket, _path, _cache} = start_server(context)
+    attach(socket)
+
+    Application.put_env(:forge_worker, :req_options,
+      plug: fn conn ->
+        if conn.request_path =~ ~r"/archive/tickets/1/" and
+             Agent.get_and_update(left, &{&1, max(&1 - 1, 0)}) > 0 do
+          Plug.Conn.send_resp(conn, 503, "")
+        else
+          platform(conn, context.requests, context.content, context.extra)
+        end
+      end
+    )
+
+    log =
+      capture_log(fn ->
+        {13, _, _} = open(socket, 2, ["1", "plan.md"])
+        assert read_all(socket, 2) == @plan
+      end)
+
+    refute log =~ "ticket 1"
+    refute log =~ "busy"
+  end
+
+  test "a listing that stays busy is a timeout on the walk, logged once", context do
+    Application.put_env(:forge_worker, :archive_retry, bound_ms: 40)
+
+    # The root is listed; it is the ticket's own listing that the platform is too busy for.
+    Application.put_env(:forge_worker, :req_options,
+      plug: fn conn ->
+        if conn.request_path == "/archive/tickets/1",
+          do: Plug.Conn.send_resp(conn, 503, ""),
+          else: platform(conn, context.requests, context.content, context.extra)
+      end
+    )
+
+    {_pid, socket, _path, _cache} = start_server(context)
+    attach(socket)
+
+    log =
+      capture_log(fn ->
+        assert errno(walk(socket, 1, 2, ["1", "plan.md"])) == @etimedout
+      end)
+
+    assert [line] = log |> String.split("\n") |> Enum.filter(&(&1 =~ "gave up"))
+    assert line =~ ~s|listing {:ticket, "1"}|
+    assert line =~ "503"
+  end
+
   test "a listing that cannot be fetched is an error on the walk, not a hang", context do
     Application.put_env(:forge_worker, :req_options,
       plug: fn conn -> Plug.Conn.send_resp(conn, 401, "") end
@@ -460,6 +545,28 @@ defmodule ForgeWorker.Archive.ServerTest do
 
     # And it did ask: the interval had passed, and it is the platform's refusal that was kept from.
     assert_receive :asked
+  end
+
+  test "a refresh the platform is too busy for keeps what was listed", context do
+    Application.put_env(:forge_worker, :archive_listing_ttl_ms, 100)
+    Application.put_env(:forge_worker, :archive_retry, bound_ms: 40)
+    {:ok, clock} = Agent.start_link(fn -> 0 end)
+    {_pid, socket, _path, _cache} = start_server(context, clock)
+    attach(socket)
+    {111, _, _} = walk(socket, 1, 2, ["1", "plan.md"])
+
+    {:ok, asked} = Agent.start_link(fn -> 0 end)
+
+    Application.put_env(:forge_worker, :req_options,
+      plug: fn conn ->
+        Agent.update(asked, &(&1 + 1))
+        Plug.Conn.send_resp(conn, 429, "")
+      end
+    )
+
+    Agent.update(clock, fn _ -> 200 end)
+    {111, _, _} = walk(socket, 1, 3, ["1", "plan.md"])
+    assert Agent.get(asked, & &1) > 0
   end
 
   # -- the connection ----------------------------------------------------------------------------

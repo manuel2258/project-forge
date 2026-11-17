@@ -383,8 +383,9 @@ defmodule ForgeWorker.Job.Workspace do
   end
 
   # What git — through curl — says when the platform is not there to answer: no connection, a
-  # name that does not resolve, a proxy's 502/503/504, a timeout. A refused credential is a 401 or
-  # a 403 and is not among them.
+  # name that does not resolve, a proxy's 502/503/504, a timeout, or its 429 when it turns a burst
+  # away (git does not wait that out itself: it is one request and one error). A refused credential
+  # is a 401 or a 403 and is not among them.
   @unreachable [
     "failed to connect",
     "couldn't connect",
@@ -393,6 +394,7 @@ defmodule ForgeWorker.Job.Workspace do
     "connection reset",
     "empty reply from server",
     "timed out",
+    "returned error: 429",
     "returned error: 502",
     "returned error: 503",
     "returned error: 504"

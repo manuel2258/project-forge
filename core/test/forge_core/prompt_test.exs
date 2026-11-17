@@ -568,6 +568,9 @@ defmodule ForgeCore.PromptTest do
         assert flat =~ "$FORGE_JOB/archive/"
         assert flat =~ "live, not pinned"
         assert flat =~ "cite a version"
+        # A busy platform is a timeout to try later, and damage is not what a limit looks like.
+        assert flat =~ "unreachable or too busy"
+        refute flat =~ "arrived damaged or the platform could not serve it"
 
         for errno <- [
               "Connection timed out",

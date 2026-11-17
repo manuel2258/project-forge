@@ -24,9 +24,10 @@ repository and nothing in it is committed.
   file is fetched when you open it, so listing is free and reading costs a download. **It is live,
   not pinned**: later versions may appear, and what is there was not approved for this job, so cite
   a version rather than assume the latest. A read that fails says why: *Connection timed out* — the
-  platform is unreachable, try later; *No such file* — it is gone; *Permission denied* — this job's
-  access has ended; *Input/output error* — it arrived damaged or the platform could not serve it, try again. Not here: transcripts,
-  raw harness output, open proposals, the changeset.
+  platform is unreachable or too busy, and the read already waited up to 30 seconds for it, so try
+  later; *No such file* — it is gone; *Permission denied* — this job's access has ended;
+  *Input/output error* — the file arrived damaged or the platform failed, so a retry may not help.
+  Not here: transcripts, raw harness output, open proposals, the changeset.
 - `$FORGE_JOB/spec.json` — this job's full specification.
 - `$FORGE_JOB/platform/platform.md` — how the platform around you works. Reference, not required
   reading.

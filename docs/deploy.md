@@ -425,12 +425,12 @@ from, or simply asserting the scheme because Traefik is authoritative for it —
 `config/prod.exs` and a rebuild, not a variable an operator sets. Until somebody wants it enough
 to make that change, the network *is* the control.
 
-**Two of the seven routes are not public.** `/worker` and `/store` are for machines, and with the
-local-VM provider those machines are on this host. Routing them publicly adds attack surface and
-nothing else. A machine anywhere else — one the Hetzner driver made, or one you run yourself
-(§ A machine you run yourself) — has to reach both, so route them to the network those machines
-are on rather than to everyone where you can; each is guarded by its own token either way, the
-worker's or a signed store token.
+**Three of the eight routes are not public.** `/worker`, `/store` and `/archive` are for machines,
+and with the local-VM provider those machines are on this host. Routing them publicly adds attack
+surface and nothing else. A machine anywhere else — one the Hetzner driver made, or one you run
+yourself (§ A machine you run yourself) — has to reach all three, so route them to the network
+those machines are on rather than to everyone where you can; each is guarded by its own token
+either way, the worker's, a signed store token or the job's.
 
 | Route | Public | What it is |
 |---|---|---|
@@ -441,11 +441,20 @@ worker's or a signed store token.
 | `/health` | proxy only | liveness. `ok`, to anyone, with no database behind it |
 | `/worker` | **no** | the worker channel |
 | `/store` | **no** | blobs and seeds |
+| `/archive` | **no** | the project's past, read by every job: one request per file it opens, in bursts (`grep -r` is hundreds in a second). The job's own token authorises it. **Not one of the rate-limited routes** |
 
 **Rate limiting is the proxy's job.** Nothing in the platform throttles, and four public routes
 are reachable without a session: `/users/log-in`, `/api/v1`, `/git` and `/auth/oidc`. A Traefik
 `rateLimit` middleware on each is the whole fix. `/health` is a fifth and is deliberately left
 out of it — a limiter that drops the liveness probe reports the container dead.
+
+`/archive`, `/worker` and `/store` are not on the list, and the example below keeps them out of
+the limit. They are machine traffic, and `/archive` in particular is read in bursts by every job
+(`design/archive.md`): at the example's twenty a minute, reading a project's two thousand files
+cold would take about an hour and forty minutes. Each is authorised by a bearer token that cannot be guessed, so a
+limit was never standing between anyone and a guess. If you limit `/archive` anyway, the worker waits it
+out — it asks again after the `Retry-After`, for up to thirty seconds of waiting a file, and then the agent
+reads `Connection timed out` — but a `grep -r` will be slow rather than broken.
 
 `/auth/oidc` earns its place on that list for a reason the others do not share: both legs make
 the node talk to the issuer. `Assent.Strategy.OIDC` re-fetches
@@ -459,10 +468,21 @@ http:
     forge-ratelimit:
       rateLimit: { average: 20, burst: 40, period: 1m }
   routers:
-    forge:
-      rule: "Host(`forge.example.org`)"
+    # The four public routes that are limited. `/health` is left out on purpose.
+    forge-public:
+      rule: >-
+        Host(`forge.example.org`) &&
+        (PathPrefix(`/users/log-in`) || PathPrefix(`/api/v1`) || PathPrefix(`/git`) ||
+        PathPrefix(`/auth/oidc`))
+      priority: 100
       service: forge
       middlewares: [forge-ratelimit]
+      tls: { certResolver: letsencrypt }
+    # Everything else, `/archive`, `/worker`, `/store` and `/health` included, with no limit.
+    forge:
+      rule: "Host(`forge.example.org`)"
+      priority: 1
+      service: forge
       tls: { certResolver: letsencrypt }
   services:
     forge:

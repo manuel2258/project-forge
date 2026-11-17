@@ -124,7 +124,10 @@ defmodule ForgeWorker.Archive.Server do
     do: {:stop, :normal, state}
 
   def handle_info({:listed, key, result}, state), do: {:noreply, listed(state, key, result)}
-  def handle_info({:fetched, ref, result}, state), do: {:noreply, fetched(state, ref, result)}
+
+  def handle_info({:fetched, ref, what, result}, state),
+    do: {:noreply, fetched(state, ref, what, result)}
+
   def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
   def handle_info(_message, state), do: {:noreply, state}
 
@@ -203,7 +206,8 @@ defmodule ForgeWorker.Archive.Server do
 
   defp work(:file, ref, config, cache_dir, {number, entry}) do
     destination = Path.join(cache_dir, ref)
-    {:fetched, ref, safely(fn -> Client.fetch(config, number, entry, destination) end)}
+    what = "ticket #{number} #{entry["path"]} (#{ref})"
+    {:fetched, ref, what, safely(fn -> Client.fetch(config, number, entry, destination) end)}
   end
 
   # A task that crashes must still answer, or the request waiting on it waits for ever.
@@ -220,6 +224,7 @@ defmodule ForgeWorker.Archive.Server do
   end
 
   defp listed(state, key, result) do
+    {result, busy} = split(result)
     state = %{state | tasks: Map.delete(state.tasks, {:listing, key})}
 
     state =
@@ -234,14 +239,15 @@ defmodule ForgeWorker.Archive.Server do
           %{state | listings: Map.put(state.listings, key, %{held | at: state.clock.()})}
 
         {{:error, errno}, _listings} ->
-          log(state, "listing #{inspect(key)} failed: #{errno}")
+          log(state, failure("listing #{inspect(key)}", errno, busy))
           %{state | failed: Map.put(state.failed, {:listing, key}, errno)}
       end
 
     wake(state, {:listing, key})
   end
 
-  defp fetched(state, ref, result) do
+  defp fetched(state, ref, what, result) do
+    {result, busy} = split(result)
     state = %{state | tasks: Map.delete(state.tasks, {:file, ref})}
 
     state =
@@ -250,12 +256,20 @@ defmodule ForgeWorker.Archive.Server do
           state
 
         {:error, errno} ->
-          log(state, "fetching #{ref} failed: #{errno}")
+          log(state, failure("fetching #{what}", errno, busy))
           %{state | failed: Map.put(state.failed, {:file, ref}, errno)}
       end
 
     wake(state, {:file, ref})
   end
+
+  # The client says which busy status a read gave up on as a third element; the errno is all that
+  # is kept and answered, and the status is for the one line the worker writes about it.
+  defp split({:error, errno, status}), do: {{:error, errno}, status}
+  defp split(result), do: {result, nil}
+
+  defp failure(what, errno, nil), do: "#{what} failed: #{errno}"
+  defp failure(what, _errno, status), do: "#{what} gave up, the platform stayed busy: #{status}"
 
   # Everything waiting on `wait` is dispatched again, in the order it arrived. A failure is read by
   # them once and then forgotten, so the next read tries again.

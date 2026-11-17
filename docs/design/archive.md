@@ -112,9 +112,24 @@ socket in it.
   fetch.
 - **A failed read is bounded and says why.** Connecting takes at most 10 s and a transfer has to
   make progress every 30 s — no progress, not total size, so a gigabyte file is not cut short. The
-  error is a plain errno: `ETIMEDOUT` (platform unreachable), `ENOENT` (gone), `EACCES` (the grant
-  ended), `EIO` (it arrived damaged). A failed fetch leaves nothing in the cache and the next read
-  tries again; the file is never there half-written.
+  error is a plain errno: `ETIMEDOUT` (platform unreachable, or too busy for 30 s), `ENOENT`
+  (gone), `EACCES` (the grant ended), `EIO` (it arrived damaged, or the platform failed with a
+  status that waiting does not mend, a `500` among them). A failed fetch leaves nothing in the
+  cache and the next read tries again; the file is never there half-written.
+- **A busy platform is waited out.** `429`, `502`, `503` and `504` — the proxy turning a burst
+  away, or a platform restarting — are not answers about the file, so the worker asks again, for a
+  file and for a listing alike, for up to 30 s of waiting in all (`ForgeWorker.Archive.Client`; the last try then has the rules above, so a platform that stalls on it can take longer). A
+  `Retry-After` of whole seconds is a floor: the next try is no sooner. Without one, the pause
+  starts at 250 ms and doubles, and either way a random addition of up to half of it keeps the
+  reads of one `grep -r`, which the proxy turned away together, from coming back together. A
+  `Retry-After` that would pass the 30 s fails the read at once, and one that is not a count of
+  whole seconds (a date, a fraction, a negative, text) is not obeyed: the backoff stands in. After
+  30 s the read is `ETIMEDOUT`, and the worker writes one `archive.failed` warning naming the
+  ticket, the file (or the listing) and the last status; a wait that ends well writes nothing.
+  `401`, `403`, `404` and `500` are answers and are asked once, and a connection that cannot be
+  made is `ETIMEDOUT` at once. Every try is the same URL with the same bearer header and no
+  redirect. A cold `grep -r` over a large archive against a proxy that limits `/archive` is slow
+  rather than broken; `docs/deploy.md` § Behind a proxy says why `/archive` is not limited.
 - **Lifetime.** The server and the mount are made after the job directory is prepared and the slice
   has handed it to the job's user (its recursive `chown` must not meet the mount), and before the
   process starts. They are gone before the files are handed back: `umount -l` and closing the socket

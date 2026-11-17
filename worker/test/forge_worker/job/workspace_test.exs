@@ -1115,6 +1115,7 @@ defmodule ForgeWorker.Job.WorkspaceTest do
       assert Workspace.unreachable?(@refused)
       assert Workspace.unreachable?("Could not resolve host: forge.example")
       assert Workspace.unreachable?("The requested URL returned error: 503")
+      assert Workspace.unreachable?("The requested URL returned error: 429")
       refute Workspace.unreachable?("The requested URL returned error: 403")
 
       refute Workspace.unreachable?(

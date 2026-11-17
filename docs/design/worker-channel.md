@@ -718,7 +718,8 @@ moment this node booted (`Workers.booted/0`).
 
 **A run that ends while the platform is down waits for it.** Its branch and its store are the
 platform's, so its last push and its uploads have nowhere to go: the push is tried again while it
-cannot reach the platform, for up to ten minutes (`Workspace.commit_and_push/4`), and an upload
+cannot reach the platform — or while a proxy in front of it turns the push away with a `429` — for
+up to ten minutes (`Workspace.commit_and_push/4`), and an upload
 retries for about eight (`ForgeWorker.Store`). Meanwhile the job is still the machine's, listed at
 its rejoin, and its result lands as usual once the platform is back. A credential refused is not
 waited on. A push that gives up fails the run; the job has left the machine's list by its rejoin,

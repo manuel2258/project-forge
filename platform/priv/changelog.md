@@ -10,6 +10,31 @@ until it changes) or **may adopt** (new and optional). A project records the rel
 brought up to in `.forge/forge-release`; `platform.md` § Upgrading to a newer forge says how an
 upgrade goes.
 
+## 0.23.0
+
+- **may adopt** — a member may put an open ticket on hold, of any type, and release it later. While it is held the platform takes no step on it by itself: no job or command goes to a machine, no transition is taken on the engine's own authority, and no chat step opens a conversation. A person's own moves still work. A run already going finishes and its transition waits for the release. A ticket that never started is re-pinned to the default branch's head on release, and the release is refused whole when its workflow file is gone, does not parse, or has no state of the ticket's name. No job or conversation can hold, release or stop a ticket, so nothing in `.forge/` changes. (workflow-grammar.md § Holding a ticket)
+
+- **may adopt** — tickets can be grouped into ordered milestones, one of them current, and ordered within the list. A milestone is created on the project page's Milestones view or over the API, and a ticket is put in one on admission or afterwards. Nothing in a workflow names them. The project's API gains `/projects/:project/milestones` and, per ticket, `hold`, `release`, `stop`, `title`, `milestone` and `move`. (the project page's Milestones view; the routes are in forge's repository, `docs/design/api-and-ui.md`)
+
+- **must change** — admitting a ticket, and accepting a proposal, must now say whether the ticket starts or is held. A project that admits tickets over the API, a script, or `mix forge.admit` has to name one, or the request is refused. Before and after:
+
+  ```
+  # before
+  POST /projects/:name/tickets  {"title": "…", "body": "…"}
+  mix forge.admit PROJECT TITLE
+  # after
+  POST /projects/:name/tickets  {"title": "…", "body": "…", "on_hold": false}
+  mix forge.admit PROJECT TITLE --start      # or --hold
+  ```
+
+  `on_hold` is `true` or `false`, and a request naming neither is refused with 422 `start_or_hold`. A project that only admits tickets from the pages is not affected. `milestone_id` is optional. (forge's repository, `docs/design/api-and-ui.md`)
+
+- **may adopt** — a conversation that lost its machine is carried on by sending it the next message, with its session kept. The separate reopen action is gone. A step's conversation can no longer be ended by hand: it ends with Accept or when the step is cancelled. A ticket returning to a chat step over a backward edge still opens a new conversation, and that is the only new visit. (workflow-grammar.md § Chat steps)
+
+- **may adopt** — a stuck ticket's transition that approves or merges is no longer taken from the queue: it is taken on the ticket's page, where what it approves is on screen, and the queue links to it. Any other declared transition is still picked from the queue. (workflow-grammar.md § Transitions)
+
+- **may adopt** — a Codex job on a worker whose Codex install is missing its tool host is no longer handed out, and a Codex turn that warns tool use is unavailable ends as an error rather than a finished turn. A project running states with `harness: codex` should expect such a job to wait for a healthy worker. (workflow-grammar.md § Semantics, Harness)
+
 ## 0.22.0
 
 - **may adopt** — a job whose check also fails on the project's default branch now treats fixing it as its own ticket's work, rather than proposing it and stopping: the smallest fix, never a deleted, skipped or weakened test or a lowered threshold, and recorded in the job's document. A fix that is more than small is proposed, and the job says the check did not pass. A project whose own prompts forbid touching code outside the ticket's change should say whether that rule gives way here. (the job preamble, which is the prompt a job is given, § Proposing a ticket)

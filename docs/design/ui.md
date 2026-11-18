@@ -619,6 +619,14 @@ the Changes view (§ Changes) and in the approval's panel, above the commit mess
 was the one fact a reviewer could not read, cut by an ellipsis — and *spent* is left out while the
 ticket has spent nothing.
 
+**A rebase that did not merge on its own waits at the rebase state with the decision row
+`review_ready` shows**: the changeset approval, Approve, and Reject with its note — and at the head
+of its panel one sentence saying why: that nobody has approved the changeset, that the last
+decision on it was a rejection, or that its approval was withdrawn when the ticket was taken out of
+the queue. It is read from the same record the engine read (`Forge.Engine.rebase_decision_reason/1`),
+so the sentence and the refusal cannot disagree. The queue lists it as it lists any pending
+approval (§ What each kind shows), leading to this row.
+
 **Open questions are never answerable inside the panel.** Accepting a chat step with questions
 open warns *N open questions will stay unanswered*, names them, and says what the next state
 starts from; its secondary is *Answer first*, which folds the panel and opens the question card
@@ -1375,7 +1383,12 @@ true:
   that state; otherwise it is the notice alone, because a conflict nobody can act on from here is
   still worth knowing before the approval. Nothing starts until the button is pressed: the confirm
   says a job will run when the target runs one, since that spends a credential on a ticket the
-  person may be about to cancel.
+  person may be about to cancel. **It also says which of two things follows the rebase**, read
+  from the record of approvals of the changeset when it is shown, and the notice says the same in
+  a line above the button: *Its changeset is approved, so when the rebase ends done it merges on
+  its own*, or *its changeset is not approved, so when the rebase ends done it comes back for your
+  approval* (`workflow-grammar-v1.md` § Merging, *What follows the rebase*). Nobody can decide on
+  the changeset while the rebase runs, so what it says holds when the rebase ends.
 - **Cancel ticket**, outlined red behind a confirm, on an active or stuck ticket; a cancelled one
   has **Restore** instead, with a line saying where it is hidden and what restoring leaves
   (`workflow-grammar-v1.md` § Cancelling a ticket). It is rare and undoable, so it sits in the

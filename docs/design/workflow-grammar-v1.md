@@ -322,7 +322,9 @@ how many times a transition may fire for one ticket; exceeding it also sticks th
 **Approval.** `approve` lists artifact names. The transition is not taken automatically; it
 enters the queue as a decision, and the operator approves or rejects the latest version of
 each listed artifact. A transition a person takes by hand records the same approvals as
-part of the choice. Approval attaches to those exact versions.
+part of the choice. Approval attaches to those exact versions. **An edge out of an integrating
+state into a merging state approves `changeset` whether or not it lists it** (§ Merging, *What
+follows the rebase*): the person who decides it, or takes it by hand, is approving the merge.
 
 **Rejection keeps the ticket in `from` and hands the choice back.** The rejection is recorded
 against the versions it refused, the decision stops being pending, and the ticket becomes
@@ -682,8 +684,8 @@ get a version, so its merge says what the platform wrote for every merge until 0
 A pin that *has* a producer and no written version sticks as above.
 
 `refs/forge/approved/<n>` is written by each merge attempt, at the commit it merges, whoever's
-transition named it — on route (b) nobody approved anything and the engine's attempt writes it. The
-name is history; what it means is *the commit this ticket's merge was last attempted for*, kept
+transition named it — on route (b) the engine's attempt writes it, after an approval that was
+already on record (§ *What follows the rebase*). The name is history; what it means is *the commit this ticket's merge was last attempted for*, kept
 reachable (`git-hosting.md` § Non-fast-forward on a ticket branch).
 
 **The check.** Before a transition into the merging state is taken, `Forge.Merge.check/2` runs
@@ -747,7 +749,7 @@ transitions:
   - { from: integrating, to: human_testing }
   - { from: human_testing, to: merged, approve: [changeset] }
 
-  # (b) straight to the merging state, with no person in between
+  # (b) straight to the merging state, with no second approval
   - { from: integrating, to: merged }
 ```
 
@@ -755,6 +757,43 @@ On route (a) the approval names the integrated version and needs giving afresh; 
 the version before integration cannot merge it. Route (b) is the engine's own edge into the merging
 state, so it is checked like any other: still conflicting — or the default branch moved again while
 the job ran — it takes `on_conflict` again.
+
+**What follows the rebase: route (b) needs an approval already on record.** Route (b) carries no
+`approve` because it is meant for a ticket whose changeset a person already approved and then
+conflicted: the approval of the version before the rebase is the one that stands. The engine
+therefore reads the record before it takes an edge **out of an integrating state into a merging
+state** for a ticket that is not in the merge queue (a ticket in the line goes back into its old
+place, as below, with no new approval asked for). *The record* is the approvals of `changeset`, on
+every version, approved and rejected alike (`Forge.Artifacts.changeset_decision/1`). **It stands**
+when its latest decision is an approval that was not withdrawn; it does not when it is empty, when
+the latest decision is a rejection, or when the latest approval was withdrawn by taking the ticket
+out of the queue. "Latest" is by version, then by when, and a rejection recorded in the same
+second as an approval of the same version counts as the later (`approvals.inserted_at` is whole
+seconds, and the safe reading is the one that asks again).
+
+- **It stands:** the edge is taken as written — queued when it says `queue: true`, otherwise
+  checked and merged. This is what keeps route (b) as it was for a ticket the queue sent: its
+  approval was recorded on the way in and is withdrawn only by taking it out of the line, which
+  takes the ticket out of this path too (it then asks, below).
+- **It does not:** the ticket stays in the integrating state with a decision pending on that
+  edge, approving `changeset` at its latest version (the one the rebase wrote), and
+  `approval.requested` is logged. Approving it takes the edge as an approval of any edge into the
+  merging state does — queued, or checked and merged; rejecting it needs a note, records the
+  rejection and leaves the ticket stuck with its declared edges offered. Nothing is merged and no
+  row is made in the line until a person approves. This holds with or without `queue: true` on the
+  edge. The record is read when the engine takes the edge, not when the job ended.
+
+An edge out of an integrating state into a merging state **approves `changeset`** whether or not
+it declares it, for whoever takes it: a person who decides the pending approval, who takes it from
+the ticket's chooser, or whose conversation writes `transition.json` for it, or who accepts a chat
+step that is the integrating state. Without that, the hand-taken edge would merge a changeset with
+no approval of it on record.
+
+Only an edge out of an integrating state is read this way. A workflow whose merging state names no
+`on_conflict` has no integrating state, and an engine edge into it — `release.yml`'s
+`publishing → merged` — merges as it always did. One consequence: a workflow that names an
+`on_conflict` and draws route (b) with no approval anywhere on the way to it now stops at the
+rebase for an approval after a conflict, where it used to merge.
 
 **That loop is bounded by the platform, not by `max`.** The engine sends a ticket down
 `on_conflict` by itself at most **three times in a row**: an engine-taken edge into the merging
@@ -801,7 +840,10 @@ route from there (`Forge.Engine.integrate/2`) when its state has an edge into a 
 `on_conflict` and nothing is live in it: the check is run again, a conflict takes the same route an
 approval that conflicted takes — less the approval — and a pending approval is cleared, since the
 version it would approve is about to be replaced. A ticket that merges cleanly by then is refused,
-and the notice it acted on was stale.
+and the notice it acted on was stale. **The rebase does not merge such a ticket by itself**: it
+was sent with no approval, and when its rebase ends the engine reads the record (§ *What follows
+the rebase*) — an unapproved ticket waits at the integrating state for a decision on the rebased
+changeset.
 
 The merge itself is idempotent, so entering the merging state twice merges once.
 
@@ -820,7 +862,10 @@ the key is declared it is always in force — there is no project, user or ticke
 it off for that edge, and a workflow with no `queue` key never writes a row, so approval merges
 at once and a conflicting approval takes the conflict route exactly as above. The engine's own
 edge into a merging state queues the same way (it is the ticket's place that matters, not who
-asked), with the job's outcome behind it.
+asked), with the job's outcome behind it — **except out of an integrating state, where it queues
+only a ticket whose approval is on record** (§ Merging, *What follows the rebase*). The row of
+such a ticket carries the approval it stood on, so taking it out of the line withdraws that
+approval too.
 
 **A ticket on hold keeps its place in the line and is skipped** (§ Holding a ticket): `claim/1`
 passes over a waiting entry whose ticket is held and takes the one behind it, `lock_entry` puts a

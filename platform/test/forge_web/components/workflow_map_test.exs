@@ -104,7 +104,27 @@ defmodule ForgeWeb.WorkflowMapTest do
   @forge Path.expand("../../../../.forge", __DIR__)
 
   # This repository's own workflow, read with its library as the parser's tests read it.
-  defp dev do
+  defp dev, do: parse_dev(File.read!(@dev))
+
+  # `dev.yml` with the `budget_exhausted` edges `7a68029` took out of it put back: one arc that
+  # carries two outcomes (`reviewing → presenting` on `done` and `budget_exhausted`) and states that
+  # retry on two. Those are the shapes the tests below were written on, and the real file no longer
+  # has them; the rest of what is drawn is still this repository's workflow.
+  defp dev_with_budget_edges do
+    edges = """
+      - { from: planning,     to: planning,     when: budget_exhausted,  max: 1 }
+      - { from: implementing, to: implementing, when: budget_exhausted,  max: 1 }
+      - { from: reviewing,    to: presenting,   when: budget_exhausted }
+      - { from: presenting,   to: presenting,   when: budget_exhausted,  max: 1 }
+
+    limits:
+    """
+
+    [head, tail] = String.split(File.read!(@dev), "\nlimits:\n", parts: 2)
+    parse_dev(head <> "\n" <> edges <> tail)
+  end
+
+  defp parse_dev(text) do
     opts = [
       prompt_exists: &File.exists?(Path.join(@forge, &1)),
       file_exists: &File.exists?(Path.join(Path.dirname(@forge), &1)),
@@ -116,7 +136,7 @@ defmodule ForgeWeb.WorkflowMapTest do
       end
     ]
 
-    {:ok, workflow} = Parser.parse(File.read!(@dev), opts)
+    {:ok, workflow} = Parser.parse(text, opts)
     workflow
   end
 
@@ -356,7 +376,10 @@ defmodule ForgeWeb.WorkflowMapTest do
 
   test "two outcomes on one edge are one arc, labelled with both" do
     assert [arc] =
-             Enum.filter(draw(dev()).edges, &(&1.from == "reviewing" and &1.to == "presenting"))
+             Enum.filter(
+               draw(dev_with_budget_edges()).edges,
+               &(&1.from == "reviewing" and &1.to == "presenting")
+             )
 
     assert arc.label == "on done, budget_exhausted"
     assert arc.title == "on done, budget_exhausted"
@@ -365,7 +388,7 @@ defmodule ForgeWeb.WorkflowMapTest do
   # The edge to the next state is straight and bare on `done` alone; with any other outcome its
   # label cannot fit the gap, so it is an arc above, and there is no straight arrow as well.
   test "an arrow to the next state is straight only when its sole outcome is done" do
-    map = draw(dev())
+    map = draw(dev_with_budget_edges())
 
     for {from, to} <- [{"refining", "planning"}, {"planning", "implementing"}] do
       assert [edge] = Enum.filter(map.edges, &(&1.from == from and &1.to == to))
@@ -383,12 +406,13 @@ defmodule ForgeWeb.WorkflowMapTest do
   end
 
   test "a state that goes back to itself says so in its box and is drawn no arc" do
-    html = html_of(dev())
+    html = html_of(dev_with_budget_edges())
 
     assert html =~ ~r/retries on\s+2 outcomes/
     assert html =~ ~r/retries on\s+1 outcome\s*</
-    assert html =~ "Retries on budget_exhausted, did_not_converge"
-    refute Enum.any?(draw(dev()).edges, &(&1.from == &1.to))
+    # In the order the edges are declared, and the restored ones come last.
+    assert html =~ "Retries on did_not_converge, budget_exhausted"
+    refute Enum.any?(draw(dev_with_budget_edges()).edges, &(&1.from == &1.to))
 
     # Every box grows for the line when any state has one, and none grows when none does.
     heights = fn html ->

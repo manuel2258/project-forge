@@ -108,8 +108,8 @@ defmodule Forge.MergeQueue do
   @doc """
   Adds the ticket's place in the line to `multi`: a row for the edge `transition` (taken for
   `outcome`), against the changeset `source` and the `commit-message` version that are current now,
-  and the ids of the approvals the transaction recorded, for withdrawing exactly those.
-  `who` is an actor. The event names it.
+  and the ids of the approvals the transaction recorded — and `attrs[:approval_ids]`, approvals
+  already on record the entry stands on — for withdrawing exactly those. `who` is an actor. The event names it.
   """
   @spec put_enter(Multi.t(), Ticket.t(), Transition.t(), String.t() | nil, map(), term(), map()) ::
           Multi.t()
@@ -123,7 +123,9 @@ defmodule Forge.MergeQueue do
         attrs
       ) do
     Multi.run(multi, :merge_queue_entry, fn repo, changes ->
-      approvals = Enum.map(transition.approve, &Map.fetch!(changes, {:approval, &1}).id)
+      approvals =
+        Enum.map(transition.approve, &Map.fetch!(changes, {:approval, &1}).id) ++
+          List.wrap(attrs[:approval_ids])
 
       %Entry{
         project_id: ticket.project_id,

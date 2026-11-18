@@ -259,9 +259,11 @@ collectable, and the merge would then act on an object that has gone. Two things
    before it merges. Under `refs/forge/*`, so it is neither a branch nor mirrored, and the object
    is permanently reachable. This note used to say the ref was written on approval; it never was —
    the attempt, in the same request as the approval, wrote it. That is still the rule, and it is
-   now also what makes the ref mean something when nobody approved: an engine-taken merge
-   (`workflow-grammar-v1.md` § Merging, route (b)) pins the commit its transition named exactly as
-   a person's does.
+   now also what makes the ref mean something when no approval is given *at that edge*: an
+   engine-taken merge (`workflow-grammar-v1.md` § Merging, route (b)) pins the commit its
+   transition named exactly as a person's does. Route (b) merges only a ticket whose approval of
+   the changeset is on record and stands (§ *What follows the rebase*), so the ref names a commit
+   somebody approved the ticket for, though not necessarily this exact commit.
 2. `Forge.Merge.perform/4` verifies the commit its transition named still resolves, and refuses
    loudly rather than quietly merging whatever the branch head happens to be now.
 

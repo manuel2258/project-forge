@@ -198,6 +198,7 @@ defmodule ForgeWeb.TicketLive do
       end
 
     diff = ticket_diff(project, ticket)
+    conflict = Forge.Merge.Watch.notice(ticket)
     step = step_view(ticket)
 
     # Subscribed before the stream is read, so an event written between the two is heard rather
@@ -232,7 +233,8 @@ defmodule ForgeWeb.TicketLive do
       queue: Forge.MergeQueue.places(project.id)[ticket.id],
       stuck_reason: Engine.why_stuck(ticket),
       drift: Tickets.drift(ticket, project),
-      conflict: Forge.Merge.Watch.notice(ticket),
+      conflict: conflict,
+      rebase_outcome: conflict && conflict.send_to && Engine.rebase_outcome(ticket, workflow),
       human_state:
         ticket.status in Forge.Tickets.Ticket.open_statuses() and
           Workflow.State.human?(Workflow.state(workflow, ticket.state)),

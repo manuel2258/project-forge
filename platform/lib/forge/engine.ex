@@ -116,7 +116,11 @@ defmodule Forge.Engine do
           put_engine_transition(multi, ticket, workflow, transition, outcome)
 
         {:approval, transition} ->
-          put_pending_approval(multi, ticket, transition, outcome)
+          # Recorded as a person's act on the edge reads it (`Workflow.approving/2`), as every other
+          # path that records a pending decision does: `decide/5` checks the versions the row sent
+          # against that list, and an edge out of a rebase declaring its own `approve` would
+          # otherwise be refused as stale on every press for the `changeset` the row also sends.
+          put_pending_approval(multi, ticket, Workflow.approving(workflow, transition), outcome)
 
         {:stuck, reason} ->
           put_stuck(multi, ticket, stuck_reason(reason, rounds))
@@ -654,6 +658,9 @@ defmodule Forge.Engine do
     with :ok <- noted(decision, comment),
          {:ok, transition} <-
            Core.choose(workflow, pending["from"], pending["to"], pending["outcome"]),
+         # Read as `take/7` reads it, so a rebase's decision is checked against the `changeset`
+         # the decision row drew (`Workflow.approving/2`) and not refused as a stale extra name.
+         transition = Workflow.approving(workflow, transition),
          {:ok, pinned} <- as_seen(ticket, transition, seen) do
       said = %{comment: comment, pinned: pinned}
       take(ticket, workflow, transition, pending["outcome"], user_id, decision, said)
@@ -834,6 +841,10 @@ defmodule Forge.Engine do
   current state **but none whose `approve` names a document with no version**, because taking it
   would record an approval of nothing and is refused (`workflow-grammar-v1.md` § Semantics). A
   refinement that failed left its ticket offering `planning`, which failed twice when taken.
+  **"Names" is the declared `approve`**, not `ForgeCore.Workflow.approving/2`: an edge out of an
+  integrating state into a merge approves `changeset` as well, and is offered when the changeset
+  has no version — taking it is then refused by the merge check (`{:merge_impossible, _}`), as a
+  merge of nothing is.
 
   The *edges*, not their targets, because the filter is per edge and two edges may reach one
   target with only one of them offerable. Everything that offers a transition reads this one
@@ -1573,7 +1584,13 @@ defmodule Forge.Engine do
   #
   # `said` is what the person decided with: the `comment`, and the versions `pinned` by what they
   # were shown (`decide/5`), empty for the latest.
+  #
+  # **The edge is read as a person's act records it** (`Workflow.approving/2`): out of an
+  # integrating state into a merging one it approves `changeset` whether or not it lists it, so
+  # nothing a person takes from the rebase state merges a changeset with no approval on record.
   defp take(ticket, workflow, transition, outcome, user_id, decision, said) do
+    transition = Workflow.approving(workflow, transition)
+
     if decision == :approved and queues?(workflow, transition) do
       commit_enqueue(ticket, transition, outcome, user_id, said)
     else
@@ -1707,14 +1724,80 @@ defmodule Forge.Engine do
       taken_out_since_entered?(ticket) ->
         put_stuck(multi, ticket, @taken_out_reason)
 
+      # **The rebase merges on its own only for a ticket a person approved**: route (b) carries no
+      # `approve` because it is meant for one the queue sent here, and nothing else said the
+      # ticket had been approved. Read here, in the one function every engine edge into a merging
+      # state passes, after the ticket row is locked, so the record is read when the edge is
+      # taken and not when the job ended (`workflow-grammar-v1.md` § Merging, *What follows the
+      # rebase*). Not in `ForgeCore.Engine.step/4`, which would ask
+      # where the record stands as well.
+      not approved_for_rebase_merge?(ticket, workflow, transition) ->
+        put_pending_approval(multi, ticket, Workflow.approving(workflow, transition), outcome)
+
       Transition.queues?(transition) ->
-        put_engine_enqueue(multi, ticket, transition, outcome)
+        put_engine_enqueue(multi, ticket, workflow, transition, outcome)
 
       Workflow.on_conflict(workflow, to) != nil ->
         put_checked_transition(multi, ticket, workflow, transition, outcome)
 
       true ->
         put_transition(multi, ticket, workflow, transition, outcome, :system)
+    end
+  end
+
+  # An edge that is not out of an integrating state is not read: a release's `publishing → merged`
+  # merges as it always did (`ForgeCore.Workflow.integrates_into_merge?/2`).
+  defp approved_for_rebase_merge?(ticket, workflow, transition) do
+    not Workflow.integrates_into_merge?(workflow, transition) or
+      Artifacts.changeset_decision(ticket.id) == :stands
+  end
+
+  @doc """
+  Why the ticket's pending decision is a rebase that did not merge on its own, or nil when it is
+  not one: `:none`, `:rejected` or `:withdrawn`, which is `Forge.Artifacts.changeset_decision/1`
+  read now. What the decision row says above Approve, so the sentence and the guard use one
+  reading.
+  """
+  @spec rebase_decision_reason(Ticket.t()) :: Artifacts.changeset_decision() | nil
+  def rebase_decision_reason(%Ticket{pending_transition: %{"from" => from, "to" => to}} = ticket) do
+    with {:ok, workflow} <- Tickets.parsed_workflow(ticket),
+         true <- Workflow.integrates_into_merge?(workflow, %Transition{from: from, to: to}),
+         reason when reason != :stands <- Artifacts.changeset_decision(ticket.id) do
+      reason
+    else
+      _not_such_a_decision -> nil
+    end
+  end
+
+  def rebase_decision_reason(%Ticket{}), do: nil
+
+  @doc """
+  What a rebase sent from here would do when it ends `done`, read from the record now: `:merge` when
+  the ticket's approval stands, `:ask` when it would wait for a person. Nil when the ticket has no rebase to send it
+  to (`integrates_to/2` is nil), or the rebase state has no edge into a merge. For the confirmation in front of
+  *Send to rebasing*.
+  """
+  @spec rebase_outcome(Ticket.t(), Workflow.t()) :: :merge | :ask | nil
+  def rebase_outcome(%Ticket{} = ticket, %Workflow{} = workflow) do
+    case integrates_to(ticket, workflow) do
+      nil ->
+        nil
+
+      target ->
+        edge =
+          workflow
+          |> Workflow.transitions_from(target)
+          |> Enum.find(&Workflow.merges_on_enter?(workflow, &1.to))
+
+        cond do
+          # A rebase state whose edges do not lead into a merge (routes (a), `:reviewed`, `:human`
+          # of `conflict_workflow/1`) goes back to a person whatever the record says.
+          edge == nil -> nil
+          # An edge that declares an approval is always asked (`Core.step/4`), standing or not.
+          edge.approve != [] -> :ask
+          Artifacts.changeset_decision(ticket.id) == :stands -> :merge
+          true -> :ask
+        end
     end
   end
 
@@ -1745,15 +1828,29 @@ defmodule Forge.Engine do
 
   # The engine's edge into a merging state, declared to queue, takes no transition: the ticket
   # stays where it is, in line, and the runner takes the edge in its turn.
-  defp put_engine_enqueue(multi, ticket, transition, outcome) do
+  #
+  # **Out of an integrating state the row carries the approval the ticket stood on**, so taking the
+  # ticket out of the line withdraws it as it withdraws one a person gave when entering. Without
+  # it the record would still stand after a take-out and the next rebase would merge on it.
+  defp put_engine_enqueue(multi, ticket, workflow, transition, outcome) do
     case Merge.changeset(ticket) do
       {:ok, source} ->
         MergeQueue.put_enter(multi, ticket, transition, outcome, source, :system, %{
-          commit_message_version: Merge.commit_message_version(ticket)
+          commit_message_version: Merge.commit_message_version(ticket),
+          approval_ids: standing_approval_ids(ticket, workflow, transition)
         })
 
       {:error, reason} ->
         put_stuck(multi, ticket, "could not merge: #{inspect(reason)}")
+    end
+  end
+
+  defp standing_approval_ids(ticket, workflow, transition) do
+    with true <- Workflow.integrates_into_merge?(workflow, transition),
+         %{id: id} <- Artifacts.standing_changeset_approval(ticket.id) do
+      [id]
+    else
+      _none -> []
     end
   end
 
@@ -2026,8 +2123,8 @@ defmodule Forge.Engine do
 
     if outcome in declared do
       case Core.step(workflow, chat.state, outcome, rounds(ticket.id)) do
-        {:transition, transition} -> {:ok, transition}
-        {:approval, transition} -> {:ok, transition}
+        {:transition, transition} -> {:ok, Workflow.approving(workflow, transition)}
+        {:approval, transition} -> {:ok, Workflow.approving(workflow, transition)}
         {:stuck, {:no_transition, _outcome}} -> {:error, {:no_edge, outcome}}
         {:stuck, {:max_exceeded, _transition}} -> {:error, {:max_spent, outcome}}
         {:error, reason} -> {:error, reason}
@@ -2520,7 +2617,9 @@ defmodule Forge.Engine do
   defp put_unapproved(multi, ticket, %Entry{} = entry) do
     workflow = Tickets.workflow(ticket)
 
-    case Core.choose(workflow, entry.from_state, entry.to_state, entry.edge_outcome) do
+    case workflow
+         |> Core.choose(entry.from_state, entry.to_state, entry.edge_outcome)
+         |> approving_edge(workflow) do
       {:ok, %Transition{approve: [_ | _]} = transition} when entry.outcome != nil ->
         put_pending_approval(multi, ticket, transition, entry.outcome)
 
@@ -2530,6 +2629,11 @@ defmodule Forge.Engine do
           else: put_stuck(multi, ticket, @taken_out_reason)
     end
   end
+
+  defp approving_edge({:ok, %Transition{} = transition}, workflow),
+    do: {:ok, Workflow.approving(workflow, transition)}
+
+  defp approving_edge(other, _workflow), do: other
 
   defp human_state?(workflow, state_name) do
     case Workflow.state(workflow, state_name) do

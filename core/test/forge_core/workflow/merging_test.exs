@@ -41,6 +41,40 @@ defmodule ForgeCore.Workflow.MergingTest do
       refute Workflow.integrating?(workflow, "implementing")
     end
 
+    # What a person's act on the edge out of an integrating state into the merge approves: the
+    # changeset, whether or not the edge lists it (`Forge.Engine` reads the record of it first).
+    test "an edge out of an integrating state into a merging one approves the changeset", %{
+      map: map
+    } do
+      {:ok, route_a} = Parser.from_map(map)
+
+      route_b =
+        Map.update!(map, "transitions", fn transitions ->
+          Enum.map(transitions, fn
+            %{"from" => "integrating"} = edge -> %{edge | "to" => "merged"}
+            edge -> edge
+          end)
+        end)
+
+      {:ok, workflow} = Parser.from_map(route_b)
+      [rebase] = for t <- workflow.transitions, t.from == "integrating", do: t
+      [reviewed] = for t <- workflow.transitions, t.from == "review_ready", do: t
+      [verified] = for t <- route_a.transitions, t.from == "integrating", do: t
+
+      assert rebase.approve == []
+      assert Workflow.integrates_into_merge?(workflow, rebase)
+      assert Workflow.approving(workflow, rebase).approve == ["changeset"]
+
+      # Already listed: once, not twice. Not out of an integrating state, or not into a merge:
+      # as declared.
+      listed = %{rebase | approve: ["changeset"]}
+      assert Workflow.approving(workflow, listed).approve == ["changeset"]
+      refute Workflow.integrates_into_merge?(workflow, reviewed)
+      assert Workflow.approving(workflow, reviewed) == reviewed
+      refute Workflow.integrates_into_merge?(route_a, verified)
+      assert Workflow.approving(route_a, verified) == verified
+    end
+
     # It is not a transition: nothing may choose it and no outcome selects it, so the state that
     # merges is as terminal as it ever was, and a ticket that merged is done.
     test "the merging state stays terminal", %{map: map} do

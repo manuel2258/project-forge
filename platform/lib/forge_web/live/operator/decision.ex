@@ -103,6 +103,10 @@ defmodule ForgeWeb.Operator.Decision do
       legacy: merges and commit.legacy,
       built_from: if(merges, do: built_from(project, ticket), else: []),
       answered: if(merges, do: length(Artifacts.answered(ticket.id)), else: 0),
+      # Why a rebase that ended `done` did not merge on its own, or nil: the engine's own reading
+      # of the record (`Forge.Engine.rebase_decision_reason/1`), so the sentence and the refusal
+      # cannot disagree (`workflow-grammar-v1.md` § Merging, *What follows the rebase*).
+      rebase_reason: Engine.rebase_decision_reason(ticket),
       # Left out when nothing was spent: `spent 0 windows` is a figure about nothing.
       spent: Format.spent(ticket.usage)
     }
@@ -510,6 +514,14 @@ defmodule ForgeWeb.Operator.Decision do
       >
         <form id="decision-form" phx-change="decision:change" phx-submit="decision:decide">
           <div class="flex flex-col gap-3">
+            <p
+              :if={@decision.rebase_reason}
+              id={"rebase-reason-#{@decision.ticket.id}"}
+              class="text-sm/[1.55]"
+            >
+              {rebase_reason_sentence(@decision.rebase_reason)}
+            </p>
+
             <ul :if={Enum.any?(@decision.pins, & &1.href)} id="decision-pins" class="flex flex-col">
               <li :for={pin <- @decision.pins} :if={pin.href}>
                 <.link
@@ -819,6 +831,19 @@ defmodule ForgeWeb.Operator.Decision do
         do: " Entering #{decision.to} merges it into #{decision.project.default_branch}.",
         else: ""
   end
+
+  # Why the rebase did not merge on its own, in the words a person acts on: the three readings of
+  # `Forge.Artifacts.changeset_decision/1` that are not a standing approval.
+  defp rebase_reason_sentence(:none),
+    do: "The rebase finished, but nobody has approved this changeset, so it has not been merged."
+
+  defp rebase_reason_sentence(:rejected),
+    do:
+      "The rebase finished, but the last decision on this changeset was a rejection, so it has not been merged."
+
+  defp rebase_reason_sentence(:withdrawn),
+    do:
+      "The rebase finished, but this changeset's approval was withdrawn when it was taken out of the queue, so it has not been merged."
 
   # The age alone: `written just …` cut the one word that mattered (UX re-check #19).
   defp written([%{changeset: false, at: at}]), do: " · #{Format.ago_phrase(at)}"

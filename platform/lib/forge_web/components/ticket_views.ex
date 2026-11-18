@@ -1128,12 +1128,19 @@ defmodule ForgeWeb.TicketViews do
         <ul class="mt-1 flex flex-col gap-0.5 font-mono break-all text-ink-2">
           <li :for={path <- @conflict.paths}>{path}</li>
         </ul>
+        <%!-- What happens when the rebase ends `done`, read from the record of approvals now
+              (`workflow-grammar-v1.md` § Merging, *What follows the rebase*). --%>
+        <p :if={@rebase_outcome} id="rebase-outcome" class="mt-2 text-ink-2">
+          {rebase_outcome_sentence(@rebase_outcome)}
+        </p>
         <.confirm
           :if={@conflict.send_to}
           id="integrate-ticket"
           label={"Send to #{@conflict.send_to}"}
           act="Send it"
-          sentence={send_confirm(@conflict.send_to, @workflow, @project.default_branch)}
+          sentence={
+            send_confirm(@conflict.send_to, @workflow, @project.default_branch, @rebase_outcome)
+          }
           tone="neutral"
           size="md"
           class="mt-2 items-start"
@@ -1350,20 +1357,32 @@ defmodule ForgeWeb.TicketViews do
   defp since(%{"chat" => _id}), do: " since a conversation merged"
   defp since(_none), do: ""
 
-  # The confirm says what pressing it spends: a job, when the state it sends to runs one.
-  defp send_confirm(target, workflow, branch) do
+  # The confirm says what pressing it spends: a job, when the state it sends to runs one — and
+  # which of the two follows the rebase, from the record as it is now.
+  defp send_confirm(target, workflow, branch, outcome) do
     case Workflow.state(workflow, target) do
       %Workflow.State{chat: true} ->
-        "Send this ticket to #{target}? A conversation opens there, waiting for a person."
+        "Send this ticket to #{target}? A conversation opens there, waiting for a person." <>
+          rebase_after(outcome)
 
       %Workflow.State{prompt: prompt} when is_binary(prompt) ->
         "Send this ticket to #{target}? A job starts there to merge #{branch} into its branch, " <>
-          "and spends a credential."
+          "and spends a credential." <> rebase_after(outcome)
 
       _human ->
-        "Send this ticket to #{target}? It waits there for a person."
+        "Send this ticket to #{target}? It waits there for a person." <> rebase_after(outcome)
     end
   end
+
+  defp rebase_after(nil), do: ""
+  defp rebase_after(outcome), do: " " <> rebase_outcome_sentence(outcome)
+
+  defp rebase_outcome_sentence(:merge),
+    do: "Its changeset is approved, so when the rebase ends done it merges on its own."
+
+  defp rebase_outcome_sentence(:ask),
+    do:
+      "Its changeset is not approved, so when the rebase ends done it comes back for your approval."
 
   # The details name what this ticket's jobs proposed, by title.
   defp proposal_title(version) do

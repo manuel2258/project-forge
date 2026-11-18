@@ -895,6 +895,75 @@ defmodule Forge.Artifacts do
     )
   end
 
+  @typedoc "What the approvals of a ticket's `changeset` say now: see `changeset_decision/1`."
+  @type changeset_decision :: :stands | :none | :rejected | :withdrawn
+
+  @doc """
+  What the record of a ticket's `changeset` says now: every approval and rejection on every
+  version, read as one history. `docs/design/workflow-grammar-v1.md` § Merging, *What follows the
+  rebase*, is what asks.
+
+    * `:stands` — the latest decision is an approval that was not withdrawn;
+    * `:rejected` — the latest decision is a rejection;
+    * `:withdrawn` — the latest decision is an approval that was withdrawn (taking the ticket out
+      of the merge queue does that);
+    * `:none` — nobody has decided it.
+
+  **Latest is by version, not by `inserted_at`**, which is whole seconds: decisions only move
+  forward through the versions, because each is recorded against the version that is latest then.
+  Within one version they are ordered by `inserted_at`, and a tie is broken against the approval —
+  a rejection counts as the later, then a standing approval over a withdrawn one (a later approval
+  of a withdrawn version is a new row and counts again). Breaking a tie towards the rejection is
+  the safe reading, since what it asks for is a person's second look.
+  """
+  @spec changeset_decision(String.t()) :: changeset_decision()
+  def changeset_decision(ticket_id) do
+    case latest_changeset_decision(ticket_id) do
+      nil -> :none
+      %Approval{decision: :rejected} -> :rejected
+      %Approval{withdrawn_at: nil} -> :stands
+      %Approval{} -> :withdrawn
+    end
+  end
+
+  @doc """
+  The approval a standing record stands on (`changeset_decision/1` is `:stands`), or nil. What an
+  engine edge into the merge queue carries as its own, so that taking the ticket out of the line
+  withdraws it.
+  """
+  @spec standing_changeset_approval(String.t()) :: Approval.t() | nil
+  def standing_changeset_approval(ticket_id) do
+    case latest_changeset_decision(ticket_id) do
+      %Approval{decision: :approved, withdrawn_at: nil} = approval -> approval
+      _other -> nil
+    end
+  end
+
+  defp latest_changeset_decision(ticket_id) do
+    rows =
+      Repo.all(
+        from ap in Approval,
+          join: v in assoc(ap, :artifact_version),
+          join: a in assoc(v, :artifact),
+          where: a.ticket_id == ^ticket_id and a.name == ^ForgeCore.Workflow.changeset_artifact(),
+          select: {v.version, ap}
+      )
+
+    case Enum.max_by(rows, &decision_order/1, fn -> nil end) do
+      nil -> nil
+      {_version, approval} -> approval
+    end
+  end
+
+  defp decision_order({version, %Approval{decision: :rejected} = ap}),
+    do: {version, DateTime.to_unix(ap.inserted_at), 2}
+
+  defp decision_order({version, %Approval{withdrawn_at: nil} = ap}),
+    do: {version, DateTime.to_unix(ap.inserted_at), 1}
+
+  defp decision_order({version, %Approval{} = ap}),
+    do: {version, DateTime.to_unix(ap.inserted_at), 0}
+
   @spec approvals(String.t()) :: [Approval.t()]
   def approvals(version_id),
     do:

@@ -7,6 +7,7 @@ defmodule Forge.ArtifactsTest do
   use Forge.DataCase, async: true
 
   import Forge.ForgeFixtures
+  import Forge.AccountsFixtures
 
   alias Forge.Artifacts
   alias ForgeCore.Workflow.Parser
@@ -332,6 +333,126 @@ defmodule Forge.ArtifactsTest do
                )
 
       assert errors_on(neither).ticket_id == ["an artifact belongs to a ticket or a chat"]
+    end
+  end
+
+  # What a ticket's record of approvals says now, read as one history across versions
+  # (`docs/design/workflow-grammar-v1.md` § Merging, *What follows the rebase*).
+  describe "changeset_decision/1" do
+    @t0 ~U[2026-01-01 10:00:00Z]
+
+    defp versions!(ticket, count) do
+      for n <- 1..count do
+        {:ok, version} =
+          Artifacts.record_version(ticket.id, "changeset", :blob, :system, %{
+            blob_uri: "git:" <> String.duplicate("#{n}", 40)
+          })
+
+        version
+      end
+    end
+
+    # Rows with a clock of their own: `inserted_at` is whole seconds, so the order a test needs is
+    # set, not waited for.
+    defp decide!(version, decision, seconds, opts \\ []) do
+      user = user_fixture()
+
+      Forge.Repo.insert!(%Forge.Artifacts.Approval{
+        artifact_version_id: version.id,
+        user_id: user.id,
+        decision: decision,
+        transition: %{"from" => "a", "to" => "b"},
+        inserted_at: DateTime.add(@t0, seconds),
+        withdrawn_at: opts[:withdrawn]
+      })
+    end
+
+    test "is none when nobody decided, whatever else the ticket has" do
+      ticket = ticket_fixture()
+      versions!(ticket, 2)
+
+      assert Artifacts.changeset_decision(ticket.id) == :none
+      assert Artifacts.standing_changeset_approval(ticket.id) == nil
+    end
+
+    test "stands on an approval, and withdrawing it takes that away" do
+      ticket = ticket_fixture()
+      [v1] = versions!(ticket, 1)
+      approval = decide!(v1, :approved, 0)
+
+      assert Artifacts.changeset_decision(ticket.id) == :stands
+      assert Artifacts.standing_changeset_approval(ticket.id).id == approval.id
+
+      {:ok, _changes} =
+        Ecto.Multi.new() |> Artifacts.put_withdrawal([approval.id]) |> Forge.Repo.transaction()
+
+      assert Artifacts.changeset_decision(ticket.id) == :withdrawn
+      assert Artifacts.standing_changeset_approval(ticket.id) == nil
+    end
+
+    test "a later version's rejection cancels an earlier version's approval" do
+      ticket = ticket_fixture()
+      [v1, v2] = versions!(ticket, 2)
+      decide!(v1, :approved, 0)
+      decide!(v2, :rejected, 10)
+
+      assert Artifacts.changeset_decision(ticket.id) == :rejected
+    end
+
+    test "the latest version decides, not the latest clock" do
+      ticket = ticket_fixture()
+      [v1, v2] = versions!(ticket, 2)
+      # The earlier version's row carries the later time: a decision on v2 is still the later one.
+      decide!(v1, :rejected, 100)
+      decide!(v2, :approved, 0)
+
+      assert Artifacts.changeset_decision(ticket.id) == :stands
+    end
+
+    test "an approval of an earlier version stands while a later one has no decision" do
+      ticket = ticket_fixture()
+      [v1, _v2] = versions!(ticket, 2)
+      decide!(v1, :approved, 0)
+
+      assert Artifacts.changeset_decision(ticket.id) == :stands
+    end
+
+    test "within one version the later decision wins, and a tie goes against the approval" do
+      ticket = ticket_fixture()
+      [v1] = versions!(ticket, 1)
+      decide!(v1, :rejected, 0)
+      decide!(v1, :approved, 5)
+      assert Artifacts.changeset_decision(ticket.id) == :stands
+
+      decide!(v1, :rejected, 5)
+      assert Artifacts.changeset_decision(ticket.id) == :rejected
+    end
+
+    test "an approval given again after a withdrawal counts again" do
+      ticket = ticket_fixture()
+      [v1] = versions!(ticket, 1)
+      decide!(v1, :approved, 0, withdrawn: ~U[2026-01-01 10:00:00.000000Z])
+      assert Artifacts.changeset_decision(ticket.id) == :withdrawn
+
+      decide!(v1, :approved, 0)
+      assert Artifacts.changeset_decision(ticket.id) == :stands
+    end
+
+    test "reads this ticket's changeset and no other artifact or ticket" do
+      ticket = ticket_fixture()
+      other = ticket_fixture()
+      [v1] = versions!(ticket, 1)
+      [o1] = versions!(other, 1)
+      decide!(o1, :approved, 0)
+
+      {:ok, doc} =
+        Artifacts.record_version(ticket.id, "commit-message", :document, :system, %{content: "x"})
+
+      decide!(doc, :approved, 0)
+
+      assert Artifacts.changeset_decision(ticket.id) == :none
+      assert Artifacts.changeset_decision(other.id) == :stands
+      assert v1.version == 1
     end
   end
 end

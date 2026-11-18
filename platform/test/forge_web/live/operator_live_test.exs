@@ -6,7 +6,10 @@ defmodule ForgeWeb.OperatorLiveTest do
   import Phoenix.LiveViewTest
   import Forge.GitFixtures
   import Forge.ForgeFixtures, only: [pool!: 2, credential_fixture: 1]
-  import Forge.MergeFixtures, only: [changeset!: 2]
+
+  import Forge.MergeFixtures,
+    only: [changeset!: 2, commit_message!: 2, pend_merge: 1, integrate!: 2, integration_done!: 1]
+
   import ForgeWeb.Operator.Components, only: [commit_message_id: 1]
 
   import Ecto.Query, only: [from: 2]
@@ -561,6 +564,181 @@ defmodule ForgeWeb.OperatorLiveTest do
     # And Activity says what the conflict was, beside its type.
     {:ok, activity, _html} = live(conn, path <> "?tab=activity")
     assert has_element?(activity, "#ticket-events", "README.md conflicted on the way into merged")
+  end
+
+  # `docs/design/workflow-grammar-v1.md` § Merging, *What follows the rebase*: the confirmation says
+  # which of the two follows the rebase, read from the record of approvals when it is shown.
+  test "the confirmation in front of the send says whether the rebase will merge on its own", %{
+    conn: conn,
+    user: user
+  } do
+    {:ok, project} =
+      Projects.register(
+        %{
+          name: "ui-outcome-#{System.unique_integer([:positive])}",
+          repo_path:
+            seeded_repo(%{
+              ".forge/workflow.yml" => conflict_workflow(:b),
+              ".forge/agents/integrate.md" => "Merge the default branch in.\n"
+            })
+        },
+        user
+      )
+
+    {:ok, ticket} = Tickets.admit(project, %{title: "Settings"}, {:user, user.id})
+    sha = commit_over_http(project, ticket.branch, "README.md", "the ticket's")
+    changeset!(ticket, sha)
+    ticket |> Ecto.Changeset.change(state: "review_ready") |> Forge.Repo.update!()
+    path = ~p"/tickets/#{project.name}/#{ticket.number}"
+    head = commit_to_default(project, %{"README.md" => "the trunk's\n"})
+    [_found] = Forge.Merge.Watch.check(project.id, head, nil)
+
+    {:ok, view, _html} = live(conn, path)
+    assert view |> element("#rebase-outcome") |> render() =~ "not approved"
+    assert view |> element("#rebase-outcome") |> render() =~ "comes back for your approval"
+
+    assert view |> element("#integrate-ticket-confirm") |> render() =~
+             "A job starts there to merge main into its branch, and spends a credential. " <>
+               "Its changeset is not approved"
+
+    version = Forge.Artifacts.latest(ticket.id, "changeset")
+
+    {:ok, _approval} =
+      Forge.Repo.insert(
+        Forge.Artifacts.Approval.changeset(%Forge.Artifacts.Approval{}, %{
+          artifact_version_id: version.id,
+          user_id: user.id,
+          decision: :approved,
+          transition: %{"from" => "review_ready", "to" => "merged"}
+        })
+      )
+
+    {:ok, view, _html} = live(conn, path)
+    assert view |> element("#rebase-outcome") |> render() =~ "merges on its own"
+    refute view |> element("#rebase-outcome") |> render() =~ "comes back"
+    assert view |> element("#integrate-ticket-confirm") |> render() =~ "it merges on its own"
+  end
+
+  # A rebase of a ticket whose changeset a person sent to be rebased, ended `done`. Before it, the
+  # person did `:nothing`, `:rejected` the approval at `review_ready`, or `:withdrawn` one — approved
+  # it into a line that queues and took it out again.
+  defp rebased!(user, before) do
+    workflow =
+      case before do
+        :withdrawn ->
+          String.replace(
+            conflict_workflow(:b),
+            "{ from: review_ready, to: merged, approve: [changeset] }",
+            "{ from: review_ready, to: merged, approve: [changeset], queue: true }"
+          )
+
+        _other ->
+          conflict_workflow(:b)
+      end
+
+    bare =
+      seeded_repo(%{
+        ".forge/workflow.yml" => workflow,
+        ".forge/agents/integrate.md" => "Merge the default branch in.\n"
+      })
+
+    {:ok, project} =
+      Projects.register(
+        %{name: "ui-rebase-#{System.unique_integer([:positive])}", repo_path: bare},
+        user
+      )
+
+    {:ok, ticket} = Tickets.admit(project, %{title: "Settings"}, {:user, user.id})
+    sha = commit_over_http(project, ticket.branch, "README.md", "the ticket's")
+    changeset!(ticket, sha)
+    commit_message!(ticket, "Settings\n")
+    ticket = pend_merge(ticket)
+
+    ticket =
+      case before do
+        :rejected ->
+          {:ok, stuck} = Forge.Operator.decide(ticket, user, :rejected, "not this one")
+          stuck
+
+        :withdrawn ->
+          {:ok, queued} = Forge.Operator.decide(ticket, user, :approved, nil)
+          {:ok, out} = Forge.Operator.take_out(queued, user)
+          out
+
+        :nothing ->
+          ticket
+      end
+
+    commit_to(bare, "main", %{"README.md" => "the trunk's\n"}, "another ticket")
+    {:ok, sent} = Forge.Operator.integrate(ticket, user)
+    changeset!(sent, integrate!(bare, sent))
+    ticket = integration_done!(sent)
+    assert ticket.state == "integrating"
+    {project, ticket}
+  end
+
+  # A person sent a ticket nobody approved to be rebased, and the rebase ended done: it waits
+  # at the rebase state with the decision row `review_ready` shows, and says why it did not merge.
+  test "a rebase that did not merge on its own shows the decision row and says why", %{
+    conn: conn,
+    user: user
+  } do
+    {project, ticket} = rebased!(user, :nothing)
+
+    view = decision_panel(conn, project, ticket)
+
+    assert view |> element("#rebase-reason-#{ticket.id}") |> render() =~
+             "nobody has approved this changeset"
+
+    assert has_element?(view, "#decision-panel button[value=approved]")
+    assert has_element?(view, "#decision-panel button[value=rejected]")
+    assert has_element?(view, "#decision-row", "changeset v")
+  end
+
+  test "the sentence says when the last decision was a rejection", %{conn: conn, user: user} do
+    {project, ticket} = rebased!(user, :rejected)
+
+    view = decision_panel(conn, project, ticket)
+
+    assert view |> element("#rebase-reason-#{ticket.id}") |> render() =~
+             "last decision on this changeset was a rejection"
+  end
+
+  test "the sentence says when the approval was withdrawn by a take-out", %{
+    conn: conn,
+    user: user
+  } do
+    {project, ticket} = rebased!(user, :withdrawn)
+
+    view = decision_panel(conn, project, ticket)
+
+    assert view |> element("#rebase-reason-#{ticket.id}") |> render() =~
+             "approval was withdrawn when it was taken out of the queue"
+  end
+
+  # The ticket page with its decision row's panel dropped, where Approve and Reject are.
+  defp decision_panel(conn, project, ticket) do
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+    view |> element("#decision-row button[phx-click='decision:open']") |> render_click()
+    view
+  end
+
+  # Criterion 13: the queue lists the refused ticket as an approval waiting, leading to the
+  # ticket's decision row, and decides nothing itself.
+  test "the queue lists the refused rebase as an approval leading to the ticket", %{
+    conn: conn,
+    user: user
+  } do
+    {project, ticket} = rebased!(user, :nothing)
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    assert has_element?(
+             view,
+             ~s(#review-#{ticket.id}[href^="/tickets/#{project.name}/#{ticket.number}"])
+           )
+
+    refute has_element?(view, "#queue-item button[value=approved]")
   end
 
   # The other things the notice says: a conversation's merge, a conflict no merge caused, and a

@@ -248,7 +248,13 @@ defmodule Forge.Jobs do
 
     for outcome <- outcomes || [Workflow.default_outcome()],
         edge <- Enum.filter(edges, &(ForgeCore.Workflow.Transition.outcome(&1) == outcome)),
-        do: %{"outcome" => outcome, "to" => edge.to, "approve" => edge.approve}
+        do: %{
+          "outcome" => outcome,
+          "to" => edge.to,
+          # What taking it records, which out of an integrating state into a merge includes the
+          # changeset whether the edge lists it or not (`ForgeCore.Workflow.approving/2`).
+          "approve" => ForgeCore.Workflow.approving(workflow, edge).approve
+        }
   end
 
   @doc """
@@ -1446,6 +1452,7 @@ defmodule Forge.Jobs do
     ticket
     |> Engine.offered_edges(workflow)
     # One entry per offered edge, grouped by target.
+    |> Enum.map(&ForgeCore.Workflow.approving(workflow, &1))
     |> Enum.group_by(& &1.to, & &1.approve)
     |> Enum.map(fn {to, edge_approvals} ->
       %{

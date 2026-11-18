@@ -153,7 +153,7 @@ defmodule Forge.Steps do
       %{
         outcome: outcome,
         to: edge.to,
-        approve: edge.approve,
+        approve: ForgeCore.Workflow.approving(workflow, edge).approve,
         blocked: blocked,
         unwritten: unwritten
       }

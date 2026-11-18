@@ -398,6 +398,29 @@ defmodule ForgeCore.Workflow do
   end
 
   @doc """
+  Whether `transition` leaves an integrating state for a state that merges: the edge a rebase
+  takes into the merge, which `workflow-grammar-v1.md` § Merging reads the approval record before
+  it takes.
+  """
+  @spec integrates_into_merge?(t(), Transition.t()) :: boolean()
+  def integrates_into_merge?(%__MODULE__{} = workflow, %Transition{from: from, to: to}),
+    do: integrating?(workflow, from) and merges_on_enter?(workflow, to)
+
+  @doc """
+  `transition` as a person's act on it records it: the edge out of an integrating state into a
+  merging one **approves `changeset` whether or not it lists it**, so a hand-taken or decided
+  merge from the rebase state has an approval on record, and the engine's reading of the record
+  (`Forge.Engine`) and a person's act on the edge agree about what it approves. Any other edge is
+  returned as it was declared.
+  """
+  @spec approving(t(), Transition.t()) :: Transition.t()
+  def approving(%__MODULE__{} = workflow, %Transition{approve: approve} = transition) do
+    if integrates_into_merge?(workflow, transition) and @changeset not in approve,
+      do: %{transition | approve: approve ++ [@changeset]},
+      else: transition
+  end
+
+  @doc """
   Every edge a ticket can move along: the declared transitions, and each merging state's
   `on_conflict` as an edge out of it. What a walk of the graph follows — reachability, what runs
   before what — because the ticket reaches an `on_conflict` target only by it. Not what

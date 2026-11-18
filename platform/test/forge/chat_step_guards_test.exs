@@ -392,4 +392,78 @@ defmodule Forge.ChatStepGuardsTest do
       assert Conversations.live?(Repo.get!(Job, chat.id))
     end
   end
+
+  # A chat step may be a merging state's `on_conflict` target (`workflow-grammar-v1.md` § Merging),
+  # and Accept there takes the edge into the merge as the rebase state's edge is taken: it approves
+  # the changeset whether the edge lists it or not.
+  describe "an edge out of a chat step that is an integrating state" do
+    test "approves the changeset, listed or not" do
+      workflow = """
+      version: 1
+      initial: coding
+      states:
+        coding:
+          prompt: agents/plan.md
+          produces: [changeset, commit-message]
+          budget: { turns: 5, tokens: 200k }
+        review_ready: {}
+        scoping:
+          chat: true
+          prompt: agents/refine.md
+          inputs: [ticket]
+          produces: [notes.md]
+        merged: { on_enter: [merge], on_conflict: scoping }
+      transitions:
+        - { from: coding, to: review_ready }
+        - { from: review_ready, to: merged, approve: [changeset] }
+        - { from: scoping, to: merged }
+      limits: { ticket_tokens: 5M }
+      """
+
+      {:ok, project} =
+        register_owned!(%{
+          name: "rebasechat-#{System.unique_integer([:positive])}",
+          repo_path: seeded_repo(%{".forge/workflow.yml" => workflow})
+        })
+
+      user = member_fixture(project)
+      funded!(project)
+      {:ok, ticket} = Tickets.admit(project, %{title: "Scope it"}, {:user, user.id})
+      {:ok, parsed} = Tickets.parsed_workflow(ticket)
+
+      assert {:ok, edge} = Engine.accepted_edge(ticket, parsed, %{state: "scoping"}, "done")
+      assert edge.to == "merged"
+      assert edge.approve == ["changeset"]
+
+      # What a conversation is told taking it records, and what the Accept area says it does.
+      ticket |> Ecto.Changeset.change(state: "scoping") |> Repo.update!()
+
+      {:ok, _version} =
+        Artifacts.record_version(ticket.id, "changeset", :blob, :system, %{
+          blob_uri: "git:" <> String.duplicate("a", 40)
+        })
+
+      {:ok, chat} = Conversations.open(project, "about this", ticket: Tickets.get!(ticket.id))
+      spec = Jobs.assignment(chat, Tickets.get!(ticket.id), project, "token")["spec"]
+      assert [%{"to" => "merged", "approve" => ["changeset"]}] = spec["moving"]["transitions"]
+
+      # And the step's own conversation, which is what the Accept area draws its outcomes from.
+      {:ok, %{step: step}} =
+        Ecto.Multi.new()
+        |> Jobs.put_create_step(:step, Tickets.get!(ticket.id), parsed, "scoping", %{})
+        |> Repo.transaction()
+
+      view = Steps.view(Tickets.get!(ticket.id), Repo.get!(Job, step.id))
+      assert [%{to: "merged", approve: ["changeset"]}] = view.outcomes
+
+      # ... and what the step's own assignment tells the agent each outcome approves.
+      step_spec =
+        Jobs.assignment(Repo.get!(Job, step.id), Tickets.get!(ticket.id), project, "token")[
+          "spec"
+        ]
+
+      assert [%{"outcome" => "done", "to" => "merged", "approve" => ["changeset"]}] =
+               step_spec["step"]["outcomes"]
+    end
+  end
 end

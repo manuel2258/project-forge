@@ -141,17 +141,17 @@ Only one of them is the operator's.
 
 | Exhausted | Resolved by | Treatment |
 |---|---|---|
-| A job's own budget | **the workflow** — a retry, or an edge onward to a person | outcome `budget_exhausted` on the job row with `· turns`, `· tokens` or `· wall clock` beside it, nowhere else |
+| A job's own budget | **a human** — run the state again, or take an edge by hand (forge's own workflows declare no edge on it) | outcome `budget_exhausted` on the job row with `· turns`, `· tokens` or `· wall clock` beside it, nowhere else |
 | Ticket allowance | **a human** — raise it or reroute | sticks the ticket, enters the queue, drawn in accent |
 | Daily spend cap | **time**, or the operator raising it | `paused · spend 6h 12m` in the ticket's subline, neutral, counting down to midnight UTC; the project's ticket list and the queue's **Open tickets** draw `paused · spend` without the countdown. **Never an item in the queue, never counted, never pushed** |
 | Window capacity | **time** | `PAUSED · CAPACITY 1h 12m`, neutral, on the ticket and the project's ticket list, **never in the queue**. Not built (§ Engine support) |
 
 **The first row is the workflow's, not the engine's.** What happens to a job that ran out is an
 edge in the definition: a self-retry where one is declared, and otherwise wherever
-`when: budget_exhausted` points — forge's own `reviewing` sends it on towards `review_ready`,
-because a review that spent its budget on subagents learns nothing from being run again from
-scratch and a person should read whatever report it left. (It goes by way of `presenting`, which
-every route to `review_ready` takes; that is `ui.md` § Changes, not this note.) Where the workflow declares no edge at all the ticket
+`when: budget_exhausted` points — forge's own workflows declare none, so a job that runs out sticks the ticket: running it again
+spends a fresh budget and moving on takes the edge by hand, and which is the person's to choose.
+(It was a one-retry self-loop and, for `reviewing`, an edge onward to `presenting`; neither is
+kept, because each spent or moved on without anyone deciding to.) Where the workflow declares no edge at all the ticket
 sticks and enters the queue, which is the second row's treatment reached by another road.
 
 **`budget_exhausted` names its ceiling.** The outcome says a job ran out; which of the three

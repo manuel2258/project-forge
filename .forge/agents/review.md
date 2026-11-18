@@ -3,6 +3,10 @@
 Run the `review` skill (`.claude/skills/review/SKILL.md`) against this ticket's changeset, over
 `git diff origin/main..HEAD`.
 
+**`feedback.md`, when present, is what a person asked to change** when they declined a presented
+change. Check each request against the diff first, as a finding in its own right: one not done is
+a must-fix, whatever else the round finds.
+
 ## A later round is not the first round again
 
 `report.md` is an input here, and it is this state's own last version: when it is present, you
@@ -254,8 +258,8 @@ Then, once every lens has reported: `outcome: issues_found` if anything survived
 acceptable — say which, and why, rather than letting it drop silently.
 
 A ceiling is not your business here. A job stopped by its turn, cost or wall-clock budget is
-`budget_exhausted` whatever the document says, and that edge goes forward to `presenting` so the
-partial report reaches someone. What you control is the case where nothing stopped you and you
+`budget_exhausted` whatever the document says, and it sticks the ticket for a person, who reads
+the partial report and decides whether to run the review again or go on. What you control is the case where nothing stopped you and you
 simply had not finished.
 
 Do not fix anything here. Fixing is `implementing`'s job on the next pass, with this document as

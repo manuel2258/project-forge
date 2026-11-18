@@ -4,6 +4,13 @@ Carry out `plan.md` against the criteria in `refinement.md`. If `report.md` is p
 already ran against an earlier attempt and sent it back — read it first, and treat its findings
 as the actual acceptance criteria for this attempt, not advice to weigh against your own judgement.
 
+**`feedback.md`, when present, is a person declining a presented change.** They read the work, said
+what must change, and moved the ticket back here instead of merging it. Its latest version is the
+acceptance criteria for this attempt, above `report.md` where they disagree: the person has seen the
+finished change and the reviewer has not. Do each fix named, or say in `implementation.md` why one
+cannot be done; do not answer it by re-arguing the design. A version of it that an earlier round
+already answered is history and not a new request — the newest is the one that counts.
+
 - If a design note's claim about the code changes, edit the note in this branch before the code
   that makes the claim true — not after, and not left for someone else (`CLAUDE.md`).
 - Write the test with the code that needs it, in the same commit. Watch each new test fail before

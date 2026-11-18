@@ -3,6 +3,13 @@
 Carry out `diagnosis.md` against the criteria in `refinement.md`. If `report.md` is present, a
 review already sent an earlier attempt back — read it first.
 
+**`feedback.md`, when present, is a person declining a presented change.** They read the work, said
+what must change, and moved the ticket back here instead of merging it. Its latest version is the
+acceptance criteria for this attempt, above `report.md` where they disagree: the person has seen the
+finished change and the reviewer has not. Do each fix named, or say in `implementation.md` why one
+cannot be done; do not answer it by re-arguing the design. A version of it that an earlier round
+already answered is history and not a new request — the newest is the one that counts.
+
 - Write the regression test before the fix, from what `diagnosis.md` said "fail" means, and
   watch it fail against the unfixed code (`CLAUDE.md` § Testing) — for a bug, this is the only
   proof the defect was real and not a misreading of the ticket.

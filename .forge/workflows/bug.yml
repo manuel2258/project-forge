@@ -39,7 +39,7 @@ states:
     effort: xhigh
     inputs: [ticket, refinement.md, implementation.md]
     produces: [diagnosis.md]
-    budget: { turns: 80, tokens: 800k }
+    budget: { turns: 120, tokens: 1.5M }
 
   implementing:
     prompt: agents/implement-bug.md
@@ -51,7 +51,7 @@ states:
     effort: high
     may_invoke:
       check: { max: 10 }
-    inputs: [ticket, refinement.md, diagnosis.md, report.md]
+    inputs: [ticket, refinement.md, diagnosis.md, report.md, feedback.md]
     produces: [implementation.md, changeset, screenshots/*]
     outcomes: [done, diagnosis_invalid]
     # **$20 and not $15, an estimate and not a measurement.** A change to the web layer now also
@@ -65,7 +65,7 @@ states:
     # 1280 MiB. Measured on 2026-11-08 with `/proc/<pid>/smaps_rollup` every 200 ms; the default
     # is above that figure, so nothing is declared. A page much heavier than the shipped setup's
     # would move it, and the figure to correct this with is a look killed at 137.
-    budget: { turns: 300, tokens: 4M }
+    budget: { turns: 400, tokens: 8M }
 
   checking:
     extends: checking
@@ -82,13 +82,18 @@ states:
   # presentation says what the rebase did, because that is what the person approves this time.
   reviewing:
     extends: reviewing
-    inputs: [refinement.md, diagnosis.md, implementation.md, report.md, rebase.md, changeset]
+    inputs: [refinement.md, diagnosis.md, implementation.md, report.md, rebase.md, feedback.md, changeset]
 
   presenting:
     extends: presenting
-    inputs: [refinement.md, diagnosis.md, implementation.md, report.md, rebase.md, changeset]
+    inputs: [refinement.md, diagnosis.md, implementation.md, report.md, rebase.md, feedback.md, changeset]
 
-  review_ready: {}
+  # **A person's no is a way back, with what they want changed.** `feedback.md` is written here,
+  # on the ticket's page, before the move to `implementing`; `implementing` and `reviewing` read
+  # the latest version (optional, as every document a human state produces is). Without it a
+  # rejection only stuck the ticket, and the fixes the person named went nowhere a job could read.
+  review_ready:
+    produces: [feedback.md]
 
   merged:
     extends: merged
@@ -142,26 +147,22 @@ transitions:
   - { from: reviewing,    to: presenting }
   - { from: reviewing,    to: implementing, when: issues_found,      max: 5 }
   - { from: presenting,   to: review_ready }
+  - { from: review_ready, to: implementing, max: 5 }
   - { from: review_ready, to: merged,       approve: [changeset], queue: true }
   - { from: rebasing,     to: merged,       queue: true }
   - { from: rebasing,     to: checking,     when: needs_review }
 
   - { from: checking,     to: checking,     when: gate_unavailable,  max: 2 }
-  - { from: refining,     to: refining,     when: budget_exhausted,  max: 1 }
   - { from: refining,     to: refining,     when: did_not_converge,  max: 1 }
-  - { from: diagnosing,   to: diagnosing,   when: budget_exhausted,  max: 1 }
   - { from: diagnosing,   to: diagnosing,   when: did_not_converge,  max: 1 }
-  - { from: implementing, to: implementing, when: budget_exhausted,  max: 1 }
   - { from: implementing, to: implementing, when: did_not_converge,  max: 1 }
-  - { from: reviewing,    to: presenting,   when: budget_exhausted }
   - { from: reviewing,    to: reviewing,    when: did_not_converge,  max: 1 }
-  - { from: presenting,   to: presenting,   when: budget_exhausted,  max: 1 }
   - { from: presenting,   to: presenting,   when: did_not_converge,  max: 1 }
 
 limits:
-  # 79.8M and not 24M because `reviewing` costs 8M and its loop runs five times, and because the
+  # 128.5M and not 24M because `reviewing` costs 12M and its loop runs five times, and because the
   # refinement and the rebases after the approval spend under the same cap. It is 4.4M under
-  # `dev.yml`'s 84.2M because this refinement is a job priced at its 1.6M budget and not a
+  # `dev.yml`'s 132.9M because this refinement is a job priced at its 1.6M budget and not a
   # conversation allowed 6M; `.forge/common.yml` derives the rest beside the review budget.
   # `project_workflows_test.exs` computes it from this file rather than trusting the comment.
-  ticket_tokens: 79.8M
+  ticket_tokens: 128.5M

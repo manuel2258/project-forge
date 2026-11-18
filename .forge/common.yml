@@ -42,6 +42,18 @@ states:
   # them over the cap and allowed through only because nothing looked until the turn ended. 7M was
   # above the one measured converging run that exceeded 3M, with room for the mutation lens.
   #
+  # **Raised on 2026-11-17 from the archive's `jobs.tsv` for tickets 43–54: `reviewing` 8M → 12M and
+  # 120 → 150 turns, `implementing` 4M → 8M and 300 → 400 turns, `planning` and `diagnosing` 800k →
+  # 1.5M and 80 → 120 turns.** Every `planning` of tickets 47, 48, 51, 53 and 54 and both
+  # `diagnosing`s of 49 and 52 ended `budget_exhausted` and were resumed by a one-retry self-loop to write the document in two
+  # or three turns; five `implementing`s stopped at 187–304 turns; two reviews of 53 and 54 stopped
+  # with their findings unfixed. A stop is not a saving: the resume pays for the context again. **That self-loop is gone**: no
+  # state declares an edge on `budget_exhausted` any more, so a job that runs out sticks the ticket
+  # and a person chooses to run it again (a fresh budget) or to move on. Spending more is theirs. These
+  # are still estimates, and the ledger's usage column and the budget are not counted alike (a
+  # stopped implementing showed 4.5M to 13M against a 4M budget, a stopped review 2.2M against 8M),
+  # so the next figure to correct them with is the worker's own count, not that column.
+  #
   # **8M now, an estimate and not a measurement, and so is `implementing`'s 4M beside it.** The
   # fifth lens (`agents/review.md` § The lenses, *Screenshots*) reads pictures on `sonnet` and is
   # the cheapest of the five, so 1M is a guess at a round that runs it, not a figure from one that
@@ -67,15 +79,15 @@ states:
   #
   # So the journey `dev.yml` declares prices out as below. `bug.yml`'s refinement is a job and not
   # a conversation, so it is priced at its own 1.6M budget instead of the 6M allowance — 4.4M
-  # less at every step, which is why its cap is 79.8M:
+  # less at every step, which is why its cap is 128.5M:
   #
   #     6M                             =   6M   the refinement conversation, an allowance
-  #     (0.8 + 4) + 8                  = 12.8M  the jobs on the way in, then the first review
-  #     5 × (4 + 0 + 8)                =  60M   five `issues_found` round-trips at `max: 5`
+  #     (1.5 + 8) + 12                 = 21.5M  the jobs on the way in, then the first review
+  #     5 × (8 + 0 + 12)               = 100M   five `issues_found` round-trips at `max: 5`
   #     0.6                            = 0.6M   `presenting`, once, on the way out
   #     3 × 1.6                        = 4.8M   `rebasing`, as often as the queue sends it round
   #                                      ---
-  #                                    84.2M   of which 82.6M is spent before the last job starts
+  #                                   132.9M   of which 131.3M is spent before the last job starts
   #
   # Three rebases because the engine sends a ticket down `on_conflict` by itself at most three times
   # in a row (`ForgeCore.Engine.conflict/5`), and once a ticket is approved every conflict it meets
@@ -83,8 +95,8 @@ states:
   #
   # At a 24M cap and a 7M review the third round-trip stopped mid-loop, after 3M of implementing
   # that was then never checked or reviewed, and `max: 3` on `reviewing → implementing` could not
-  # be reached at all. 84.2M clears the journey as it now stands, the 70.8M before the last review,
-  # the 78.8M before the presentation and the 82.6M before the third rebase included — the cap is
+  # be reached at all. 132.9M clears the journey as it now stands, the 115.5M before the last review,
+  # the 127.5M before the presentation and the 131.3M before the third rebase included — the cap is
   # read before a job starts, against what is spent already, so a journey whose total is the cap
   # exactly still runs to the end.
   #
@@ -110,9 +122,9 @@ states:
   # see that the plan and the code disagree, instead of one that quietly spends 4.8M a lap until
   # the cap stops it with nothing to show.
   #
-  # The cap still binds, and is still the outer backstop. The journey above prices at 84.2M, which
-  # is the cap exactly; the worst journey is that *plus* two re-plan laps, every `budget_exhausted`
-  # and `did_not_converge` retry, a refinement that talked past its allowance and a `needs_review`
+  # The cap still binds, and is still the outer backstop. The journey above prices at 132.9M, which
+  # is the cap exactly; the worst journey is that *plus* two re-plan laps, every `did_not_converge`
+  # retry and every run a person starts again after a stop, a refinement that talked past its allowance and a `needs_review`
   # rebase that sends the ticket round the review loop again, so it is strictly greater and the
   # cap is what stops it. The bounds shape the ordinary path; the cap catches the pathological one.
   #
@@ -140,11 +152,11 @@ states:
     # result stays on the larger one: cutting the writer and the reader in the same edit is not a
     # cost cut, it is a quality cut with a cost cut's arithmetic. The round count out of this
     # state is also the meter for that change — rounds of `issues_found` staying at zero or one
-    # says the cheaper `implementing` held, and rounds climbing says it did not, at 8M each.
+    # says the cheaper `implementing` held, and rounds climbing says it did not, at 12M each.
     effort: high
     produces: [report.md]
     outcomes: [done, issues_found]
-    budget: { turns: 120, tokens: 8M }
+    budget: { turns: 150, tokens: 12M }
 
   # A presentation (`produces: [presentation.md!]`): prose for the person deciding, drawn above
   # the diff on the review page with the source it quotes inline, read by no later state and

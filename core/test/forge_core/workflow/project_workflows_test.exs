@@ -98,13 +98,17 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
     end
   end
 
-  # Forward and not round again, which is ticket 13's rule; `presenting` and not `review_ready`
-  # directly, which is ticket 7's — every way to `review_ready` goes through the presentation, and
-  # an exhausted review is exactly the diff a person needs narrated.
-  test "a reviewing run that exhausts its budget goes forward to presenting, never back" do
-    for {name, workflow} <- reviewing_workflows() do
-      assert edges(workflow, "reviewing", "budget_exhausted") == [{"presenting", nil}],
-             "#{name}: budget_exhausted must leave reviewing for presenting, with no retry"
+  # A job that runs out of a ceiling is a person's decision, in every state: whether to spend
+  # more is theirs to make (run the state again, or take an edge by hand). No edge is declared on
+  # `budget_exhausted`, so the engine sticks the ticket and the queue shows it. This replaces
+  # ticket 13's rule that an exhausted review goes forward to `presenting` and the one-retry
+  # self-loops every job state carried: each spent more without anyone deciding to.
+  test "no state retries or moves on by itself when a job runs out of its budget" do
+    for path <- workflow_files(), workflow = load!(path) do
+      declared = for t <- workflow.transitions, t.when == "budget_exhausted", do: {t.from, t.to}
+
+      assert declared == [],
+             "#{Path.basename(path)}: budget_exhausted must stick the ticket, but #{inspect(declared)}"
     end
   end
 
@@ -138,8 +142,8 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
     for {name, workflow} <- reviewing_workflows() do
       budget = Workflow.state(workflow, "reviewing").budget
 
-      assert budget.tokens == 8_000_000, "#{name}: reviewing has #{budget.tokens}"
-      assert budget.turns == 120, "#{name}: reviewing has #{budget.turns} turns"
+      assert budget.tokens == 12_000_000, "#{name}: reviewing has #{budget.tokens}"
+      assert budget.turns == 150, "#{name}: reviewing has #{budget.turns} turns"
     end
   end
 
@@ -355,6 +359,28 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
     end
   end
 
+  # A person declining a presented change had no edge to take: the only one out of `review_ready`
+  # merged, so a rejection stuck the ticket and the fixes they named reached no job. The way back
+  # is a plain edge, and `feedback.md` — written on the human state — is what the jobs behind it read.
+  test "a person can decline a presented change and name what to fix" do
+    for {name, workflow} <- reviewing_workflows() do
+      assert "feedback.md" in Workflow.state(workflow, "review_ready").produces,
+             "#{name}: a person cannot write what they want changed"
+
+      assert [%Transition{to: "implementing", approve: []}] =
+               Enum.filter(
+                 Workflow.transitions_from(workflow, "review_ready"),
+                 &(&1.to == "implementing")
+               ),
+             "#{name}: review_ready has no way back to implementing"
+
+      for state <- ["implementing", "reviewing"] do
+        assert "feedback.md" in Workflow.state(workflow, state).inputs,
+               "#{name}: #{state} cannot read the person's feedback"
+      end
+    end
+  end
+
   # A review after a rebase reads the rebase and not the change a person already approved
   # (`agents/review.md` § After a rebase, review the rebase): what it is scoped to is `rebase.md`
   # and the rebase's own commit, so the document has to reach it — and the presentation, which
@@ -376,7 +402,7 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
   # ticket 7's `planning` died at turn 51 of 50 with $1.11 of its $4.00 unspent, and `publishing`
   # has no retry at all, so for it the same ceiling sticks a ticket that has already written to
   # GHCR. 60 is the repository's floor for that, and this asserts the rule rather than each
-  # figure: a state may give more turns, and `reviewing` at 120 and `implementing` at 200 do.
+  # figure: a state may give more turns, and `reviewing` at 150 and `implementing` at 400 do.
   test "a job state costing a few dollars is not stopped by its turn ceiling first" do
     budgets =
       for path <- workflow_files(),
@@ -431,7 +457,7 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
            )
 
     assert Enum.sort(for %Transition{when: w, to: "refining", max: 1} <- edges, do: w) ==
-             ["budget_exhausted", "did_not_converge"]
+             ["did_not_converge"]
   end
 
   # Wherever the key is declared it is in force, and an edge without it merges at once and skips

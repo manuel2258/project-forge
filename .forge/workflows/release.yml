@@ -155,7 +155,6 @@ transitions:
   - { from: publishing,    to: release_ready, when: snapshot_failed }
   - { from: release_ready, to: merged,        approve: [changeset], queue: true }
 
-  - { from: refining,      to: refining,      when: budget_exhausted, max: 1 }
   - { from: refining,      to: refining,      when: did_not_converge, max: 1 }
 
 limits:

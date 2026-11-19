@@ -12,6 +12,7 @@ These decisions are settled. They are not to be reopened.
 
 - A ticket moves through a statechart, not a linear pipeline. Backward transitions are normal, not exceptional.
 - Every project defines its own lifecycle in a definition file committed to that repository. The engine has no built-in default lifecycle. *Widened to one or more: a project may declare ticket types, one workflow file per type under `.forge/workflows/`, and a ticket's type is chosen at admission and pinned with its workflow; there is no default type (`design/ticket-types.md`).*
+- **A schedule is declared in a workflow file, admits nothing until a project admin switches it on, admits in that admin's name, and never admits a release.** A new door for admission, beside "any job may propose; none may create": every ticket that spends money still has a person behind it, here made once in advance and undone by a switch or by that person losing the right to admit (`design/schedules.md`, `design/workflow-grammar-v1.md` § Schedules). Times missed while the platform was down are made up by one ticket, and no lower bound is put on how often one fires.
 - **A hold is a flag on the ticket, set and lifted by a person, not a state in any workflow.** Resting states, and `initial` naming a human state, were considered and dropped: a hold needs no grammar change, works on every project and type at once, and can hold a ticket at any step (`design/workflow-grammar-v1.md` § Holding a ticket).
 - The workflow definition is pinned per ticket at admission. *Amended: a workflow may bring a ticket's branch up to date with an `update` step, which also re-pins the ticket to the workflow at the default-branch commit the code was brought up to; a person's re-pin stays (`design/workflow-grammar-v1.md` § Bringing the branch up to date, § Pinning).*
 - Approval requirements are declared per transition, and only on some transitions.
@@ -88,7 +89,9 @@ These decisions are settled. They are not to be reopened.
   `waiting?/1`. *Widens an earlier decision twice: first for a conversation's replies, a reply to a
   question you asked being the same shape of thing as an answer you are owed
   (`docs/design/conversations.md` § In the queue, and on the phone); then to every waiting kind,
-  once the phone became a client the operator develops from rather than an inbox for questions.
+  once the phone became a client the operator develops from rather than an inbox for questions;
+  then to a schedule that fails to admit or switches itself off, which every member of the project
+  is told of on the phone and in the queue (`docs/design/schedules.md` § Alerts).
   See `docs/design/ui.md` § The phone.*
 - Additional views: ticket timeline, job view showing the pinned input manifest, and merge approval showing the diff alongside the verification report, the documents the change was built from, the questions answered, and total cost. *Amended by the UI redesign (`docs/design/ui.md`): the board is dropped — a project's tickets are one list and its workflow a map with the open tickets on it — and the review page is folded into the ticket's Changes view, where the merge approval still shows the documents the change was built from, the questions answered and the cost, under Files and in the approval's panel. Reverses "board" in this list; the person deciding the redesign confirmed it. `/board` and the review page's address are gone.*
 - Live output is shown on a page about one piece of work that the operator has opened — a
@@ -98,7 +101,9 @@ These decisions are settled. They are not to be reopened.
   narrows its first replacement ("where the operator is waiting for it") from who is waiting to
   who is looking. `docs/design/ui.md` § Motion and structure carries the distinction.*
 - Ticket proposals are digested, never queued: the queue's decisions are what will not move until
-  a person acts, and a proposal blocks nothing. *The queue also serves open non-blocking
+  a person acts, and a proposal blocks nothing. *Widened: a schedule that failed to admit or switched
+  itself off is in the queue, since nothing it was meant to start will start until a person looks
+  (`docs/design/schedules.md` § Alerts). The queue also serves open non-blocking
   questions, beneath its decisions and in no count of what is waiting (`docs/design/ui.md` § Not
   waiting on you); a proposal is not among them, and is decided on the project page.*
 - Message delivery must be visibly reliable: message state shown, sends retried, answers composed offline and synced. A silently dropped message must be impossible.

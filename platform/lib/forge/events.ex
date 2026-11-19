@@ -223,6 +223,17 @@ defmodule Forge.Events do
     )
   end
 
+  @doc """
+  Tells the pages drawing one project's schedules, and the queues that may hold one's alert, that a
+  schedule changed (`docs/design/schedules.md` § Alerts). A schedule has no ticket to notify, so
+  the project's own topic and the queue's carry it.
+  """
+  @spec notify_schedules(String.t()) :: :ok
+  def notify_schedules(project_id) when is_binary(project_id) do
+    notify_project(project_id)
+    queue_changed(project_id)
+  end
+
   @doc "Subscribes the caller to `{:project_changed, project_id}` for that one project."
   @spec subscribe_project(String.t()) :: :ok | {:error, term()}
   def subscribe_project(project_id) when is_binary(project_id),
@@ -451,6 +462,30 @@ defmodule Forge.Events do
          _bound
        ),
        do: "cap #{ForgeCore.Usage.format(from)} → #{ForgeCore.Usage.format(to)}"
+
+  # A schedule's, and the ticket it admitted (`docs/design/schedules.md` § Events). The reason a
+  # schedule failed or switched itself off is words from the platform and a repository, bounded
+  # like any other line in the log.
+  defp describe(
+         %Event{type: "ticket.admitted", payload: %{"schedule" => %{"name" => name} = schedule}},
+         _bound
+       ),
+       do:
+         "admitted by the schedule #{name}, due #{Forge.Schedules.due_date(schedule["due_at"])}" <>
+           if(schedule["admin"], do: ", in #{schedule["admin"]}'s name", else: "")
+
+  defp describe(%Event{type: "schedule.switched_on", payload: %{"name" => name} = p}, _bound),
+    do: "schedule #{name} switched on#{if p["cron"], do: " (#{p["cron"]})"}"
+
+  defp describe(%Event{type: "schedule.switched_off", payload: %{"name" => name} = p}, bound),
+    do: "schedule #{name} switched off#{note(p["reason"], bound)}"
+
+  defp describe(%Event{type: "schedule.failed", payload: %{"name" => name} = p}, bound),
+    do:
+      "schedule #{name} could not admit its ticket due #{Forge.Schedules.due_date(p["due_at"])}#{note(p["reason"], bound)}"
+
+  defp describe(%Event{type: "schedule.dismissed", payload: %{"name" => name}}, _bound),
+    do: "schedule #{name}: alert dismissed"
 
   # The hold and milestones (`docs/design/workflow-grammar-v1.md` § Holding a ticket,
   # `docs/design/ui.md` § Milestones). *On hold*, *hold* and *release*: never *paused*, which is the

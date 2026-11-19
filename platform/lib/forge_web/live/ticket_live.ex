@@ -252,6 +252,7 @@ defmodule ForgeWeb.TicketLive do
       proposals: Proposals.open_for_ticket(ticket.id),
       changeset: Artifacts.latest(ticket.id, Workflow.changeset_artifact()),
       release: release(ticket),
+      scheduled: scheduled(ticket),
       # The hold (`docs/design/workflow-grammar-v1.md` § Holding a ticket): what releasing does, and
       # whether a run is still going that Stop now would stop. The open milestones are what the
       # details' select offers.
@@ -329,10 +330,18 @@ defmodule ForgeWeb.TicketLive do
   defp ticket_events(ticket) do
     ticket.id
     |> Events.for_ticket()
-    |> Enum.filter(&(&1.type in TicketViews.said_types()))
+    |> Enum.filter(&(&1.type in TicketViews.said_types() and listed_admission?(&1)))
     |> Enum.reverse()
     |> Enum.take(12)
   end
+
+  # An admission is on the ticket's Activity only when a schedule made it: a person's own is the
+  # ticket's first line already, and `docs/design/ui.md` § Activity names which schedule and whose
+  # name for the other.
+  defp listed_admission?(%{type: "ticket.admitted", payload: payload}),
+    do: is_map(payload["schedule"])
+
+  defp listed_admission?(_event), do: true
 
   # The Accept area's model while the ticket rests in a chat step that has a conversation.
   defp step_view(%Forge.Tickets.Ticket{status: status} = ticket)
@@ -354,6 +363,22 @@ defmodule ForgeWeb.TicketLive do
     |> Events.for_ticket()
     |> Enum.filter(&(&1.type == "step.accepted"))
     |> Map.new(&{&1.job_id, &1.payload})
+  end
+
+  # The schedule that admitted the ticket and the admin it acted for, from the `ticket.admitted` event,
+  # or nil for a ticket a person admitted (`docs/design/schedules.md` § The pages).
+  defp scheduled(ticket) do
+    case Events.latest_for_ticket(ticket.id, "ticket.admitted") do
+      %{payload: %{"schedule" => %{"name" => name} = schedule}} ->
+        %{
+          name: name,
+          due: schedule["due_at"] && Forge.Schedules.due_date(schedule["due_at"]),
+          by: schedule["admin"]
+        }
+
+      _admitted_by_a_person ->
+        nil
+    end
   end
 
   # A release ticket's band and the head of its Steps (`ui.md` § Steps, `21e`): who started it,

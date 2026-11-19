@@ -303,6 +303,64 @@ defmodule ForgeWeb.Api.Render do
     }
   end
 
+  @doc """
+  The schedules one type's file declares, as `Forge.Schedules.declared/3` read them: one object
+  each, with what the file says (`cron`, `title`, `body`) and what a person did about it. A file
+  that does not parse lists the schedules that are on, by name, with the file's problem.
+  """
+  def schedules(%{type: type, schedules: schedules, error: error}) do
+    Enum.map(schedules, fn s ->
+      s.row
+      |> then(&schedule(type, s, &1))
+      |> Map.put(:file_error, error && ForgeCore.Error.to_text(error))
+    end)
+  end
+
+  @doc "One schedule: `declared` is what the file says (nil when it cannot be read), `row` what is kept."
+  def schedule(type, declared, row) do
+    declared = declared || %{name: row.name, cron: row.cron, title: nil, body: nil, next_at: nil}
+
+    Map.merge(
+      %{
+        type: type,
+        name: declared.name,
+        cron: declared.cron,
+        title: declared.title,
+        body: declared.body,
+        next_at: declared.next_at
+      },
+      kept_schedule(row)
+    )
+  end
+
+  defp kept_schedule(nil) do
+    %{
+      on: false,
+      enabled_by: nil,
+      enabled_at: nil,
+      last_ticket: nil,
+      problem: nil,
+      problem_kind: nil,
+      problem_at: nil,
+      alert_open: false
+    }
+  end
+
+  defp kept_schedule(%Forge.Schedules.Schedule{} = row) do
+    on = Forge.Schedules.Schedule.on?(row)
+
+    %{
+      on: on,
+      enabled_by: if(on, do: row.enabled_by && row.enabled_by.email),
+      enabled_at: if(on, do: row.enabled_at),
+      last_ticket: row.last_ticket && row.last_ticket.number,
+      problem: row.problem,
+      problem_kind: row.problem_kind,
+      problem_at: row.problem_at,
+      alert_open: row.alerted_at != nil
+    }
+  end
+
   def queue_item(%{kind: kind, since: since} = item, project_name) do
     %{
       kind: kind,

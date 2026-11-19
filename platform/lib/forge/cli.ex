@@ -128,6 +128,10 @@ defmodule Forge.CLI do
     "STUCK     #{label(ticket)}  in #{d.state}; choose a transition with forge.transition"
   end
 
+  defp queue_line(%{kind: :schedule, project: project, detail: d}) do
+    "SCHEDULE  #{project.name}  #{d.name}: #{d.reason}"
+  end
+
   defp queue_line(%{kind: :review, ticket: ticket, detail: d}) do
     "REVIEW    #{label(ticket)}  in #{d.state}; next: #{Enum.join(d.transitions, ", ")}"
   end

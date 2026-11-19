@@ -323,6 +323,48 @@ defmodule Forge.Operator do
   defp start_or_hold(%{on_hold: on_hold}) when is_boolean(on_hold), do: :ok
   defp start_or_hold(_attrs), do: {:error, :start_or_hold}
 
+  ## Schedules
+
+  @doc """
+  Switches a project's schedule on (`docs/design/schedules.md`): from now on it admits tickets in
+  the name of `user`, who must be an admin of the project. **A project admin's own act, by session
+  or by their own user token, and no project token's, whatever its access**: the function takes a
+  `%User{}` only, so a token cannot reach it by construction, and the capability asked is
+  `:manage`, which a member does not hold. `type` is the ticket type whose file declares it, nil
+  for the single `.forge/workflow.yml`.
+
+  Refused with `:schedule_gone`, `:schedule_unreadable` or `:already_on`, writing nothing.
+  """
+  @spec switch_schedule_on(Project.t(), User.t(), String.t() | nil, String.t()) ::
+          {:ok, Forge.Schedules.Schedule.t()} | {:error, term()}
+  def switch_schedule_on(%Project{} = project, %User{} = user, type, name) do
+    with :ok <- allow(project, user, :manage) do
+      Forge.Schedules.switch_on(project, user, type, name)
+    end
+  end
+
+  @doc "Switches a schedule off. A project admin's, on the same terms as switching it on."
+  @spec switch_schedule_off(Project.t(), User.t(), String.t() | nil, String.t()) ::
+          {:ok, Forge.Schedules.Schedule.t()} | {:error, term()}
+  def switch_schedule_off(%Project{} = project, %User{} = user, type, name) do
+    with :ok <- allow(project, user, :manage) do
+      Forge.Schedules.switch_off(project, user, type, name)
+    end
+  end
+
+  @doc """
+  Dismisses the queue item of a schedule that failed or switched itself off. Any member may, as
+  anyone may answer a question, and so may a project token with API write: `:use`. Recorded with
+  who.
+  """
+  @spec dismiss_schedule(Project.t(), actor(), String.t() | nil, String.t()) ::
+          {:ok, Forge.Schedules.Schedule.t()} | {:error, term()}
+  def dismiss_schedule(%Project{} = project, actor, type, name) do
+    with :ok <- allow(project, actor, :use) do
+      Forge.Schedules.dismiss(project, Actor.of(actor), type, name)
+    end
+  end
+
   ## Hold, titles and milestones
 
   @doc """

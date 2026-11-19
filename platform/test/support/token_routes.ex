@@ -47,6 +47,10 @@ defmodule ForgeWeb.TokenRoutes do
     {:post, "/api/v1/projects/:project/milestones/:id/close"} => :token_write,
     {:post, "/api/v1/projects/:project/milestones/:id/reopen"} => :token_write,
     {:post, "/api/v1/projects/:project/milestones/:id/move"} => :token_write,
+    {:get, "/api/v1/projects/:project/schedules"} => :token_read,
+    {:post, "/api/v1/projects/:project/schedules/on"} => :token_never,
+    {:post, "/api/v1/projects/:project/schedules/off"} => :token_never,
+    {:post, "/api/v1/projects/:project/schedules/dismiss"} => :token_write,
     {:get, "/api/v1/projects/:project/proposals"} => :token_read,
     {:post, "/api/v1/proposals/:version_id/accept"} => :token_write,
     {:post, "/api/v1/proposals/:version_id/decline"} => :token_write

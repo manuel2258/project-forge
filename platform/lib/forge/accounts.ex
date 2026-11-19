@@ -494,12 +494,16 @@ defmodule Forge.Accounts do
   def suspend_user(%User{id: id}, %User{id: id}), do: {:error, :self}
 
   def suspend_user(%User{} = user, %User{} = by) do
-    with {:ok, %{user: suspended, sessions: sessions}} <-
+    with {:ok, %{user: suspended, sessions: sessions} = changes} <-
            govern(user, by, "user.suspended", [suspended_at: DateTime.utc_now(:second)],
-             also: &drop_sessions(&1, user)
+             also:
+               &(&1
+                 |> drop_sessions(user)
+                 |> Forge.Schedules.put_withdrawn(:all, user, :suspended))
            ) do
       # After the commit, so a page that reconnects at once finds its session already gone.
       ForgeWeb.UserAuth.disconnect_sessions(sessions)
+      Forge.Schedules.announce_withdrawn(changes)
       {:ok, suspended}
     end
   end

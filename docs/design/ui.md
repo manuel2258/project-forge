@@ -560,7 +560,9 @@ What asks: revoking a token or a credential, deleting a secret or a waiting acco
 member, a mirror, a template or a provider credential, destroying or retiring a machine, ending a
 conversation, cancelling a ticket, taking one out of the merge queue, suspending an account,
 making someone a node admin or a project admin, making yourself a project member, re-pinning a
-ticket and sending one on from a merge conflict.
+ticket, sending one on from a merge conflict and switching a schedule on (in neutral tone: it says
+what the schedule admits, how often in words, and that each ticket is admitted in the person's
+name; switching one off asks nothing).
 
 ### The decision row
 
@@ -974,6 +976,11 @@ in words if sent. At the end of the pass, the first item to arrive is drawn.
 
 ### What each kind shows
 
+- **A schedule that failed or switched itself off** (`docs/design/schedules.md` § Alerts) is an item
+  of its own with no ticket: the eyebrow *schedule failed* or *schedule switched off*, a sentence
+  naming the schedule and why (*Schedule weekly-cleanup could not admit its ticket: its workflow
+  does not parse…*), **Dismiss** (any member's, which clears the item and leaves the problem on the
+  schedule), and *Open the schedule ›* to its row on the Workflow view. Words from a file are text.
 - **Every item about a ticket** shows **the ticket's past**, between the context card and what is
   particular to the kind: one line per step it has been in, in the order it first reached them —
   *implementing · 4 runs · last converged* — then, when a loop has fired, the loops. An agent step
@@ -1149,7 +1156,8 @@ queue and the push as on any ticket; a ticket admitted on hold and never started
 (`Forge.Queue.for_ticket/1`).
 
 **The queue button's count is the number of items the queue page draws** for the viewer: questions
-grouped per document version, approvals, stuck tickets, conversations waiting on their reader — and
+grouped per document version, approvals, stuck tickets, conversations waiting on their reader,
+schedules that failed or switched themselves off — and
 not assumptions, not an open ticket drawn in **Open tickets**. **For a node admin it also counts accounts waiting
 for approval** (`12i`): an account waiting on an admin is a decision, and without it in the count
 nobody would know to look. **The queue lists them where the count says they are**: one item,
@@ -1187,9 +1195,10 @@ as a blocking question by accident; the page draws it at the end of the pass:
 ### Push follows the queue
 
 Anything that starts waiting on a human pushes to the phones of the people in its project — a
-blocking question, an approval, a stuck ticket, a ticket ready for review, a conversation's reply —
+blocking question, an approval, a stuck ticket, a ticket ready for review, a conversation's reply,
+a schedule that failed or switched itself off —
 and links to the object: a ticket's URL, which opens on the view holding what waits (§ The ticket),
-and a conversation's Talk. An assumption, which waits on nobody, is digested. The rule is
+a conversation's Talk, and a schedule's row on the Workflow view. An assumption, which waits on nobody, is digested. The rule is
 `Queue.waiting?/1`, not a list kept beside it, so a queue kind added later pushes or does not for
 the same reason.
 
@@ -1427,7 +1436,8 @@ with no earlier release draws nothing there. The platform keeps no git tags to r
 ### The details
 
 `6d`. Tapping the title drops the ticket's details: its facts (type, workflow and its pin, branch,
-admitted, jobs and usage in windows, the capacity lines written out for the project's pool —
+admitted — and, for a ticket a schedule admitted, *Admitted by the schedule `name`, due 2026-11-23, in
+ana@example.com's name*, from its `ticket.admitted` event — jobs and usage in windows, the capacity lines written out for the project's pool —
 § Usage), what it pinned, and its lifecycle actions. Three notices live here, each shown only while
 true:
 
@@ -1615,7 +1625,9 @@ and the chip there said it again a line away. A conversation's job is not opened
 its Activity is where it is read.
 
 Under the stream, **On the ticket** lists what happened to the ticket itself rather than in a job
-— a decision and its note, a transition, a stick, a merge-queue event, a rename, **a job extended, a
+— a decision and its note, a transition, a stick, a merge-queue event, a rename, **an admission by a
+schedule** (*admitted by the schedule `weekly-cleanup`, due 2026-11-23, in ana@example.com's name*; a person's
+own is the ticket's first line and not repeated), **a job extended, a
 state run again with its note, a cap raised** — newest first. Each of the last three says who did
 it, and so does every other row a person acted on now but a jump: their address, or `API · <token name>`.
 **A jump reads as one**: *jumped from planning to reviewing, with no transition*, by whoever made
@@ -2055,6 +2067,22 @@ another type), each under its name and description, a type that does not parse s
 `.forge/workflows/` holds that is not a type is listed with why, since it blocks nothing and would
 otherwise be invisible (`ticket-types.md` § The project page). The release workflow is one of the
 types, and says it is the release.
+
+**Schedules** are drawn in each type's section, under its name and description and above its flow
+(`docs/design/schedules.md` § The pages): one row per schedule the file declares — its name, its
+cron line with what it means in words (*every Monday at 06:00 UTC*), its title, **the next time it
+fires in the reader's own time** (a `<time>` the browser's hook rewrites, with the UTC text as the
+fallback and *in 2d 3h* beside it), *on* or *off* and, when on, *Switched on by ana@example.com, 3 days ago*,
+the ticket it last admitted (linked), what it admits as a disclosure, and its problem in the warning
+notice. **A project admin sees the switch** — *Switch on* behind a confirm in the neutral tone (§ The
+confirm), and a plain *Switch off*; a member sees the state and none. A refused switch (no longer an
+admin, the schedule left the file meanwhile) is drawn in place, under the row it was about, and
+nothing changes. **A type whose file declares none says how one is added** — *No schedules. A
+`schedules:` key in `.forge/workflows/chore.yml` would admit a ticket of this type on a clock.* —
+and the release type says nothing of the kind, since it may not have one. **A file that does not
+parse** lists the schedules that are on, by name, with the file's reason in the type's own notice.
+A long name, title or cron line wraps, and markup in any is shown as text. An alert's link carries
+`type=`, so the page opens on the type holding the schedule.
 
 **On a portrait and a wide screen the workflow is a map** (`7g`, `7h`): a box per state with its
 job and budget, states joined left to right in declared order, skips and loops drawn as arcs, and

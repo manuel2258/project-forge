@@ -2,7 +2,8 @@ defmodule Forge.Queue do
   @moduledoc """
   The operator's queue: everything waiting on a human decision, in one ordered list.
   Blocking questions, pending approvals, stuck tickets, tickets resting in a human state that
-  has a way forward, and conversations waiting on a reply.
+  has a way forward, conversations waiting on a reply, and schedules that failed or switched
+  themselves off (`docs/design/schedules.md` § Alerts).
 
   And one kind in that list that is waiting on nobody: an open non-blocking question, served as
   `:assumption` — the agent said what it assumed and carried on. It is here so that it reaches
@@ -34,11 +35,12 @@ defmodule Forge.Queue do
   @typedoc """
   One thing waiting on a person.
 
-  `ticket` is nil for a conversation about a project, which is why every reader of this has to
-  take a project of its own rather than reaching through the ticket.
+  `ticket` is nil for a conversation about a project and for a schedule that failed or switched
+  itself off, which is why every reader of this has to take a project of its own rather than
+  reaching through the ticket.
   """
   @type item :: %{
-          kind: :question | :assumption | :approval | :stuck | :review | :chat,
+          kind: :question | :assumption | :approval | :stuck | :review | :chat | :schedule,
           ticket: Ticket.t() | nil,
           project: Projects.Project.t(),
           since: DateTime.t(),
@@ -225,7 +227,10 @@ defmodule Forge.Queue do
     tickets = askable(tickets)
 
     {waiting, assumed} =
-      (questions(tickets) ++ decisions(tickets) ++ chats(project_ids))
+      (questions(tickets) ++
+         decisions(tickets) ++
+         chats(project_ids) ++
+         Forge.Schedules.items(project_ids))
       |> Enum.split_with(&waiting?/1)
 
     oldest_first(waiting) ++ oldest_first(assumed)

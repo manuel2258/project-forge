@@ -20,6 +20,12 @@ touch a ticket that is not its own. Creating work spends money and takes a slice
 `docs/vision.md` is explicit that an agent may never widen its own envelope. Admission is the
 human act that widens it, and it already exists: `Forge.Tickets.admit/3`.
 
+**Switching a schedule on is that act, made once in advance** (`schedules.md`): a project admin
+switches on a schedule a workflow file declares, and from then every ticket it admits is admitted in
+their name. A schedule a file declares and nobody switched on admits nothing, so a job that writes
+one into a workflow file on its own branch — which a person merges — has still proposed and not
+admitted.
+
 This also makes loops a non-problem. Ticket A's job proposes B, whose job proposes C — and it
 terminates, because a person stands between each pair. There is no `propose_depth` and there does
 not need to be one.

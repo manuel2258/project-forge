@@ -69,6 +69,19 @@ not run here (its § Not verified here).
 defaults and state templates a type imports, and a proposal that may suggest a type a person
 confirms. **It is built**; nothing yet has run on a real project with types.
 
+`docs/design/schedules.md` is the standard for tickets admitted on a clock: a `schedules:` list in a
+workflow file (a name, a five-field cron line read in UTC, a title and a body), a `schedules` row for
+each one a project admin has switched on, and a runner that admits an ordinary ticket in that
+admin's name when one comes due. **It is built**: the grammar and cron dialect in `core`, a
+schedule off until a person switches it on and off again when it leaves its file or its admin loses
+the right to admit (checked when it fires, not only when the role changes), one ticket however many
+times were missed, a failure recorded and never retried before the next time, and an alert in the
+queue and on the phone that a repeat does not push again; on the project page's Workflow view, in
+the queue, over the JSON API and on a scheduled ticket's details. **Not verified here:** a runner
+over days on a real node, pushes to real phones, and a scheduled ticket of a real agent type
+merged end to end (`docs/design/schedules.md` § Not verified here). Nothing under `.forge/` declares
+a schedule yet.
+
 `docs/design/commands.md` is the standard for commands: a fixed script a workflow declares once,
 run as a job of its own — by a command state on entry, its exit statuses mapped to an outcome, or
 by an agent that writes `$FORGE_JOB/invoke.json` and parks until its commands are done. **It is

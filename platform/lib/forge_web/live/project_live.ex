@@ -46,6 +46,7 @@ defmodule ForgeWeb.ProjectLive do
     ProjectTickets,
     ProposalsView,
     ReleaseComponents,
+    SchedulesView,
     WorkflowMap
   }
 
@@ -73,6 +74,8 @@ defmodule ForgeWeb.ProjectLive do
        refusal: nil,
        filter: "open",
        type: nil,
+       # A refusal of a schedule's switch, by the schedule it was pressed on.
+       schedule_refusals: %{},
        release_error: nil,
        chat_error: nil,
        # The Proposals view's own state (`docs/design/ui.md` § Proposals): which list, whether
@@ -99,8 +102,15 @@ defmodule ForgeWeb.ProjectLive do
 
     read = if is_binary(params["read"]) and params["read"] != "", do: params["read"]
 
+    # `type=` is how an alert's link opens the Workflow view on the type holding its schedule.
+    type =
+      if is_binary(params["type"]) and params["type"] != "",
+        do: params["type"],
+        else: socket.assigns.type
+
     {:noreply,
      assign(socket,
+       type: type,
        view: view,
        # Only a view the address names, not the default: the wide page then opens on it.
        view_given: params["view"] in @views and params["view"] != "tickets",
@@ -150,6 +160,7 @@ defmodule ForgeWeb.ProjectLive do
       # The repository's current workflow, which is what the *next* ticket will pin — not the
       # one each open ticket follows, which it pinned at admission.
       current: current,
+      schedules: schedules(current, project, now),
       forge_release: forge_release(project, tip),
       release: release_block(socket, current, project),
       latest_release: Forge.ReleaseRecords.latest(project),
@@ -163,6 +174,43 @@ defmodule ForgeWeb.ProjectLive do
     |> load_proposals(project, all)
     |> load_chats()
   end
+
+  defp switch_schedule(act, %{"name" => name} = params, socket) when is_binary(name) do
+    type = blank_to_nil(params["type"])
+    user = socket.assigns.current_scope.user
+    project = socket.assigns.project
+    key = SchedulesView.key(type, name)
+
+    result =
+      case act do
+        :on -> Operator.switch_schedule_on(project, user, type, name)
+        :off -> Operator.switch_schedule_off(project, user, type, name)
+      end
+
+    refusals =
+      case result do
+        {:ok, _schedule} ->
+          Map.delete(socket.assigns.schedule_refusals, key)
+
+        {:error, reason} ->
+          Map.put(socket.assigns.schedule_refusals, key, SchedulesView.explain(reason))
+      end
+
+    {:noreply, socket |> assign(schedule_refusals: refusals) |> load()}
+  end
+
+  defp switch_schedule(_act, _params, socket), do: {:noreply, socket}
+
+  # What each type's file declares, with what a person has done about it (`Forge.Schedules`). Rows
+  # only: the file was read for `current`, which is the one commit the whole page is drawn from.
+  defp schedules({:ok, types}, project, now),
+    do: Forge.Schedules.declared(types, Forge.Schedules.rows(project), now)
+
+  # No workflow to read at all — none, or both forms — so no type to put them under: the schedules
+  # that are on are listed on their own, with why (`docs/design/schedules.md` § A file that does not
+  # read). The runner treats this as a failure to read, so they alert, and must be switchable off.
+  defp schedules({:error, reason}, project, now),
+    do: Forge.Schedules.unreadable(Forge.Schedules.rows(project), reason, now)
 
   defp default_tip(project) do
     case Git.resolve(Projects.repo_path(project), project.default_branch) do
@@ -465,6 +513,12 @@ defmodule ForgeWeb.ProjectLive do
     do: {:noreply, assign(socket, type: value)}
 
   def handle_event("workflow:type", _params, socket), do: {:noreply, socket}
+
+  # A schedule switched on or off, by the admin pressing it. The operation is the guard: a member's
+  # `schedule:on` pushed by hand is refused there and changes nothing, and the refusal is drawn on
+  # the row it was about (`docs/design/schedules.md` § Switching on and off).
+  def handle_event("schedule:on", params, socket), do: switch_schedule(:on, params, socket)
+  def handle_event("schedule:off", params, socket), do: switch_schedule(:off, params, socket)
 
   # A conversation started in place, the project fixed (`7c`). `Operator.open_chat/4` checks the
   # person is a member, which this page's mount already did — the check is the operation's.
@@ -1722,6 +1776,17 @@ defmodule ForgeWeb.ProjectLive do
             lives in the repository, so it is pushed rather than edited here.
           </.notice>
 
+          <SchedulesView.block
+            :for={entry <- @schedules}
+            :if={match?({:error, _reason}, @current)}
+            entry={entry}
+            path=""
+            project={@project}
+            admin={@manage}
+            refusals={@schedule_refusals}
+            now={@now}
+          />
+
           <%!-- One per ticket type, each with its own states, the one the switch shows drawn and
                 the rest hidden; a broken one says why. See docs/design/ticket-types.md § The
                 project page. --%>
@@ -1745,6 +1810,16 @@ defmodule ForgeWeb.ProjectLive do
                 elem(type.workflow, 1)
               )}.
             </.notice>
+
+            <SchedulesView.block
+              :for={declared <- Enum.filter(@schedules, &(&1.type == type.name))}
+              entry={declared}
+              path={type.path}
+              project={@project}
+              admin={@manage}
+              refusals={@schedule_refusals}
+              now={@now}
+            />
 
             <div :if={Admission.ready?(type.workflow)} class="workflow-flow-wrap">
               <WorkflowMap.flow

@@ -247,6 +247,30 @@
   .workflow-source { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; font-size: 13px; }
   .workflow-type-name { font-family: var(--font-mono); font-size: 13px; font-weight: 600; }
   .workflow-release { font-family: var(--font-mono); font-size: 11px; color: var(--link); }
+  /* Schedules (docs/design/schedules.md): a list of rows under each type, every word of which is a
+     file's and so wraps rather than overflows. */
+  .schedules { display: flex; flex-direction: column; gap: 8px; }
+  .schedule { display: flex; min-width: 0; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-1); font-size: 13px; }
+  .schedule--on { border-left: 3px solid var(--link); }
+  .schedule-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+  .schedule-name { min-width: 0; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+  .schedule-state { font-family: var(--font-mono); font-size: 11px; color: var(--ink-3); }
+  .schedule-state--on { color: var(--link); }
+  .schedule-cron,
+  .schedule-title,
+  .schedule-by,
+  .schedule-next,
+  .schedule-last { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  .schedule-cron .font-mono { overflow-wrap: anywhere; }
+  .schedule-words { color: var(--ink-2); }
+  .schedule-title { font-weight: 500; }
+  .schedule-label { margin-right: 6px; font-size: 11.5px; color: var(--ink-3); }
+  .schedule-ago { margin-left: 6px; color: var(--ink-3); }
+  .schedule-by { font-size: 12px; color: var(--ink-2); }
+  .schedule-problem-at { display: block; margin-top: 2px; font-size: 11.5px; opacity: .7; }
+  .schedule-body > summary { cursor: pointer; font-size: 12px; color: var(--ink-3); }
+  .schedule-body-text { margin: 4px 0 0; padding: 8px; overflow-wrap: anywhere; white-space: pre-wrap; border-radius: 6px; background: var(--surface-2); font-family: var(--font-mono); font-size: 12px; }
+  .schedule-controls { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 4px; }
   .not-types { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; opacity: .8; }
   .wf-flow { display: flex; flex-direction: column; }
   .wf-step { position: relative; display: flex; gap: 12px; padding: 0 0 18px 2px; }

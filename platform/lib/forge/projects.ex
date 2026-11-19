@@ -398,14 +398,19 @@ defmodule Forge.Projects do
       on_conflict: {:replace, [:role, :updated_at]},
       conflict_target: [:project_id, :user_id]
     )
+    |> put_demoted(project, user, role)
     |> Events.log(:event, "project.member_set", {:user, by.id}, %{
       project_id: project.id,
       payload: %{"project_id" => project.id, "user_id" => user.id, "role" => to_string(role)}
     })
     |> Repo.transaction()
     |> case do
-      {:ok, %{member: member}} -> {:ok, member}
-      {:error, _step, reason, _changes} -> {:error, reason}
+      {:ok, %{member: member} = changes} ->
+        Forge.Schedules.announce_withdrawn(changes)
+        {:ok, member}
+
+      {:error, _step, reason, _changes} ->
+        {:error, reason}
     end
   end
 
@@ -430,16 +435,29 @@ defmodule Forge.Projects do
       from(m in Member, where: m.project_id == ^project.id and m.user_id == ^user.id)
     )
     |> put_withdrawn(project, user)
+    |> Forge.Schedules.put_withdrawn(project, user, :removed)
     |> Events.log(:event, "project.member_removed", {:user, by.id}, %{
       project_id: project.id,
       payload: %{"project_id" => project.id, "user_id" => user.id}
     })
     |> Repo.transaction()
     |> case do
-      {:ok, _changes} -> :ok
-      {:error, _step, reason, _changes} -> {:error, reason}
+      {:ok, changes} ->
+        Forge.Schedules.announce_withdrawn(changes)
+        :ok
+
+      {:error, _step, reason, _changes} ->
+        {:error, reason}
     end
   end
+
+  # A schedule acts in the name of the admin who switched it on: demoted, they stop being one, so
+  # theirs are switched off with the change of role (`docs/design/schedules.md` § Switching itself
+  # off). Promotion or a role kept as admin touches nothing.
+  defp put_demoted(multi, project, user, :member),
+    do: Forge.Schedules.put_withdrawn(multi, project, user, :demoted)
+
+  defp put_demoted(multi, _project, _user, :admin), do: multi
 
   defp not_last_admin(project, user),
     do: if(last_admin?(project, user), do: {:error, :last_admin}, else: {:ok, nil})

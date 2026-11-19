@@ -124,6 +124,11 @@ stored as `proposal-<your file name>`; the platform adds the prefix, so do not. 
 admits it as an ordinary ticket, pinning the project's workflow — the chosen ticket type's, on a
 project with types — **at that moment** rather than when it was proposed.
 
+A ticket may also be admitted by a **schedule**: a workflow file may declare `schedules:`, and once a
+project admin has switched one on, the platform admits an ordinary ticket of that type on its cron
+line, in that admin's name. You change a schedule only as you change a workflow — a commit on your
+branch that a person merges — and a schedule you add is off until a person switches it on.
+
 This is the same rule as everywhere else here — your write scope is your own ticket, and beyond
 it you can only speak. It is also why proposing is free: nothing you write starts work, spends
 money or takes a machine.

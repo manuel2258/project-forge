@@ -103,6 +103,9 @@ it. Every refusal to authenticate is the same 401 body.
 | `POST /tickets/:project/:number/title` `{title}`, `…/milestone` `{milestone_id}`, `…/move` `{to: top\|up\|down\|bottom}` or `{before: number}` | Retitle (a release's is 422 `release_title`); put in a milestone or none; order |
 | `GET /projects/:project/milestones`, `POST` | List with order, current, closed, progress and ticket numbers in order; create `{name, description}` |
 | `POST /projects/:project/milestones/:id` and `/:id/{current,close,reopen,move}` | Update; mark current (`current: false` unmarks); close; reopen; order. Other projects' ids answer 404. |
+| `GET /projects/:project/schedules` | Every schedule the project's workflow files declare, with its type, cron line, title, body, whether it is on and by whom, the next time it fires, its last ticket's number, its problem and whether an alert is open, and `file_error` (null, or why its file does not parse). Where there is no workflow to read at all, the schedules that are on are listed by name with the reason in `file_error` and no title or body. Members and project tokens with read; another project's is 404. |
+| `POST /projects/:project/schedules/{on,off}` `{type, name}` | Switch a schedule on or off — a project admin's session or own user token only, 403 for a member and for every project token; 409 `schedule_gone`, `schedule_unreadable`, `already_on`, `already_off` (`schedules.md`). `type` is absent for the single `.forge/workflow.yml`. |
+| `POST /projects/:project/schedules/dismiss` `{type, name}` | Dismiss a schedule's queue item — any member, or a token with write; 409 `no_alert`. |
 | `GET /me` | The token's user; for a project token, `{token: {id, name, project, git, api, expires_at}}` |
 | `GET /queue` | The operator queue |
 | `GET /projects`, `POST /projects` | List; register `{name, default_branch}` (repository created under the platform's repos directory) |

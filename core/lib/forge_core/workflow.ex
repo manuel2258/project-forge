@@ -42,7 +42,7 @@ defmodule ForgeCore.Workflow do
   @spec platform_docs() :: [{String.t(), String.t()}]
   def platform_docs, do: [{"platform.md", @platform}, {"workflow-grammar.md", @grammar}]
 
-  alias ForgeCore.Workflow.{Command, Defaults, Limits, Resources, State, Transition}
+  alias ForgeCore.Workflow.{Command, Defaults, Limits, Resources, Schedule, State, Transition}
 
   @engine_outcomes ~w(did_not_converge budget_exhausted error cancelled)
   @default_outcome "done"
@@ -66,6 +66,7 @@ defmodule ForgeCore.Workflow do
             limits: nil,
             defaults: nil,
             commands: %{},
+            schedules: [],
             release: false,
             release_files: [],
             release_notes: nil
@@ -83,6 +84,8 @@ defmodule ForgeCore.Workflow do
           limits: Limits.t(),
           defaults: Defaults.t() | nil,
           commands: %{String.t() => Command.t()},
+          # Tickets of this file's type admitted on a clock once an admin switches each on.
+          schedules: [Schedule.t()],
           release: boolean(),
           release_files: [artifact_name()],
           release_notes: artifact_name() | nil
@@ -231,7 +234,8 @@ defmodule ForgeCore.Workflow do
 
   @doc """
   `valid_name?/1`'s rule in words, for every message that refuses a name by it: one wording, so a
-  state, an artifact, a command, a ticket type and a library path are refused in the same terms.
+  state, an artifact, a command, a ticket type, a schedule and a library path are refused in the same
+  terms.
   """
   @spec name_rule() :: String.t()
   def name_rule, do: "letters, digits, . _ -, starting with a letter or digit"

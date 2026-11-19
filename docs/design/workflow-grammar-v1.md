@@ -150,6 +150,12 @@ transitions:
 
 limits:
   ticket_tokens: 5M
+
+schedules:                            # optional: tickets admitted on a clock (§ Schedules)
+  - name: weekly-cleanup
+    cron: "0 6 * * MON"               # five fields, read in UTC
+    title: Weekly cleanup
+    body: Tidy what the last week left behind.
 ```
 
 ## Semantics
@@ -681,6 +687,52 @@ other: entering it does what entering it does. A step conversation has none (§ 
 the comment, `reopened: true` when the ticket was done, and the changeset and commit message it
 names when the target merges, by whoever made it. The job it starts reads `entered.jump`. Jobs
 arriving by a jump need worker protocol 12 (`worker-channel.md` § What needs a bump).
+
+## Schedules
+
+A workflow file may declare tickets of its own type that the platform admits on a clock, so that a
+regular piece of work — a weekly cleanup, a monthly dependency check — need not wait for a person
+to press *new ticket*. `docs/design/schedules.md` is the note: what *on* means, what is done when a time
+is missed, and who a ticket is admitted in the name of. This section is the grammar.
+
+```yaml
+schedules:
+  - name: weekly-cleanup
+    cron: "0 6 * * MON"
+    title: Weekly cleanup
+    body: |
+      Look for dead code and stale comments in `core/` and remove what nothing uses.
+```
+
+`schedules` is a **list**, not a mapping, because YAML keeps the last of two equal keys of a mapping
+and "two schedules of one name" would then be impossible to refuse. Each entry has exactly four
+keys and all four are required, non-blank strings:
+
+- `name` follows the rule of a state's name (letters, digits, `.`, `_`, `-`, starting with a letter
+  or digit) and is unique within the file. It is what a person's switch belongs to: a renamed
+  schedule is a new one and starts off. At most 100 characters.
+- `cron` is five fields — minute `0-59`, hour `0-23`, day of month `1-31`, month `1-12` or
+  `JAN`-`DEC`, day of week `0-7` or `SUN`-`SAT` (0 and 7 are Sunday) — **read in UTC**. A field is
+  a comma list of `*`, `n`, `a-b`, `*/s` and `a-b/s`. There is no `@weekly`, `L`, `#` or `?`. A step
+  of 0, a reversed range, a value out of range and a line that names no date that exists (`0 0 30 2
+  *`) are refused, as is a line over 200 characters (the platform keeps it in a row). **No lower
+  bound is put on how often it may fire.**
+- `title` and `body` are the ticket it admits. The ticket's title is the `title` and the UTC date
+  the time was due — *Weekly cleanup · 2026-11-23* — and its body is `body`, exactly as a ticket
+  written by hand carries its own, shown as text wherever it is drawn.
+
+**When both day fields are restricted a day must match both.** `0 9 1-7 * 1` is the first Monday
+of the month. Standard cron reads it as days 1 to 7 *or* any Monday, which is about eleven firings
+a month and is not what the line is written for; this dialect has one rule, and it is the
+narrower.
+
+**A schedule on the default branch is off.** Nothing is admitted until a project admin switches it
+on from the project page, and every ticket it admits is admitted in that admin's name. Once on, it
+follows the file: its cron line, title and body are read at the time it fires (§ Pinning: the
+ticket pins the same commit the title was read from). A schedule is declared in the file of the
+type it admits, or in `.forge/workflow.yml` for a project with no types, and **never in the release
+type's file**, which a schedule may not start (`docs/design/ticket-types.md` § Releases). A library
+may not hold one.
 
 ## Release keys
 
@@ -1530,6 +1582,12 @@ is never produced; `answers.md` is platform-managed and never declared.
   a state with a prompt and without `chat: true` (not a group, a presentation, the changeset, or a
   chat step's). Every error names the key, and for a file its place in the list:
   `release_files[1]`.
+- `schedules`, where present, is a list of mappings with exactly the keys `name`, `cron`, `title`
+  and `body`, each a non-blank string (§ Schedules). A name follows a state's name rule and appears
+  once in the file and is at most 100 characters; a `cron` is five fields of the dialect, names a date
+  that exists and is at most 200 characters. Refused in
+  a file with `release: true`, saying a schedule never admits a release, and in a library. Each
+  error names the entry and the key: `schedules[1].cron`.
 - Every `import` entry is a path of names under `.forge/`, not in `workflows/`, that exists at the
   pinned commit, and appears once; § Imports has the rest.
 - Keys outside this grammar (`blocks`, `use`, `can_spawn`, `fanout`, `spawn_depth`,

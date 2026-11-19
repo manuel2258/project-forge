@@ -124,6 +124,12 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/api/v1/projects/:project/milestones/:id/close" => :member,
     "/api/v1/projects/:project/milestones/:id/reopen" => :member,
     "/api/v1/projects/:project/milestones/:id/move" => :member,
+    # Schedules: reading is any member's; switching is `Operator.switch_schedule_on/4` and `_off/4`,
+    # which ask `:manage` of a `%User{}` and take no token; dismissing asks `:use`.
+    "/api/v1/projects/:project/schedules" => :member,
+    "/api/v1/projects/:project/schedules/on" => :manage,
+    "/api/v1/projects/:project/schedules/off" => :manage,
+    "/api/v1/projects/:project/schedules/dismiss" => :member,
     "/api/v1/projects/:project/proposals" => :member,
     "/api/v1/proposals/:version_id/accept" => :member,
     "/api/v1/proposals/:version_id/decline" => :member,
@@ -215,6 +221,10 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # `Operator.start_release/3` asks for `:manage`, and the page draws the block for an admin only
     # (`docs/design/ticket-types.md` § Releases).
     {"project_live.ex", "release:start"} => :manage,
+    # A schedule switched on or off: `Operator.switch_schedule_on/4` and `_off/4` ask `:manage`, so a
+    # member's event pushed by hand is refused there and draws the refusal on the row.
+    {"project_live.ex", "schedule:on"} => :manage,
+    {"project_live.ex", "schedule:off"} => :manage,
     # The Milestones view: every one is a `Forge.Operator` function asking `:use`, and each ticket
     # or milestone id off the wire is resolved inside this project first
     # (`Forge.Milestones.get/2`, `ticket_of/2`), so another project's answers as one that is not
@@ -256,6 +266,9 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # mount already allowed, and reaches no context and no database.
     {"repo_live.ex", "expand"} => :local,
     {"repo_live.ex", "search"} => :local,
+    # A schedule's alert dismissed: `Operator.dismiss_schedule/4` asks `:use` of the project the
+    # schedule is in, resolved from its id.
+    {"queue_live.ex", "schedule:dismiss"} => :member,
     {"queue_live.ex", "push:subscribe"} => :self,
     {"queue_live.ex", "push:unsubscribe"} => :self,
     {"queue_live.ex", "push:error"} => :local,

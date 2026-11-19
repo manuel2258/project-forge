@@ -89,9 +89,11 @@ defmodule Forge.Push do
 
   **The rule is the queue's, not a list kept beside it** (`docs/design/ui.md` § The phone): a
   blocking question, an approval, a stuck ticket, a ticket resting where only a person can move
-  it, and a conversation's reply all push; an assumption does not, and a kind added to the queue
+  it, a conversation's reply, and a schedule that failed or switched itself off all push; an
+  assumption does not, and a kind added to the queue
   later pushes or does not for the same reason. Each links to where it waits: a ticket's page,
-  which opens on the view holding it, or a conversation's Talk.
+  which opens on the view holding it, a conversation's Talk, or a schedule's row on the Workflow
+  view (`Forge.Schedules` pushes it when it opens the item).
 
   Tagged per thing waiting, so a re-ask or a later reply replaces its notification instead of
   stacking another.
@@ -120,6 +122,15 @@ defmodule Forge.Push do
   defp describe(%{kind: :chat, project: project, detail: detail}) do
     {"Reply on #{project.name}", detail.text || "It replied.",
      "/chats/#{detail.chat_id}?tab=talk", "chat-#{detail.chat_id}"}
+  end
+
+  # A schedule has no ticket: it opens on the Workflow view, at the schedule.
+  defp describe(%{kind: :schedule, project: project, detail: detail}) do
+    what =
+      if detail.problem_kind == :switched_off, do: "switched off", else: "failed"
+
+    {"Schedule #{what} on #{project.name}", "#{detail.name} — #{detail.reason}",
+     ForgeWeb.SchedulesView.path(project, detail), "schedule-#{detail.id}"}
   end
 
   defp describe(%{kind: kind, project: project, ticket: ticket} = item) do

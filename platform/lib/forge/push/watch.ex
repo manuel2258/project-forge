@@ -18,7 +18,8 @@ defmodule Forge.Push.Watch do
 
   A conversation's reply is not seen here: a project conversation is announced under no ticket,
   and a turn ending is its own moment, so `Forge.Conversations` pushes it through the same gate
-  when it happens (`Forge.Push.chat_reply/1`).
+  when it happens (`Forge.Push.chat_reply/1`). Nor is a schedule's alert, which has no ticket:
+  `Forge.Schedules` pushes it as it opens the item.
 
   Started on the node that runs jobs, when push is configured, as the digest is. Tests start it
   themselves.

@@ -29,6 +29,15 @@ conversation waiting to be made) — a flag and not a status (`design/workflow-g
 within `(project_id, milestone_id)`, meaningful for open tickets; existing tickets were given their
 number.
 
+**schedule** — one row per schedule of a workflow file that anyone has switched on
+(`design/schedules.md`): `project_id` (cascade), `ticket_type` (null for the single file), `name`
+(unique among the project's *of one type*, the null type counting as one type), `enabled_by_id` and `enabled_at` (null
+is off — checked together with `fires_after`), `cron` (the line last read), `fires_after` (only
+times after it are due, moved by every firing), `last_ticket_id` (nilified), `problem`,
+`problem_kind` (`failed | switched_off`) and `problem_at`, and `alerted_at` (set is an open queue
+item; a check says it needs a problem). The cron line, title and body are in the repository and
+never here.
+
 **milestone** — `project_id`, `name` (at most 80 characters, unique among the project's, closed
 ones included), `description` (at most 2,000), `position` in the project's order, `current` (at
 most one per project: a partial unique index, and a check that a current one is not closed) and

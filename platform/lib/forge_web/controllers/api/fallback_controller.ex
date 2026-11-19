@@ -225,6 +225,15 @@ defmodule ForgeWeb.Api.FallbackController do
 
   def call(conn, {:error, :not_found}), do: error(conn, :not_found, "not_found", nil)
 
+  # Schedules (`docs/design/schedules.md`): what a switch or a dismissal can be refused for. The
+  # state of the file or of the schedule, and the client's to resolve.
+  def call(conn, {:error, reason})
+      when reason in [:schedule_gone, :schedule_unreadable, :already_on, :already_off, :no_alert],
+      do: error(conn, :conflict, Atom.to_string(reason), ForgeWeb.SchedulesView.explain(reason))
+
+  def call(conn, {:error, :forbidden}),
+    do: error(conn, :forbidden, "forbidden", "you are not allowed to do this")
+
   # Hold, milestones and order (`docs/design/workflow-grammar-v1.md` § Holding a ticket). The
   # state of the ticket or the milestone and so the client's to resolve are 409; a request that
   # names something that cannot be is 422.

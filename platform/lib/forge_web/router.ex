@@ -124,6 +124,10 @@ defmodule ForgeWeb.Router do
     post "/projects/:project/milestones/:id/close", MilestoneController, :close
     post "/projects/:project/milestones/:id/reopen", MilestoneController, :reopen
     post "/projects/:project/milestones/:id/move", MilestoneController, :move
+    get "/projects/:project/schedules", ScheduleController, :index
+    post "/projects/:project/schedules/on", ScheduleController, :on
+    post "/projects/:project/schedules/off", ScheduleController, :off
+    post "/projects/:project/schedules/dismiss", ScheduleController, :dismiss
     get "/projects/:project/proposals", TicketController, :proposals
     post "/proposals/:version_id/accept", TicketController, :accept_proposal
     post "/proposals/:version_id/decline", TicketController, :decline_proposal

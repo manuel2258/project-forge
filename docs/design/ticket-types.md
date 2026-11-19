@@ -444,7 +444,7 @@ belonged to it.
 - **Nested imports, imported transitions, a deep merge, overriding an imported command.** Each is
   a rule a reader has to run in their head to know what a type does.
 - **A project setting that names the release**, starting one by API, an agent, a chat or a
-  schedule, a form for its title, and a chat step's documents renaming it. The flag in the file is
+  schedule (a schedule in the release type's file is refused by the validator, `schedules.md`), a form for its title, and a chat step's documents renaming it. The flag in the file is
   the only assignment and the page the only door (§ Releases).
 - **Re-pinning changing whether a ticket is the release.** A re-pin holds the ticket's flag
   (§ Releases), so a file that gains or drops the flag changes the next admission and no ticket

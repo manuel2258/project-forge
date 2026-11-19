@@ -221,6 +221,7 @@ defmodule ForgeWeb.QueueLive do
   defp key(%{kind: :questions, version: version}), do: "questions-#{version.id}"
   defp key(%{kind: :chat, detail: detail}), do: "chat-#{detail.chat_id}"
   defp key(%{kind: :accounts}), do: "accounts"
+  defp key(%{kind: :schedule, detail: detail}), do: "schedule-#{detail.id}"
   defp key(%{kind: kind, ticket: ticket}), do: "#{kind}-#{ticket.id}"
 
   # The ticket's workflow as a track — its states in the order it reaches them, the current one
@@ -492,6 +493,25 @@ defmodule ForgeWeb.QueueLive do
   def handle_event("push:subscribe" = event, params, socket), do: push(event, params, socket)
   def handle_event("push:unsubscribe" = event, params, socket), do: push(event, params, socket)
   def handle_event("push:error" = event, params, socket), do: push(event, params, socket)
+
+  # A schedule's alert dismissed, by any member: the schedule is resolved from its id, and
+  # `Operator.dismiss_schedule/4` asks `:use` of its project and refuses a non-member, so an id off
+  # the wire reaches nothing it should not. What is refused is not drawn: the item is simply read
+  # again, and is gone or is not.
+  def handle_event("schedule:dismiss", %{"id" => id}, socket) when is_binary(id) do
+    with %Forge.Schedules.Schedule{} = row <- Forge.Schedules.find(id) do
+      project = Projects.get!(row.project_id)
+
+      Forge.Operator.dismiss_schedule(
+        project,
+        socket.assigns.current_scope.user,
+        row.ticket_type,
+        row.name
+      )
+    end
+
+    {:noreply, socket |> update(:pass, &QueuePass.decide/1) |> load()}
+  end
 
   def handle_event(event, params, socket), do: dispatch(event, params, socket)
 
@@ -769,10 +789,16 @@ defmodule ForgeWeb.QueueLive do
     """
   end
 
-  defp row_title(%{kind: kind} = item) when kind in [:chat, :accounts], do: sentence(item)
+  defp row_title(%{kind: kind} = item) when kind in [:chat, :accounts, :schedule],
+    do: sentence(item)
+
   defp row_title(item), do: item.ticket.title
 
   defp row_meta(%{kind: :accounts}), do: "this node"
+
+  defp row_meta(%{kind: :schedule, project: project, detail: detail}),
+    do: "#{project} · #{detail.ticket_type || "workflow"}"
+
   defp row_meta(%{ticket: nil, project: project}), do: "#{project} · chat"
 
   defp row_meta(%{ticket: ticket, project: project}),
@@ -833,6 +859,7 @@ defmodule ForgeWeb.QueueLive do
         drafts={@drafts}
       />
       <.chat_reply :if={@item.kind == :chat} item={@item} detail={@detail} />
+      <.schedule_alert :if={@item.kind == :schedule} item={@item} />
     </article>
     """
   end
@@ -910,6 +937,12 @@ defmodule ForgeWeb.QueueLive do
   # *branch updated* over a conflict that sent the ticket to a job.
   defp since_line(%{type: "ticket.branch_updated"} = event, _me),
     do: excerpt_text(Events.summary(event))
+
+  defp since_line(
+         %{type: "ticket.admitted", payload: %{"schedule" => %{"name" => name}} = payload},
+         _me
+       ),
+       do: "admitted by the schedule #{name} into #{payload["state"]}"
 
   defp since_line(%{type: "ticket.admitted", payload: payload}, _me),
     do: "admitted into #{payload["state"]}"
@@ -1335,6 +1368,35 @@ defmodule ForgeWeb.QueueLive do
     """
   end
 
+  defp schedule_path(%{project: project, detail: detail}),
+    do: ForgeWeb.SchedulesView.path(%{name: project}, detail)
+
+  attr :item, :map, required: true
+
+  # A schedule that failed or switched itself off: which one, where it is declared, and the way to
+  # it. What it says is in the sentence above; the reason is also the schedule's own on the Workflow
+  # view, where it stays after this item is dismissed.
+  defp schedule_alert(assigns) do
+    ~H"""
+    <section id="queue-schedule" class="queue-block">
+      <p class="queue-quiet">
+        Declared in {if @item.detail.ticket_type,
+          do: "the #{@item.detail.ticket_type} type's workflow file",
+          else: "the project's workflow file"}.
+        Dismissing it only clears this item: the schedule's own page keeps what went wrong.
+      </p>
+      <div class="queue-links">
+        <.link
+          navigate={schedule_path(@item)}
+          class="queue-link"
+        >
+          Open the schedule ›
+        </.link>
+      </div>
+    </section>
+    """
+  end
+
   attr :item, :map, required: true
   attr :detail, :map, required: true
   attr :forms, :map, required: true
@@ -1434,6 +1496,28 @@ defmodule ForgeWeb.QueueLive do
         navigate={~p"/chats/#{@item.detail.chat_id}"}
       >
         Open the chat
+      </.button>
+      <.button
+        :if={@item.kind == :schedule}
+        id="queue-schedule-dismiss"
+        type="button"
+        variant="primary"
+        fill
+        phx-click="schedule:dismiss"
+        phx-value-id={@item.detail.id}
+        phx-disable-with="Dismissing…"
+      >
+        Dismiss
+      </.button>
+      <.button
+        :if={@item.kind == :schedule}
+        id="queue-schedule-open"
+        variant="outline"
+        fill
+        chevron
+        navigate={schedule_path(@item)}
+      >
+        Open the schedule
       </.button>
       <.button
         :if={@item.kind == :accounts}
@@ -1566,6 +1650,11 @@ defmodule ForgeWeb.QueueLive do
   defp kind(%{kind: :review}), do: "review ready"
   defp kind(%{kind: :accounts}), do: "accounts"
 
+  defp kind(%{kind: :schedule, detail: %{problem_kind: :switched_off}}),
+    do: "schedule switched off"
+
+  defp kind(%{kind: :schedule}), do: "schedule failed"
+
   # The item's eyebrow: its kind and where it is. An assumption in the same card is named apart
   # rather than added to what is waiting.
   defp kind_label(%{kind: :questions, questions: questions, version: version} = item) do
@@ -1605,6 +1694,14 @@ defmodule ForgeWeb.QueueLive do
     do: "#{item.ticket.title} is stuck and needs a way forward."
 
   defp sentence(%{kind: :review} = item), do: "#{item.ticket.title} is waiting for your review."
+
+  # A schedule's alert says which schedule, what happened and why, as the Workflow view does. The
+  # words come from a repository, so they are text and nothing else.
+  defp sentence(%{kind: :schedule, detail: %{problem_kind: :switched_off} = d}),
+    do: "Schedule #{d.name} switched itself off: #{d.reason}."
+
+  defp sentence(%{kind: :schedule, detail: d}),
+    do: "Schedule #{d.name} could not admit its ticket: #{d.reason}."
 
   defp sentence(%{kind: :accounts, count: 1}), do: "1 account waits to be approved."
   defp sentence(%{kind: :accounts, count: count}), do: "#{count} accounts wait to be approved."

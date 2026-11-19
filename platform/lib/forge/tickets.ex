@@ -301,7 +301,8 @@ defmodule Forge.Tickets do
   Adds the steps that admit a ticket to `multi`, under `:number`, `:ticket`, `:admitted`,
   `{:ticket_doc, _}`, `{:first_job, _}` and `:branch`.
 
-  `attrs` may carry `:on_hold` (default false, which is the engine's, the fixtures' and the
+  `attrs` may carry `:schedule` — `%{"id", "name", "due_at", "admin"}`, which `Forge.Schedules` passes when a
+  schedule admits the ticket — and it is kept in the `ticket.admitted` event. It may carry `:on_hold` (default false, which is the engine's, the fixtures' and the
   release's: they start) and `:milestone_id`. A ticket admitted on hold has run nothing and made
   nothing: no first job and no step conversation, only the entry it waits to make
   (`held_entry`), and its branch, which is cut either way. The ticket goes to the bottom of its
@@ -347,12 +348,14 @@ defmodule Forge.Tickets do
     |> Events.log(:admitted, "ticket.admitted", actor, fn %{ticket: ticket} ->
       %{
         ticket_id: ticket.id,
-        payload: %{
-          "number" => ticket.number,
-          "state" => workflow.initial,
-          "base_commit" => base,
-          "ticket_type" => ticket.ticket_type
-        }
+        payload:
+          %{
+            "number" => ticket.number,
+            "state" => workflow.initial,
+            "base_commit" => base,
+            "ticket_type" => ticket.ticket_type
+          }
+          |> put_schedule(attrs[:schedule])
       }
     end)
     |> Multi.merge(fn %{ticket: ticket} ->
@@ -390,6 +393,10 @@ defmodule Forge.Tickets do
         else: Multi.new()
     end)
   end
+
+  # A ticket a schedule admitted says which, and the time it was due (`docs/design/schedules.md`).
+  defp put_schedule(payload, nil), do: payload
+  defp put_schedule(payload, %{} = schedule), do: Map.put(payload, "schedule", schedule)
 
   # Where a ticket is admitted to — the bottom of its milestone's order or of the unplaced — and the
   # hold it is admitted with, if any.

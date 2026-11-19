@@ -83,7 +83,8 @@ defmodule Forge.Application do
         {Task, &recover/0},
         Forge.Jobs.Scheduler,
         Forge.MergeQueue.Runner,
-        Forge.ImageBuilds.Runner
+        Forge.ImageBuilds.Runner,
+        Forge.Schedules.Runner
       ],
       else: []
   end

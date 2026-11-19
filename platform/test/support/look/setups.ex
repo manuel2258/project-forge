@@ -45,6 +45,7 @@ defmodule Forge.Look.Setups do
     "forge_release" => Forge.Look.Setups.ForgeRelease,
     "image_builds" => Forge.Look.Setups.ImageBuilds,
     "milestones" => Forge.Look.Setups.Milestones,
+    "schedules" => Forge.Look.Setups.Schedules,
     "update_step" => Forge.Look.Setups.UpdateStep
   }
 

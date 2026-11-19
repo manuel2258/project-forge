@@ -32,13 +32,14 @@ defmodule ForgeCore.Workflow.Parser do
     Keys,
     Limits,
     Resources,
+    Schedule,
     State,
     Transition,
     Validator
   }
 
-  @top_keys ~w(version description initial states transitions limits defaults commands release
-                release_files release_notes)
+  @top_keys ~w(version description initial states transitions limits defaults commands schedules
+                release release_files release_notes)
   @state_keys ~w(prompt env model effort harness inputs produces optional outcomes budget on_enter
                  on_conflict resources invoke exit may_invoke secrets chat)
   @command_keys ~w(run env produces timeout resources secrets)
@@ -209,6 +210,7 @@ defmodule ForgeCore.Workflow.Parser do
     {release, e9} = boolean(map, "release", "")
     {release_files, e10} = string_list(map, "release_files", "")
     {release_notes, e11} = optional_string(map, "release_notes", "")
+    {schedules, e12} = schedules(map)
 
     workflow = %Workflow{
       version: version,
@@ -219,6 +221,7 @@ defmodule ForgeCore.Workflow.Parser do
       limits: limits,
       defaults: defaults,
       commands: commands,
+      schedules: schedules,
       release: release,
       release_files: release_files || [],
       release_notes: release_notes
@@ -235,8 +238,43 @@ defmodule ForgeCore.Workflow.Parser do
        e7 ++
        e8 ++
        e9 ++
-       e10 ++ e11}
+       e10 ++ e11 ++ e12}
   end
+
+  # `docs/design/workflow-grammar-v1.md` § Schedules. A list, not a mapping, so that two of one name
+  # reach the validator instead of being collapsed by YAML; absent is none, which is every workflow
+  # written before they existed. The four keys are structural here and their *content* is the
+  # validator's, so a stored pin is never refused for what a later rule says about a cron line.
+  defp schedules(map) do
+    case Map.get(map, "schedules") do
+      nil ->
+        {[], []}
+
+      entries when is_list(entries) ->
+        {built, errors} =
+          entries
+          |> Enum.with_index()
+          |> Enum.map(fn {entry, index} -> schedule(entry, Error.join("schedules", index)) end)
+          |> Enum.unzip()
+
+        {Enum.reject(built, &is_nil/1), List.flatten(errors)}
+
+      _ ->
+        {[], [Error.new("schedules", "must be a list of schedules")]}
+    end
+  end
+
+  defp schedule(entry, path) when is_map(entry) do
+    {name, e1} = required_string(entry, "name", path)
+    {cron, e2} = required_string(entry, "cron", path)
+    {title, e3} = required_string(entry, "title", path)
+    {body, e4} = required_string(entry, "body", path)
+    errors = unknown_keys(entry, Schedule.keys(), path) ++ e1 ++ e2 ++ e3 ++ e4
+
+    {%Schedule{name: name || "", cron: cron, title: title, body: body}, errors}
+  end
+
+  defp schedule(_entry, path), do: {nil, [Error.new(path, "must be a mapping")]}
 
   # `docs/design/workflow-grammar-v1.md` § Commands. A mapping of names, each a mapping of its own;
   # absent is no commands at all, which is every workflow written before they existed.

@@ -252,11 +252,13 @@ made it look true sorted the stored strings, so "admins first" held because 'adm
 `Forge.Operator` is the single place every human action exists, taking the acting user, and the
 guard goes at the entrance of each of its functions.
 
-The acting *user* is a `%User{}` or, for the twenty-three operations a project token may do (`answer`,
-`answer_all`, `decide`, `transition`, `retry`, `cancel`, `restore`, `edit`, `admit`,
-`accept_proposal`, `decline_proposal`, and the twelve of holds and milestones: `hold`, `release`,
-`stop_now`, `retitle`, `set_milestone`, `move_ticket`, `create_milestone`, `update_milestone`,
-`set_current_milestone`, `close_milestone`, `reopen_milestone`, `move_milestone`), a `%Forge.Git.Token{}`. Both go through the same
+The acting *user* is a `%User{}` or, for the operations a project token may do — `answer`,
+`answer_all`, `decide`, `transition`, `retry`, `extend`, `cancel`, `restore`, `edit`, `admit`,
+`accept_proposal`, `decline_proposal`, `decline_proposals`, `reopen_proposal`, the holds and
+milestones (`hold`, `release`, `stop_now`, `retitle`, `set_milestone`, `move_ticket`,
+`create_milestone`, `update_milestone`, `set_current_milestone`, `close_milestone`,
+`reopen_milestone`, `move_milestone`) and `dismiss_schedule` — a `%Forge.Git.Token{}`. (They are
+listed by name and not counted, because a count written here was wrong by the time it was read.) Both go through the same
 `Forge.Access` call, a token's scope being `:use` only on its own project and only with API write.
 Every other function still takes a `%User{}` only, so a token cannot reach one by construction.
 Below `Operator` the actor is `{:user, id}` or `{:api, id, name}`, and answers, approvals and
@@ -463,6 +465,14 @@ says so. Assigning one brings them back (`credentials.md` § How a job picks).
 credentials, in the transaction that removes the membership. A person no longer in a project does
 not keep funding it.
 
+**The same goes for the schedules they switched on** (`schedules.md` § Switching itself off): a
+schedule admits in the name of the admin who switched it on, so a demotion to member, a removal
+and a suspension (across every project) switch theirs off in the transaction that changes the role,
+recorded with why, and `Forge.Schedules.put_withdrawn/4` sits beside the withdrawal above; another
+admin's schedules are untouched. And because a role can be changed some way no hook sees, **a
+schedule asks again when it fires** — `:use` and `:manage` of the admin it acts for — and admits
+nothing, switching itself off, if either is gone.
+
 `jobs` gains `credential_id`, the credential the job is on now, and every start of a job records
 the credential it ran on in `job_runs`. That is what makes spend per credential a query rather
 than a running total somebody has to maintain (`credentials.md` § Spend).
@@ -578,7 +588,8 @@ What that comes to (taking a ticket out of the merge queue is `member`, as appro
   and every
   conversation write.
 - **`manage`** is the settings actions — the model, the effort, the project's secrets, minting a
-  git token and revoking one, membership, mirrors, and starting a release
+  git token and revoking one, membership, mirrors, switching a schedule on or off (a `%User{}`
+  only: no project token holds `:manage`, so none can), and starting a release
   (`ticket-types.md` § Releases). A node admin who is not a member is not an admin of the project, and
   reaches nothing in it, so has no Release. The tokens are admin-only to *read* as well, because the
   token list names the ids the revoke button needs.

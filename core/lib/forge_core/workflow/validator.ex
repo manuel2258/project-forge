@@ -13,6 +13,7 @@ defmodule ForgeCore.Workflow.Validator do
     [
       release(workflow, Keyword.get(opts, :single_file, false)),
       release_keys(workflow),
+      schedules(workflow),
       names(workflow),
       initial(workflow),
       state_shapes(workflow),
@@ -33,6 +34,91 @@ defmodule ForgeCore.Workflow.Validator do
   end
 
   # -- rules --------------------------------------------------------------------------------
+
+  # `docs/design/workflow-grammar-v1.md` § Schedules. One error per fault, at the entry and the key.
+  # A schedule never admits a release (`docs/design/ticket-types.md` § Releases), so the release
+  # type's file is refused one as a whole, at `schedules`, rather than entry by entry.
+  defp schedules(%Workflow{schedules: []}), do: []
+
+  defp schedules(%Workflow{schedules: schedules, release: release}) do
+    entries =
+      schedules
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {schedule, index} ->
+        path = Error.join("schedules", index)
+
+        schedule_name(schedule, path) ++
+          schedule_cron(schedule, path) ++
+          schedule_text(schedule, "title", path) ++
+          schedule_text(schedule, "body", path)
+      end)
+
+    refused =
+      if release,
+        do: [
+          Error.new("schedules", "a schedule never admits a release: remove it from this file")
+        ],
+        else: []
+
+    refused ++ entries ++ duplicate_schedules(schedules)
+  end
+
+  # A name and a cron line are kept in the platform's `schedules` row (`varchar(255)`), so each is
+  # bounded here, well inside it: a line the validator accepted that the table refused would stop
+  # every schedule of its project at the next pass (`docs/design/workflow-grammar-v1.md` § Schedules).
+  @max_schedule_name 100
+  @max_schedule_cron 200
+
+  defp schedule_name(%{name: name}, path) do
+    cond do
+      not valid_name?(name) ->
+        [
+          Error.new(
+            Error.join(path, "name"),
+            "#{inspect(name)} is not a valid name: #{Workflow.name_rule()}"
+          )
+        ]
+
+      String.length(name) > @max_schedule_name ->
+        [Error.new(Error.join(path, "name"), "is longer than #{@max_schedule_name} characters")]
+
+      true ->
+        []
+    end
+  end
+
+  defp schedule_cron(%{cron: line}, path) do
+    case ForgeCore.Cron.parse(line) do
+      {:ok, _cron} when byte_size(line) > @max_schedule_cron ->
+        [Error.new(Error.join(path, "cron"), "is longer than #{@max_schedule_cron} characters")]
+
+      {:ok, _cron} ->
+        []
+
+      {:error, message} ->
+        [Error.new(Error.join(path, "cron"), message)]
+    end
+  end
+
+  defp schedule_text(schedule, key, path) do
+    if String.trim(Map.fetch!(schedule, String.to_existing_atom(key))) == "",
+      do: [Error.new(Error.join(path, key), "must not be blank")],
+      else: []
+  end
+
+  defp duplicate_schedules(schedules) do
+    schedules
+    |> Enum.with_index()
+    |> Enum.group_by(fn {schedule, _index} -> schedule.name end)
+    |> Enum.flat_map(fn {name, [_first | repeats]} ->
+      for {_schedule, index} <- repeats,
+          do:
+            Error.new(
+              Error.join(Error.join("schedules", index), "name"),
+              "#{inspect(name)} is declared twice"
+            )
+    end)
+  end
 
   # `docs/design/ticket-types.md` § Releases. The single file has no types, so nothing could
   # start it as the release. Here and not in the parser because a stored pin must never meet it.

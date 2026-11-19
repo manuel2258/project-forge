@@ -39,7 +39,7 @@ defmodule ForgeWeb.TicketViews do
            ticket.cancelled ticket.restored ticket.repinned ticket.held ticket.released
            ticket.stopped ticket.refreshed transition.held ticket.retitled
            ticket.milestone_set ticket.moved ticket.branch_updated ticket.base_moved
-           ticket.retried job.extended ticket.cap_raised)
+           ticket.retried job.extended ticket.cap_raised ticket.admitted)
 
   @doc """
   Who an event of the ticket's Activity was made by, in the words the product uses: a person by
@@ -1262,6 +1262,13 @@ defmodule ForgeWeb.TicketViews do
         <p class="ticket-details-sub">
           {@project.name}#{@ticket.number}<span :if={@ticket.ticket_type} id="ticket-type"> · {@ticket.ticket_type}</span>
           · admitted {admitted(@ticket.inserted_at, @now)}
+        </p>
+        <%!-- Admitted by a clock, not a person's hand: which schedule, the time it was due, and the
+              admin whose name it was admitted in. Text, as every word out of a file is. --%>
+        <p :if={@scheduled} id="ticket-scheduled" class="ticket-details-sub">
+          Admitted by the schedule <span class="font-mono">{@scheduled.name}</span>, due {@scheduled.due}<span :if={
+            @scheduled.by
+          }>, in {@scheduled.by}'s name</span>.
         </p>
       </div>
 

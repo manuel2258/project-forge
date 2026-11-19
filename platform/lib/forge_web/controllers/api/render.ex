@@ -24,6 +24,34 @@ defmodule ForgeWeb.Api.Render do
   milestone id to name).
   """
   def ticket(%Ticket{} = t, project_name, opts \\ []) do
+    base = ticket_fields(t, project_name, opts)
+    if Keyword.get(opts, :offers, false), do: Map.merge(base, offers(t)), else: base
+  end
+
+  # What a person may do about a job that ran out, and the cap it is judged against
+  # (`docs/design/workflow-grammar-v1.md` § Extending a job). Not in a list, which would parse
+  # every ticket's workflow to say it: `show` and the acts that answer with the ticket ask for it.
+  defp offers(%Ticket{} = t) do
+    case Forge.Tickets.parsed_workflow(t) do
+      {:ok, workflow} ->
+        facts = Forge.Jobs.Extensions.cap_facts(t, workflow)
+
+        %{
+          cap: facts.cap,
+          cap_raise: facts.cap_raise,
+          workflow_cap: facts.workflow_cap,
+          left: facts.left,
+          restart_need: facts.restart_need,
+          retry: Forge.Engine.retryable?(t),
+          extend: Forge.Jobs.Extensions.offer(t)
+        }
+
+      {:error, _errors} ->
+        %{cap: nil, cap_raise: t.cap_raise, retry: false, extend: nil}
+    end
+  end
+
+  defp ticket_fields(%Ticket{} = t, project_name, opts) do
     %{
       id: t.id,
       ref: "#{project_name}##{t.number}",
@@ -112,7 +140,59 @@ defmodule ForgeWeb.Api.Render do
     }
   end
 
-  def job_with_spec(%Job{} = j), do: j |> job() |> Map.put(:spec, j.spec)
+  def job_with_spec(%Job{} = j) do
+    j
+    |> job()
+    |> Map.merge(%{
+      spec: j.spec,
+      restart: restart(j),
+      extensions: Enum.map(Forge.Jobs.Extensions.all(j.id), &extension/1),
+      runs: Enum.map(Forge.Jobs.Runs.for_job(j.id), &run/1)
+    })
+  end
+
+  # Each extension a person gave the job, oldest first, with who and the cap raise that came with
+  # it. The job's `spec` above is the one it was made with: these are what its later runs read.
+  defp extension(%Forge.Jobs.Extension{} = e) do
+    raise = Forge.Repo.get_by(Forge.Tickets.CapRaise, extension_id: e.id)
+
+    %{
+      id: e.id,
+      author: Forge.Jobs.Extensions.author(e),
+      tokens: e.tokens,
+      turns: e.turns,
+      note: e.note,
+      exhausted: e.exhausted,
+      stopped_at: e.stopped_at,
+      usage_before: e.usage_before,
+      raise: raise && %{from: raise.from_tokens, to: raise.to_tokens},
+      inserted_at: e.inserted_at
+    }
+  end
+
+  # The person's *Run again* that made this job, with who and the note it arrived with, or nil.
+  defp restart(%Job{restart_id: nil}), do: nil
+
+  defp restart(%Job{restart_id: id}) do
+    restart = Forge.Repo.get!(Forge.Tickets.Restart, id)
+
+    %{
+      id: id,
+      author: Forge.Jobs.Extensions.author(restart),
+      note: restart.note,
+      inserted_at: restart.inserted_at
+    }
+  end
+
+  defp run(%Forge.Jobs.Run{} = r) do
+    %{
+      started_at: r.started_at,
+      finished_at: r.finished_at,
+      usage: r.usage,
+      extension_id: r.extension_id,
+      resumed: r.resumed
+    }
+  end
 
   def artifact(%Artifact{} = a, %Version{} = latest) do
     %{

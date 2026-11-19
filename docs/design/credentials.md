@@ -137,7 +137,8 @@ At a job's **first** start, from its project's pool, for the job's harness:
 `jobs.credential_id` records the choice, written in the transaction that marks the job running.
 
 **At every later start** — a job resuming after a question, re-queued after its worker was lost
-or after its credential's limit stopped it, a conversation reopened — **the job keeps its
+or after its credential's limit stopped it, extended by a person after it ran out of budget, a
+conversation reopened — **the job keeps its
 credential while it is usable and not rate-limited**: not revoked, still in the project's pool,
 same harness, and no window of it blocking.
 

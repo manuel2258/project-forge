@@ -18,6 +18,12 @@ defmodule Forge.Jobs.Run do
     belongs_to :job, Forge.Jobs.Job
     belongs_to :credential, Forge.Credentials.Credential
     belongs_to :worker, Forge.Workers.Worker
+    # The extension whose figures this run was started on, nil for a run no extension reopened
+    # (`docs/design/data-model.md`).
+    belongs_to :extension, Forge.Jobs.Extension
+    # Whether the run resumed its session, as the worker says: false where it was refused or could
+    # not be restored, nil where nothing reported (`docs/design/claude-code-events.md` § Resume).
+    field :resumed, :boolean
     field :started_at, :utc_datetime
     # Weighted tokens (`ForgeCore.Usage`), the tokens by kind behind them (nil where `converted`),
     # and Claude Code's own dollar figure, kept for information and read by no cap and no pick.

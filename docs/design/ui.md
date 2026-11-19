@@ -1028,6 +1028,9 @@ in words if sent. At the end of the pass, the first item to arrive is drawn.
   it is the way-on link below, and the queue refuses it in words if it is sent anyway. The push
   carries the reason after the title. The first ticket stuck on an exhausted `max` read only *needs
   a way forward*, which is true of every stuck ticket and says nothing about this one.
+  **A job that ran out of budget offers two more words** in the same rows, *Extend `<state>`* above
+  *Run `<state>` again* — the same two forms as on the ticket page (§ Steps, *Ways forward*), in
+  `ways-<id>`, with what was typed kept per ticket across a reconnect.
 - **A ticket resting in a human state** (`review`) has the same ways forward as a stuck one. When a
   way merges, the item shows what an approval of a change shows — the changeset's size and files
   and the commit message the merge will write — and its way on is **Read the presentation ›**, or
@@ -1311,7 +1314,31 @@ them. **Run again** is one of them —
 `Run refining again` — whenever the ticket rests in a job or command state with nothing live in it
 (`workflow-grammar-v1.md` § Running a state again). It is offered after a success as well as a
 failure, because redoing a refinement before approving it is a choice a person makes while reading
-it. A transition whose approval has nothing to approve is never offered. A way forward is not a
+it. A transition whose approval has nothing to approve is never offered.
+
+**Extend and the Run again forms.** On a stuck ticket whose latest job of the state ended
+`budget_exhausted` and left a session (`Forge.Jobs.Extensions.offer/1`, which `retryable?` always
+accompanies), **Extend `<state>`** is a choice row directly above *Run `<state>` again*. Picking
+either row opens its fields inside `#ways-forward`, under the row, so the one button submits them on
+a phone and on a laptop alike. *Extend*: a facts line (which ceiling ran out, what the job has used
+across its runs, the state's declared tokens and turns, what the ticket has left of its cap), a
+**tokens** box and — only for a harness whose runs have a turn ceiling (Claude Code) — a **turns**
+box, each starting at half the state's declared figure, rounded up, and a **note** box. **The
+figures in these fields are in the grammar the boxes take** (`6M`, `800k`, with the exact weighted
+tokens in a title), not in windows: a person types an amount and reads the facts beside it in the
+same units (`ForgeWeb.Components.MoreRoom`); the job page's extensions and Activity's lines for an extension and a cap raise say `+6M` and `5M → 6M` for the same reason, and are the places a token figure is not drawn as windows. It says the
+figures are what the reopened run may spend *on top of* what the job has spent; nothing on it
+lowers anything. *Run again*: the note box. **A raise box** *raise this ticket's cap by* appears only
+when the tokens typed (Extend), or the state's budget (Run again), exceed what the ticket has left; it
+is filled with the shortfall and names the cap's old and new figures. On Run again with something
+left, emptying it says the run will be lowered to what is left. A refusal — a figure that is not a
+positive token amount (`800k`, `1.5M`, `2000000`) or whole number of turns, a note over 4,000
+characters, a raise short of the shortfall, a job already live again, a ticket that moved — is
+drawn under the form with what was typed still in it, and the button is disabled until the answer
+arrives. Both forms have an id and a `phx-change`, so a reconnect keeps what was typed
+(`ReconnectTest`). A note is text: shown as typed, line breaks kept, wrapping on a phone
+(`whitespace-pre-wrap [overflow-wrap:anywhere]`, escaped by the template).
+A way forward is not a
 decision row: it moves the ticket and approves nothing, which is the difference between a dock
 button and an amber one.
 
@@ -1545,7 +1572,9 @@ and the chip there said it again a line away. A conversation's job is not opened
 its Activity is where it is read.
 
 Under the stream, **On the ticket** lists what happened to the ticket itself rather than in a job
-— a decision and its note, a transition, a stick, a merge-queue event, a rename — newest first.
+— a decision and its note, a transition, a stick, a merge-queue event, a rename, **a job extended, a
+state run again with its note, a cap raised** — newest first. Each of the last three says who did
+it, and so does every other row a person acted on now: their address, or `API · <token name>`.
 Activity also says what the platform's own events mean beside their type: the statuses a command
 batch decided and its outcome, why the ticket stuck, which edge it took, and what each merge-queue
 event means.
@@ -1578,6 +1607,17 @@ the person reads one that failed.
   it; **its runs** are listed under the plan, each in windows with the exact weighted tokens in its
   title and its tokens by kind beneath (`120k fresh input · 0 cache write · 3M cache read · 90k
   output`) — a converted run has none and says so.
+- **Extensions**, oldest first, only when the job has any — no empty heading: who, when, the tokens
+  and turns given, the cap raise that came with it, and the note drawn as text. Each run in the runs
+  list says `extension N` when one started it and `started without its session` when the worker
+  reported that a run an extension reopened ran cold (a job's first run has no session to resume, and
+  is never said to have started without one). A restarted attempt's note is its arrival comment, which the
+  *Manifest* pane draws under *How it arrived* (`#job-arrival`: where it came from and who took it,
+  then the comment as text with its line breaks); a job that arrived from nothing — the ticket's first
+  visit to its first state — has no such block, while a first state run again with a note has one
+  (from itself, by a person). `extension N` names the run the extension was given to, and no later run of the job. **The ticket's allowance** is drawn as the figure in force once a person has raised it,
+  `120 windows · raised from 100 windows` (`ForgeWeb.Format.allowance/2`), in the ticket's details and
+  Changes' usage; the forms say the cap in the token grammar of their boxes.
 - A job whose runs held project secrets has a *secrets* fact, a line per run — *`STRIPE_TEST_KEY`
   v2, `SENTRY_TOKEN` v1* — by name and version, **never a value**.
 

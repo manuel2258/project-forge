@@ -388,6 +388,30 @@ defmodule Forge.HoldTest do
       assert [%Job{state: "implementing"}] = pending(ticket)
     end
 
+    # The entry a move by hand leaves is for the state the ticket now rests in, with no restart
+    # behind it: running that state again replaces it, as it did before Run again took a note.
+    test "running again the state a move by hand put the ticket in is taken", %{
+      project: project,
+      user: user,
+      worker: worker
+    } do
+      ticket = admit!(project, user) |> in_planning!(user, worker)
+      [job] = pending(ticket)
+      assignment = FakeWorker.assign(job, worker)
+      {:ok, _} = Operator.hold(Tickets.get!(ticket.id), user)
+      {:ok, _} = FakeWorker.finish(assignment, "success", doc: "plan.md")
+      {:ok, moved} = Operator.transition(Tickets.get!(ticket.id), user, "implementing")
+      assert moved.held_entry["state"] == "implementing"
+      assert Engine.retryable?(moved)
+
+      {:ok, retried} = Operator.retry(moved, user, note: "Smaller steps")
+      assert retried.held_entry["restart_id"] != nil
+
+      {:ok, _} = Operator.release(retried, user)
+      assert [%Job{state: "implementing"} = next] = pending(ticket)
+      assert Jobs.spec(next).entered["comment"] == "Smaller steps"
+    end
+
     test "retrying a state on a ticket on hold waits for the release", %{
       project: project,
       user: user,

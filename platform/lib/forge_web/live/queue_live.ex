@@ -44,6 +44,8 @@ defmodule ForgeWeb.QueueLive do
   alias Forge.Tickets.{Doing, Past, Views}
   alias ForgeCore.Workflow
 
+  alias ForgeWeb.Components.MoreRoom
+
   alias ForgeWeb.{
     Diff,
     Format,
@@ -498,14 +500,41 @@ defmodule ForgeWeb.QueueLive do
     do: {:noreply, socket |> update(:pass, &QueuePass.later/1) |> detail()}
 
   # The way forward picked, kept by the page so a re-render or a rejoin does not lose it.
-  defp dispatch("queue:pick", %{"ticket" => id, "way" => way}, socket)
-       when is_binary(id) and is_binary(way),
-       do: {:noreply, update(socket, :ways, &Map.put(&1, id, way))}
+  # What is typed under it (the Extend and Run again fields) is held with the pick, in the page's
+  # drafts under the form's own id, so that a rejoin gives it back and the raise box follows it
+  # (`ForgeWeb.Components.MoreRoom`). The raise is the shortfall until typed in: picking another
+  # way or changing the tokens drops what an earlier shortfall filled in.
+  defp dispatch("queue:pick", %{"ticket" => id, "way" => way} = params, socket)
+       when is_binary(id) and is_binary(way) do
+    typed =
+      if params["_target"] in [["tokens"], ["way"]], do: Map.delete(params, "raise"), else: params
+
+    socket =
+      case Drafts.handle("draft:change", Map.put(typed, "draft", "ways-#{id}"), socket) do
+        {:state, socket} -> socket
+        :unknown -> socket
+      end
+
+    {:noreply, update(socket, :ways, &Map.put(&1, id, way))}
+  end
 
   # A way forward taken: the same operation the ticket's page takes, through `Actions`, which
   # resolves the ticket off the wire and refuses a non-member (`Forge.Operator`).
-  defp dispatch("queue:way", %{"ticket" => id, "way" => "retry"}, socket),
-    do: deciding("retry", %{"ticket" => id}, socket)
+  defp dispatch("queue:way", %{"ticket" => id, "way" => "retry"} = params, socket),
+    do:
+      deciding(
+        "retry",
+        params |> Map.take(~w(note raise draft)) |> Map.put("ticket", id),
+        socket
+      )
+
+  defp dispatch("queue:way", %{"ticket" => id, "way" => "extend"} = params, socket),
+    do:
+      deciding(
+        "extend",
+        params |> Map.take(~w(tokens turns note raise job draft)) |> Map.put("ticket", id),
+        socket
+      )
 
   defp dispatch("queue:way", %{"ticket" => id, "way" => "to:" <> to}, socket),
     do: deciding("transition", %{"ticket" => id, "to" => to}, socket)
@@ -644,6 +673,7 @@ defmodule ForgeWeb.QueueLive do
           item={@item}
           detail={@detail}
           ways={@ways}
+          drafts={@drafts}
           now={@now}
           me={@current_scope.user.id}
         />
@@ -652,7 +682,7 @@ defmodule ForgeWeb.QueueLive do
           :if={!@item}
           id="queue-refusal"
           refusal={@refusal}
-          at={~w(retry transition)}
+          at={~w(retry extend transition)}
         />
         <.ending :if={!@item} pass={@pass} left={@left} now={@now} />
         <%!-- Below 1440px the two quiet groups are drawn here, after the end of the pass, and not in
@@ -759,6 +789,7 @@ defmodule ForgeWeb.QueueLive do
   attr :item, :map, required: true
   attr :detail, :map, required: true
   attr :ways, :map, required: true
+  attr :drafts, :map, required: true
   attr :now, :any, required: true
   attr :me, :string, required: true
 
@@ -794,7 +825,13 @@ defmodule ForgeWeb.QueueLive do
 
       <.approval :if={@item.kind in [:approval, :review]} item={@item} detail={@detail} />
       <.stuck :if={@item.kind == :stuck} item={@item} detail={@detail} />
-      <.ways :if={@item.kind in [:stuck, :review]} item={@item} detail={@detail} ways={@ways} />
+      <.ways
+        :if={@item.kind in [:stuck, :review]}
+        item={@item}
+        detail={@detail}
+        ways={@ways}
+        drafts={@drafts}
+      />
       <.chat_reply :if={@item.kind == :chat} item={@item} detail={@detail} />
     </article>
     """
@@ -1056,6 +1093,7 @@ defmodule ForgeWeb.QueueLive do
   attr :item, :map, required: true
   attr :detail, :map, required: true
   attr :ways, :map, required: true
+  attr :drafts, :map, required: true
 
   # The ways forward as choice rows: run the state again where it can be, and each transition the
   # person may take from here that decides nothing, each saying what it starts. A way that approves
@@ -1089,15 +1127,27 @@ defmodule ForgeWeb.QueueLive do
         phx-submit="queue:way"
       >
         <input type="hidden" name="ticket" value={@item.ticket.id} />
-        <.choice_row
-          :for={way <- @rows}
-          id={"way-#{@item.ticket.id}-#{way.value}"}
-          name="way"
-          value={way.value}
-          label={way.label}
-          detail={way.detail}
-          selected={@picked == way.value}
-        />
+        <%= for way <- @rows do %>
+          <.choice_row
+            id={"way-#{@item.ticket.id}-#{way.value}"}
+            name="way"
+            value={way.value}
+            label={way.label}
+            detail={way.detail}
+            selected={@picked == way.value}
+          />
+          <%!-- The same fields the ticket page draws under the same two rows, so the queue never
+                offers Retry without Extend where the page offers both. --%>
+          <MoreRoom.fields
+            :if={@picked == way.value and @item.detail[:room] != nil and way_fields(way.value)}
+            way={way_fields(way.value)}
+            offer={@item.detail[:extend]}
+            room={@item.detail.room}
+            drafts={@drafts}
+            draft={"ways-#{@item.ticket.id}"}
+            prefix={"queue-#{@item.ticket.id}"}
+          />
+        <% end %>
       </form>
     </section>
     """
@@ -1111,6 +1161,17 @@ defmodule ForgeWeb.QueueLive do
   defp ways_of(%{kind: kind, ticket: ticket} = item, detail) when kind in [:stuck, :review] do
     workflow = detail[:workflow]
     past = detail[:past] || []
+
+    extend =
+      if item.detail[:retry] && item.detail[:extend],
+        do: [
+          %{
+            value: "extend",
+            label: "Extend #{ticket.state}",
+            detail: "the same job carries on with its session, on the room you give it"
+          }
+        ],
+        else: []
 
     retry =
       if item.detail[:retry],
@@ -1144,10 +1205,15 @@ defmodule ForgeWeb.QueueLive do
       |> Enum.map(&edge_link(item, detail, &1))
       |> Enum.uniq_by(& &1.href)
 
-    {retry ++ Enum.reverse(moves), links}
+    {extend ++ retry ++ Enum.reverse(moves), links}
   end
 
   defp ways_of(_item, _detail), do: {[], []}
+
+  # The rows that open fields under them, and what `MoreRoom` calls each.
+  defp way_fields("extend"), do: "extend"
+  defp way_fields("retry"), do: "again"
+  defp way_fields(_other), do: nil
 
   defp decision_edge(nil, _ticket, _to), do: nil
 
@@ -1314,7 +1380,7 @@ defmodule ForgeWeb.QueueLive do
       )
 
     ~H"""
-    <Actions.refused id="queue-refusal" refusal={@refusal} at={~w(retry transition)} />
+    <Actions.refused id="queue-refusal" refusal={@refusal} at={~w(retry extend transition)} />
     <div id="queue-dock" class="queue-dock">
       <.later />
       <%!-- Never decided here: an approval is the decision row on its ticket, beside what it

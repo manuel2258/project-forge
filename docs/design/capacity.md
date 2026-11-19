@@ -141,10 +141,17 @@ Only one of them is the operator's.
 
 | Exhausted | Resolved by | Treatment |
 |---|---|---|
-| A job's own budget | **a human** — run the state again, or take an edge by hand (forge's own workflows declare no edge on it) | outcome `budget_exhausted` on the job row with `· turns`, `· tokens` or `· wall clock` beside it, nowhere else |
-| Ticket allowance | **a human** — raise it or reroute | sticks the ticket, enters the queue, drawn in accent |
+| A job's own budget | **a human** — **extend it** (the same job runs again on its session with the tokens and turns they give, and a note), **run the state again**, or take an edge by hand (forge's own workflows declare no edge on it) | outcome `budget_exhausted` on the job row with `· turns`, `· tokens` or `· wall clock` beside it, nowhere else |
+| Ticket allowance | **a human** — raise it on the Extend or Run again form, where it is short, or reroute | sticks the ticket, enters the queue, drawn in accent |
 | Daily spend cap | **time**, or the operator raising it | `paused · spend 6h 12m` in the ticket's subline, neutral, counting down to midnight UTC; the project's ticket list and the queue's **Open tickets** draw `paused · spend` without the countdown. **Never an item in the queue, never counted, never pushed** |
 | Window capacity | **time** | `PAUSED · CAPACITY 1h 12m`, neutral, on the ticket and the project's ticket list, **never in the queue**. Not built (§ Engine support) |
+
+**Extending is a person's act on a finished job, not an edge** (`design/workflow-grammar-v1.md`
+§ Extending a job). The job that ran out goes back to pending and runs once more on its own session:
+its tokens are *this many more, for that run*, its turns the ones the person gave, and the spec it was
+made with is untouched. Each extension is a record of who, how much and why, so that how often jobs
+needed it can be counted and the base budgets tuned from it. Running a state again is kept beside it,
+and takes the same note and the same raise.
 
 **The first row is the workflow's, not the engine's.** What happens to a job that ran out is an
 edge in the definition: a self-retry where one is declared, and otherwise wherever
@@ -259,7 +266,8 @@ of a job is a run (`docs/design/credentials.md` § Spend) — monotonic, and it 
 operator watched happen. A job in flight has recorded nothing — usage lands
 at completion — so the figure the gate reads adds the budgeted tokens of every live job to what is
 already spent. Without that, several concurrent jobs each pass the gate on their own and together
-walk straight through the cap. **A held ticket's pending job reserves nothing**
+walk straight through the cap. **A job an extension reopened reserves the extension's tokens**, not
+its spec's: that is what its run is allowed to spend. **A held ticket's pending job reserves nothing**
 (`Spend.budgeted_live/0` leaves it out): it will not run until a person releases it, so committing
 the day to it would pause work that can run (`workflow-grammar-v1.md` § Holding a ticket). A job
 already running on a held ticket still counts, because it is spending.
@@ -269,7 +277,10 @@ emits a `usage` event per model call; the runner (and a chat's process) keeps th
 once it passes the effective budget, stops the process through the wall-clock path and the run ends
 `budget_exhausted`, stopped `:tokens`. The effective token budget of a job is the least of what its
 state declared, what the ticket has left and what the day has left; a conversation's is what is
-left of the day. The stored spec is not touched — a job's budget is written once — and the
+left of the day. For a run an extension reopened, what the state declared is replaced by the tokens
+the person gave. **The ticket's allowance is the workflow's `limits.ticket_tokens` plus the ticket's
+`cap_raise`** (`Spend.ticket_cap/2`), the one figure every reader of it uses: the gate, the stop after
+a job, the lowering, the manifest's line and every page that draws it. The stored spec is not touched — a job's budget is written once — and the
 difference is recorded as `job.budget_lowered`, without which a job stopping at a tenth of its
 declared budget is inexplicable to anyone reading the log later. Claude Code is no longer given
 `--max-budget-usd`. This is what a worker needs protocol 11 for.

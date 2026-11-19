@@ -19,6 +19,15 @@ defmodule ForgeWeb.Format do
   def author(_actor), do: nil
 
   @doc """
+  `author/1`, and a person too, by the address in `addresses` (`Forge.Accounts.addresses/1`): who
+  did a thing an operator is reading about — *On the ticket*, a job's extensions. A person whose
+  address is not in the map, and the engine, are nil.
+  """
+  @spec author(map() | nil, %{String.t() => String.t()}) :: String.t() | nil
+  def author(%{"kind" => "user", "id" => id}, addresses), do: Map.get(addresses, id)
+  def author(actor, _addresses), do: author(actor)
+
+  @doc """
   A compact relative age: `4m`, `19h`, `3d`. Seconds are `now`, because a queue item that just
   arrived does not need a number ticking on it.
   """
@@ -133,6 +142,24 @@ defmodule ForgeWeb.Format do
   @spec windows(number() | nil) :: String.t() | nil
   def windows(tokens) do
     tokens |> Capacity.windows(window_tokens()) |> Capacity.format()
+  end
+
+  @doc """
+  A ticket's allowance as it is drawn wherever one is: the figure in force, and — when a person has
+  raised it — where it was raised from, `120 windows · raised from 100 windows`
+  (`docs/design/ui.md` § The job page). The figure is `Forge.Spend.ticket_cap/2`, the one every
+  reader of the cap uses.
+  """
+  @spec allowance(Forge.Tickets.Ticket.t(), ForgeCore.Workflow.t()) :: String.t()
+  def allowance(
+        %Forge.Tickets.Ticket{cap_raise: raised} = ticket,
+        %ForgeCore.Workflow{} = workflow
+      ) do
+    figure = windows(Forge.Spend.ticket_cap(ticket, workflow)) || "—"
+
+    if (raised || 0) > 0,
+      do: figure <> " · raised from " <> (windows(workflow.limits.ticket_tokens) || "—"),
+      else: figure
   end
 
   @doc """

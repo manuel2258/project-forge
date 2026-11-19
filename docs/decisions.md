@@ -33,6 +33,10 @@ These decisions are settled. They are not to be reopened.
 ## Jobs
 
 - A job receives an immutable specification: prompt, inputs pinned by version, environment, commit, budgets, permitted children.
+- A finished workflow job is final, except in one case: a person may extend a job that ran out of
+  budget. It then runs again on its own session with its spec untouched, and the next run's ceilings
+  are the person's, kept on a record of their own. No engine outcome, scheduler or retry reopens a
+  finished workflow job (a conversation is reopened by a message, which is its own rule) (`design/capacity.md` § Four exhaustions, three treatments).
 - Jobs are disposable. Anything that must survive is committed to the job's branch or written to the artifact store. Nothing else exists.
 - A job commits its work before hibernating, when its state declares a `changeset`. A state
   that declares none has a scratch tree and commits nothing, ever. History is squashed.

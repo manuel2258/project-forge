@@ -171,13 +171,40 @@ defmodule Forge.Operator do
   end
 
   @doc """
-  Runs the ticket's current state again (`Forge.Engine.retry/2`): after a failure, or after a
-  success whose documents a person wants done afresh.
+  Runs the ticket's current state again (`Forge.Engine.retry/3`): after a failure, or after a
+  success whose documents a person wants done afresh. `opts` are the person's `:note` and `:raise`
+  of the ticket's cap.
+
+  **The guard is asked twice**: here, so a refusal costs nothing, and again inside the engine's
+  transaction straight after it locks the ticket — what is checked is what is acted on
+  (`docs/design/identity.md`).
   """
-  @spec retry(Ticket.t(), actor()) :: {:ok, Ticket.t()} | {:error, term()}
-  def retry(%Ticket{} = ticket, actor) do
+  @spec retry(Ticket.t(), actor(), keyword()) :: {:ok, Ticket.t()} | {:error, term()}
+  def retry(%Ticket{} = ticket, actor, opts \\ []) do
     with :ok <- allow(ticket, actor, :use),
-         {:ok, ticket} <- Engine.retry(ticket, Actor.of(actor)) do
+         {:ok, ticket} <-
+           Engine.retry(
+             ticket,
+             Actor.of(actor),
+             Keyword.put(opts, :allow, fn -> allow(ticket, actor, :use) end)
+           ) do
+      notify(ticket)
+    end
+  end
+
+  @doc """
+  Reopens the job of `ticket` that ran out of budget with what the person gives it
+  (`Forge.Engine.extend/5`): `attrs` are `tokens`, `turns`, `note` and `raise`. Any project member
+  may, or a project token with write access — the guard every write passes — checked again inside
+  the transaction that acts.
+  """
+  @spec extend(Ticket.t(), actor(), String.t(), map()) :: {:ok, Ticket.t()} | {:error, term()}
+  def extend(%Ticket{} = ticket, actor, job_id, attrs) do
+    with :ok <- allow(ticket, actor, :use),
+         {:ok, ticket} <-
+           Engine.extend(ticket, job_id, Actor.of(actor), attrs,
+             allow: fn -> allow(ticket, actor, :use) end
+           ) do
       notify(ticket)
     end
   end

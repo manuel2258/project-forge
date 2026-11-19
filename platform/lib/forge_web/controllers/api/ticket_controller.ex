@@ -17,6 +17,7 @@ defmodule ForgeWeb.Api.TicketController do
               :approve,
               :transition,
               :retry,
+              :extend,
               :cancel,
               :restore,
               :hold,
@@ -166,7 +167,7 @@ defmodule ForgeWeb.Api.TicketController do
     %{ticket: ticket, project: project} = conn.assigns
 
     json(conn, %{
-      ticket: Render.ticket(ticket, project.name),
+      ticket: Render.ticket(ticket, project.name, offers: true),
       jobs: Enum.map(Jobs.for_ticket(ticket.id), &Render.job/1),
       artifacts:
         Enum.map(
@@ -306,11 +307,25 @@ defmodule ForgeWeb.Api.TicketController do
     end
   end
 
-  # Runs the state the ticket rests in again (`Forge.Engine.retry/2`). The queue serves `retry`
-  # on a stuck item, and a client that can read it can act on it.
-  def retry(conn, _params) do
-    with {:ok, ticket} <- Operator.retry(conn.assigns.ticket, actor(conn)) do
-      json(conn, Render.ticket(ticket, conn.assigns.project.name))
+  # Runs the state the ticket rests in again (`Forge.Engine.retry/3`), with the person's note and
+  # the raise of the ticket's cap they ask for. The queue serves `retry` on a stuck item, and a
+  # client that can read it can act on it.
+  def retry(conn, params) do
+    opts = [note: params["note"], raise: params["raise"]]
+
+    with {:ok, ticket} <- Operator.retry(conn.assigns.ticket, actor(conn), opts) do
+      json(conn, Render.ticket(ticket, conn.assigns.project.name, offers: true))
+    end
+  end
+
+  # Reopens the job that ran out of budget (`Forge.Engine.extend/5`): `tokens`, `turns`, `note`
+  # and `raise`. The queue and the ticket serve `extend` — the offer — and a client that can read
+  # it can act on it.
+  def extend(conn, %{"job_id" => job_id} = params) do
+    attrs = Map.take(params, ~w(tokens turns note raise))
+
+    with {:ok, ticket} <- Operator.extend(conn.assigns.ticket, actor(conn), job_id, attrs) do
+      json(conn, Render.ticket(ticket, conn.assigns.project.name, offers: true))
     end
   end
 

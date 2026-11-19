@@ -19,6 +19,10 @@ outside `Operator` altogether (§ Operations).
 - `transition(ticket, user, to, opts)` — takes a declared transition by hand.
 - `retry(ticket, user)` — runs the state the ticket rests in again
   (`design/workflow-grammar-v1.md` § Running a state again).
+- `retry(ticket, user, opts)` also takes `note:` and `raise:` (the ticket's cap, in weighted tokens);
+  `extend(ticket, user, job_id, attrs)` — reopens the job that ran out of budget with `tokens`, `turns`,
+  `note` and `raise` (`design/workflow-grammar-v1.md` § Extending a job). Both pass the guard inside
+  the act's transaction.
 - `cancel(ticket, user)`, `restore(ticket, user)` — cancels a ticket, hiding it everywhere, and
   brings it back (`design/workflow-grammar-v1.md` § Cancelling a ticket).
 - `edit(ticket, user, name, content)` — writes a new version of a document.
@@ -104,10 +108,10 @@ it. Every refusal to authenticate is the same 401 body.
 | `GET /projects`, `POST /projects` | List; register `{name, default_branch}` (repository created under the platform's repos directory) |
 | `GET /tickets[?project=name][&state=s][&open=true]` | List tickets. `state` filters to one state name, `open=true` to status active or stuck; they combine. A project token needs no `project` |
 | `POST /projects/:name/tickets` | Admit `{title, body, ticket_type, on_hold, milestone_id}` (`on_hold` required, below); `ticket_type` is required when the project has more than one (`ticket-types.md`); naming the release type is refused with 422 `release_ticket_type`, saying a project admin starts it with Release on the project page |
-| `GET /tickets/:project/:number` | Ticket with jobs, artifacts, open questions, pending transition |
+| `GET /tickets/:project/:number` | Ticket with jobs, artifacts, open questions, pending transition; and what a person may do about a job that ran out — `cap`, `cap_raise`, `workflow_cap`, `left`, `restart_need`, `retry` and `extend` (the offer: the job, what it used, the declared figures, the half the form starts at, whether turns are bounded), `extend` null when there is none, and only `cap`, `cap_raise`, `retry` (false) and `extend` (null) where the workflow no longer parses |
 | `GET /tickets/:project/:number/events` | The event timeline |
 | `GET /tickets/:project/:number/review` | The merge decision: diff, documents, presentations, the commit message, answers, cost |
-| `GET /tickets/:project/:number/jobs/:job_id` | Job with its spec and harness events |
+| `GET /tickets/:project/:number/jobs/:job_id` | Job with its spec and harness events, its `runs` (each with the `extension_id` it started on and whether it `resumed`), its `extensions` (who, tokens, turns, note, the cap raise that came with it) and the `restart` that made it (who, note), null when none |
 | `GET /tickets/:project/:number/artifacts/:name[?version=n]` | A version with content |
 | `GET /tickets/:project/:number/artifacts` | Every artifact (name, kind) with **all** its versions: number, id, author, `inserted_at`, `content_hash`, and `form` (`text`, `file` or `commit`). One call, no limit |
 | `GET /tickets/:project/:number/artifacts/:name/:version/raw` | The version's stored bytes, `:name` one encoded segment (`group%2Ffile`). The listed `content_hash` is `sha256:` of exactly these bytes for anything a worker's result or a person wrote (a blob recorded without a hash, milestone 1's, lists `uri:…` instead). Text is `text/plain`; a raster image blob (`.png` `.jpg` `.jpeg` `.gif` `.webp` `.avif`) is its `image/*` type, inline; anything else, `.svg` included, an attachment. `nosniff` and `content-security-policy: default-src 'none'; sandbox` on all (`ui.md` § Addressable artifact versions). A commit is 422 `not_a_file` naming the review endpoint; a version that is not a positive integer, or does not exist, is 404 |
@@ -115,7 +119,8 @@ it. Every refusal to authenticate is the same 401 body.
 | `POST /tickets/:project/:number/answers` | `{key, choice, text}` |
 | `POST /tickets/:project/:number/approve` | `{decision, comment}` |
 | `POST /tickets/:project/:number/transition` | `{to, outcome, comment}` |
-| `POST /tickets/:project/:number/retry` | Runs the state the ticket rests in again |
+| `POST /tickets/:project/:number/retry` | Runs the state the ticket rests in again; `{note, raise}` optional |
+| `POST /tickets/:project/:number/jobs/:job_id/extend` | `{tokens, turns, note, raise}`: reopens the job that ran out of budget; refused 409 `not_extendable`, `job_live` or `step_live` and 422 for a bad figure, a long note (counted in codepoints, as the database counts it) or one the database could not store (a NUL byte, bytes that are not UTF-8), a raise that is not an amount, a raise nothing needs (`raise_not_needed`) or one short of the shortfall. A write token may; a read token or a job's may not |
 | `POST /tickets/:project/:number/cancel`, `…/restore` | Cancels the ticket; brings a cancelled one back — a cancelled release is refused with 409 `release_open` while another release is open (`ticket-types.md` § Releases) |
 | `GET /projects/:project/proposals` | Open ticket proposals on the project, each with the `suggested_type` it names |
 | `POST /proposals/:version_id/accept` | `{comment, ticket_type}`; answers with the ticket it admitted |
@@ -153,7 +158,7 @@ The pages, as `design/ui.md` draws them in the redesign:
 - `/` — the queue: one item per screen, oldest first, with *Later*, an *All* sheet and the end of
   the pass (`design/ui.md` § The queue). A document's questions are one card — options to lock in,
   free text beside them, one Send (`design/ui.md` § The question card); a stuck item offers its
-  ways forward, including whether its state can be run again (`retry`). **An approval links to the
+  ways forward, including whether its state can be run again (`retry`) and whether the job that ran out can be extended (`extend`, the same offer the ticket carries). **An approval links to the
   ticket's Changes or Docs, where it is decided; the queue decides nothing.** Non-blocking
   questions asked on their own follow the pass as lines, each leading to its ticket
   (`design/ui.md` § Not waiting on you); one asked in the same document as a blocking question is

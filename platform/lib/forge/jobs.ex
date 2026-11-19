@@ -34,7 +34,7 @@ defmodule Forge.Jobs do
 
   alias Forge.Events.Event
   alias Forge.Git.{Tokens, Url}
-  alias Forge.Jobs.{Blobs, Commands, Job, Runs}
+  alias Forge.Jobs.{Blobs, Commands, Extension, Extensions, Job, Run, Runs}
   alias Forge.Projects.Project
   alias Forge.Tickets.Ticket
   alias Forge.Workers.Worker
@@ -60,6 +60,10 @@ defmodule Forge.Jobs do
   # job needs it, commands included, so a protocol-10 worker takes nothing
   # (`docs/design/worker-channel.md` § Protocol 11).
   @usage_protocol 11
+  # A job a person extended: its spec carries the `extension` the worker composes the prompt's
+  # opening from, which a worker from before drops without a word (`docs/design/worker-channel.md`
+  # § Protocol 12).
+  @extension_protocol 12
   @step_protocol 10
 
   # How many of the merges that landed on the default branch since a ticket's base an integrating
@@ -129,6 +133,7 @@ defmodule Forge.Jobs do
               if(Keyword.get(opts, :came_back, false),
                 do: forkable(repo, ticket.id, state_name, spec)
               ),
+            restart_id: Keyword.get(opts, :restart_id),
             spec: spec |> Spec.to_json() |> Jason.decode!(),
             memory_max: resources.memory,
             cores: resources.cores,
@@ -707,7 +712,7 @@ defmodule Forge.Jobs do
   defp unassign(job, reason) do
     Multi.new()
     |> Multi.update(:job, Job.progress_changeset(get!(job.id), %{status: :pending}))
-    |> Runs.close(job.id, DateTime.utc_now(:second))
+    |> Runs.close(job.id, DateTime.utc_now(:second), nil, release_extension: true)
     |> Repo.transaction()
 
     Tokens.revoke_for_job(job.id)
@@ -898,6 +903,10 @@ defmodule Forge.Jobs do
     document is required, because the note that says otherwise is new with this, so it nags for
     an optional one the agent skipped and ends the job `error` on a state with no `error` edge
     (`docs/design/worker-channel.md` § Versions). A state that declares neither asks nothing more.
+  - **A job a person extended needs protocol 12**: the extension is what the reopened run's prompt
+    opens with, and a release from before it resumes the session with no word of the note or of why
+    there is more room (`docs/design/worker-channel.md` § Protocol 12). Every other job asks nothing
+    more.
   - **A conversation needs protocol 8**: it is now told the default branch, and a release from
     before 8 acts on that without being able to squash a merge that is still open — the turn dies
     on `reset --soft` and every turn after it does too, which is a trap a chat could not reach
@@ -931,8 +940,18 @@ defmodule Forge.Jobs do
       secrets: secrets_protocol(job),
       outputs: outputs_protocol(job),
       archive: archive_protocol(job),
+      extension: extension_protocol(job),
       usage: @usage_protocol
     ]
+
+  defp extension_protocol(%Job{kind: :workflow, id: id}),
+    do:
+      if(Repo.exists?(from e in Extension, where: e.job_id == ^id),
+        do: @extension_protocol,
+        else: 0
+      )
+
+  defp extension_protocol(%Job{}), do: 0
 
   defp archive_protocol(%Job{kind: kind}) when kind in [:workflow, :chat], do: @archive_protocol
   defp archive_protocol(%Job{}), do: 0
@@ -1378,7 +1397,7 @@ defmodule Forge.Jobs do
         effort: effort_for(job)
     }
 
-    spec = lower_budget(spec, job, ticket)
+    spec = spec |> put_extension(job) |> lower_budget(job, ticket)
     {results, _logs} = Commands.results(job)
     {entered, _logs} = Commands.entered(job)
 
@@ -1615,6 +1634,45 @@ defmodule Forge.Jobs do
   defp as_input(document),
     do: %Input{name: document.name, version: document.version, content: document.content}
 
+  # A job a person extended runs on what they gave it: the extension's tokens are the base the
+  # budget is lowered from, its turns the run's turn ceiling (the spec's own where it gave none), and
+  # the spec carries the extension for the prompt — `Forge.Jobs.Extensions`, `ForgeCore.Prompt`. The
+  # stored spec is not touched; this is the copy the run is handed, as `lower_budget/3`'s is. Every
+  # run of the job after its first extension carries its latest one — a resume after a question
+  # too — because each of them gets the job's current ceiling, as each gets the declared one
+  # otherwise (`docs/design/capacity.md`).
+  defp put_extension(%Spec{} = spec, %Job{} = job) do
+    case Extensions.current(job) do
+      nil ->
+        spec
+
+      %Extension{} = extension ->
+        budget = %{
+          spec.budget
+          | tokens: extension.tokens,
+            turns: extension.turns || spec.budget.turns
+        }
+
+        %{
+          spec
+          | budget: budget,
+            extension: %{
+              "number" => Extensions.number(extension),
+              "tokens" => extension.tokens,
+              "turns" => extension.turns,
+              "note" => extension.note,
+              "exhausted" => extension.exhausted && Atom.to_string(extension.exhausted),
+              # Told of the extension by the run it was given to only: a later run of the job keeps
+              # the extension's ceiling and is told what any resume is (`ForgeCore.Prompt`).
+              "later_run" => Extensions.later_run?(job, extension),
+              "used_tokens" => job.usage,
+              "used_turns" => job.turns,
+              "runs" => Repo.aggregate(from(r in Run, where: r.job_id == ^job.id), :count)
+            }
+        }
+    end
+  end
+
   # The job row's `spec` is written once and never rewritten — the invariant holds for what was
   # declared. Only the copy the harness runs with is narrowed, and the difference is an event,
   # without which a job stopping at a tenth of its declared budget is inexplicable later.
@@ -1705,7 +1763,8 @@ defmodule Forge.Jobs do
   defp put_allowance(spec, ticket, %Workflow{limits: %{ticket_tokens: cap}} = workflow)
        when is_integer(cap) do
     left = Spend.ticket_remaining(ticket, workflow)
-    %{spec | budget: Map.merge(spec.budget, %{ticket_left: left, ticket_limit: cap})}
+    limit = Spend.ticket_cap(ticket, workflow)
+    %{spec | budget: Map.merge(spec.budget, %{ticket_left: left, ticket_limit: limit})}
   end
 
   defp put_allowance(spec, _ticket, _workflow), do: spec
@@ -1898,7 +1957,7 @@ defmodule Forge.Jobs do
         started_at: job.started_at || now
       })
     )
-    |> Runs.open(job, worker, credential, now)
+    |> Runs.open(job, worker, credential, now, Extensions.to_tell(job))
     |> put_credential_changed(job, credential)
     |> Events.log(:event, "job.started", :system, %{
       ticket_id: job.ticket_id,
@@ -1995,7 +2054,7 @@ defmodule Forge.Jobs do
       # hear the same one twice. Keyed by the job: a job is recorded once. Not "is it running":
       # a worker that rejoins before its result is acked has the job re-queued under it
       # (`WorkerChannel.reconcile/2`), and the result that follows is still the run's answer.
-      job.status == :finished -> settled(job, result.harness)
+      recorded?(job) -> settled(job, result.harness)
       # A command's result is its exit status and its log (`docs/design/commands.md`).
       job.kind == :command -> Commands.complete(job, ticket, result)
       # An agent that asked for commands: the run is over and the job is not.
@@ -2007,6 +2066,27 @@ defmodule Forge.Jobs do
       true -> record_and_follow_up(job, ticket, result)
     end
   end
+
+  # A job whose result is already in: it finished, **or it was extended since its latest start** —
+  # the result of the run before a person's extension, sent again until acked and arriving after
+  # the job was reopened. It was recorded when the job finished, and recording it now would finish
+  # the reopened job on the old run's outcome: acked, and it changes nothing (`settled/2`).
+  defp recorded?(%Job{status: :finished}), do: true
+  defp recorded?(%Job{} = job), do: extended_since_started?(job)
+
+  # Whether the job's latest `job.extended` is newer than its latest `job.started`: reopened, and
+  # not yet started again, so a result arriving now cannot be the reopened run's.
+  defp extended_since_started?(%Job{kind: :workflow, id: id}) do
+    Repo.all(
+      from e in Event,
+        where: e.job_id == ^id and e.type in ["job.extended", "job.started"],
+        order_by: [desc: e.seq],
+        limit: 1,
+        select: e.type
+    ) == ["job.extended"]
+  end
+
+  defp extended_since_started?(%Job{}), do: false
 
   # **Stopped by its account's limit, not failed** (`docs/design/credentials.md` § A limit reached
   # mid-run): it ended in error, nobody killed it, and the last window report it saw blocks —
@@ -2033,7 +2113,9 @@ defmodule Forge.Jobs do
       Job.progress_changeset(job, Map.put(accounting(job, result), :status, :pending))
     )
     |> Credentials.put_renew(job, result.harness["credential_return"])
-    |> Runs.close(job.id, DateTime.utc_now(:second), figure)
+    |> Runs.close(job.id, DateTime.utc_now(:second), figure,
+      resumed: Runs.resumed(result.harness)
+    )
     |> Tickets.put_progress(:ticket_cost, ticket, %{usage: ticket.usage + figure.usage})
     |> Events.log(:event, "job.rate_limited", {:job, job.id}, %{
       ticket_id: ticket.id,
@@ -2094,7 +2176,8 @@ defmodule Forge.Jobs do
     # Codex may refresh its login on start-up, before it fails to find the session: "never got
     # going" is not a safe reading of a run that held one (`Forge.Credentials.put_renew/3`).
     |> Credentials.put_renew(job, result.harness["credential_return"])
-    |> Runs.close(job.id, DateTime.utc_now(:second))
+    # The platform knows the harness refused the session, whatever the worker said of it.
+    |> Runs.close(job.id, DateTime.utc_now(:second), nil, resumed: false, release_extension: true)
     |> Events.log(:event, "job.resume_failed", {:job, job.id}, %{
       ticket_id: ticket.id,
       job_id: job.id,
@@ -2140,7 +2223,9 @@ defmodule Forge.Jobs do
         )
       )
       |> Credentials.put_renew(job, result.harness["credential_return"])
-      |> Runs.close(job.id, DateTime.utc_now(:second), figure)
+      |> Runs.close(job.id, DateTime.utc_now(:second), figure,
+        resumed: Runs.resumed(result.harness)
+      )
       |> Tickets.put_progress(:ticket_cost, ticket, %{usage: ticket.usage + figure.usage})
       |> Commands.put_invoked(ticket, workflow, job, decided, at, batch)
       |> Events.log(:event, "job.parked", {:job, job.id}, fn changes ->
@@ -2273,7 +2358,9 @@ defmodule Forge.Jobs do
     |> put_changeset(ticket, job, result)
     |> Multi.update(:job, Job.progress_changeset(job, progress_attrs(job, result)))
     |> Credentials.put_renew(job, result.harness["credential_return"])
-    |> Runs.close(job.id, DateTime.utc_now(:second), Runs.figure(result.harness))
+    |> Runs.close(job.id, DateTime.utc_now(:second), Runs.figure(result.harness),
+      resumed: Runs.resumed(result.harness)
+    )
     |> Tickets.put_progress(:ticket_cost, ticket, %{
       usage: ticket.usage + Runs.figure(result.harness).usage
     })
@@ -2692,7 +2779,7 @@ defmodule Forge.Jobs do
     Multi.new()
     |> Multi.update(:job, Job.progress_changeset(job, %{status: interrupted_status(job)}))
     |> Credentials.put_renew(job, returned)
-    |> Runs.close(job.id, DateTime.utc_now(:second))
+    |> Runs.close(job.id, DateTime.utc_now(:second), nil, release_extension: true)
     |> Events.log(:event, "job.hibernated", {:job, job.id}, %{
       ticket_id: job.ticket_id,
       job_id: job.id,
@@ -2729,7 +2816,7 @@ defmodule Forge.Jobs do
 
     Multi.new()
     |> Multi.update(:job, Job.progress_changeset(job, %{status: interrupted_status(job)}))
-    |> Runs.close(job.id, DateTime.utc_now(:second))
+    |> Runs.close(job.id, DateTime.utc_now(:second), nil, release_extension: true)
     |> Events.log(:event, "job.interrupted", :system, %{
       ticket_id: job.ticket_id,
       job_id: job.id,
@@ -2791,7 +2878,7 @@ defmodule Forge.Jobs do
       {:ok, %{job: interrupted}} =
         Multi.new()
         |> Multi.update(:job, Job.progress_changeset(job, %{status: interrupted_status(job)}))
-        |> Runs.close(job.id, DateTime.utc_now(:second))
+        |> Runs.close(job.id, DateTime.utc_now(:second), nil, release_extension: true)
         |> Events.log(:event, "job.interrupted", :system, %{
           ticket_id: job.ticket_id,
           job_id: job.id

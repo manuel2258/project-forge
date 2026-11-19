@@ -139,11 +139,11 @@ defmodule Forge.ArchiveTest do
       [header | rows] = String.split(all, "\n", trim: true)
 
       assert header ==
-               "ticket\tstate\tattempt\tkind\toutcome\tstatus\tstarted_at\tfinished_at\tturns\tusage\tmodel\teffort\tmemory_max\tcores\truns"
+               "ticket\tstate\tattempt\tkind\toutcome\tstatus\tstarted_at\tfinished_at\tturns\tusage\tmodel\teffort\tmemory_max\tcores\truns\textensions\textension_tokens\trestarted"
 
       assert length(rows) == 3
       fields = Enum.map(rows, &String.split(&1, "\t"))
-      assert Enum.all?(fields, &(length(&1) == 15))
+      assert Enum.all?(fields, &(length(&1) == 18))
 
       refute all =~ credential.id
       refute all =~ worker.id
@@ -155,6 +155,8 @@ defmodule Forge.ArchiveTest do
       assert Enum.at(never_row, 4) == "n/a"
       assert Enum.at(never_row, 6) == "n/a"
       assert Enum.at(never_row, 14) == "0"
+      # Nobody extended it, and nobody restarted it.
+      assert Enum.slice(never_row, 15, 3) == ["0", "0", "false"]
 
       [ran_row] = Enum.filter(fields, &(Enum.at(&1, 2) == "2"))
       assert Enum.at(ran_row, 5) == "running"
@@ -171,6 +173,46 @@ defmodule Forge.ArchiveTest do
       assert Enum.at(chat_row, 11) == "high"
 
       refute all =~ other.state
+    end
+
+    # `docs/design/archive.md` § Layout: how many times a job was extended and the tokens that gave
+    # in total, and whether a person's *Run again* made the attempt — counts, never who or why.
+    test "counts a job's extensions and their tokens, and marks an attempt a person restarted",
+         %{project: project, ticket: ticket} do
+      person = Forge.AccountsFixtures.user_fixture()
+      extended = job_fixture(%{ticket: ticket, attempt: 3})
+
+      for tokens <- [6_000_000, 1_500_000] do
+        Repo.insert!(%Forge.Jobs.Extension{
+          job_id: extended.id,
+          ticket_id: ticket.id,
+          user_id: person.id,
+          tokens: tokens,
+          note: "SECRET-NOTE"
+        })
+      end
+
+      restart =
+        Repo.insert!(%Forge.Tickets.Restart{
+          ticket_id: ticket.id,
+          user_id: person.id,
+          state: "refining"
+        })
+
+      restarted = job_fixture(%{ticket: ticket, attempt: 4, restart_id: restart.id})
+      transitioned = job_fixture(%{ticket: ticket, attempt: 5})
+
+      %{"inline" => all} = Enum.find(Archive.root(project)["files"], &(&1["path"] == "jobs.tsv"))
+      rows = all |> String.split("\n", trim: true) |> tl() |> Enum.map(&String.split(&1, "\t"))
+      row = fn attempt -> Enum.find(rows, &(Enum.at(&1, 2) == to_string(attempt))) end
+
+      assert Enum.slice(row.(extended.attempt), 15, 3) == ["2", "7500000", "false"]
+      assert Enum.slice(row.(restarted.attempt), 15, 3) == ["0", "0", "true"]
+      assert Enum.slice(row.(transitioned.attempt), 15, 3) == ["0", "0", "false"]
+
+      # Not who, and not why.
+      refute all =~ person.id
+      refute all =~ "SECRET-NOTE"
     end
 
     test "a ticket's own ledger is that ticket's jobs only", %{project: project, ticket: ticket} do

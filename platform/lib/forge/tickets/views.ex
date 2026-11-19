@@ -27,7 +27,7 @@ defmodule Forge.Tickets.Views do
              ticket.done ticket.cancelled ticket.restored ticket.renamed ticket.merged
              ticket.merge_conflicted approval.requested approval.approved approval.rejected
              step.accepted merge_queue.entered merge_queue.left job.finished chat.message
-             artifact.version_written)
+             artifact.version_written job.extended ticket.cap_raised)
 
   @doc "The event types *since you last looked* lists."
   @spec listed() :: [String.t()]

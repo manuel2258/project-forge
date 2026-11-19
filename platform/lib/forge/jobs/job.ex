@@ -74,6 +74,10 @@ defmodule Forge.Jobs.Job do
     # The previous attempt of this state whose session this one forks: a new attempt the ticket
     # came back to (`docs/design/claude-code-events.md` § Resume). Cleared when a resume is refused.
     belongs_to :resume_from, __MODULE__
+
+    # The person's *Run again* that made this job, or released it from hold, so an attempt a person
+    # restarted is told from one a transition sent back (`docs/design/archive.md` § jobs.tsv).
+    belongs_to :restart, Forge.Tickets.Restart
     belongs_to :worker, Forge.Workers.Worker
     # What pays for it: the credential it picked from its project's pool at its first start, and
     # keeps while that is usable (`docs/design/credentials.md` § How a job picks). A credential's
@@ -115,6 +119,7 @@ defmodule Forge.Jobs.Job do
       :attempt,
       :parent_job_id,
       :resume_from_id,
+      :restart_id,
       :spec,
       :worker_id,
       :model,

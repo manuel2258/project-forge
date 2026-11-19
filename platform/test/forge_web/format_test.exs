@@ -101,6 +101,28 @@ defmodule ForgeWeb.FormatTest do
     end
   end
 
+  describe "allowance/2" do
+    # The figure in force, and from what it was raised (ticket 58).
+    test "is the workflow's cap, or the raised figure and the workflow's it was raised from" do
+      cap = 100_000_000
+      ticket = %Forge.Tickets.Ticket{cap_raise: 0}
+
+      workflow = %ForgeCore.Workflow{
+        initial: "a",
+        states: %{},
+        transitions: [],
+        limits: %{ticket_tokens: cap}
+      }
+
+      assert Format.allowance(ticket, workflow) == Format.windows(cap)
+
+      raised = %{ticket | cap_raise: 20_000_000}
+
+      assert Format.allowance(raised, workflow) ==
+               Format.windows(cap + 20_000_000) <> " · raised from " <> Format.windows(cap)
+    end
+  end
+
   describe "spent/1" do
     # A row leaves a zero out rather than print `0 windows` (UX pass, A11).
     test "is the windows used, and nothing for nothing used" do

@@ -38,6 +38,11 @@ defmodule Forge.Tickets.Ticket do
     field :status, Ecto.Enum, values: [:active, :stuck, :done, :cancelled], default: :active
     field :usage, :integer, default: 0
     field :usage_converted, :boolean, default: false
+
+    # What people have added to the workflow's `limits.ticket_tokens` for this ticket alone, on the
+    # Extend and Run again forms: kept as an addition so a re-pin that moves the workflow's cap
+    # moves it under the raise (`Forge.Spend.ticket_cap/2`, `Forge.Tickets.CapRaise`).
+    field :cap_raise, :integer, default: 0
     field :pending_transition, :map
 
     # A hold: set while a person has put the ticket on hold. `held_transition` and `held_entry` are
@@ -152,13 +157,23 @@ defmodule Forge.Tickets.Ticket do
   end
 
   @doc """
-  Changeset for the engine moving a ticket: state, status, accumulated usage and the approval or
-  hold it waits on (`pending_transition`, `held_transition`, `held_entry`), and nothing else.
+  Changeset for the engine moving a ticket: state, status, accumulated usage, the cap raise a person
+  made with an extension or a restart, and the approval or hold it waits on
+  (`pending_transition`, `held_transition`, `held_entry`), and nothing else.
   """
   def progress_changeset(ticket, attrs) do
     ticket
-    |> cast(attrs, [:state, :status, :usage, :pending_transition, :held_transition, :held_entry])
+    |> cast(attrs, [
+      :state,
+      :status,
+      :usage,
+      :cap_raise,
+      :pending_transition,
+      :held_transition,
+      :held_entry
+    ])
     |> validate_required([:state, :status, :usage])
     |> validate_number(:usage, greater_than_or_equal_to: 0)
+    |> validate_number(:cap_raise, greater_than_or_equal_to: 0)
   end
 end

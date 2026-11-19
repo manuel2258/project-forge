@@ -111,6 +111,22 @@ defmodule ForgeWeb.ProjectTicketsTest do
       assert out =~ ~s(id="rows-#{two.id}")
     end
 
+    # The allowance is the workflow's plus what a person raised it by (ticket 58): half of the raised
+    # figure is the line, not half of the workflow's.
+    test "usage is high against the raised allowance, not the workflow's" do
+      ticket = ticket_fixture()
+      cap = Forge.Spend.ticket_cap(ticket, Forge.Tickets.workflow(ticket))
+      spent = div(cap, 2) + 1
+
+      high = ticket |> Ecto.Changeset.change(usage: spent) |> Repo.update!()
+      raised = high |> Ecto.Changeset.change(cap_raise: cap) |> Repo.update!()
+
+      assert [%{usage_high: true}] = ProjectTickets.rows([high], facts(high, pending(:workflow)))
+
+      assert [%{usage_high: false}] =
+               ProjectTickets.rows([raised], facts(raised, pending(:workflow)))
+    end
+
     test "usage is shown below half the allowance only when asked to, and never when nothing was spent" do
       spent = ticket_fixture() |> Ecto.Changeset.change(usage: 1_000) |> Repo.update!()
       unspent = ticket_fixture()

@@ -105,6 +105,9 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/api/v1/tickets/:project/:number/approve" => :member,
     "/api/v1/tickets/:project/:number/transition" => :member,
     "/api/v1/tickets/:project/:number/retry" => :member,
+    # Extending a job that ran out: `Forge.Operator.extend/4`, the guard every ticket write passes,
+    # asked again inside the engine's transaction after the ticket is locked.
+    "/api/v1/tickets/:project/:number/jobs/:job_id/extend" => :member,
     "/api/v1/tickets/:project/:number/cancel" => :member,
     "/api/v1/tickets/:project/:number/restore" => :member,
     # The hold, titles and milestones: `Forge.Operator` guards every one, a project token with API
@@ -350,6 +353,7 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"operator/actions.ex", "cancel-ticket"} => :member,
     {"operator/actions.ex", "restore-ticket"} => :member,
     {"operator/actions.ex", "retry"} => :member,
+    {"operator/actions.ex", "extend"} => :member,
     {"operator/actions.ex", "repin"} => :member,
     {"operator/actions.ex", "integrate"} => :member,
     {"operator/actions.ex", "take-out"} => :member,

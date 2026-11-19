@@ -1265,7 +1265,8 @@ defmodule ForgeWorker.Job.Runner do
           state.rate_limit,
           Memory.summary(state.memory),
           {state.baseline, state.spec.job_id},
-          state.meter
+          state.meter,
+          state.resume
         )
         |> put_return(credential_return(state))
     }
@@ -1360,7 +1361,8 @@ defmodule ForgeWorker.Job.Runner do
          rate_limit,
          memory,
          {baseline, job_id},
-         meter
+         meter,
+         resumed
        ) do
     started = started || %{}
     finished = finished || %{}
@@ -1390,7 +1392,15 @@ defmodule ForgeWorker.Job.Runner do
       "claude_usage" => Map.get(finished, :claude_usage),
       "exit_status" => exit_status,
       "rate_limit" => rate_limit && window_report(rate_limit),
-      "memory" => memory
+      "memory" => memory,
+      # Whether this run resumed its session, which only the worker knows: `Session.check/7` drops a
+      # resume it will not attempt (a version mismatch, a file that is not the session's own) and
+      # the run is a cold start with the full prompt. The platform records it on the run, so a job
+      # a person extended can say it started without its session (`docs/design/claude-code-events.md`
+      # § Resume). The same value that chose `--resume` and the prompt, and so cannot disagree — and
+      # so false of a job's first run too, which had no session to resume: the job page reads it only
+      # of a run an extension reopened.
+      "resumed" => resumed
     }
   end
 

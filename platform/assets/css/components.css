@@ -347,6 +347,31 @@
   .ui-field-input[aria-invalid="true"] { border-color: var(--danger); }
   .ui-field--mono .ui-field-input { font-family: var(--font-mono); }
   .ui-field--desk .ui-field-label { font-size: 12.5px; }
+
+  /* The fields under the Extend and Run again rows of a stuck ticket's ways forward
+     (`ForgeWeb.Components.MoreRoom`): set in from the row they belong to, and wrapping anything a
+     person or a workflow wrote — a note is text, and a long one wraps on a phone. */
+  .ui-room {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: -2px 0 6px 14px;
+    padding: 4px 0 2px 14px;
+    border-left: 2px solid var(--border-control);
+    /* A box for an amount or a note does not need the page's whole width on a laptop. */
+    max-width: 36rem;
+    min-width: 0;
+  }
+  .ui-room-facts {
+    margin: 0 0 6px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink-2);
+    overflow-wrap: anywhere;
+  }
+  .ui-room .ui-field { margin-bottom: 4px; }
+  .ui-room textarea.ui-field-input { min-height: 72px; white-space: pre-wrap; }
+  .ui-room-raise { display: flex; flex-direction: column; gap: 2px; padding-top: 4px; }
   .ui-field--desk .ui-field-input { min-height: 34px; padding: 0 10px; border-radius: var(--radius-sm); font-size: 13px; }
   .ui-field--desk textarea.ui-field-input { padding: 12px; }
   .ui-field-hint { font-size: 12.5px; line-height: 1.45; opacity: .6; }

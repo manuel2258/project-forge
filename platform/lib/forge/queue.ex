@@ -390,7 +390,11 @@ defmodule Forge.Queue do
           reason: Engine.why_stuck(ticket),
           transitions: transitions_from(ticket),
           reviewable: reviewable?(ticket),
-          retry: retryable?(ticket)
+          retry: retryable?(ticket),
+          # What a job that ran out may be given (`Forge.Jobs.Extensions.offer/1`), nil when the
+          # ticket's job did not, and the figures the form and *Run again* are judged against.
+          extend: Forge.Jobs.Extensions.offer(ticket),
+          room: room(ticket)
         }
       }
     ]
@@ -448,6 +452,13 @@ defmodule Forge.Queue do
     case Tickets.parsed_workflow(ticket) do
       {:ok, workflow} -> Engine.offered_transitions(ticket, workflow)
       {:error, errors} -> unparseable(ticket, errors, [])
+    end
+  end
+
+  defp room(%Ticket{} = ticket) do
+    case Tickets.parsed_workflow(ticket) do
+      {:ok, workflow} -> Forge.Jobs.Extensions.cap_facts(ticket, workflow)
+      {:error, _errors} -> nil
     end
   end
 

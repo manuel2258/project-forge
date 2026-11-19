@@ -368,7 +368,41 @@ the last attempt had (`job-prompt.md` § How the job arrived); clears any pendin
 the documents it would approve are about to be replaced; unsticks the ticket; and records
 `ticket.retried`. It takes no transition, so no `max` counts it: `max` bounds the engine's loops,
 and this is a person choosing to spend again. What a retry may spend is the ticket's cost cap,
-as for any job.
+as for any job. It takes an optional **note**, carried as the arrival comment, and an optional
+**raise of the ticket's cap** (§ Extending a job). On an agent state it is refused when the ticket
+has nothing left of its cap unless the raise covers what the state's budget needs; with something
+left but less than the state's budget, it runs lowered to what is left (`job.budget_lowered`) unless
+the person raises the cap. A command state spends no tokens and is never refused for the cap.
+The act, its guard and its checks are one transaction, and the ticket is locked in it.
+
+**Extending a job.** A job that ended `budget_exhausted` on a ticket it stuck may be reopened by a
+person (`Forge.Engine.extend/5`): the same job row and attempt, a new run, on its own session. Only
+a person: no outcome, `transition.json`, `invoke.json`, scheduler or retry reopens a finished job,
+and no workflow edge on `budget_exhausted` is involved. It is offered, and acted on, only when
+`Forge.Jobs.Extensions.extendable/3` says so: a stuck, unqueued ticket; the job is the state's
+latest attempt, `:workflow` and `:finished` with `:budget_exhausted`, and no job of the state is
+live; the state is an agent state; and the job kept a session id and a session file. The figures are
+**on top of what the job has used**, never a new total: the reopened run's token ceiling is the
+extension's tokens, and its turn ceiling the extension's turns where the harness bounds them
+(Claude Code; a Codex run is not bounded by turns, and the form has no turns box for it); the
+wall clock is the per-run default and is not a person's to set. **The ticket cap:** tokens past what the ticket has
+left are refused unless the same submission raises the ticket's cap by at least the shortfall;
+the raise is stored as an addition (`tickets.cap_raise`), so a re-pin that moves the workflow's cap
+moves it under the raise. Each of the extension, the restart and the raise is its own insert-only
+record (who, when, the figures, the note), logged as `job.extended`, `ticket.retried` and
+`ticket.cap_raised`. No `max` counts any of them, and either clears a pending approval. The job
+runs on the spec it was created with even if the ticket was re-pinned since. A job may be extended again
+once its reopened run has stopped on budget too, so each extension is the one stop it answers;
+an extension while the job is live again (or while a Run again waits on a hold), and an extension
+after a restart, are refused. **Only the run an extension was given to is told so**: it is stamped
+with the extension (`job_runs.extension_id`) and its continuation opens with it, while a later run
+of the same job — resumed after a question, a park or a limit — keeps the extension's ceiling and is
+told what any resume is (`spec.extension.later_run`). A run the platform takes back with no
+result — the harness refused its session, its machine was lost or never reached, or it hibernated —
+lets go of the extension, and the run that follows takes it. **A cold run is told of the extension
+whichever run of the job it is**, having no memory of an earlier telling. **A
+second Run again on a held ticket is refused as a live job is**, since the first one's entry waits for
+the release and a second would overwrite its note.
 
 **Cancelling a ticket.** A person may cancel a ticket that is active or stuck
 (`Forge.Engine.cancel/2`): the ticket becomes `cancelled`, every job of it that is still live —
@@ -487,7 +521,8 @@ There are three, not two: the turn budget, the token budget, and the engine's wa
 which is a default of the engine's and has no key here at all
 (`capacity.md` § Four exhaustions, three treatments). `limits.ticket_tokens` (the older `ticket_cost`, refused the same way) is required and caps the
 sum over all jobs of a ticket; reaching it sticks the ticket. Budgets are never modifiable by a
-job.
+job. **A person may raise it for one ticket** on the Extend or Run again form
+(§ Extending a job): the allowance is then `limits.ticket_tokens` plus the ticket's `cap_raise`.
 
 **`limits.ticket_tokens` caps the jobs the engine starts, and not a conversation.** The workflow
 and command jobs of a ticket are what it sums; a conversation opened on that ticket has no

@@ -393,7 +393,7 @@ defmodule Forge.Archive do
 
   # -- the jobs ledger ----------------------------------------------------------------------------
 
-  @header ~w(ticket state attempt kind outcome status started_at finished_at turns usage model effort memory_max cores runs)
+  @header ~w(ticket state attempt kind outcome status started_at finished_at turns usage model effort memory_max cores runs extensions extension_tokens restarted)
 
   # Every job of the project, or of one ticket (`ticket_id` set). A field the platform did not
   # record is `n/a` and the line is kept: a job that never started is still a job that ran here.
@@ -410,12 +410,32 @@ defmodule Forge.Archive do
         group_by: r.job_id,
         select: %{job_id: r.job_id, n: count(r.id)}
 
+    # What a person gave each job (`Forge.Jobs.Extension`): how many times and how many tokens, and
+    # not who or why — the ledger names no person (`docs/design/archive.md` § Layout).
+    #
+    # The `project_id` filter below is an equivalent mutant: the outer query keeps only this
+    # project's jobs and joins on `job_id`, so another project's rows never reach the result. It
+    # narrows what the aggregate reads, as `runs` above does.
+    extensions =
+      from e in Forge.Jobs.Extension,
+        join: ej in Job,
+        on: ej.id == e.job_id,
+        where: ej.project_id == ^project_id,
+        group_by: e.job_id,
+        select: %{
+          job_id: e.job_id,
+          n: count(e.id),
+          tokens: type(coalesce(sum(e.tokens), 0), :integer)
+        }
+
     query =
       from j in Job,
         left_join: t in Ticket,
         on: t.id == j.ticket_id,
         left_join: r in subquery(runs),
         on: r.job_id == j.id,
+        left_join: x in subquery(extensions),
+        on: x.job_id == j.id,
         where: j.project_id == ^project_id,
         order_by: [j.inserted_at, j.id],
         select: [
@@ -433,7 +453,10 @@ defmodule Forge.Archive do
           fragment("coalesce(?, ?->>'effort')", j.effort, j.spec),
           j.memory_max,
           j.cores,
-          coalesce(r.n, 0)
+          coalesce(r.n, 0),
+          coalesce(x.n, 0),
+          coalesce(x.tokens, 0),
+          not is_nil(j.restart_id)
         ]
 
     query = if ticket_id, do: from([j] in query, where: j.ticket_id == ^ticket_id), else: query

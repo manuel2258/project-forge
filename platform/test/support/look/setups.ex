@@ -31,6 +31,7 @@ defmodule Forge.Look.Setups do
     "machines" => Forge.Look.Setups.Machines,
     "codex" => Forge.Look.Setups.Codex,
     "weighted_usage" => Forge.Look.Setups.WeightedUsage,
+    "extend" => Forge.Look.Setups.Extend,
     "templates" => Forge.Look.Setups.Templates,
     "usage" => Forge.Look.Setups.Usage,
     "projects" => Forge.Look.Setups.Projects,

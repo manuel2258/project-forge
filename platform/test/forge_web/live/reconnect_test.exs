@@ -171,6 +171,117 @@ defmodule ForgeWeb.ReconnectTest do
     end
   end
 
+  # Extending a job that ran out and running a state again take a note, figures and a cap raise
+  # (`docs/design/ui.md` § Steps, *Ways forward*): the same fields on the ticket page and in the
+  # queue's stuck item, each in the form that holds the rows.
+  describe "the Extend and Run again forms" do
+    setup %{user: user} do
+      {:ok, project} =
+        Projects.register(
+          %{
+            name: "rc-ext-#{System.unique_integer([:positive])}",
+            repo_path:
+              seeded_repo(%{
+                ".forge/workflow.yml" => """
+                version: 1
+                initial: implementing
+                states:
+                  implementing:
+                    prompt: agents/implement.md
+                    inputs: [ticket]
+                    produces: [implementation.md]
+                    budget: { turns: 150, tokens: 12M }
+                  review_ready: {}
+                transitions:
+                  - { from: implementing, to: review_ready }
+                limits: { ticket_tokens: 100M }
+                """
+              })
+          },
+          user
+        )
+
+      Forge.ForgeFixtures.funded!(project)
+      {:ok, ticket} = Tickets.admit(project, %{title: "Out of room"}, {:user, user.id})
+      [job] = Jobs.for_ticket(ticket.id)
+      assignment = Forge.FakeWorker.assign(job, Process.get(:worker))
+
+      {:ok, _job} =
+        Forge.FakeWorker.finish(assignment, "max_budget",
+          written: %{},
+          harness: %{
+            "session_id" => "sess-42",
+            "session_blob" => assignment["store"]["session_prefix"] <> "1.jsonl",
+            "version" => "2.1.284"
+          }
+        )
+
+      %{stuck: Tickets.get!(ticket.id), stuck_project: project}
+    end
+
+    test "hold on the ticket page, with each way picked", ctx do
+      %{conn: conn, stuck: ticket, stuck_project: project} = ctx
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+
+      for way <- ["extend", "again"] do
+        html = view |> form("#ways-forward", %{"way" => way}) |> render_change()
+        assert html =~ ~s(id="forward-#{way}-note")
+        assert_recoverable(html, "a stuck ticket's #{way} fields")
+      end
+    end
+
+    test "hold in the queue, with each way picked", ctx do
+      %{conn: conn, stuck: ticket} = ctx
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      for {way, fields} <- [{"extend", "extend"}, {"retry", "again"}] do
+        html = view |> form("#ways-#{ticket.id}", %{"way" => way}) |> render_change()
+        assert html =~ ~s(id="queue-#{ticket.id}-#{fields}-note")
+        assert_recoverable(html, "the queue's #{way} fields")
+      end
+    end
+
+    # The replay is a change event carrying every field. What came back is drawn from the page's
+    # held draft, with the way still picked, and a raise typed by hand is not overwritten.
+    test "put back what was typed, and the way picked, when the replay lands", ctx do
+      %{conn: conn, stuck: ticket, stuck_project: project} = ctx
+      ticket |> Ecto.Changeset.change(usage: 98_000_000) |> Forge.Repo.update!()
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+
+      view |> form("#ways-forward", %{"way" => "extend"}) |> render_change()
+
+      replayed = %{
+        "way" => "extend",
+        "tokens" => "9M",
+        "turns" => "40",
+        "note" => "Look at the parser.",
+        "raise" => "7M"
+      }
+
+      html = view |> form("#ways-forward", replayed) |> render_change(%{"_target" => ["raise"]})
+
+      assert html =~ ~s(value="9M")
+      assert html =~ ~s(value="40")
+      assert html =~ ~s(value="7M")
+      assert html =~ "Look at the parser."
+      assert has_element?(view, "#forward-extend-fields")
+    end
+
+    test "put back what was typed in the queue", ctx do
+      %{conn: conn, stuck: ticket} = ctx
+      {:ok, view, _html} = live(conn, ~p"/")
+      view |> form("#ways-#{ticket.id}", %{"way" => "extend"}) |> render_change()
+
+      html =
+        view
+        |> form("#ways-#{ticket.id}", %{"way" => "extend", "tokens" => "3M", "note" => "Careful."})
+        |> render_change()
+
+      assert html =~ ~s(value="3M")
+      assert html =~ "Careful."
+    end
+  end
+
   # `docs/design/ticket-types.md` § Releases: the note box is held as a proposal's comment is, and
   # drawn only for a project admin of a project whose workflow sets the flag.
   test "holds on a project's Release note", %{conn: conn, user: user} do
@@ -749,7 +860,11 @@ defmodule ForgeWeb.ReconnectTest do
             # (`docs/design/ui.md` § Milestones).
             {"components/milestones_view.ex", "milestones:create"},
             {"components/milestones_view.ex", "milestones:update"},
-            {"components/ticket_views.ex", "retitle"}
+            {"components/ticket_views.ex", "retitle"},
+            # The Extend and Run again fields under a stuck ticket's ways forward, on its page and
+            # in the queue (`ForgeWeb.Components.MoreRoom`).
+            {"components/ticket_views.ex", "forward"},
+            {"live/queue_live.ex", "queue:way"}
           ] do
         assert site in recovering, "#{inspect(site)} is not in the scan at all"
       end

@@ -96,6 +96,18 @@ the one file in which a project records the release it was last brought up to, w
 reads and an agent moves when it upgrades the project. **It is built**; every release writes its own
 section (§ Writing a section), and no agent has yet upgraded a real project by it.
 
+`docs/design/workflow-grammar-v1.md` § Extending a job is the standard for what a person may do about
+a job that ran out of budget: reopen it on its own session with more room and a note, or run the
+state again with a note, each kept as a record of who, how much and why, and either may raise the
+ticket's cap in the same step (`docs/design/capacity.md` § Four exhaustions). **It is built**
+(ticket 58): the same job row and attempt runs again, its spec untouched, on the tokens and turns the
+person gave — on top of what it has used — with `tickets.cap_raise` added to the workflow's cap
+wherever the cap is read; the forms are on the ticket page and in the queue's stuck item, the
+extensions are on the job page and in Activity, and the ledger counts them. It needs **worker
+protocol 12** (the spec's `extension`, and `resumed` in the result). **Not verified here:** whether
+Claude Code's `--max-turns` counts only the new turns of a `--resume`d session, which the rest of the
+design assumes as the resume after a question already does; no real job has been extended.
+
 `docs/design/look.md` is the standard for looking at the platform: `bin/look` opens a page in
 headless Chromium as a fixture user over a setup built from the suite's fixtures, runs steps and
 takes screenshots, in a network namespace of its own with a database of its own. Every change to

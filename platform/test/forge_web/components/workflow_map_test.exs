@@ -374,7 +374,19 @@ defmodule ForgeWeb.WorkflowMapTest do
     end
   end
 
+  # Two outcomes on one edge: this repository's own workflow has none now (`reviewing` used to
+  # reach `presenting` on `done` and on `budget_exhausted`, until a job that runs out stuck its
+  # ticket for a person), so a workflow of the test's own has it.
   test "two outcomes on one edge are one arc, labelled with both" do
+    assert [arc] =
+             Enum.filter(
+               draw(chain(3, [{0, 1, "trivial"}])).edges,
+               &(&1.from == "s0" and &1.to == "s1")
+             )
+
+    assert arc.label == "on done, trivial"
+    assert arc.title == "on done, trivial"
+
     assert [arc] =
              Enum.filter(
                draw(dev_with_budget_edges()).edges,
@@ -396,23 +408,26 @@ defmodule ForgeWeb.WorkflowMapTest do
       assert edge.label == nil
     end
 
-    refute Enum.any?(
-             map.edges,
-             &(&1.from == "reviewing" and &1.to == "presenting" and &1.d =~ " L")
-           )
-
-    assert Enum.find(map.edges, &(&1.from == "reviewing" and &1.to == "presenting")).side ==
-             :above
+    # With a second outcome the label cannot fit the gap, so it is an arc above and no straight
+    # arrow as well.
+    skipping = draw(chain(3, [{0, 1, "trivial"}]))
+    assert [edge] = Enum.filter(skipping.edges, &(&1.from == "s0" and &1.to == "s1"))
+    refute edge.d =~ " L"
+    assert edge.side == :above
   end
 
   test "a state that goes back to itself says so in its box and is drawn no arc" do
     html = html_of(dev_with_budget_edges())
 
-    assert html =~ ~r/retries on\s+2 outcomes/
     assert html =~ ~r/retries on\s+1 outcome\s*</
     # In the order the edges are declared, and the restored ones come last.
     assert html =~ "Retries on did_not_converge, budget_exhausted"
+    refute Enum.any?(draw(dev()).edges, &(&1.from == &1.to))
     refute Enum.any?(draw(dev_with_budget_edges()).edges, &(&1.from == &1.to))
+
+    # Several outcomes on one state's own loop are counted.
+    two = html_of(chain(2, [{0, 0, "tired"}, {0, 0, "lost"}]))
+    assert two =~ ~r/retries on\s+2 outcomes/
 
     # Every box grows for the line when any state has one, and none grows when none does.
     heights = fn html ->

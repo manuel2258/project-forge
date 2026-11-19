@@ -28,15 +28,30 @@ defmodule Forge.Jobs.Commands do
 
   @doc """
   Adds the command jobs a command state runs on entry to `multi`, under `{key, index}`: one per
-  `invoke` entry, all at the ticket branch's head, one batch.
+  `invoke` entry, all at the ticket branch's head, one batch. `restart_id` (an option) is the
+  person's *Run again* that asked for them, recorded on each (`jobs.restart_id`).
   """
-  @spec put_for_state(Multi.t(), term(), Ticket.t(), Workflow.t(), String.t()) :: Multi.t()
-  def put_for_state(multi, key, %Ticket{} = ticket, %Workflow{} = workflow, state_name) do
+  @spec put_for_state(Multi.t(), term(), Ticket.t(), Workflow.t(), String.t(), keyword()) ::
+          Multi.t()
+  def put_for_state(
+        multi,
+        key,
+        %Ticket{} = ticket,
+        %Workflow{} = workflow,
+        state_name,
+        opts \\ []
+      ) do
     %State{invoke: invoke} = Workflow.state(workflow, state_name)
     batch = Ecto.UUID.generate()
     repo_path = ticket |> Tickets.project_of() |> Projects.repo_path()
 
-    invocation = %{state: state_name, parent: nil, batch: batch, concurrent: nil}
+    invocation = %{
+      state: state_name,
+      parent: nil,
+      batch: batch,
+      concurrent: nil,
+      restart_id: Keyword.get(opts, :restart_id)
+    }
 
     multi
     |> Multi.run({key, :at}, fn _repo, _changes ->
@@ -182,6 +197,7 @@ defmodule Forge.Jobs.Commands do
           state: invocation.state,
           attempt: attempt,
           parent_job_id: invocation.parent,
+          restart_id: Map.get(invocation, :restart_id),
           spec: spec |> Spec.to_json() |> Jason.decode!(),
           memory_max: resources.memory,
           cores: resources.cores,

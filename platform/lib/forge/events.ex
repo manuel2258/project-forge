@@ -296,6 +296,11 @@ defmodule Forge.Events do
     "#{name} #{input |> Jason.encode!() |> String.slice(0, 160)}"
   end
 
+  defp with_note(sentence, note, bound) when is_binary(note) and note != "",
+    do: sentence <> " · " <> bounded(note, 200, bound)
+
+  defp with_note(sentence, _no_note, _bound), do: sentence
+
   @doc "A one-line, bounded rendering of an event's payload for lists and logs."
   @spec summary(Event.t()) :: String.t()
   def summary(%Event{} = event), do: describe(event, :bounded)
@@ -396,6 +401,30 @@ defmodule Forge.Events do
        do: "statuses #{Enum.map_join(statuses, ", ", &(&1 || "none"))} → #{outcome}"
 
   defp describe(%Event{type: "ticket.stuck", payload: %{"reason" => reason}}, _bound), do: reason
+
+  # What a person did about a job that ran out (`docs/design/workflow-grammar-v1.md` § Extending a
+  # job): the room they gave and the note they gave it with, run again with its note, and a cap
+  # raised from one figure to another.
+  defp describe(%Event{type: "job.extended", payload: %{"tokens" => tokens} = p}, bound) do
+    given =
+      [
+        "+" <> ForgeCore.Usage.format(tokens),
+        is_integer(p["turns"]) && "+#{p["turns"]} turns"
+      ]
+      |> Enum.filter(& &1)
+      |> Enum.join(", ")
+
+    with_note(given, p["note"], bound)
+  end
+
+  defp describe(%Event{type: "ticket.retried", payload: %{"state" => state} = p}, bound),
+    do: with_note("ran #{state} again", p["note"], bound)
+
+  defp describe(
+         %Event{type: "ticket.cap_raised", payload: %{"from" => from, "to" => to}},
+         _bound
+       ),
+       do: "cap #{ForgeCore.Usage.format(from)} → #{ForgeCore.Usage.format(to)}"
 
   # The hold and milestones (`docs/design/workflow-grammar-v1.md` § Holding a ticket,
   # `docs/design/ui.md` § Milestones). *On hold*, *hold* and *release*: never *paused*, which is the

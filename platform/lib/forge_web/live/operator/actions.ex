@@ -119,9 +119,23 @@ defmodule ForgeWeb.Operator.Actions do
     end
   end
 
-  defp act("retry", %{"ticket" => id}, socket) do
-    with {:ok, ticket} <- Operator.retry(ticket(id), user(socket)) do
+  # Run again takes the note the new attempt arrives with and, where the ticket's cap is short, the
+  # raise (`docs/design/workflow-grammar-v1.md` § Running a state again).
+  defp act("retry", %{"ticket" => id} = params, socket) do
+    opts = [note: params["note"], raise: params["raise"]]
+
+    with {:ok, ticket} <- Operator.retry(ticket(id), user(socket), opts) do
       {:ok, "Running #{ticket.state} again"}
+    end
+  end
+
+  # Extend: the job the person was shown, and what they typed under it. The operation checks that
+  # job against the ticket as it is now (`Forge.Engine.extend/5`).
+  defp act("extend", %{"ticket" => id, "job" => job_id} = params, socket) do
+    attrs = Map.take(params, ~w(tokens turns note raise))
+
+    with {:ok, ticket} <- Operator.extend(ticket(id), user(socket), job_id, attrs) do
+      {:ok, "Extended #{ticket.state}"}
     end
   end
 
@@ -320,7 +334,13 @@ defmodule ForgeWeb.Operator.Actions do
     do: "ambiguous; pick an outcome: #{Enum.join(outcomes, ", ")}"
 
   def describe(other) do
-    Logger.error("operator action failed: #{inspect(other)}")
-    "something went wrong; see the server log"
+    case Forge.Jobs.Extensions.explain(other) do
+      nil ->
+        Logger.error("operator action failed: #{inspect(other)}")
+        "something went wrong; see the server log"
+
+      words ->
+        words
+    end
   end
 end

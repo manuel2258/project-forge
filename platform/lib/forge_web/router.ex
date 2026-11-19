@@ -108,6 +108,7 @@ defmodule ForgeWeb.Router do
     post "/tickets/:project/:number/approve", TicketController, :approve
     post "/tickets/:project/:number/transition", TicketController, :transition
     post "/tickets/:project/:number/retry", TicketController, :retry
+    post "/tickets/:project/:number/jobs/:job_id/extend", TicketController, :extend
     post "/tickets/:project/:number/cancel", TicketController, :cancel
     post "/tickets/:project/:number/restore", TicketController, :restore
     post "/tickets/:project/:number/hold", TicketController, :hold

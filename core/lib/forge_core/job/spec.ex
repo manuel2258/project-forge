@@ -96,6 +96,19 @@ defmodule ForgeCore.Job.Spec do
     # `changeset`, `merges` (each `sha` and `subject`, newest first) and `more`, for the manifest.
     # Nil for every other job.
     integration: nil,
+    # What a person gave this job when they extended it after it ran out of budget, string keys:
+    # `number` (which extension this is), `tokens`, `turns` (nil where the harness does not bound
+    # them), `note`, `exhausted` (which ceiling ran out: "turns", "tokens", "wall_clock" or nil),
+    # `used_tokens`, `used_turns` and `runs`, what the job had used before this run, and `later_run`,
+    # true when an earlier run has already been given this extension (the run is a resume after a
+    # question, a park or a limit): its budget is still the extension's, but a resumed run is not
+    # told again that it ran out and was extended. A cold run has no memory, so it is told whatever
+    # `later_run` says. Filled at run
+    # time from the extension's record and never stored in the spec — the job's own budget is
+    # never rewritten (`docs/design/capacity.md`). The worker composes the prompt's opening from
+    # it, which is why a worker has to speak protocol 12 to be given one. Nil for every job no
+    # person extended.
+    extension: nil,
     # The names of the project secrets this run holds in its environment, filled at assignment —
     # never a value, which travels sealed beside the spec (`docs/design/secrets.md` § Delivery).
     # What the manifest names, so the agent knows they are there and what not to do with them.
@@ -155,6 +168,7 @@ defmodule ForgeCore.Job.Spec do
           secrets_gone: [String.t()],
           moving: %{String.t() => term()} | nil,
           step: %{String.t() => term()} | nil,
+          extension: %{String.t() => term()} | nil,
           ticket:
             %{number: pos_integer(), title: String.t(), ticket_type: String.t() | nil} | nil,
           state: String.t() | nil,
@@ -317,8 +331,21 @@ defmodule ForgeCore.Job.Spec do
       secrets: or_default(get, :secrets, []),
       secrets_gone: or_default(get, :secrets_gone, []),
       moving: moving_from_map(get.(:moving)),
-      step: step_from_map(get.(:step))
+      step: step_from_map(get.(:step)),
+      extension: extension_from_map(get.(:extension))
     }
+  end
+
+  # String keys whichever way it arrived, for the reason `moving` is.
+  defp extension_from_map(nil), do: nil
+
+  defp extension_from_map(map) do
+    Map.new(
+      ~w(number tokens turns note exhausted used_tokens used_turns runs later_run),
+      fn key ->
+        {key, nested(map, key)}
+      end
+    )
   end
 
   # String keys whichever way it arrived, for the reason `moving` is.

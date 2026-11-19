@@ -3,7 +3,8 @@ defmodule Forge.Spend do
   What the platform is allowed to use, and what it has, in weighted tokens (`ForgeCore.Usage`).
 
   Two caps, and `docs/design/capacity.md` settles why they are not the same thing. A **ticket
-  allowance** — `limits.ticket_tokens` from the pinned workflow — is resolved by a human raising it
+  allowance** — `limits.ticket_tokens` from the pinned workflow plus what people have raised it by
+  for this ticket (`tickets.cap_raise`, read through `ticket_cap/2`) — is resolved by a human raising it
   or rerouting the work, so exhausting it sticks the ticket and puts it in the queue. A **daily
   cap** is resolved by time, like the provider's own window, so exhausting it pauses the node and
   the ticket stays `active` and out of the queue. A paused ticket in the inbox would train the
@@ -20,7 +21,7 @@ defmodule Forge.Spend do
 
   import Ecto.Query, only: [from: 2]
 
-  alias Forge.Jobs.{Job, Run}
+  alias Forge.Jobs.{Extension, Job, Run}
   alias Forge.Repo
   alias Forge.Tickets.Ticket
   alias ForgeCore.Workflow
@@ -81,10 +82,28 @@ defmodule Forge.Spend do
       where:
         j.kind == :workflow and
           (j.status == :running or (j.status == :pending and is_nil(t.held_at))),
-      select: j.spec
+      select: {j.id, j.spec}
     )
     |> Repo.all()
-    |> Enum.reduce(0, fn spec, acc -> acc + budget_tokens(spec) end)
+    |> reserved()
+  end
+
+  # **A job a person extended reserves what they gave it**, not what its spec declared: the
+  # extension's tokens are what its next run is allowed to spend (`Forge.Jobs.put_extension`).
+  # Oldest first, so the latest of a job's extensions is the one that is kept.
+  defp reserved(jobs) do
+    given =
+      Repo.all(
+        from e in Extension,
+          where: e.job_id in ^Enum.map(jobs, &elem(&1, 0)),
+          order_by: [asc: e.inserted_at, asc: e.id],
+          select: {e.job_id, e.tokens}
+      )
+      |> Map.new()
+
+    Enum.reduce(jobs, 0, fn {id, spec}, acc ->
+      acc + Map.get_lazy(given, id, fn -> budget_tokens(spec) end)
+    end)
   end
 
   # A spec stored before budgets were counted in tokens carries `cost`, in dollars, and is read
@@ -102,10 +121,26 @@ defmodule Forge.Spend do
     end
   end
 
+  @doc """
+  The ticket's allowance: the workflow's `limits.ticket_tokens` plus what people have raised it by
+  for this ticket (`tickets.cap_raise`). **The one figure every reader of the cap uses** — the gate,
+  the stop after a job, the budget lowering, the manifest and every page — so the raised figure is
+  the only one there is.
+  """
+  @spec ticket_cap(Ticket.t(), Workflow.t()) :: non_neg_integer()
+  def ticket_cap(%Ticket{cap_raise: raised}, %Workflow{limits: %{ticket_tokens: cap}}),
+    do: cap + (raised || 0)
+
+  # The page's own components are drawn from bare maps in places (`ForgeWeb.UITest`), and read the
+  # allowance the same way: the workflow's figure and the raise, where there is one.
+  def ticket_cap(ticket, %{limits: %{ticket_tokens: cap}})
+      when is_map(ticket) and is_integer(cap),
+      do: cap + (Map.get(ticket, :cap_raise) || 0)
+
   @doc "What is left of the ticket's own allowance."
   @spec ticket_remaining(Ticket.t(), Workflow.t()) :: non_neg_integer()
-  def ticket_remaining(%Ticket{usage: used}, %Workflow{limits: %{ticket_tokens: cap}}) do
-    max(cap - (used || 0), 0)
+  def ticket_remaining(%Ticket{usage: used} = ticket, %Workflow{} = workflow) do
+    max(ticket_cap(ticket, workflow) - (used || 0), 0)
   end
 
   @doc "The configured daily cap in weighted tokens, or `nil` when there is none."

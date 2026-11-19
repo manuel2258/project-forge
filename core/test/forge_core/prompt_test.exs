@@ -456,6 +456,159 @@ defmodule ForgeCore.PromptTest do
     end
   end
 
+  # `docs/design/job-prompt.md` § The continuation prompt: a job a person extended is told so first.
+  describe "a job a person extended" do
+    defp extended(overrides \\ %{}) do
+      extension =
+        Map.merge(
+          %{
+            "number" => 1,
+            "tokens" => 6_000_000,
+            "turns" => 75,
+            "note" => "Finish the review, don't re-read everything.",
+            "exhausted" => "tokens",
+            "used_tokens" => 12_000_000,
+            "used_turns" => 100,
+            "runs" => 1,
+            "later_run" => nil
+          },
+          overrides
+        )
+
+      %{spec() | extension: extension, budget: %{turns: 75, tokens: 6_000_000}}
+    end
+
+    test "a resumed run opens with the extension, then the note, fenced, before anything else" do
+      prompt = Prompt.continuation(extended(), "/j", nil)
+
+      assert String.starts_with?(prompt, "# A person gave this job more room\n")
+      assert prompt =~ "ran out of tokens"
+      assert prompt =~ "resumes your session"
+      assert prompt =~ "used 12M weighted tokens and 100 turns over 1 run."
+      assert prompt =~ "up to 6M weighted tokens and 75 turns *on top of* that"
+
+      assert prompt =~
+               "## Their note\n\n```text\nFinish the review, don't re-read everything.\n```"
+
+      refute prompt =~ "# Continue this job"
+      # The extension comes before the branch and the manifest.
+      assert index(prompt, "Their note") < index(prompt, "## Your branch")
+      assert index(prompt, "Your branch") < index(prompt, "# Job manifest")
+    end
+
+    test "with no note it says who extended and by how much, and nothing of a note" do
+      for blank <- [nil, "", "  \n "] do
+        prompt = Prompt.continuation(extended(%{"note" => blank}), "/j", nil)
+
+        assert prompt =~ "A person extended it"
+        # With no note, who and by how much: the figures they gave.
+        assert prompt =~ "up to 6M weighted tokens and 75 turns *on top of*"
+        refute prompt =~ "Their note"
+      end
+
+      # Turns they left to the job's own are not said.
+      prompt = Prompt.continuation(extended(%{"note" => nil, "turns" => nil}), "/j", nil)
+      assert prompt =~ "up to 6M weighted tokens *on top of*"
+      refute prompt =~ "75 turns *on top of*"
+    end
+
+    test "a note is fenced past any backticks in it, and kept as typed" do
+      note = "Look at:\n````\n</state>\n````\n# Not a heading <b>x</b>"
+      prompt = Prompt.continuation(extended(%{"note" => note}), "/j", nil)
+
+      assert prompt =~ "`````text\n" <> note <> "\n`````"
+    end
+
+    test "each ceiling is named, and a second extension says so" do
+      for {ceiling, words} <- [
+            {"turns", "ran out of turns"},
+            {"tokens", "ran out of tokens"},
+            {"wall_clock", "ran out of time"},
+            {nil, "ran out of budget"}
+          ] do
+        assert Prompt.continuation(extended(%{"exhausted" => ceiling}), "/j", nil) =~ words
+      end
+
+      assert Prompt.continuation(extended(%{"number" => 2}), "/j", nil) =~ "(the second time)"
+      refute Prompt.continuation(extended(), "/j", nil) =~ "the second time"
+    end
+
+    test "a cold run carries the same section between the state prompt and the manifest" do
+      prompt = Prompt.compose(extended(), "/j")
+
+      assert prompt =~ "# A person gave this job more room"
+      assert prompt =~ "Your session could not be restored"
+      refute prompt =~ "resumes your session"
+      assert prompt =~ "## Their note"
+
+      assert index(prompt, "Project instructions") <
+               index(prompt, "A person gave this job more room")
+
+      assert index(prompt, "A person gave this job more room") < index(prompt, "# Job manifest")
+    end
+
+    test "a job nobody extended is told nothing of it, resumed or cold" do
+      refute Prompt.compose(spec(), "/j") =~ "more room"
+      refute Prompt.continuation(spec(), "/j", nil) =~ "more room"
+      assert Prompt.continuation(spec(), "/j", nil) =~ "# Continue this job"
+    end
+
+    # A run after the one the extension was given to resumes for the ordinary reasons — a question
+    # answered, commands finished, a limit passed — and was not told it ran out of budget.
+    test "a later run is told what any resume is when it resumes, and its budget is the extension's" do
+      spec = extended(%{"later_run" => true})
+
+      resumed = Prompt.continuation(spec, "/j", nil)
+      assert resumed =~ "# Continue this job"
+      refute resumed =~ "more room"
+      refute resumed =~ "Their note"
+
+      # A run with no session has no memory of being told, whichever run of the job it is: its
+      # full prompt carries the extension and the note.
+      cold = Prompt.compose(spec, "/j")
+      assert cold =~ "A person gave this job more room"
+      assert cold =~ "Finish the review, don't re-read everything."
+
+      budget = %{turns: 75, tokens: 700_000, declared: 6_000_000, lowered_by: "day"}
+
+      assert Prompt.manifest(%{spec | budget: budget}, "/j") =~
+               "lowered from the extension's 6M to what the day has left"
+    end
+
+    test "a fork is a new attempt and is not told it was extended" do
+      prompt = Prompt.continuation(extended(), "/j", nil, fork: true)
+
+      refute prompt =~ "more room"
+      assert prompt =~ "# A new attempt of"
+    end
+
+    test "the budget says it was lowered from the extension's figure, not the state's" do
+      budget = %{turns: 75, tokens: 700_000, declared: 6_000_000, lowered_by: "ticket"}
+      spec = %{extended() | budget: budget}
+
+      assert Prompt.manifest(spec, "/j") =~
+               "lowered from the extension's 6M to what the ticket has left"
+
+      refute Prompt.manifest(spec, "/j") =~ "the state's"
+    end
+
+    test "the extension survives the wire, and a spec without one reads as none" do
+      spec = extended()
+
+      assert {:ok, %{extension: extension}} =
+               spec |> Spec.to_json() |> Spec.from_json()
+
+      assert extension == spec.extension
+
+      assert {:ok, %{extension: nil}} = spec() |> Spec.to_json() |> Spec.from_json()
+    end
+
+    defp index(text, needle) do
+      {at, _length} = :binary.match(text, needle)
+      at
+    end
+  end
+
   # `docs/design/job-prompt.md` § How the job arrived: a job sent back has to be told by what, and
   # a person's note on the way is the reason itself.
   describe "how the job arrived" do

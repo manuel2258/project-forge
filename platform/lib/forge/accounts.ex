@@ -69,6 +69,17 @@ defmodule Forge.Accounts do
   def get_user!(id), do: Repo.get!(User, id)
 
   @doc """
+  The addresses of `ids`, as `%{user_id => email}`: what a page names a person by, where it names
+  one — a person has no other name here. One query, for the rows of a list.
+  """
+  @spec addresses([String.t()]) :: %{String.t() => String.t()}
+  def addresses([]), do: %{}
+
+  def addresses(ids) when is_list(ids) do
+    Repo.all(from u in User, where: u.id in ^ids, select: {u.id, u.email}) |> Map.new()
+  end
+
+  @doc """
   Gets a user, or nil.
 
   For ids that came off the wire: a page holding a client-supplied id must not raise for one

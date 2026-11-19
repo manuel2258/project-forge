@@ -139,7 +139,14 @@ defmodule ForgeCore.Engine do
     end
   end
 
-  @doc "Whether a ticket that has used `usage` weighted tokens may still run jobs."
+  @doc """
+  Whether a ticket that has used `usage` weighted tokens may still run jobs **under the workflow's
+  own `limits.ticket_tokens`**. The platform does not ask this: a ticket's allowance is the workflow's
+  plus what people have raised it by (`Forge.Spend.ticket_cap/2`), which the workflow cannot know.
+  What still asks is core's own tests — the one that holds the shipped workflows' loops against
+  their caps (`project_workflows_test.exs`) and this function's (`engine_test.exs`) — which are about
+  the workflow alone.
+  """
   @spec within_ticket_budget?(Workflow.t(), non_neg_integer()) :: boolean()
   def within_ticket_budget?(%Workflow{limits: %{ticket_tokens: cap}}, usage), do: usage < cap
 

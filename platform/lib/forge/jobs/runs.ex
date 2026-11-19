@@ -15,12 +15,17 @@ defmodule Forge.Jobs.Runs do
   import Ecto.Query, only: [from: 2]
 
   alias Ecto.Multi
-  alias Forge.Jobs.{Job, Run}
+  alias Forge.Jobs.{Extension, Job, Run}
   alias Forge.Repo
 
-  @doc "Opens a run of `job` on `worker` and `credential`, closing any run the job left open."
-  @spec open(Multi.t(), Job.t(), map(), map() | nil, DateTime.t()) :: Multi.t()
-  def open(multi, %Job{id: job_id}, worker, credential, now) do
+  @doc """
+  Opens a run of `job` on `worker` and `credential`, closing any run the job left open. `extension`
+  is the extension the run is the first of (`Forge.Jobs.Extensions.to_tell/1`), stamped on it
+  (`job_runs.extension_id`), or nil.
+  """
+  @spec open(Multi.t(), Job.t(), map(), map() | nil, DateTime.t(), Extension.t() | nil) ::
+          Multi.t()
+  def open(multi, %Job{id: job_id}, worker, credential, now, extension \\ nil) do
     multi
     |> close(job_id, now)
     |> Multi.insert(
@@ -28,6 +33,7 @@ defmodule Forge.Jobs.Runs do
       %Run{
         job_id: job_id,
         worker_id: worker.id,
+        extension_id: extension && extension.id,
         # A command runs on no credential (`docs/design/commands.md` § An invocation is a job).
         credential_id: credential && credential.id,
         # Copied from the credential's kind, now and for good: a kind redefined later does not
@@ -86,31 +92,66 @@ defmodule Forge.Jobs.Runs do
   Closes `job_id`'s open run, adding `figure` to it — a workflow job's result, which reports what
   that run used. Without a figure the run is closed as it stands: a conversation's has been set
   turn by turn, and a run that stopped without reporting used nothing anyone knows of.
-  """
-  @spec close(Multi.t(), String.t(), DateTime.t(), figure() | nil) :: Multi.t()
-  def close(multi, job_id, now, figure \\ nil)
 
-  def close(multi, job_id, now, nil),
-    do: Multi.update_all(multi, :close_run, open_runs(job_id), set: [finished_at: now])
+  `resumed:` (an option) is whether the run resumed its session, written to the run when it is a
+  boolean (`resumed/1` reads it from a result). `release_extension: true` clears the run's
+  `extension_id`, for a run the platform took back with no result: its machine was lost or never
+  reached, it hibernated, or the harness refused its session. The extension was not delivered by it, and the next
+  run is its first (`Forge.Jobs.Extensions.first_run?/1`).
+  """
+  @spec close(Multi.t(), String.t(), DateTime.t(), figure() | nil, keyword()) :: Multi.t()
+  def close(multi, job_id, now, figure \\ nil, opts \\ [])
+
+  def close(multi, job_id, now, nil, opts),
+    do:
+      Multi.update_all(multi, :close_run, open_runs(job_id),
+        set: [finished_at: now] ++ resumed_set(opts)
+      )
 
   # `usage` is added to what the run holds, as the dollar figure was; `tokens` and `claude_cost_usd`
   # are set to the report's (nil when the worker sent none). A run is closed once — `open_runs`
   # selects only runs not yet finished — so nothing here is summed twice.
-  def close(multi, job_id, now, %{usage: usage} = figure) do
+  def close(multi, job_id, now, %{usage: usage} = figure, opts) do
     Multi.update_all(
       multi,
       :close_run,
       open_runs(job_id),
       [
-        set: [
-          finished_at: now,
-          tokens: figure[:tokens],
-          claude_cost_usd: figure[:claude_cost_usd]
-        ]
+        set:
+          [
+            finished_at: now,
+            tokens: figure[:tokens],
+            claude_cost_usd: figure[:claude_cost_usd]
+          ] ++ resumed_set(opts)
       ] ++
         [inc: [usage: usage]]
     )
   end
+
+  # `resumed` is written only when the caller knows: a result that said nothing leaves the run's
+  # column null, as does a run closed without one.
+  defp resumed_set(opts) do
+    resumed =
+      case Keyword.get(opts, :resumed) do
+        resumed when is_boolean(resumed) -> [resumed: resumed]
+        nil -> []
+      end
+
+    # `release_extension: true` lets go of the extension the run was started on: a run that ended
+    # with no result (`Extensions.first_run?/1`). A run that failed or was cancelled keeps it, and
+    # the job page's label, as the run of that extension it was.
+    if Keyword.get(opts, :release_extension, false),
+      do: [extension_id: nil] ++ resumed,
+      else: resumed
+  end
+
+  @doc """
+  Whether the run resumed its session, as a worker's report says (`harness["resumed"]`): a boolean,
+  or nil from a worker that does not say — a protocol 11 worker, which nothing here guesses for.
+  """
+  @spec resumed(map() | nil) :: boolean() | nil
+  def resumed(%{"resumed" => resumed}) when is_boolean(resumed), do: resumed
+  def resumed(_harness), do: nil
 
   @doc """
   Sets what `job_id`'s latest run has used so far: a conversation's turn, whose figure is the

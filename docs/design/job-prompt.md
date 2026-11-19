@@ -12,7 +12,8 @@ questions. The interface is files, not tools, so any harness with a filesystem c
    written. Read at the pinned commit.
 3. **Job manifest.** Rendered from the spec as assigned — the immutable one, with `answers.md`
    appended once there are answers and the cost budget perhaps lowered (`capacity.md` § Spend
-   caps): ticket title and number, how the job came to be in this state (§ How the job
+   caps) and, for a run an extension reopened, with that extension's figures as the base the budget
+   lines are lowered from: ticket title and number, how the job came to be in this state (§ How the job
    arrived), each input with its path and version, each optional input not yet written, each
    `produces` entry with its target path, the allowed outcomes, the budgets.
 
@@ -27,6 +28,14 @@ transition, whether the engine or a person took it, and the person's comment whe
 the note a tester leaves when sending a build back is exactly what the next job needs. The first
 job of a ticket has none, and the manifest says it is the ticket's first state. Like the rest of
 the spec it is written once, when the job is created, from the transition that created it.
+
+**A restart's note is the arrival comment.** *Run again* takes an optional note, and it is joined
+into the new attempt's `entered.comment` the way a rejection's is — after the transition's own
+comment and the rejection note — so the manifest's *They wrote:* quotes it and no workflow declares
+anything for it. A rejection's note replaces the older ones; a restart's does not, because a run
+that failed has not acted on what it was told, so a second restart's arrival carries the first's note
+and then its own. A first state run again has no arrival to add to, and is told it came from that
+state, by a person, with the note.
 
 **A rejection's note reaches the next job the same way.** Rejecting an approval needs a note
 (`ui.md` § The decision row), and the note is the reason the work came back: a ticket rejected at
@@ -365,6 +374,20 @@ survive gets a cold start, and a cold start has to know what it asked for too.
 A run that resumes its harness session is handed a **continuation**, `Prompt.continuation/4`,
 rather than the whole prompt again. The session already holds the preamble and the state prompt;
 what it lacks is what happened while it was stopped:
+
+0. **The extension, first, when a person gave the job more room.** `spec.extension` is set at run
+   time from the job's latest extension record (never stored in the spec). The opening says that a
+   person extended the job, which ceiling ran out, what the job has used, that this run may spend up to
+   the tokens (and turns, where they set them) they gave *on top of* that — the budget below is what
+   binds, and says so if the day or the ticket lowered it — that what earlier runs wrote is recorded
+   and every declared output must be in `out/` when the run finishes, and then their note, fenced the
+   way an answer is. With no note it says only that a person extended it and the room they gave. It replaces the generic opening; a cold run gets
+   the same section in `compose/2`, between the state prompt and the manifest. **Only for the run
+   the extension was given to** (`spec.extension["later_run"]` is not true): a run after it — a
+   resume after a question, a park or a limit — has the extension's ceiling and the generic opening,
+   because it did not just run out of budget. **A cold run carries the section whichever run of the job
+   it is**, since it has no memory of being told. The note is the
+   person's text and is carried, never interpreted.
 
 1. **The answers** — `answers.md` as the spec pins it: its version, its path, and its text
    inline, fenced verbatim. That is every answer on the ticket, oldest first, so the ones this

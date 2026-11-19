@@ -101,9 +101,13 @@ defmodule ForgeWeb.ProjectTickets do
 
   # Whether a ticket has spent more than half of what its workflow allows it: the phone row shows
   # its spend only then, since a figure on every row that is the same on every row is noise.
-  defp usage_high?(%Ticket{usage: spent}, %ForgeCore.Workflow{limits: %{ticket_tokens: cap}})
-       when is_number(cap) and cap > 0,
-       do: (spent || 0) * 2 > cap
+  defp usage_high?(
+         %Ticket{usage: spent} = ticket,
+         %ForgeCore.Workflow{limits: %{ticket_tokens: _}} = workflow
+       ) do
+    cap = Forge.Spend.ticket_cap(ticket, workflow)
+    cap > 0 and (spent || 0) * 2 > cap
+  end
 
   defp usage_high?(_ticket, _workflow), do: false
 

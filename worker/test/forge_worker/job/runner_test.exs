@@ -512,6 +512,9 @@ defmodule ForgeWorker.Job.RunnerTest do
 
       assert File.read!(Path.join(job_dir, "fake-args.txt")) =~ "--resume sess-42"
       assert String.starts_with?(prompt, "# Continue this job")
+      # The result says the run resumed, which only the worker knows (`Session.check/7` may have
+      # dropped it): the platform records it on the run.
+      assert result.harness["resumed"] == true
       assert prompt =~ "A: sqlite"
       assert prompt =~ "`ticket/7`, at `c0ffee`"
       refute prompt =~ "# You are one job in a ticket lifecycle"
@@ -531,6 +534,61 @@ defmodule ForgeWorker.Job.RunnerTest do
       refute File.read!(Path.join(job_dir, "fake-args.txt")) =~ "--resume"
       assert String.starts_with?(prompt, "# You are one job in a ticket lifecycle")
       refute prompt =~ "# Continue this job"
+      assert result.harness["resumed"] == false
+    end
+
+    # A job a person extended (`docs/design/job-prompt.md`): the spec carries the extension, and
+    # the worker composes the opening from it — which is why it needs protocol 12.
+    test "a resumed run of an extended job opens with the extension and the note",
+         %{spec: spec} =
+           context do
+      spec = %{spec | extension: extension()}
+
+      {:ok, result} =
+        context
+        |> run("success",
+          spec: spec,
+          head: "c0ffee",
+          harness_opts: [
+            executable: fake_executable(),
+            credential: {:api_key, "secret-key"},
+            resume_session: "sess-42"
+          ]
+        )
+        |> Runner.await(30_000)
+
+      prompt = File.read!(Path.join(job_dir(result), "fake-prompt.txt"))
+
+      assert String.starts_with?(prompt, "# A person gave this job more room")
+      assert prompt =~ "Finish the review."
+      assert prompt =~ "`ticket/7`, at `c0ffee`"
+      refute prompt =~ "# Continue this job"
+    end
+
+    test "a cold run of an extended job carries the extension after the state prompt",
+         %{spec: spec} = context do
+      spec = %{spec | extension: extension()}
+
+      {:ok, result} = context |> run("success", spec: spec) |> Runner.await(30_000)
+      prompt = File.read!(Path.join(job_dir(result), "fake-prompt.txt"))
+
+      assert String.starts_with?(prompt, "# You are one job in a ticket lifecycle")
+      assert prompt =~ "# A person gave this job more room"
+      assert prompt =~ "Finish the review."
+      assert result.harness["resumed"] == false
+    end
+
+    defp extension do
+      %{
+        "number" => 1,
+        "tokens" => 6_000_000,
+        "turns" => 75,
+        "note" => "Finish the review.",
+        "exhausted" => "tokens",
+        "used_tokens" => 12_000_000,
+        "used_turns" => 100,
+        "runs" => 1
+      }
     end
   end
 

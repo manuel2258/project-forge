@@ -9,9 +9,10 @@ defmodule Forge.Engine do
   alias Ecto.Multi
   alias Forge.{Artifacts, Events, Jobs, Merge, MergeQueue, ReleaseRecords, Repo, Tickets}
   alias Forge.Events.Event
-  alias Forge.Jobs.Job
+  alias Forge.Jobs.{Extension, Extensions, Job}
   alias Forge.MergeQueue.Entry
-  alias Forge.Tickets.Ticket
+  alias Forge.Spend
+  alias Forge.Tickets.{CapRaise, Restart, Ticket}
   require Forge.Tickets.Ticket
   alias ForgeCore.Engine, as: Core
   alias ForgeCore.Workflow
@@ -105,7 +106,7 @@ defmodule Forge.Engine do
   defp decide_after_job(workflow, ticket, job, outcome, held) do
     multi = Multi.new()
 
-    if Core.within_ticket_budget?(workflow, ticket.usage) do
+    if Forge.Spend.ticket_remaining(ticket, workflow) > 0 do
       rounds = rounds(ticket.id)
 
       case Core.step(workflow, job.state, outcome, rounds) do
@@ -371,10 +372,28 @@ defmodule Forge.Engine do
 
   `entered` is how the ticket came in (`Forge.Jobs.put_create/7`), and `came_back` says a transition
   created it rather than a person asking for the state again.
+
+  `restart_id` (an option) is the person's *Run again* that asked for it: it reaches every job made,
+  now or at release from hold (`jobs.restart_id`).
   """
-  @spec put_entry(Multi.t(), Ticket.t(), Workflow.t(), String.t(), map() | nil, boolean()) ::
-          Multi.t()
-  def put_entry(multi, %Ticket{} = ticket, %Workflow{} = workflow, state_name, entered, came_back) do
+  @spec put_entry(
+          Multi.t(),
+          Ticket.t(),
+          Workflow.t(),
+          String.t(),
+          map() | nil,
+          boolean(),
+          keyword()
+        ) :: Multi.t()
+  def put_entry(
+        multi,
+        %Ticket{} = ticket,
+        %Workflow{} = workflow,
+        state_name,
+        entered,
+        came_back,
+        opts \\ []
+      ) do
     state = Workflow.state(workflow, state_name)
 
     cond do
@@ -382,7 +401,12 @@ defmodule Forge.Engine do
         multi
 
       locked_held?(Repo, ticket.id) ->
-        entry = %{"state" => state_name, "entered" => entered, "came_back" => came_back}
+        entry = %{
+          "state" => state_name,
+          "entered" => entered,
+          "came_back" => came_back,
+          "restart_id" => opts[:restart_id]
+        }
 
         Multi.update(
           multi,
@@ -391,7 +415,7 @@ defmodule Forge.Engine do
         )
 
       true ->
-        put_entry_now(multi, ticket, workflow, state, state_name, entered, came_back)
+        put_entry_now(multi, ticket, workflow, state, state_name, entered, came_back, opts)
     end
   end
 
@@ -403,15 +427,37 @@ defmodule Forge.Engine do
   # A chat step's entry opens a conversation instead of a job: no job, no budget, no outcome from
   # the harness (`docs/design/workflow-grammar-v1.md` § Chat steps). Before the clause below
   # because a chat step has a prompt too.
-  defp put_entry_now(multi, ticket, workflow, %State{chat: true}, state_name, entered, _back),
-    do: put_step_chat(multi, :next_job, ticket, workflow, state_name, entered)
+  defp put_entry_now(
+         multi,
+         ticket,
+         workflow,
+         %State{chat: true},
+         state_name,
+         entered,
+         _back,
+         _opts
+       ),
+       do: put_step_chat(multi, :next_job, ticket, workflow, state_name, entered)
 
-  defp put_entry_now(multi, ticket, workflow, %State{prompt: prompt}, state_name, entered, back)
+  defp put_entry_now(
+         multi,
+         ticket,
+         workflow,
+         %State{prompt: prompt},
+         state_name,
+         entered,
+         back,
+         opts
+       )
        when is_binary(prompt) do
     # What its commands said is added to an arrival a transition made; a state run again keeps the
     # arrival the last attempt had, which carries it already (`again/1`).
     entered = if back, do: put_batch(entered, ticket), else: entered
-    Jobs.put_create(multi, :next_job, ticket, workflow, state_name, entered, came_back: back)
+
+    Jobs.put_create(multi, :next_job, ticket, workflow, state_name, entered,
+      came_back: back,
+      restart_id: opts[:restart_id]
+    )
   end
 
   # A command state's entry runs its commands (`docs/design/commands.md`). How the ticket came in
@@ -423,9 +469,13 @@ defmodule Forge.Engine do
          %State{invoke: [_ | _]},
          state_name,
          _entered,
-         _back
+         _back,
+         opts
        ),
-       do: Forge.Jobs.Commands.put_for_state(multi, :next_job, ticket, workflow, state_name)
+       do:
+         Forge.Jobs.Commands.put_for_state(multi, :next_job, ticket, workflow, state_name,
+           restart_id: opts[:restart_id]
+         )
 
   # The conversation a ticket entering a chat step gets, and its branch, cut from the ticket's.
   # (`Forge.Tickets.put_admit/5` does the same for a first state with the pieces from `Jobs`,
@@ -828,7 +878,14 @@ defmodule Forge.Engine do
   # call already meets; the first branch only names it, so the person is told to Accept instead of
   # being told a job is running (`docs/design/conversations.md` § A
   # conversation that is a step). The way out of a live step is Accept.
-  defp no_live_job(%Ticket{id: id, state: state}) do
+  @doc """
+  Whether nothing is live in the ticket's state: `:ok`, or `{:error, {:step_live, state}}` /
+  `{:error, {:job_live, state}}`. The one check a person's act on the state makes — run again,
+  extend, re-pin, a transition — and `Forge.Jobs.Extensions` makes it too, so the offer and the act
+  cannot differ about it.
+  """
+  @spec no_live_job(Ticket.t()) :: :ok | {:error, {:step_live | :job_live, String.t()}}
+  def no_live_job(%Ticket{id: id, state: state}) do
     cond do
       Jobs.live_step(id, state) != nil -> {:error, {:step_live, state}}
       Jobs.live?(id, state) -> {:error, {:job_live, state}}
@@ -1281,7 +1338,8 @@ defmodule Forge.Engine do
       Tickets.workflow(released),
       state,
       entry["entered"],
-      entry["came_back"] == true
+      entry["came_back"] == true,
+      restart_id: entry["restart_id"]
     )
   end
 
@@ -1407,35 +1465,286 @@ defmodule Forge.Engine do
 
   Refused, with why, on a ticket that is done, in a state no job runs in, or with a job still live
   in its state — `retryable/1` is the same check, for a surface deciding whether to offer it.
-  """
-  @spec retry(Ticket.t(), String.t()) :: {:ok, Ticket.t()} | {:error, term()}
-  def retry(%Ticket{} = ticket, user_id) do
-    workflow = Tickets.workflow(ticket)
 
-    with :ok <- retryable(ticket, workflow) do
-      Multi.new()
-      |> Tickets.put_progress(:ticket, ticket, %{
-        state: ticket.state,
+  Options:
+
+  - `:note` — what the person says about why, carried as the new attempt's arrival comment after
+    any rejection note (`job-prompt.md` § How the job arrived) and recorded with the decision
+    (`ticket_restarts`). At most 4,000 characters.
+  - `:raise` — weighted tokens to add to the ticket's cap with this run (`ticket_cap_raises`),
+    a number or what `ForgeCore.Usage.parse/1` reads. An agent state is refused when the ticket has
+    nothing left unless the raise covers the state's budget; with something left but less than the
+    state's budget the run is lowered to what is left, unless raised. A raise that nothing needs is
+    refused.
+  - `:allow` — a zero-arity function, called inside the transaction straight after the ticket is
+    locked, returning `:ok` or `{:error, reason}`: the guard of the act (`Forge.Operator`), made in
+    the transaction it guards (`identity.md`). Absent, nothing is asked.
+
+  **The ticket is locked and everything is read from the locked row**: the state, the live jobs
+  and the cap. A struct read before the lock may be stale.
+  """
+  @spec retry(Ticket.t(), Forge.Actor.t() | String.t(), keyword()) ::
+          {:ok, Ticket.t()} | {:error, term()}
+  def retry(%Ticket{id: ticket_id}, who, opts \\ []) do
+    actor = actor(who)
+    allow = Keyword.get(opts, :allow, fn -> :ok end)
+
+    Multi.new()
+    |> Multi.run(:locked, fn repo, _changes -> lock_open(repo, ticket_id, :not_retryable) end)
+    |> Multi.run(:allowed, fn _repo, _changes -> allowed(allow) end)
+    |> Multi.merge(fn %{locked: locked} -> put_retry(locked, actor, opts) end)
+    |> Repo.transaction()
+    |> finish_act([:locked, :allowed, :retryable, :figures, :cap])
+  end
+
+  # The guard of an act, asked inside its transaction (`Forge.Operator`): `:ok` or the refusal.
+  defp allowed(allow) do
+    case allow.() do
+      :ok -> {:ok, :allowed}
+      {:error, _reason} = refused -> refused
+    end
+  end
+
+  # The act's own errors are the person's and come back as they are; anything else failing is a
+  # step of the transaction, named.
+  defp finish_act(result, own) do
+    case result do
+      {:ok, %{ticket: ticket}} ->
+        Events.notify(ticket.id)
+        {:ok, ticket}
+
+      {:error, step, reason, _changes} ->
+        if step in own, do: {:error, reason}, else: {:error, {step, reason}}
+    end
+  end
+
+  defp put_retry(%Ticket{} = locked, actor, opts) do
+    workflow = Tickets.workflow(locked)
+    left = Spend.ticket_remaining(locked, workflow)
+    need = Extensions.restart_need(workflow, locked.state)
+
+    Multi.new()
+    |> Multi.run(:retryable, fn _repo, _changes ->
+      with :ok <- retryable(locked, workflow), do: {:ok, :retryable}
+    end)
+    |> Multi.run(:figures, fn _repo, _changes ->
+      Extensions.parse_restart(%{note: opts[:note], raise: opts[:raise]})
+    end)
+    |> Multi.run(:cap, fn _repo, %{figures: figures} ->
+      Extensions.check_cap(need, left, figures.raise, left == 0)
+    end)
+    |> Multi.insert(:restart, fn %{figures: figures} ->
+      Restart.changeset(
+        %Restart{},
+        Map.merge(Forge.Actor.columns(actor), %{
+          ticket_id: locked.id,
+          state: locked.state,
+          note: figures.note
+        })
+      )
+    end)
+    |> put_cap_raise(locked, workflow, actor, :restart_id, :restart)
+    |> Multi.update(:ticket, fn changes ->
+      Ticket.progress_changeset(locked, %{
+        state: locked.state,
         status: :active,
-        usage: ticket.usage,
+        usage: locked.usage,
+        cap_raise: locked.cap_raise + (changes.cap || 0),
         pending_transition: nil,
         held_transition: nil
       })
-      |> Events.log(:retry_event, "ticket.retried", actor(user_id), %{
-        ticket_id: ticket.id,
-        payload: %{"state" => ticket.state}
-      })
-      |> put_again(workflow, Workflow.state(workflow, ticket.state))
-      |> Repo.transaction()
-      |> case do
-        {:ok, %{ticket: ticket}} ->
-          Events.notify(ticket.id)
-          {:ok, ticket}
+    end)
+    |> Events.log(:retry_event, "ticket.retried", actor, fn %{restart: restart} ->
+      %{
+        ticket_id: locked.id,
+        payload: %{"state" => locked.state, "note" => restart.note, "restart_id" => restart.id}
+      }
+    end)
+    |> Multi.merge(fn %{ticket: ticket, restart: restart} ->
+      put_entry(
+        Multi.new(),
+        ticket,
+        workflow,
+        ticket.state,
+        again(ticket, restart.note),
+        false,
+        restart_id: restart.id
+      )
+    end)
+  end
 
-        {:error, step, reason, _changes} ->
-          {:error, {step, reason}}
-      end
+  # The raise a person made with the act, as its own record: who, the cap before and after as the
+  # numbers they were, and the extension or restart it came with (`ticket_cap_raises`), and the
+  # event that says so. Adds nothing when there is none. The amount is `:cap`'s, which the ticket's
+  # own column reads.
+  defp put_cap_raise(multi, %Ticket{} = locked, workflow, actor, origin_key, origin) do
+    Multi.merge(multi, fn
+      %{cap: nil} ->
+        Multi.new()
+
+      %{cap: raise} = changes ->
+        from = Spend.ticket_cap(locked, workflow)
+
+        Multi.new()
+        |> Multi.insert(
+          :cap_raise,
+          CapRaise.changeset(
+            %CapRaise{},
+            actor
+            |> Forge.Actor.columns()
+            |> Map.merge(%{ticket_id: locked.id, from_tokens: from, to_tokens: from + raise})
+            |> Map.put(origin_key, Map.fetch!(changes, origin).id)
+          )
+        )
+        |> Events.log(:cap_event, "ticket.cap_raised", actor, fn %{cap_raise: record} ->
+          %{
+            ticket_id: locked.id,
+            payload: %{
+              "from" => record.from_tokens,
+              "to" => record.to_tokens,
+              "raise_id" => record.id,
+              origin_payload_key(origin_key) => Map.fetch!(changes, origin).id
+            }
+          }
+        end)
+    end)
+  end
+
+  defp origin_payload_key(:restart_id), do: "restart_id"
+  defp origin_payload_key(:extension_id), do: "extension_id"
+
+  @doc """
+  Reopens the job that ran out of budget, with what a person gives it (`workflow-grammar-v1.md`
+  § Extending a job): the same job row and attempt goes back to `pending` and runs once more on
+  its own session, on the tokens and turns given — *on top of* what it has used, never a new total
+  — and a note it reads first. Its `spec` is not touched; the figures are an `Extension` record
+  and the run reads them in place of the spec's (`Forge.Jobs` builds its budget from them at assignment). Takes no transition,
+  so no `max` counts it; clears a pending approval and unsticks the ticket, as running a state
+  again does.
+
+  `attrs` are the form's fields: `tokens`, `turns`, `note` and `raise` (`Forge.Jobs.Extensions.parse/2`).
+  The cap: tokens past what the ticket has left are refused unless `raise` covers the shortfall,
+  and a raise nothing needs is refused; a refusal writes nothing.
+
+  **One transaction, in the order `cancel/2` locks in**: the ticket row, then `allow` — the guard of
+  the act, a zero-arity function returning `:ok` or `{:error, reason}`, so that what is checked
+  is what is acted on (`identity.md`) — then the job row. What is then checked is
+  `Forge.Jobs.Extensions.extendable/3`'s, on the locked rows, and is also what the offer is drawn
+  from. The job named has to be the ticket's: another ticket's, or an unknown id, is `:not_found`.
+  """
+  @spec extend(Ticket.t(), String.t(), Forge.Actor.t() | String.t(), map(), keyword()) ::
+          {:ok, Ticket.t()} | {:error, term()}
+  def extend(%Ticket{id: ticket_id}, job_id, who, attrs, opts \\ []) do
+    actor = actor(who)
+    allow = Keyword.get(opts, :allow, fn -> :ok end)
+
+    Multi.new()
+    |> Multi.run(:locked, fn repo, _changes -> lock_open(repo, ticket_id, :not_extendable) end)
+    |> Multi.run(:allowed, fn _repo, _changes -> allowed(allow) end)
+    |> Multi.run(:job, fn repo, %{locked: locked} -> lock_job(repo, locked, job_id) end)
+    |> Multi.merge(fn %{locked: locked, job: job} -> put_extension(locked, job, actor, attrs) end)
+    |> Repo.transaction()
+    |> finish_act([:locked, :allowed, :job, :extendable, :figures, :cap])
+  end
+
+  # The job, locked, if it is this ticket's. Another ticket's job is not found, whatever the
+  # request said about the ticket it belongs to.
+  defp lock_job(repo, %Ticket{id: ticket_id}, job_id) do
+    with {:ok, id} <- Ecto.UUID.cast(job_id),
+         %Job{} = job <-
+           repo.one(
+             from j in Job, where: j.id == ^id and j.ticket_id == ^ticket_id, lock: "FOR UPDATE"
+           ) do
+      {:ok, job}
+    else
+      _unknown -> {:error, :not_found}
     end
+  end
+
+  defp put_extension(%Ticket{} = locked, %Job{} = job, actor, attrs) do
+    case Tickets.parsed_workflow(locked) do
+      {:ok, workflow} ->
+        put_extension(locked, job, actor, attrs, workflow)
+
+      {:error, _errors} ->
+        Multi.error(Multi.new(), :extendable, {:not_extendable, :workflow_broken})
+    end
+  end
+
+  defp put_extension(%Ticket{} = locked, %Job{} = job, actor, attrs, workflow) do
+    bounded = ForgeCore.Harness.bounds_turns?(job.harness)
+    left = Spend.ticket_remaining(locked, workflow)
+
+    Multi.new()
+    |> Multi.run(:extendable, fn _repo, _changes ->
+      with :ok <- Extensions.extendable(locked, job, workflow), do: {:ok, :extendable}
+    end)
+    |> Multi.run(:figures, fn _repo, _changes -> Extensions.parse(attrs, bounded) end)
+    |> Multi.run(:cap, fn _repo, %{figures: figures} ->
+      Extensions.check_cap(figures.tokens, left, figures.raise, true)
+    end)
+    |> Multi.insert(:extension, fn %{figures: figures} ->
+      Extension.changeset(%Extension{}, extension_attrs(figures, locked, job, actor))
+    end)
+    |> put_cap_raise(locked, workflow, actor, :extension_id, :extension)
+    # `finished → pending`, the one move a finished job makes: what the stop wrote is cleared, so
+    # the row says how the job ends *now* once the reopened run finishes, and what it used, its
+    # turns and its session stay (`data-model.md` § job).
+    |> Multi.update(
+      :reopened,
+      Job.progress_changeset(job, %{
+        status: :pending,
+        outcome: nil,
+        declared_outcome: nil,
+        exhausted: nil,
+        finished_at: nil,
+        worker_id: nil
+      })
+    )
+    |> Multi.update(:ticket, fn changes ->
+      Ticket.progress_changeset(locked, %{
+        state: locked.state,
+        status: :active,
+        usage: locked.usage,
+        cap_raise: locked.cap_raise + (changes.cap || 0),
+        pending_transition: nil,
+        held_transition: nil
+      })
+    end)
+    |> Events.log(:extended_event, "job.extended", actor, fn %{extension: extension} ->
+      %{ticket_id: locked.id, job_id: job.id, payload: extended_payload(extension)}
+    end)
+  end
+
+  # What the record keeps: who, the figures, and the stop it extended (`data-model.md`
+  # § job_extension), read from the locked job.
+  defp extension_attrs(figures, %Ticket{} = locked, %Job{} = job, actor) do
+    actor
+    |> Forge.Actor.columns()
+    |> Map.merge(%{
+      job_id: job.id,
+      ticket_id: locked.id,
+      tokens: figures.tokens,
+      turns: figures.turns,
+      note: figures.note,
+      exhausted: job.exhausted,
+      stopped_at: job.finished_at,
+      usage_before: job.usage,
+      turns_before: job.turns,
+      runs_before: Repo.aggregate(from(r in Jobs.Run, where: r.job_id == ^job.id), :count)
+    })
+  end
+
+  defp extended_payload(%Extension{} = extension) do
+    %{
+      "extension_id" => extension.id,
+      "tokens" => extension.tokens,
+      "turns" => extension.turns,
+      "note" => extension.note,
+      "exhausted" => extension.exhausted && Atom.to_string(extension.exhausted),
+      "stopped_at" => extension.stopped_at,
+      "usage_before" => extension.usage_before
+    }
   end
 
   @doc """
@@ -1510,15 +1819,18 @@ defmodule Forge.Engine do
     end
   end
 
-  defp queued_or_live(ticket), do: with(:ok <- not_queued(ticket), do: no_live_job(ticket))
+  # **A Run again that waits on a hold is a job that is going to be live**: it writes `held_entry`
+  # with its `restart_id` and makes no job until the release, so a second one would write another
+  # restart record and overwrite the first one's note (criterion 20 of ticket 58: only one takes
+  # effect). Refused as a live job is. Only an entry a Run again wrote: *Stop now* leaves an entry
+  # with no `restart_id` key, and a move made by hand on a hold leaves one for the state the ticket
+  # now rests in with the key nil (`put_entry/7`); Run again over those is what it was, and replaces
+  # the entry, carrying its note to the release.
+  defp queued_or_live(%Ticket{held_entry: %{"state" => state, "restart_id" => restart}} = ticket)
+       when state == ticket.state and not is_nil(restart),
+       do: {:error, {:job_live, state}}
 
-  # The state again, as a person asked for it: the arrival the last attempt had, and no session
-  # forked. On a ticket on hold it waits (`put_entry/6`).
-  defp put_again(multi, workflow, %State{}) do
-    Multi.merge(multi, fn %{ticket: ticket} ->
-      put_entry(Multi.new(), ticket, workflow, ticket.state, again(ticket), false)
-    end)
-  end
+  defp queued_or_live(ticket), do: with(:ok <- not_queued(ticket), do: no_live_job(ticket))
 
   # How the last attempt of this state arrived, so the next is told the same: the comment a tester
   # sent a build back with is still what the job has to act on (`job-prompt.md` § How the job
@@ -1546,6 +1858,22 @@ defmodule Forge.Engine do
 
       {entered, note} ->
         Map.put(entered, "comment", join_note(note, own_comment(ticket)))
+    end
+  end
+
+  # The arrival a state run again by a person has, with their note: the note is joined after what
+  # the arrival carries, as a rejection's is (`join_note/2`), and a first state — which has no
+  # arrival to add to — is told it came from itself, by a person, with the note.
+  defp again(ticket, note) do
+    case {again(ticket), note} do
+      {entered, nil} ->
+        entered
+
+      {nil, note} ->
+        %{"from" => ticket.state, "by" => "person", "comment" => note}
+
+      {entered, note} ->
+        Map.put(entered, "comment", join_note(note, entered["comment"]))
     end
   end
 

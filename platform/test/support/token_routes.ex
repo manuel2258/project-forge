@@ -31,6 +31,7 @@ defmodule ForgeWeb.TokenRoutes do
     {:post, "/api/v1/tickets/:project/:number/approve"} => :token_write,
     {:post, "/api/v1/tickets/:project/:number/transition"} => :token_write,
     {:post, "/api/v1/tickets/:project/:number/retry"} => :token_write,
+    {:post, "/api/v1/tickets/:project/:number/jobs/:job_id/extend"} => :token_write,
     {:post, "/api/v1/tickets/:project/:number/cancel"} => :token_write,
     {:post, "/api/v1/tickets/:project/:number/restore"} => :token_write,
     {:post, "/api/v1/tickets/:project/:number/hold"} => :token_write,

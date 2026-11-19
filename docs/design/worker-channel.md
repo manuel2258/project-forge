@@ -835,6 +835,18 @@ already has the framework for.
   is now a release too old to take a job's credential, and it takes no inference job
   (`credentials.md` § What a worker offers now).
 
+## Protocol 12 (ticket 58)
+
+Protocol 11 → 12, a breaking change: the spec gains `extension`, which the worker acts on — it is
+the opening of the prompt a job a person extended is resumed with (`job-prompt.md` § The continuation
+prompt), and an 11 worker's `Spec.from_map/1` drops a key it does not know without a word, so it would
+resume the session with no note. `Jobs.protocol_needs/1` gains `extension: 12` for a job that has an
+extension record, so it waits on the existing *needs worker protocol 12* reason until a machine speaks
+it; every other job needs no more than before, and `minimum` stays. The run's figures travel in the
+fields they always did (`spec.budget`, `resume_session`, `session`). The result's harness map gains
+`resumed`: whether the run resumed its session — false of a first run too, which had none — which only the worker knows when it dropped a resume
+it could not check (`claude-code-events.md` § Resume). A platform ignores it where it is absent.
+
 ## Protocol 11 (ticket 43)
 
 Protocol 10 → 11. A worker counts weighted tokens during the run and stops it past its budget

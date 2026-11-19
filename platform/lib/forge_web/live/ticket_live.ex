@@ -200,6 +200,7 @@ defmodule ForgeWeb.TicketLive do
     diff = ticket_diff(project, ticket)
     conflict = Forge.Merge.Watch.notice(ticket)
     step = step_view(ticket)
+    events = ticket_events(ticket)
 
     # Subscribed before the stream is read, so an event written between the two is heard rather
     # than missing until the next reload; one read and heard both is skipped as seen.
@@ -224,11 +225,17 @@ defmodule ForgeWeb.TicketLive do
       artifacts: artifacts,
       diff: diff,
       commits: commits(project, ticket),
-      events: ticket_events(ticket),
+      events: events,
+      addresses:
+        Forge.Accounts.addresses(for %{actor: %{"kind" => "user", "id" => id}} <- events, do: id),
       queue_events: queue_events(ticket),
       activity: if(current, do: Events.for_job(current.id), else: []),
       transitions: Engine.offered_transitions(ticket, workflow),
       retry: Engine.retryable?(ticket),
+      # What a job that ran out may be given, and the cap it is judged against: the Extend and Run
+      # again forms are drawn from these (`ForgeWeb.Components.MoreRoom`).
+      extend: Forge.Jobs.Extensions.offer(ticket),
+      room: Forge.Jobs.Extensions.cap_facts(ticket, workflow),
       # Where the ticket stands in its project's merge queue, or nil (`ui.md` § Steps).
       queue: Forge.MergeQueue.places(project.id)[ticket.id],
       stuck_reason: Engine.why_stuck(ticket),
@@ -640,13 +647,13 @@ defmodule ForgeWeb.TicketLive do
   # The way forward picked, held so the dock button names it and a rejoin gives it back
   # (`docs/design/ui.md` § A reconnect is not a reload). Picking commits nothing.
   def handle_event("forward:pick", params, socket),
-    do: {:noreply, assign(socket, forward: params["way"])}
+    do: {:noreply, socket |> assign(forward: params["way"]) |> hold_typed(params)}
 
   # The dock button: the way picked, taken by the operation that takes it anywhere — a transition
   # or running the state again, each guarded in `Forge.Operator`.
   def handle_event("forward", params, socket) do
-    case forward(params["way"], socket.assigns.ticket) do
-      {event, params} -> handle_event(event, params, assign(socket, forward: nil))
+    case forward(params, socket.assigns.ticket) do
+      {event, params} -> forward_act(event, params, socket)
       nil -> {:noreply, socket}
     end
   end
@@ -659,9 +666,46 @@ defmodule ForgeWeb.TicketLive do
     end
   end
 
-  defp forward("again", ticket), do: {"retry", %{"ticket" => ticket.id}}
-  defp forward("to:" <> to, ticket), do: {"transition", %{"ticket" => ticket.id, "to" => to}}
+  # A way forward taken: the pick is let go when it was done, and kept when it was refused, so that
+  # the refusal is drawn under the form with what was typed still in it (`ui.md` § Errors stay where
+  # you acted).
+  defp forward_act(event, params, socket) do
+    {:noreply, socket} = handle_event(event, params, socket)
+
+    if socket.assigns.refusal == nil,
+      do: {:noreply, assign(socket, forward: nil)},
+      else: {:noreply, socket}
+  end
+
+  # Taken by the operation that takes it anywhere — each guarded in `Forge.Operator`. What was
+  # typed under the row rides along: the note and the cap raise of both, the tokens and turns of
+  # Extend, and the job the person was shown, which is the one the act checks.
+  defp forward(%{"way" => "again"} = params, ticket),
+    do: {"retry", params |> Map.take(~w(note raise draft)) |> Map.put("ticket", ticket.id)}
+
+  defp forward(%{"way" => "extend"} = params, ticket),
+    do:
+      {"extend",
+       params |> Map.take(~w(tokens turns note raise job draft)) |> Map.put("ticket", ticket.id)}
+
+  defp forward(%{"way" => "to:" <> to}, ticket),
+    do: {"transition", %{"ticket" => ticket.id, "to" => to}}
+
   defp forward(_nothing, _ticket), do: nil
+
+  # What is typed under the way picked, held in the page's drafts so that a rejoin gives it back and
+  # the raise box can be drawn from it. The raise is the shortfall until the person types in it:
+  # picking another way or changing the tokens drops what an earlier shortfall filled in, so it
+  # follows them; a change to anything else leaves a raise the person typed alone.
+  defp hold_typed(socket, params) do
+    params =
+      if params["_target"] in [["tokens"], ["way"]], do: Map.delete(params, "raise"), else: params
+
+    case Drafts.handle("draft:change", Map.put(params, "draft", "ways-forward"), socket) do
+      {:state, socket} -> socket
+      :unknown -> socket
+    end
+  end
 
   # The view shown: the one named, else the one that held what waited when the page was opened.
   defp view(%{tab: tab}) when tab != nil, do: tab

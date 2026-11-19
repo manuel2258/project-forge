@@ -25,7 +25,7 @@ defmodule ForgeWeb.TicketViews do
 
   alias Forge.{Artifacts, Conversations, Events, Git, Jobs, Projects}
   alias ForgeCore.Workflow
-  alias ForgeWeb.Components.StepAccept
+  alias ForgeWeb.Components.{MoreRoom, StepAccept}
   alias ForgeWeb.{Diff, FileType, Format, WorkScreen}
   alias ForgeWeb.Operator.{Actions, QuestionForm}
 
@@ -38,7 +38,7 @@ defmodule ForgeWeb.TicketViews do
            merge_queue.left ticket.merged ticket.renamed approval.approved approval.rejected
            ticket.cancelled ticket.restored ticket.repinned ticket.held ticket.released
            ticket.stopped ticket.refreshed transition.held ticket.retitled
-           ticket.milestone_set ticket.moved)
+           ticket.milestone_set ticket.moved ticket.retried job.extended ticket.cap_raised)
 
   @doc "The ticket's event types Activity says in words, beside what its jobs did."
   @spec said_types() :: [String.t()]
@@ -185,6 +185,17 @@ defmodule ForgeWeb.TicketViews do
           ),
         else: []
 
+    extend =
+      if assigns.retry and Map.get(assigns, :extend),
+        do: [
+          %{
+            value: "extend",
+            label: "Extend #{ticket.state}",
+            detail: "the same job carries on with its session, on the room you give it"
+          }
+        ],
+        else: []
+
     again =
       if assigns.retry,
         do: [
@@ -196,7 +207,7 @@ defmodule ForgeWeb.TicketViews do
         ],
         else: []
 
-    moves ++ again
+    moves ++ extend ++ again
   end
 
   defp moves?(assigns) do
@@ -827,15 +838,27 @@ defmodule ForgeWeb.TicketViews do
         class="flex flex-col gap-2"
       >
         <.eyebrow>Ways forward</.eyebrow>
-        <.choice_row
-          :for={way <- @ways}
-          id={"way-#{way.value}"}
-          name="way"
-          value={way.value}
-          label={way.label}
-          detail={way.detail}
-          selected={@forward == way.value}
-        />
+        <%= for way <- @ways do %>
+          <.choice_row
+            id={"way-#{way.value}"}
+            name="way"
+            value={way.value}
+            label={way.label}
+            detail={way.detail}
+            selected={@forward == way.value}
+          />
+          <%!-- Its fields, under the row picked: the form is one, so the one button submits them
+                on a phone and on a laptop alike (`ui.md` § Steps, *Ways forward*). --%>
+          <MoreRoom.fields
+            :if={@forward == way.value and way.value in ~w(extend again)}
+            way={way.value}
+            offer={@extend}
+            room={@room}
+            drafts={@drafts}
+            draft="ways-forward"
+            prefix="forward"
+          />
+        <% end %>
       </form>
       <%!-- From 768 the button sits under the choices it commits, not a screen away in the
             dock (UX pass, B1); the dock keeps it on a phone, under the thumb. --%>
@@ -847,7 +870,7 @@ defmodule ForgeWeb.TicketViews do
       </div>
       <%!-- Under the ways forward, and drawn without them too: a way sent from a page drawn
             before the ticket moved is refused after they have gone. --%>
-      <Actions.refused id="forward-refusal" refusal={@refusal} at={~w(retry transition)} />
+      <Actions.refused id="forward-refusal" refusal={@refusal} at={~w(retry extend transition)} />
     </div>
     """
   end
@@ -954,8 +977,8 @@ defmodule ForgeWeb.TicketViews do
             <span class="work-act-type">{event.type}</span>
             <div class="work-act-detail">
               {said(event)}
-              <span :if={Format.author(event.actor)} class="text-ink-2">
-                · {Format.author(event.actor)}
+              <span :if={Format.author(event.actor, @addresses)} class="text-ink-2">
+                · {Format.author(event.actor, @addresses)}
               </span>
             </div>
           </div>
@@ -1068,9 +1091,10 @@ defmodule ForgeWeb.TicketViews do
             {Format.spent(@ticket.usage) || "nothing spent yet"}
           </span>
           <span class="text-ink-3">
-            {if Format.spent(@ticket.usage), do: "of", else: "allowance"} {Format.windows(
-              @workflow.limits.ticket_tokens
-            ) || "—"}
+            {if Format.spent(@ticket.usage), do: "of", else: "allowance"} {Format.allowance(
+              @ticket,
+              @workflow
+            )}
           </span>
         </div>
         <.allowance
@@ -1417,6 +1441,8 @@ defmodule ForgeWeb.TicketViews do
     cap = workflow.limits.ticket_tokens
 
     if is_number(cap) and cap > 0 do
+      cap = Forge.Spend.ticket_cap(ticket, workflow)
+
       ticket.usage
       |> Kernel./(cap)
       |> Kernel.*(100)

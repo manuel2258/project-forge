@@ -708,7 +708,7 @@ defmodule ForgeWeb.Changes do
           class="changes-usage-bar"
         />
         <span class="changes-usage-cap">
-          allowance {Format.windows(@workflow.limits.ticket_tokens) || "—"}
+          allowance {Format.allowance(@ticket, @workflow)}
         </span>
       </div>
     </section>

@@ -8,4 +8,10 @@ defmodule ForgeCore.HarnessTest do
     assert Harness.default() == "claude_code"
     assert Harness.default() in Harness.names()
   end
+
+  test "only Claude Code's runs have a turn ceiling" do
+    assert Harness.bounds_turns?("claude_code")
+    refute Harness.bounds_turns?("codex")
+    refute Harness.bounds_turns?(nil)
+  end
 end

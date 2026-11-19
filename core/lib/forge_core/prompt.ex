@@ -60,8 +60,12 @@ defmodule ForgeCore.Prompt do
     [
       @preamble,
       "---\n\n# Project instructions for state `#{spec.state}`\n\n" <> String.trim(spec.prompt),
+      # A job a person extended that cannot resume its session runs cold, and is still told why it
+      # has the room it has and what its note said (`docs/design/job-prompt.md`).
+      extension_section(spec, false),
       "---\n\n" <> manifest(spec, job_dir)
     ]
+    |> Enum.reject(&is_nil/1)
     |> Enum.map_join("\n\n", &String.trim_trailing/1)
     |> Kernel.<>("\n")
   end
@@ -144,14 +148,22 @@ defmodule ForgeCore.Prompt do
     end
   end
 
-  defp opening(_spec, false) do
-    """
-    # Continue this job
+  # **A person extended this job**: the opening is theirs, and is what the run reads first. Only
+  # without a fork — a fork is a new attempt and no extension reaches one (`Forge.Jobs.Extensions`).
+  # Told of it by the run it was given to, and not by the runs after that one (`later_run`): a run
+  # that resumes after a question, a park or a limit is told what any resume is.
+  defp opening(%Spec{extension: extension}, false) do
+    if told_of?(extension) do
+      extension_text(extension, true)
+    else
+      """
+      # Continue this job
 
-    This resumes your session on it. Your instructions are the ones you were given; below is
-    what changed while you were stopped, and the manifest as it stands now. Where the manifest
-    differs from what you remember, the manifest is right.
-    """
+      This resumes your session on it. Your instructions are the ones you were given; below is
+      what changed while you were stopped, and the manifest as it stands now. Where the manifest
+      differs from what you remember, the manifest is right.
+      """
+    end
   end
 
   # A fork: the session is the previous attempt's, and the job is a new one. The one thing it
@@ -190,6 +202,79 @@ defmodule ForgeCore.Prompt do
     "The ticket went on from here and has come back — *How you got here* in the manifest below " <>
       "says from where and why — and your instructions are the ones you were given."
   end
+
+  # A cold run has no memory of being told, whichever run of the job it is: it carries the section
+  # always (`later_run` decides only whether a resumed run is told again).
+  defp extension_section(%Spec{extension: %{} = extension}, resumed?),
+    do: "---\n\n" <> extension_text(extension, resumed?)
+
+  defp extension_section(%Spec{}, _resumed?), do: nil
+
+  defp told_of?(%{} = extension), do: extension["later_run"] != true
+  defp told_of?(nil), do: false
+
+  # What a run a person's extension reopened is told, resumed or cold. The figures are the job's, as
+  # the platform counted them; the note is the person's own text, fenced as an answer is so that
+  # a quoted block cannot close it early, and carried without being read (`docs/design/job-prompt.md`
+  # § The continuation prompt).
+  defp extension_text(extension, resumed?) do
+    """
+    # A person gave this job more room
+
+    #{extension_stopped(extension)} A person extended it#{extension_by(extension)}.#{extension_resumes(resumed?)}
+
+    #{extension_used(extension)} **This run may spend up to #{extension_room(extension)} *on top of* that**, and no more (the budget below is what binds, and says so if the day or the ticket lowered it). What earlier runs wrote is recorded, and every output the manifest declares must be in `out/` when this run finishes: reach a declared outcome inside the room you were given, and do not read again what you already read.#{extension_note(extension)}
+    """
+  end
+
+  defp extension_stopped(%{"exhausted" => "turns"}),
+    do: "This job stopped because it ran out of turns."
+
+  defp extension_stopped(%{"exhausted" => "tokens"}),
+    do: "This job stopped because it ran out of tokens."
+
+  defp extension_stopped(%{"exhausted" => "wall_clock"}),
+    do: "This job stopped because it ran out of time."
+
+  defp extension_stopped(_extension), do: "This job stopped because it ran out of budget."
+
+  defp extension_by(%{"number" => number}) when is_integer(number) and number > 1,
+    do: " (the #{ordinal(number)} time)"
+
+  defp extension_by(_extension), do: ""
+
+  defp ordinal(2), do: "second"
+  defp ordinal(3), do: "third"
+  defp ordinal(number), do: "#{number}th"
+
+  defp extension_resumes(true),
+    do:
+      " This resumes your session on it: what you read and concluded is as you left it, and the manifest below is as it stands now."
+
+  defp extension_resumes(false),
+    do:
+      " Your session could not be restored, so this run starts from the instructions above and the work on the branch."
+
+  defp extension_used(%{"used_tokens" => tokens, "used_turns" => turns, "runs" => runs}) do
+    "So far it has used #{Usage.format(tokens || 0)} weighted tokens and #{turns || 0} turns over #{runs || 0} #{if runs == 1, do: "run", else: "runs"}."
+  end
+
+  # What the person gave, said as they gave it: tokens, and turns where they set them.
+  defp extension_room(%{"tokens" => tokens, "turns" => turns}) when is_integer(turns),
+    do: "#{Usage.format(tokens)} weighted tokens and #{turns} turns"
+
+  defp extension_room(%{"tokens" => tokens}), do: "#{Usage.format(tokens)} weighted tokens"
+
+  defp extension_note(%{"note" => note}) when is_binary(note) do
+    if blank?(note) do
+      ""
+    else
+      fence = fence(note)
+      "\n\n## Their note\n\n#{fence}text\n#{String.trim(note)}\n#{fence}"
+    end
+  end
+
+  defp extension_note(_extension), do: ""
 
   # Every turn of a conversation is committed as it ends, so the tree is what the last turn left;
   # a turn cut short when it stopped left only what it had committed.
@@ -514,18 +599,19 @@ defmodule ForgeCore.Prompt do
     ## Budget
 
     - Turns: #{spec.budget.turns}
-    - Weighted tokens: #{Usage.format(spec.budget.tokens)}#{lowered(spec.budget)}#{allowance(spec.budget)}
+    - Weighted tokens: #{Usage.format(spec.budget.tokens)}#{lowered(spec)}#{allowance(spec.budget)}
     """
   end
 
   # Said, not left to an event log the agent cannot read: a job stopping at a tenth of its state's
   # budget, or saving a round it had plenty for, needs the figure that decided it.
-  defp lowered(%{declared: declared, lowered_by: by}) do
+  defp lowered(%Spec{budget: %{declared: declared, lowered_by: by}, extension: extension}) do
     left = if by == "day", do: "what the day has left", else: "what the ticket has left"
-    " — lowered from the state's #{Usage.format(declared)} to #{left}"
+    from = if extension, do: "the extension's", else: "the state's"
+    " — lowered from #{from} #{Usage.format(declared)} to #{left}"
   end
 
-  defp lowered(_budget), do: ""
+  defp lowered(%Spec{}), do: ""
 
   defp allowance(%{ticket_left: left, ticket_limit: limit}),
     do:

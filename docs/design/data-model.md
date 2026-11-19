@@ -42,7 +42,12 @@ null otherwise),
 `commit`, budgets, permitted children, which is empty in v1; `answers.md` and the answered keys are
 added at run time, not stored; a command's is its script, argv, commit, env and timeout),
 `status` (`pending | running | waiting | parked | hibernated | finished` — `parked` is a job waiting
-on commands it invoked, holding no slice: `design/commands.md` § Always park), `exit_status` (a
+on commands it invoked, holding no slice: `design/commands.md` § Always park. **`finished` is final
+but for one move**, `finished → pending`, made by a person's extension of a workflow job that ended
+`budget_exhausted` and by nothing else (a conversation that went idle is reopened by a message, which
+is `docs/design/conversations.md`'s rule): `outcome`, `declared_outcome`, `exhausted`, `finished_at`
+and `worker_id` are cleared, and `turns`, `usage` and the session are kept; `design/capacity.md`
+§ Four exhaustions, three treatments), `exit_status` (a
 command's, null for every other kind and for a command that ended without one),
 `outcome` (`converged | did_not_converge | budget_exhausted | error | cancelled`, null until
 finished), `declared_outcome` (the workflow outcome the agent selected, null unless converged),
@@ -58,7 +63,9 @@ file the worker uploaded — its store key, the Claude Code version that wrote i
 running total when it did, which the resumed run's cost is reported less — which a resume
 on another machine puts back; `design/claude-code-events.md` § Resume), `resume_from_id` (the
 previous attempt of the state whose session a new attempt forks, set when the ticket came back to
-a state that attempt finished in, and cleared when a resume is refused), `worker_id` (nullable),
+a state that attempt finished in, and cleared when a resume is refused), `restart_id` (the
+`ticket_restarts` row of a person's *Run again* that made this job, or that released it from hold;
+null for every job a transition made), `worker_id` (nullable),
 `credential_id` (the inference credential its current or last run spent, nullable until it first
 starts), `model` and `effort` (a conversation's, chosen when it was opened; a workflow job's are
 its state's and are not on the row), `memory_max` and `cores` (what the scheduler gates on,
@@ -191,10 +198,25 @@ commit a taken name points at, or the reason a tag was not made), `inserted_at`.
 release ticket ends `done` and never updated, so it has no `updated_at`; releases concluded before it
 existed have none. `design/ticket-types.md` § The record, the tag, the history.
 
-**job_run** — `job_id`, `credential_id`, `worker_id`, `started_at`, `finished_at`, `usage`, `tokens`. One
+**job_run** — `job_id`, `credential_id`, `worker_id`, `started_at`, `finished_at`, `usage`, `tokens`,
+`extension_id` (the extension this run was given to — the first run started on it, null for every other run, a later one of an extended job included, and for a run the platform took back with no result — its machine lost or never reached, a hibernation, or the harness refusing its session — which lets go of it so that the next run is told) and `resumed` (whether the run resumed its session, as the worker reports it: false for any run that did not — a session refused or not restorable, and
+also a job's first run, which had none — null where nothing reported). One
 process of a job: a resume, a requeue or a reopened conversation is a new run. Spend is recorded
 here per credential, set from the harness's running total for that process, less what a session it resumed had already
 spent (`Forge.Jobs.Runs`).
+
+**job_extension** — insert-only: what a person gave a job that ran out of budget
+(`design/capacity.md` § Four exhaustions, three treatments). `job_id`, `ticket_id`, who
+(`user_id` or `token_id`, exactly one), `tokens` (what the reopened run may spend, on top of what the
+job has used), `turns` (null when the harness does not bound turns, or the job's own), `note`
+(at most 4,000 characters), the stop it extended (`exhausted`, `stopped_at`, `usage_before`,
+`turns_before`, `runs_before`) and `inserted_at`. A job has as many as it was extended.
+
+**ticket_restart** — insert-only: a person running a state again. `ticket_id`, `state`, who, `note`,
+`inserted_at`. **ticket_cap_raise** — insert-only: a person raising a ticket's allowance. `ticket_id`,
+who, `from_tokens`, `to_tokens`, and the `extension_id` or `restart_id` it was made with (exactly one).
+The ticket's `cap_raise` is the sum, and its allowance is the workflow's `limits.ticket_tokens` plus
+it.
 
 **git_token** — `project_id`, `ticket_id`, `job_id` (the last two nullable), `token_hash`,
 `ref` (the one ref a `branch` token may update: `refs/heads/ticket/<n>` for a ticket's job,
@@ -241,7 +263,9 @@ run rebuilds from the branch and the manifest.
 
 ## Invariants
 
-- A job's `spec` is written once. Resumption reads it; nothing rewrites it.
+- A job's `spec` is written once. Resumption reads it; nothing rewrites it. An extension does not
+  rewrite it either: the figures a person gave are on the `job_extension` row, and the run that
+  follows reads them in place of the spec's.
 - `artifact_version` rows are insert-only. Editing is a new version. Human edits carry a user
   author.
 - The input manifest references versions, so a job's basis is answerable after later
@@ -257,7 +281,10 @@ run rebuilds from the branch and the manifest.
 - Budgets in `spec` are copied from the pinned workflow at job creation and the row is never
   rewritten. The *effective* cost budget a run is handed is the least of what the spec declared,
   what the ticket allowance has left and what the daily cap has left, computed at start and
-  recorded as `job.budget_lowered` when it differs. The turn budget is the spec's, always.
+  recorded as `job.budget_lowered` when it differs. The turn budget is the spec's, except for a run
+  an extension reopened, whose ceilings — tokens and, where the harness bounds turns, turns — are the
+  extension's, and whose base for the lowering is its tokens. The ticket allowance is the workflow's
+  plus the ticket's `cap_raise`.
 
 ## Not in v1, but shaped for
 

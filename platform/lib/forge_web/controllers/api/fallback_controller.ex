@@ -112,6 +112,38 @@ defmodule ForgeWeb.Api.FallbackController do
   def call(conn, {:error, {:no_job_in, state}}),
     do: error(conn, :conflict, "no_job_in_state", "no job runs in #{state}")
 
+  # What a person did about a job that ran out (`Forge.Jobs.Extensions`): a job or ticket that is
+  # not in a state to be extended is the state of things and the client's to resolve (409), and a
+  # figure, a note or a raise that is wrong is the request's (422), in the words the page says.
+  def call(conn, {:error, {:not_extendable, _why} = reason}),
+    do: error(conn, :conflict, "not_extendable", Forge.Jobs.Extensions.explain(reason))
+
+  def call(conn, {:error, reason})
+      when elem(reason, 0) in [
+             :invalid_tokens,
+             :invalid_turns,
+             :invalid_note,
+             :invalid_raise,
+             :note_too_long,
+             :raise_short
+           ],
+      do:
+        error(
+          conn,
+          :unprocessable_entity,
+          Atom.to_string(elem(reason, 0)),
+          Forge.Jobs.Extensions.explain(reason)
+        )
+
+  def call(conn, {:error, :raise_not_needed}),
+    do:
+      error(
+        conn,
+        :unprocessable_entity,
+        "raise_not_needed",
+        Forge.Jobs.Extensions.explain(:raise_not_needed)
+      )
+
   def call(conn, {:error, {:not_retryable, status}}),
     do: error(conn, :conflict, "not_retryable", "a #{status} ticket cannot be run again")
 

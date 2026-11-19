@@ -447,6 +447,14 @@ flag comes from (`job-prompt.md` § The continuation prompt). Resume is never re
 correctness, and no outcome depends on it: what it saves is context, which is this system's
 expensive resource.
 
+**A job a person extended resumes its own session, not a fork** (`workflow-grammar-v1.md`
+§ Extending a job). It is the same job, so the assignment carries `resume_session` and the session
+file as it does after a question, and the continuation opens by saying a person gave the job more
+room (`job-prompt.md` § The continuation prompt). A session that cannot be restored runs cold on the
+full prompt with the same opening added, and the worker's result says `resumed: false`, which is
+recorded on the run (`job_runs.resumed`) so the job page can say a run an extension reopened started
+without its session (it is false of a job's first run too, and the page says nothing of that).
+
 **What `--resume` needs is a file, and the file is carried.** Claude Code keeps a session as
 `$HOME/.claude/projects/<the working directory, each character not a letter or digit a dash>/<session_id>.jsonl`,
 and `HOME` is `$FORGE_JOB/home` — on the machine that ran the job and on no other. So after every
@@ -510,8 +518,8 @@ instructions are its own. Carrying the context is also the whole point: a cold s
 re-reads the code and re-derives the findings the first one already paid for, which is the
 expense that pays for a state's budget twice. The risk this leaves open is the one the other
 three are kept out for: an attempt that spends its budget the same way twice makes no progress
-but costs a second budget. The `max: 1` on every `budget_exhausted` self-loop in
-`.forge/workflows/` is what bounds that, not this rule.
+but costs a second budget. No workflow declares an edge on `budget_exhausted` any more, so nothing
+bounds that but a person, who is the one who sends the ticket back.
 
 **So the continuation says so.** A self-loop sends the state from itself to itself, which is not
 the ticket going on and coming back, and the fork's opening paragraph said it was. An attempt

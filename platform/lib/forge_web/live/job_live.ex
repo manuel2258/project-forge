@@ -20,6 +20,7 @@ defmodule ForgeWeb.JobLive do
 
   use ForgeWeb, :live_view
 
+  import Ecto.Query, only: [from: 2]
   import ForgeWeb.Indicators
   import ForgeWeb.Actions, only: [checklist: 1, clip: 1, line: 1]
   import ForgeWeb.Operator.Components, only: [scroll_pane: 1]
@@ -82,10 +83,37 @@ defmodule ForgeWeb.JobLive do
       refusals: Jobs.refusals(job),
       archive_reads: Archive.reads(job.id),
       runs: Runs.for_job(job.id),
+      extensions: extensions(job),
       now: DateTime.utc_now()
     )
     |> assign(events: events, memory: Memory.trouble(events), held: held(events))
   end
+
+  # What a person gave this job, oldest first, with who (an address, or the token's name) and the
+  # cap raise that came with each: none for a job nobody extended, which the page then does not
+  # mention (`docs/design/ui.md` § The job page).
+  defp extensions(%{id: job_id}) do
+    extensions = job_id |> Forge.Jobs.Extensions.all() |> Forge.Repo.preload([:user, :token])
+
+    raises =
+      Map.new(
+        Forge.Repo.all(
+          from r in Forge.Tickets.CapRaise,
+            where: r.extension_id in ^Enum.map(extensions, & &1.id)
+        ),
+        &{&1.extension_id, &1}
+      )
+
+    for {extension, n} <- Enum.with_index(extensions, 1),
+        do: %{record: extension, number: n, raise: raises[extension.id], who: who(extension)}
+  end
+
+  defp extension_number(extensions, id),
+    do: Enum.find_value(extensions, fn e -> e.record.id == id && e.number end)
+
+  defp who(%{token: %{name: name}}), do: "API · " <> name
+  defp who(%{user: %{email: email}}), do: email
+  defp who(_other), do: nil
 
   # What the page knows of its ticket rather than of its job: the strip's counts, the job running
   # now and the attempts at this job's state in this visit. Read on mount and when the ticket
@@ -405,6 +433,34 @@ defmodule ForgeWeb.JobLive do
               </li>
             </ul>
           </div>
+          <%!-- What people gave the job, oldest first, and why. Absent for a job nobody extended:
+                an empty heading would say it might have been. A note is text, shown as typed. --%>
+          <div :if={@extensions != []} id="job-extensions" class="job-attempts">
+            <.eyebrow>{if length(@extensions) == 1, do: "Extension", else: "Extensions"}</.eyebrow>
+            <ul>
+              <li :for={e <- @extensions} id={"extension-#{e.record.id}"} class="job-run">
+                <span class="job-run-head">
+                  <span class="job-dim">extension {e.number}</span>
+                  <span title={Format.exact(e.record.tokens)}>
+                    +{ForgeCore.Usage.format(e.record.tokens)}<span :if={e.record.turns}>, +{e.record.turns} turns</span>
+                  </span>
+                </span>
+                <span class="job-run-kinds">
+                  {e.who || "a person"} · {Calendar.strftime(e.record.inserted_at, "%m-%d %H:%M")}
+                </span>
+                <span :if={e.raise} class="job-run-kinds">
+                  cap raised {ForgeCore.Usage.format(e.raise.from_tokens)} → {ForgeCore.Usage.format(
+                    e.raise.to_tokens
+                  )}
+                </span>
+                <span
+                  :if={e.record.note}
+                  id={"extension-#{e.record.id}-note"}
+                  class="job-run-kinds whitespace-pre-wrap [overflow-wrap:anywhere]"
+                >{e.record.note}</span>
+              </li>
+            </ul>
+          </div>
           <%!-- What each process used (ticket 43): windows with the exact weighted tokens in the
                 title, and its tokens by kind — a converted run has none, only the dollars the
                 migration read, and says so. --%>
@@ -420,6 +476,20 @@ defmodule ForgeWeb.JobLive do
                   {Format.kinds(run.tokens)}
                 </span>
                 <span :if={run.converted} class="job-run-kinds">converted from dollars</span>
+                <%!-- Which extension reopened it, and — when the worker says so — that it could not
+                      resume the session and started from the prompt (`docs/design/ui.md`). Only a
+                      run an extension reopened: the worker says `resumed: false` of a job's first
+                      run too, which had no session to resume. --%>
+                <span :if={run.extension_id} id={"run-#{run.id}-extension"} class="job-run-kinds">
+                  extension {extension_number(@extensions, run.extension_id)}
+                </span>
+                <span
+                  :if={run.extension_id && run.resumed == false}
+                  id={"run-#{run.id}-cold"}
+                  class="job-run-kinds"
+                >
+                  started without its session
+                </span>
               </li>
             </ul>
           </div>
@@ -668,6 +738,14 @@ defmodule ForgeWeb.JobLive do
   attr :written_names, :any, required: true
   attr :refusals, :map, required: true
 
+  # "from planning on done · the engine took it": the arrival's own words, without its comment,
+  # which is drawn as the person wrote it.
+  defp arrival_line(%{"from" => from} = entered) do
+    on = if entered["outcome"], do: " on #{entered["outcome"]}", else: ""
+    who = if entered["by"] == "person", do: "a person took it", else: "the engine took it"
+    "from #{from}#{on} · #{who}"
+  end
+
   defp manifest(assigns) do
     ~H"""
     <div id="job-manifest" class="job-manifest">
@@ -682,6 +760,21 @@ defmodule ForgeWeb.JobLive do
         <summary class="job-prompt-summary">The prompt it was given</summary>
         <pre id="state-prompt" class="job-prompt">{@spec.prompt}</pre>
       </details>
+
+      <%!-- How the ticket arrived on this visit, and the comment it came with: a transition's, a
+            rejection's, or the note a person wrote when they ran the state again — text, as typed
+            (`docs/design/job-prompt.md` § How the job arrived). Nothing for a job that arrived from nothing (the first visit
+            to the first state). --%>
+      <div :if={@spec.entered} id="job-arrival">
+        <.eyebrow>How it arrived</.eyebrow>
+        <p class="job-dim">{arrival_line(@spec.entered)}</p>
+        <p
+          :if={is_binary(@spec.entered["comment"]) and @spec.entered["comment"] != ""}
+          id="job-arrival-comment"
+          class="job-prompt whitespace-pre-wrap [overflow-wrap:anywhere]"
+          phx-no-format
+        >{@spec.entered["comment"]}</p>
+      </div>
 
       <.eyebrow>Pinned manifest</.eyebrow>
       <.fact_list dense>

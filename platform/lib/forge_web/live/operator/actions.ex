@@ -231,6 +231,10 @@ defmodule ForgeWeb.Operator.Actions do
       "moving to #{to} approves or merges, so it is taken on the ticket, where what it approves is on screen"
 
   def describe({:job_live, state}), do: "a job for #{state} is still live"
+
+  def describe({:updating, state}),
+    do: "#{state} is bringing the branch up to date right now; it moves on by itself"
+
   def describe({:step_live, state}), do: "#{state} is a conversation; Accept it to move on"
   def describe({:invalid_document, errors}), do: ForgeCore.Error.format(errors)
   def describe(:nothing_pending), do: "nothing awaits approval"

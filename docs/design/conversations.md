@@ -412,6 +412,9 @@ ticket chat is given for a refused move.
   kickoff (`Conversations.step_kickoff/0`) that is never logged as a `chat.message`, so the page
   does not show it as the person speaking; the state's prompt is in the manifest, so a resumed or
   cold reopened conversation still has it.
+- **A conversation about a ticket is told the ticket's base** in its manifest, as a job is
+  (`job-prompt.md` § The ticket's base): its checkout's `commit` is already that base, so the line
+  restates it as the revision to diff against.
 - **The manifest** is the chat preamble plus § This step: the prompt, the declared inputs, the
   documents to write to `out/`, the outcomes and where each leads, that **the person alone
   chooses the outcome and ends the step**, that an `outcome:` in front matter is ignored, and on

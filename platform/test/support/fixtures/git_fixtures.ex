@@ -320,6 +320,76 @@ defmodule Forge.GitFixtures do
   end
 
   @doc """
+  A workflow with an update step between implementing and review: implementing → refresh (the step)
+  → review_ready, a conflict going to `resolving`, which may give up to a person who sends it round
+  again through the step (`docs/design/workflow-grammar-v1.md` § Bringing the branch up to date).
+  `after: "merged"` leads the step into the merge, `conflict: false` names no conflict state and
+  `max: n` bounds the step's edge and `queue: true` queues it into the merge. Its prompts are `agents/integrate.md` and `agents/implement.md`.
+  """
+  def update_workflow(opts \\ []) do
+    # `job: true`: the step's edge leads into a job that reads the changeset, so what the job is
+    # made on (its pin, its base) is visible in the job's own inputs.
+    {after_step, building, building_edge} =
+      if opts[:job] do
+        {"building",
+         """
+           building:
+             prompt: agents/implement.md
+             inputs: [changeset]
+             produces: [notes.md]
+             budget: { turns: 10, tokens: 200k }
+         """, "  - { from: building, to: review_ready }\n"}
+      else
+        {Keyword.get(opts, :after, "review_ready"), "", ""}
+      end
+
+    max = if opts[:max], do: ", max: #{opts[:max]}", else: ""
+    queue = if opts[:queue], do: ", queue: true", else: ""
+
+    {conflict, states, edges} =
+      if Keyword.get(opts, :conflict, true) do
+        {"    on_conflict: resolving\n",
+         """
+           resolving:
+             prompt: agents/integrate.md
+             inputs: [changeset]
+             produces: [integration.md, changeset]
+             outcomes: [done, gave_up]
+             budget: { turns: 10, tokens: 200k }
+           asking: {}
+         """,
+         """
+           - { from: resolving, to: review_ready }
+           - { from: resolving, to: asking, when: gave_up }
+           - { from: asking, to: refresh }
+         """}
+      else
+        {"", "", ""}
+      end
+
+    """
+    version: 1
+    initial: implementing
+    states:
+      implementing:
+        prompt: agents/implement.md
+        produces: [implementation.md, changeset, commit-message]
+        budget: { turns: 10, tokens: 200k }
+      refresh:
+        on_enter: update
+    #{conflict}#{states}#{building}  review_ready: {}
+      merged:
+        on_enter: merge
+    transitions:
+      - { from: implementing, to: refresh }
+      - { from: refresh, to: #{after_step}#{max}#{queue} }
+    #{edges}#{building_edge}  - { from: review_ready, to: merged, approve: [changeset] }
+    limits:
+      ticket_tokens: 5M
+    """
+  end
+
+  @doc """
   Every file under the bare repository at `repo`, by path and content hash.
 
   What a write of *any* kind changes, and what `for-each-ref` cannot see: a page that wrote a
@@ -397,9 +467,10 @@ defmodule Forge.GitFixtures do
   end
 
   @doc """
-  Wraps the repository's `pre-receive`. On the n-th push it moves the default branch to the n-th
-  of `moves`, if there is one, and then hands over to the real hook — or, with `refuse: true`,
-  refuses without moving anything. Returns a function counting the pushes it saw.
+  Wraps the repository's `pre-receive`. On the n-th push it moves `ref` (the default branch unless
+  `ref: "refs/heads/ticket/3"` says otherwise) to the n-th of `moves`, if there is one, and then
+  hands over to the real hook — or, with `refuse: true`, refuses without moving anything. Returns a
+  function counting the pushes it saw.
 
   The move has to leave git's quarantine to be allowed at all: a hook may not update a ref
   while the pushed objects are still quarantined, which is the rule that makes this window
@@ -412,6 +483,7 @@ defmodule Forge.GitFixtures do
     moves = Path.join(dir, "moves")
     File.write!(moves, Enum.map_join(Keyword.get(opts, :moves, []), &(&1 <> "\n")))
 
+    ref = Keyword.get(opts, :ref, "refs/heads/main")
     hook = Path.join([bare, "hooks", "pre-receive"])
     File.rename!(hook, hook <> ".real")
 
@@ -427,7 +499,7 @@ defmodule Forge.GitFixtures do
     echo "$n" > "#{count}"
     target=$(sed -n "${n}p" "#{moves}")
     if [ -n "$target" ]; then
-      env -u GIT_QUARANTINE_PATH git update-ref refs/heads/main "$target"
+      env -u GIT_QUARANTINE_PATH git update-ref #{ref} "$target"
     fi
     #{finish}
     """)

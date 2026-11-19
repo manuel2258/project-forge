@@ -142,6 +142,11 @@ declares none leaves it untouched. There are no per-job branches.
 A conversation has its own branch, `chat/<id>`, and commits to it every turn whatever it
 declares — the rule above is about workflow states and not about you.
 
+**The branch may hold a merge of the default branch that you did not make.** A workflow may bring
+a ticket's branch up to date between jobs, and the platform then writes a merge commit itself
+(authored by the platform) or moves the branch forward. The manifest's *Base* line names the
+ticket's base: `git diff <base>..HEAD` is the ticket's own change, whatever the branch has taken in.
+
 **Nothing pushes to the default branch except the platform's own merge.** A credential is scoped
 to exactly one ref, and the repository refuses everything else. Work reaches the default branch by
 a person approving it and the platform merging it — never by a push from here.

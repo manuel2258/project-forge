@@ -13,7 +13,7 @@ These decisions are settled. They are not to be reopened.
 - A ticket moves through a statechart, not a linear pipeline. Backward transitions are normal, not exceptional.
 - Every project defines its own lifecycle in a definition file committed to that repository. The engine has no built-in default lifecycle. *Widened to one or more: a project may declare ticket types, one workflow file per type under `.forge/workflows/`, and a ticket's type is chosen at admission and pinned with its workflow; there is no default type (`design/ticket-types.md`).*
 - **A hold is a flag on the ticket, set and lifted by a person, not a state in any workflow.** Resting states, and `initial` naming a human state, were considered and dropped: a hold needs no grammar change, works on every project and type at once, and can hold a ticket at any step (`design/workflow-grammar-v1.md` § Holding a ticket).
-- The workflow definition is pinned per ticket at admission.
+- The workflow definition is pinned per ticket at admission. *Amended: a workflow may bring a ticket's branch up to date with an `update` step, which also re-pins the ticket to the workflow at the default-branch commit the code was brought up to; a person's re-pin stays (`design/workflow-grammar-v1.md` § Bringing the branch up to date, § Pinning).*
 - Approval requirements are declared per transition, and only on some transitions.
 - Sub-structure within a state (fan-out and join) is declared as named, reusable blocks.
 - An agent may spawn children only from an explicitly permitted set — bounded choice.

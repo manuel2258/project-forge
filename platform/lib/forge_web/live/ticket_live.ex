@@ -465,28 +465,88 @@ defmodule ForgeWeb.TicketLive do
     end
   end
 
-  # One step per state visit, in the order the jobs ran. A state the ticket reached without a
+  # One step per state visit, in the order the jobs ran, and an update step's visits among them: a
+  # visit of its own each, never folded into a neighbour, in the order the events were written
+  # (`events.inserted_at` is whole seconds, so `seq` decides). A state the ticket reached without a
   # job — a human state it is resting in — still gets its step, because the operator is looking
   # for where the ticket is, not only for where work happened.
   defp steps(jobs, artifacts, ticket, workflow) do
     visits =
       jobs
-      |> Enum.chunk_by(& &1.state)
-      |> Enum.map(fn group ->
-        %{
-          name: hd(group).state,
-          jobs: group,
-          artifacts: Enum.filter(artifacts, &written_in?(&1, group)),
-          cost: Enum.reduce(group, 0, &(&2 + &1.usage))
-        }
+      |> in_order(Forge.Update.visits(ticket.id), ticket)
+      |> chunk_visits()
+      |> Enum.map(fn
+        {:jobs, group} ->
+          %{
+            name: hd(group).state,
+            jobs: group,
+            artifacts: Enum.filter(artifacts, &written_in?(&1, group)),
+            cost: Enum.reduce(group, 0, &(&2 + &1.usage)),
+            update: nil
+          }
+
+        {:update, payload} ->
+          %{name: payload["state"], jobs: [], artifacts: [], cost: 0, update: payload}
       end)
 
     if Enum.any?(visits, &(&1.name == ticket.state)) do
       visits
     else
-      visits ++ [%{name: ticket.state, jobs: [], artifacts: [], cost: 0}]
+      visits ++ [%{name: ticket.state, jobs: [], artifacts: [], cost: 0, update: nil}]
     end
     |> Enum.map(&Map.put(&1, :topology, ForgeWeb.Topology.of(workflow, &1.name)))
+    |> name_merges(ticket)
+  end
+
+  # Jobs and visits in the order they were made: a job by the seq of its `job.created`, a visit by
+  # its own. A job with no such event (none the platform makes) keeps its place after the ones that
+  # have one, in the order it came.
+  defp in_order(jobs, [], _ticket), do: Enum.map(jobs, &{:job, &1})
+
+  defp in_order(jobs, visits, %{id: ticket_id}) do
+    created = Forge.Update.created_seqs(ticket_id)
+
+    jobs
+    |> Enum.with_index()
+    |> Enum.map(fn {job, i} -> {Map.get(created, job.id, 1_000_000_000_000 + i), {:job, job}} end)
+    |> Enum.concat(Enum.map(visits, fn {seq, payload} -> {seq, {:update, payload}} end))
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map(&elem(&1, 1))
+  end
+
+  # Consecutive jobs of one state are one visit; an update step's visit is always its own.
+  @doc false
+  def chunk_visits(items) do
+    items
+    |> Enum.reduce([], fn
+      {:update, payload}, acc ->
+        [{:update, payload} | acc]
+
+      {:job, job}, [{:jobs, [%{state: state} | _] = group} | rest] when job.state == state ->
+        [{:jobs, [job | group]} | rest]
+
+      {:job, job}, acc ->
+        [{:jobs, [job]} | acc]
+    end)
+    |> Enum.reverse()
+    |> Enum.map(fn
+      {:jobs, group} -> {:jobs, Enum.reverse(group)}
+      update -> update
+    end)
+  end
+
+  # What each merge an update step brought in is called: the title of the ticket whose merge it was,
+  # read once for the page. A conversation's merge and one nothing recorded have no title.
+  defp name_merges(visits, ticket) do
+    numbers =
+      for %{update: %{"merges" => merges}} <- visits,
+          %{"ticket" => number} <- merges,
+          uniq: true,
+          do: number
+
+    titles = Forge.Update.titles(ticket.project_id, numbers)
+
+    Enum.map(visits, &Map.put(&1, :titles, titles))
   end
 
   # Why each pending job has not gone out, in the scheduler's own sentence — only a pending job

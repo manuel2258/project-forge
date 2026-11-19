@@ -43,7 +43,8 @@ defmodule Forge.Look.Setups do
     "chats" => Forge.Look.Setups.Chats,
     "forge_release" => Forge.Look.Setups.ForgeRelease,
     "image_builds" => Forge.Look.Setups.ImageBuilds,
-    "milestones" => Forge.Look.Setups.Milestones
+    "milestones" => Forge.Look.Setups.Milestones,
+    "update_step" => Forge.Look.Setups.UpdateStep
   }
 
   @doc "The registered setups, by name."

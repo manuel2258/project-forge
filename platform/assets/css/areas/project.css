@@ -256,6 +256,7 @@
   /* A workflow's states are not live: the flow draws its marks in ink-2, so `▸ triage` does not
      read as a ticket running now. Blue is the map's ticket dots' (UX pass, C16). */
   .wf-step--job .wf-step-dot,
+  .wf-step--update .wf-step-dot,
   .wf-step--human .wf-step-dot { background: var(--ink-3); }
   .wf-flow .ui-state .ui-state-mark { color: var(--ink-2); }
   .wf-step-count { margin-left: auto; font-size: 11.5px; opacity: .7; }
@@ -278,6 +279,8 @@
   .wf-map-name { fill: var(--ink); font-size: 12.5px; font-weight: 600; }
   .wf-map-box--job .wf-map-mark { fill: var(--info); }
   .wf-map-box--human .wf-map-mark { fill: var(--link); }
+  .wf-map-box--update .wf-map-rect { fill: var(--surface-2); stroke-dasharray: 4 3; }
+  .wf-map-box--update .wf-map-mark { fill: var(--ink-2); }
   .wf-map-job { fill: var(--ink-3); font-size: 12px; }
   .wf-map-count { fill: var(--ink); font-size: 12.5px; font-weight: 600; }
   .wf-map-edge path { fill: none; stroke: var(--ink-4); stroke-width: 1.2; }

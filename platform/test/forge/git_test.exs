@@ -525,4 +525,30 @@ defmodule Forge.GitTest do
                Git.with_scratch_file("no-such-dir/test", "x", &{:ok, &1})
     end
   end
+
+  # `docs/design/git-hosting.md` § Where it runs: a write that decided from a head it read keeps from
+  # overwriting what was pushed since.
+  describe "push_internal/3 with a lease" do
+    test "is refused when the branch is not at the head the write was decided from", %{repo: repo} do
+      {:ok, main} = Git.resolve(repo, "refs/heads/main")
+      first = commit_to(repo, "main", %{"a.txt" => "a\n"}, "first")
+      second = commit_to(repo, "main", %{"b.txt" => "b\n"}, "second")
+      assert :ok = Git.push_internal(repo, "#{main}:refs/heads/side")
+
+      # A fast-forward of `side`, so only the lease can refuse it: it names a head `side` is not at.
+      assert {:error, _reason} =
+               Git.push_internal(repo, "#{second}:refs/heads/side",
+                 lease: {"refs/heads/side", first}
+               )
+
+      assert {:ok, ^main} = Git.resolve(repo, "refs/heads/side")
+
+      assert :ok =
+               Git.push_internal(repo, "#{second}:refs/heads/side",
+                 lease: {"refs/heads/side", main}
+               )
+
+      assert {:ok, ^second} = Git.resolve(repo, "refs/heads/side")
+    end
+  end
 end

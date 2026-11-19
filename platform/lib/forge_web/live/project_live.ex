@@ -1750,6 +1750,7 @@ defmodule ForgeWeb.ProjectLive do
               <WorkflowMap.flow
                 id={workflow_id(type)}
                 workflow={elem(type.workflow, 1)}
+                default_branch={@project.default_branch}
                 counts={
                   @rows
                   |> Enum.filter(&(&1.ticket.ticket_type == type.name))
@@ -1761,6 +1762,7 @@ defmodule ForgeWeb.ProjectLive do
               <WorkflowMap.map
                 id={"map-#{type.name || "workflow"}"}
                 workflow={elem(type.workflow, 1)}
+                default_branch={@project.default_branch}
                 dots={ProjectTickets.dots(Enum.filter(@rows, &(&1.ticket.ticket_type == type.name)))}
                 selected={@state}
                 filter={&~p"/projects/#{@project.name}?#{[view: @view, state: &1]}"}

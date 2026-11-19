@@ -83,8 +83,8 @@ backpressure and client-disconnect handling on the stream. That is an upgrade, n
 ### The environment, and the one dangerous default
 
 `System.cmd/3`'s `:env` **merges with the BEAM's own environment rather than replacing it**. The
-platform process sets `FORGE_INTERNAL=1` when it performs a merge or makes a release's tag
-(`Forge.Git.push_internal/2`), and that variable is what the `pre-receive` hook accepts as
+platform process sets `FORGE_INTERNAL=1` when it performs a merge, makes a release's tag or
+brings a ticket's branch up to date (`Forge.Git.push_internal/3`), and that variable is what the `pre-receive` hook accepts as
 authority to write the default branch and to create a tag. If it leaked into a CGI child it
 would let any client with a job token rewrite the default branch and create tags. Every `FORGE_*`
 variable the wrapper does not set is therefore passed explicitly as `nil`, which removes it.
@@ -196,7 +196,8 @@ operator sees a mirror that stopped working rather than a mirror that was never 
   history).
 - Otherwise only branches are written.
 - The default branch is written only with authority over it, and only fast-forward. Authority is
-  either `FORGE_INTERNAL=1`, which the platform's own pushes set (the merge, a release's tag) and the CGI strips from every
+  either `FORGE_INTERNAL=1`, which the platform's own pushes set (the merge, a release's tag, an update step's
+write to `ticket/<n>`) and the CGI strips from every
   request it serves, or a credential whose `FORGE_ALLOWED_REFS` (space-separated; the list
   `Tokens.allowed_refs/2` computes) names it — an *admin* project token or an old default-branch
   token, which only an operator can mint. So the default branch is
@@ -588,6 +589,15 @@ the common case: a merging state's `on_conflict` is the way out of a terminal st
 conflict takes (`workflow-grammar-v1.md` § Merging). What is left of the dead end is a failure
 that is not a conflict, and a workflow that names no `on_conflict`. `perform/4` is idempotent, so
 a retry, whenever something asks for one, is safe.
+
+**An update step writes `ticket/<n>` by the same push** (`workflow-grammar-v1.md` § Bringing the
+branch up to date): `Forge.Update` pushes the new head with `Forge.Git.push_internal/3` and
+`--force-with-lease=refs/heads/ticket/<n>:<head it read>`, so `pre-receive` and the mirrors see it
+as they see a merge, and a branch a developer's token moved meanwhile is refused and not
+overwritten. It follows the retry rule above: when the push fails and the branch has moved, the step
+decides again from the new head once, and a second move sticks the ticket. A move is always a
+fast-forward of the branch by construction — a merge with the head as its first parent, or the
+default branch's head the branch is already in — which the hook already admits for an internal push.
 
 ### After a merge, the other tickets
 

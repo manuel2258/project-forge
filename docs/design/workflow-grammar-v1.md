@@ -191,12 +191,14 @@ carried by `pending_transition`, a separate field, and a ticket parked on the ed
 doing the state's work. The state name has one job, and it is to name the activity.
 
 **Entry actions.** `on_enter` names what the platform does when a ticket arrives in a state: one
-action, or a list of them. v1 has exactly one, `merge`, which merges the changeset the transition
-into the state named into the project's default branch — § Merging says which commit that is and
-what a conflict does, `git-hosting.md` how. It is declared on the
+action, or a list of them. v1 has two. `merge` merges the changeset the transition into the state
+named into the project's default branch — § Merging says which commit that is and what a conflict
+does, `git-hosting.md` how. `update` brings the ticket's own branch up to date with the default
+branch and runs no job (§ Bringing the branch up to date). Either is declared on the
 state rather than on the edge because entering the state is the invariant: two edges into the same
 state would each have to carry it, and a transition a person takes by hand down a third would
 skip it silently. `on_enter` is not allowed on a job state, whose entry already runs a job.
+`merge` and `update` are not both on one state.
 
 **Inputs** are artifact names. `ticket` is reserved and means the ticket body as a document. Every
 other name must be produced by a state that can run before the consumer (one from which the
@@ -429,7 +431,8 @@ type, a release's included — **on hold** (`Forge.Engine.hold/2`), and release 
 no job or command is handed to a machine, no transition is taken on the engine's own authority
 (the retry edges `budget_exhausted` and `did_not_converge` included), a job
 waiting on a credential's rate limit does not resume, a restart does not set its jobs running, no
-chat step opens a conversation, and the merge queue does not merge it. A person's own moves work:
+chat step opens a conversation, and the merge queue does not merge it. An entry into an update step
+waits too (`held_entry`), and release runs the step. A person's own moves work:
 answering, approving or rejecting, taking a transition by hand, Accept, retrying; what they would
 start waits for the release.
 
@@ -673,6 +676,121 @@ states:
   produced by `from` or earlier, `max` on edges): a chat step is a job state to the engine's
   graph, and `ForgeCore.Engine.step/4` treats it as one.
 
+## Bringing the branch up to date
+
+```yaml
+states:
+  refresh:
+    on_enter: update
+    on_conflict: resolving      # optional; a job state or a human state, as a merging state's
+  resolving: { prompt: ..., ... }
+transitions:
+  - { from: implementing, to: refresh }
+  - { from: refresh, to: checking }
+```
+
+A ticket's branch is cut from the default branch at admission and nothing moves it afterwards. A
+state declaring `on_enter: update` is how a workflow says *here*: entering it brings the ticket's
+branch up to date with the default branch, runs **no job** and spends nothing, and the engine then
+takes the state's one edge out at once — or sticks the ticket instead, when the ticket's token cap is
+spent (also on a conflicted visit) or the clean edge's `max` is exceeded (a conflict is not bound by a
+`max`), as the end of a job would (§ Semantics). It is the platform's own step. Which edges lead through
+one is the workflow's decision — the engine has no built-in lifecycle (`docs/decisions.md`) — and a
+workflow may have several.
+
+**Every entry runs it, and a retry never does.** The step is run by the transition into it, from
+whichever act took the transition (a job's result, a person's choice, an approval, a command, a
+conversation's Accept), by a release replaying an entry, and by boot's recovery; the merge queue only
+enters merging states and never takes one. A job resumed or retried in the state after it keeps its working tree, so nothing
+moves a branch under a running job: the step is entered after the job before it has ended, and
+a ticket that still has a live job of its own (a state the product does not make) is stuck by the
+step, with its branch where it was.
+
+**Four results**, from the ticket's head `H` and the default branch's head `D`:
+
+- *current*: `D` is already in `H`. No branch moves and no changeset is recorded.
+- *forwarded*: `H` is in `D`, the branch has nothing of its own. The branch moves to `D`, with no
+  merge commit and no changeset version (an empty change on every ticket that passes a step before
+  it has work would be noise).
+- *merged*: the branch has its own commits and `D` merges cleanly into it (`merge-tree`). The
+  platform writes the merge commit — parents `H` then `D`, message `Merge <default> into
+  ticket/<n>`, author and committer the platform — and records a `changeset` version of it, by the
+  engine.
+- *conflicted*: the merge conflicts. The branch is not moved. The ticket goes to the state's
+  `on_conflict`, taken on the outcome `merge_conflict` as a merging state's is, and its job is
+  told what conflicted and given the default branch (`docs/design/job-prompt.md` § Integrating the
+  default branch). With no `on_conflict` the ticket sticks, saying which paths conflicted. The
+  visit is recorded as `ticket.branch_updated`, **not** as `ticket.merge_conflicted`: the
+  three-in-a-row bound (§ The merge queue) reads that event only, and an update step's loop is
+  bounded by the `max` on the edges it runs through, by a person, or, where a workflow has neither, by the ticket's token cap, which the step checks before it takes its edge. The validator does not require any of them.
+
+**The write is the platform's push, never a ref set directly.** Every move of the branch is a
+push of the new head to `refs/heads/ticket/<n>` with `--force-with-lease` naming `H`, so
+`pre-receive` and the mirrors see it as they see every other write (`git-hosting.md`). If the
+branch is no longer at `H` the push is refused; the step reads the branch again and decides once
+more from the new head. If the branch moved a second time it sticks the ticket, saying the branch is
+being pushed to while the step runs (the rule `git-hosting.md` § Where it runs gives the
+merge).
+
+**The base moves with the branch.** In all three clean results the ticket's base becomes the merge
+base of the new head and the default branch (the rule of § Merging, "The ticket's base follows an
+integration"), and `ticket.base_moved` says so — when that is past the base, which a visit that
+found the branch already current, with the base already there, is not. The diff shown on the ticket and handed to a job
+as `changeset` is the branch against its base, so it holds the ticket's own work and not what the
+default branch brought in. Every job's manifest names the base (`job-prompt.md`).
+
+**It re-pins.** In the same step the ticket is re-pinned to its type's workflow at `D`, the commit the
+code was brought up to, whether the merge was clean or conflicted, and `ticket.repinned` records
+both commits, by the engine. The edge out is decided on the workflow the ticket then has. The
+re-pin is **skipped**, with the reason recorded on `ticket.branch_updated`, and the ticket goes on,
+when the workflow at `D`: has no file for the type any more, fails to parse or validate, cannot be
+read at all, has no state of this name, or has one that is not an update step (so there is no edge
+to take). A ticket
+whose pin has no update step never passes through one, and the engine never re-pins it; a person's
+re-pin (§ Pinning) is how it gets one.
+
+**An edge out of the step may lead into a merging state** (route (b), § Merging). The transition the
+engine then takes names the changeset version the step left — the one it wrote when it merged, the
+latest one otherwise — and merges that, recorded as the engine's. An approval a person gave earlier
+stays recorded against the version it was given on; it is never moved to a version the step wrote,
+so a workflow that routes a step straight into a merge can merge a version nobody read. That is the
+workflow's decision, as route (b) is, and the validator does not refuse it. With `queue: true` on
+the edge the ticket enters the merge queue with that version; a ticket already in the line, or in
+the queue now, is left alone by the step.
+
+**Hold.** A ticket on hold does not run the step on entry; it writes `held_entry` and the step runs
+when the ticket is released (§ Holding a ticket). A hold that lands after the entering transaction
+but before the step looks is seen by the step, which leaves the ticket alone; a hold that lands while
+the step is running is seen when it records: it records the visit and keeps the entry. **Release runs
+the step for any active ticket resting in one**, which decides on the branch as it is then — a
+*current* visit and the edge when nothing conflicts, the conflict route when something does.
+
+**Nobody acts inside a running step.** While a ticket is active in an update step `choose`, re-pin
+and integrate are refused (`{:updating, state}`) and there is no job to retry. A step that stuck
+the ticket offers its one edge out. A stuck step is not retried in place: a workflow that wants
+*try again* routes a human state back into it. A crash between the git work and its record leaves
+the ticket active in the step; boot runs the step again for such a ticket, and a second run finds
+the branch *current*.
+
+**A visit that fails to record leaves the base where it was.** The merge is already pushed when the
+record transaction runs, so a record that fails, or a ticket cancelled while the git half ran,
+leaves the branch ahead of its base. The base moves again when a job's result records a
+`changeset` (§ The ticket's base follows an integration) or when the ticket passes an update step
+again (a clean visit moves it, a *current* one included), and a job started in between reads the old
+base. The ticket is stuck in the step when the record fails.
+
+**What it records.** `ticket.branch_updated`, by the engine, for every visit it records (a record
+transaction that fails writes none, and sticks the ticket) — the head before and
+after, `D`, the result, the conflicting paths, the merges brought in, whether it retried, and the
+re-pin or the reason there was none.
+
+**Validation.** Beside the rules of a merging state: an update step has no prompt and no `invoke`,
+no `produces`, exactly one transition out with no `when` and no `approve`, and that transition does
+not lead into an update step (no chain, no loop with no job in it); it is not `initial`; it is not
+also a merging state; its `on_conflict` is a job state or a human state with a way out, never an
+update step. Several steps may share one conflict state, and a human state may have an edge back
+into a step.
+
 ## Merging
 
 ```yaml
@@ -681,6 +799,9 @@ states:
     on_enter: merge
     on_conflict: integrating     # a job state or a human state of this workflow
 ```
+
+An `update` step (§ Bringing the branch up to date) names its conflict state the same way, and that
+state is an integrating state too.
 
 **Which commit a merge merges, and what it says.** Every transition into the merging state names
 the commit it is taken for: the latest `changeset` version at the moment it is taken, read once.
@@ -824,9 +945,11 @@ the ticket's chooser, or whose conversation writes `transition.json` for it, or 
 step that is the integrating state. Without that, the hand-taken edge would merge a changeset with
 no approval of it on record.
 
-Only an edge out of an integrating state is read this way. A workflow whose merging state names no
-`on_conflict` has no integrating state, and an engine edge into it — `release.yml`'s
-`publishing → merged` — merges as it always did. One consequence: a workflow that names an
+Only an edge out of an integrating state is read this way. A workflow in which neither a merging
+state nor an update step names an `on_conflict` has no integrating state, and an engine edge into
+a merging state — `release.yml`'s `publishing → merged` — merges as it always did. An update step's
+conflict state counts: an edge out of it into a merging state needs an approval on record, even
+when the merging state names no `on_conflict` of its own. One consequence: a workflow that names an
 `on_conflict` and draws route (b) with no approval anywhere on the way to it now stops at the
 rebase for an approval after a conflict, where it used to merge.
 
@@ -863,7 +986,8 @@ transaction, and `ticket.base_moved` says from where to where. Of the runs on a 
 only an integrating job's checkout can see the default branch, so in practice that is the
 integrating job's result; a person's hand resolution moves it the same way when the next job
 records the branch. A conversation's checkout can see it too (`conversations.md` § Commits), but
-it commits to `chat/<id>` and records no `changeset`, so nothing of it reaches here.
+it commits to `chat/<id>` and records no `changeset`, so nothing of it reaches here. An `update`
+step moves the base itself when it moves the branch (§ Bringing the branch up to date).
 
 **A conflict can be found before the merge.** After every merge into the default branch — a
 ticket's or a conversation's — the project's other open tickets with a changeset are checked, and
@@ -1191,7 +1315,10 @@ reaches it (cancel, restore and re-pin do not read the old pin).
 
 A stored definition with no `queue` key reads every edge as `queue: false`.
 
-**Re-pinning is a person's act** (`Forge.Engine.repin/2`). It reads the workflow of the ticket's
+**Re-pinning is a person's act, with one exception: an update step** (§ Bringing the branch up to
+date) re-pins by the engine, at the default-branch commit it brought the code up to, and records the same
+`ticket.repinned` event with the engine as the actor. A pin whose workflow has no update step never
+meets it. What follows is the person's (`Forge.Engine.repin/2`). It reads the workflow of the ticket's
 own type at the default branch's head — refusing when that type's file is gone — validates it as
 admission does, and stores the definition and the commit in place of the old ones; every job made after it reads its prompt and its scripts from there. The branch,
 its base and what the ticket has written stay. It is refused while a job for the ticket's state
@@ -1284,18 +1411,23 @@ is never produced; `answers.md` is platform-managed and never declared.
   ticket behind a job that succeeded. It is the same rule as "declaring outcomes other than done
   requires a document in produces", one step further: there has to be one, and it has to be
   written.
-- Every `on_enter` entry is a known action (`merge` alone in v1); `on_enter` is absent from every
-  job state and every command state; at most one state in a workflow merges; `initial` does not merge; and a workflow that
+- Every `on_enter` entry is a known action (`merge` and `update`); `on_enter` is absent from every
+  job state and every command state; no state both merges and updates (§ Bringing the branch up to
+  date has the update step's own rules); at most one state in a workflow merges; `initial` does not merge; and a workflow that
   merges has a state producing `changeset` and a state producing `commit-message`, the second
   never `optional`. This binds admission and re-pinning; a stored pin is not asked again
   (§ Pinning) and its merge is the exception in § Merging.
-- `on_conflict`, where present, is on the state that merges, and names another state of the
+- `on_conflict`, where present, is on a state that merges or one that updates, and names another state of the
   workflow that is a job state or a human state with a transition out — never a command state,
   and never the merging state itself; a job state it names is the `to` of no transition
   (§ Merging). Every walk of the graph — whether each state is reachable, whether an input or an
   approval comes before its reader, the order the project page draws its states in — follows it as an
   edge out of the merging state, because the ticket can reach the target only by it. It is no
   transition: no `when` selects it and no person chooses it.
+- **An update step** (`on_enter: update`) has no `produces`, exactly one transition out, with no
+  `when` and no `approve`, that does not lead into an update step; it is not `initial` and not also
+  a merging state; and no `on_conflict` of any state names an update step. A human state may have
+  an edge back into one. Each is refused with a message of its own.
 - `queue` is `true` or `false`, and `true` only on an edge whose `to` has `on_enter: merge`:
   `only an edge into a merging state (one with on_enter: merge) can queue; "x" merges nothing`.
   Nor on an edge out of a chat step: `an edge out of a chat step cannot queue: "x" is ended by
@@ -1330,5 +1462,5 @@ wrong answer.
 ## Deferred, with the intended shape
 
 Named blocks with fan-out and join, `can_spawn` with `spawn_depth` and `child_budget`,
-experiment states, further `on_enter` actions, and guarded transitions on document fields. None of
+experiment states, further `on_enter` actions beyond `merge` and `update`, and guarded transitions on document fields. None of
 these change the meaning of anything above.

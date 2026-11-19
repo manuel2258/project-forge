@@ -906,6 +906,11 @@ defmodule ForgeWeb.QueueLive do
   defp since_line(%{type: "artifact.version_written", actor: actor, payload: payload}, me),
     do: "#{who(actor, me)} wrote #{payload["artifact"]} v#{payload["version"]}"
 
+  # An update step's visit says what it did, in its own sentence: the event's name alone would read
+  # *branch updated* over a conflict that sent the ticket to a job.
+  defp since_line(%{type: "ticket.branch_updated"} = event, _me),
+    do: excerpt_text(Events.summary(event))
+
   defp since_line(%{type: "ticket.admitted", payload: payload}, _me),
     do: "admitted into #{payload["state"]}"
 
@@ -1236,8 +1241,11 @@ defmodule ForgeWeb.QueueLive do
     "#{TicketViews.leads(workflow, to)} · #{ran_phrase(kind, (step && step.runs) || 0)}"
   end
 
-  defp ran_phrase(:human, 0), do: "has not been visited yet"
-  defp ran_phrase(:human, n), do: "visited #{Format.counted(n, "time")}"
+  defp ran_phrase(kind, 0) when kind in [:human, :update], do: "has not been visited yet"
+
+  defp ran_phrase(kind, n) when kind in [:human, :update],
+    do: "visited #{Format.counted(n, "time")}"
+
   defp ran_phrase(_kind, 0), do: "has not run yet"
   defp ran_phrase(_kind, n), do: "has run #{Format.counted(n, "time")}"
 

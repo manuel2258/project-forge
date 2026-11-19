@@ -402,6 +402,8 @@ defmodule ForgeCore.Workflow.Validator do
 
     Enum.concat([
       Enum.flat_map(states, &entry_action_shape/1),
+      Enum.flat_map(states, &merge_and_update/1),
+      update_steps(workflow),
       merge_count(merging),
       merge_not_initial(merging, initial),
       merge_needs_artifact(merging, workflow, Workflow.changeset_artifact()),
@@ -425,6 +427,108 @@ defmodule ForgeCore.Workflow.Validator do
   end
 
   defp entry_action_shape({_name, %State{}}), do: []
+
+  defp merge_and_update({name, %State{} = state}) do
+    if State.merges?(state) and State.updates?(state),
+      do: [
+        Error.new(
+          Error.join(Error.join("states", name), "on_enter"),
+          "a state merges or updates, not both"
+        )
+      ],
+      else: []
+  end
+
+  # `docs/design/workflow-grammar-v1.md` § Bringing the branch up to date. An update step runs no
+  # job, so there is nothing for it to produce, and the engine takes its one edge out as soon as the
+  # branch is current, so there must be exactly one, with nothing to select it and nothing to approve.
+  # An edge into another update step would chain steps (or loop with no job in it) for nothing.
+  defp update_steps(%Workflow{states: states, initial: initial} = workflow) do
+    states
+    |> Enum.filter(fn {_name, state} -> State.updates?(state) end)
+    |> Enum.sort()
+    |> Enum.flat_map(fn {name, state} ->
+      path = Error.join("states", name)
+      out = for {t, i} <- Enum.with_index(workflow.transitions), t.from == name, do: {t, i}
+
+      List.flatten([
+        if(state.produces != [],
+          do: [
+            Error.new(
+              Error.join(path, "produces"),
+              "not allowed on an update step: it runs no job to write anything"
+            )
+          ],
+          else: []
+        ),
+        if(name == initial,
+          do: [
+            Error.new(
+              "initial",
+              "names an update step: a ticket's branch is cut up to date when it is admitted"
+            )
+          ],
+          else: []
+        ),
+        update_edges(workflow, path, name, out)
+      ])
+    end)
+  end
+
+  defp update_edges(_workflow, path, name, []),
+    do: [
+      Error.new(
+        path,
+        "an update step has no transition out: #{inspect(name)} has to lead somewhere once the branch is current"
+      )
+    ]
+
+  defp update_edges(workflow, path, name, [_one | _] = out) do
+    many =
+      if match?([_, _ | _], out),
+        do: [
+          Error.new(
+            path,
+            "an update step has exactly one transition out; #{inspect(name)} has #{length(out)}"
+          )
+        ],
+        else: []
+
+    many ++
+      Enum.flat_map(out, fn {transition, index} ->
+        at = Error.join("transitions", index)
+
+        List.flatten([
+          if(transition.when != nil,
+            do: [
+              Error.new(
+                Error.join(at, "when"),
+                "not allowed on a transition out of an update step: it has no outcome to select it"
+              )
+            ],
+            else: []
+          ),
+          if(transition.approve != [],
+            do: [
+              Error.new(
+                Error.join(at, "approve"),
+                "not allowed on a transition out of an update step: nobody is there to approve it"
+              )
+            ],
+            else: []
+          ),
+          if(Workflow.updates_on_enter?(workflow, transition.to),
+            do: [
+              Error.new(
+                Error.join(at, "to"),
+                "an update step cannot lead into another: #{inspect(transition.to)} is one"
+              )
+            ],
+            else: []
+          )
+        ])
+      end)
+  end
 
   defp merge_count([_one]), do: []
   defp merge_count([]), do: []
@@ -507,15 +611,27 @@ defmodule ForgeCore.Workflow.Validator do
     |> Enum.filter(fn {_name, state} -> state.on_conflict != nil end)
     |> Enum.flat_map(fn {name, state} ->
       path = Error.join(Error.join("states", name), "on_conflict")
-      conflict_target(workflow, path, name, state, Workflow.state(workflow, state.on_conflict))
+
+      if State.merges?(state) or State.updates?(state),
+        do:
+          conflict_target(
+            workflow,
+            path,
+            name,
+            state,
+            Workflow.state(workflow, state.on_conflict)
+          ),
+        else: [
+          Error.new(
+            path,
+            "only the state that merges, or an update step, may say where a conflict goes"
+          )
+        ]
     end)
   end
 
-  defp conflict_target(workflow, path, name, %State{on_conflict: target_name} = state, target) do
+  defp conflict_target(workflow, path, name, %State{on_conflict: target_name}, target) do
     cond do
-      not State.merges?(state) ->
-        [Error.new(path, "only the state that merges may say where a conflict goes")]
-
       target == nil ->
         [Error.new(path, "names an unknown state #{inspect(target_name)}")]
 
@@ -527,6 +643,14 @@ defmodule ForgeCore.Workflow.Validator do
           Error.new(
             path,
             "must be a job state or a human state: a command's checkout has no default branch to merge"
+          )
+        ]
+
+      State.updates?(target) ->
+        [
+          Error.new(
+            path,
+            "names #{inspect(target_name)}, an update step: a conflict goes to a state that resolves it"
           )
         ]
 
@@ -1138,10 +1262,14 @@ defmodule ForgeCore.Workflow.Validator do
     ])
   end
 
+  # An update step's edge is checked by `update_steps/1`, in words of its own: it is neither a
+  # human state's nor a job's, and `runs_when/4` would call its absent outcome unknown.
   defp when_errors(workflow, path, %State{} = from, %Transition{} = transition) do
-    if State.human?(from),
-      do: human_when(path, transition),
-      else: runs_when(workflow, path, from, transition)
+    cond do
+      State.updates?(from) -> []
+      State.human?(from) -> human_when(path, transition)
+      true -> runs_when(workflow, path, from, transition)
+    end
   end
 
   defp human_when(path, %Transition{when: outcome}) when outcome != nil,

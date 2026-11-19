@@ -97,6 +97,15 @@ defmodule ForgeWeb.Api.FallbackController do
   def call(conn, {:error, {:job_live, state}}),
     do: error(conn, :conflict, "job_live", "a job for #{state} is pending, running or waiting")
 
+  def call(conn, {:error, {:updating, state}}),
+    do:
+      error(
+        conn,
+        :conflict,
+        "updating",
+        "#{state} is bringing the branch up to date; the ticket moves on by itself"
+      )
+
   def call(conn, {:error, {:step_live, state}}),
     do:
       error(

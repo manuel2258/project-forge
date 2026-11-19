@@ -40,9 +40,9 @@ defmodule ForgeCore.Engine do
         {:error, {:unknown_state, state_name}}
 
       %State{} = state ->
-        if State.human?(state),
-          do: {:error, {:human_state, state_name}},
-          else: decide(workflow, state_name, outcome, counts)
+        if State.runs?(state),
+          do: decide(workflow, state_name, outcome, counts),
+          else: {:error, {:human_state, state_name}}
     end
   end
 
@@ -107,6 +107,44 @@ defmodule ForgeCore.Engine do
     case Enum.find(many, &(&1.when == nil)) do
       %Transition{} = default -> {:ok, default}
       nil -> {:error, {:ambiguous, Enum.map(many, &Transition.outcome/1)}}
+    end
+  end
+
+  @doc """
+  What follows an update step (`docs/design/workflow-grammar-v1.md` § Bringing the branch up to
+  date) once the branch is current (`:done`) or the merge conflicted (`:conflict`).
+
+    * `{:transition, t}` - take the step's one edge out. `max` binds it: an edge the engine takes
+      on its own has to stop somewhere, as a job's does.
+    * `{:conflict, edge}` - take the edge to the step's `on_conflict`, outcome `merge_conflict`.
+      No count binds it: the loop it makes is bounded by the `max` on the edges it runs through, by
+      a person, or by the ticket's token cap (the validator requires none of them).
+    * `{:stuck, reason}` - the edge's `max` is used up, or a conflict has nowhere to go.
+  """
+  @spec after_update(Workflow.t(), Workflow.state_name(), :done | :conflict, counts()) ::
+          {:transition, Transition.t()}
+          | {:conflict, Transition.t()}
+          | {:stuck, {:max_exceeded, Transition.t()} | :no_conflict_state | :no_edge}
+  def after_update(%Workflow{} = workflow, state_name, :done, counts) do
+    case Workflow.transitions_from(workflow, state_name) do
+      [%Transition{} = edge | _] ->
+        if exhausted?(edge, counts),
+          do: {:stuck, {:max_exceeded, edge}},
+          else: {:transition, edge}
+
+      # Unreachable for a validated workflow, which refuses an update step with no transition out
+      # (`ForgeCore.Workflow.Validator`), and a stored pin is not validated again: this is what a
+      # pin that dropped the edge would meet (`UpdateStepTest` builds one by hand). It sticks the
+      # ticket in words rather than raising inside the record transaction.
+      [] ->
+        {:stuck, :no_edge}
+    end
+  end
+
+  def after_update(%Workflow{} = workflow, state_name, :conflict, _counts) do
+    case Workflow.conflict_transition(workflow, state_name, state_name) do
+      %Transition{} = edge -> {:conflict, edge}
+      nil -> {:stuck, :no_conflict_state}
     end
   end
 

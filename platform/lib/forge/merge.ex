@@ -433,7 +433,7 @@ defmodule Forge.Merge do
   end
 
   defp merge(%{repo: repo, project: project, head: head} = plan, tree, user) do
-    with {:ok, sha} <- commit_tree(repo, tree, head, plan.message, user),
+    with {:ok, sha} <- commit_tree(repo, tree, [head], plan.message, user),
          :ok <- push(repo, project, sha) do
       # After the push, because it records that the push happened — `plan.pin` before it records
       # only that an attempt was made, which is why that one cannot answer "did this land".
@@ -452,7 +452,14 @@ defmodule Forge.Merge do
 
   # `merge-tree --write-tree` prints the merged tree, then — on a conflict, exit 1 — a block of
   # `<mode> <oid> <stage>\t<path>` lines, then its messages.
-  defp merge_tree(repo, head, approved) do
+  @doc """
+  Merges `approved` into `head` in memory and writes no ref: `{:ok, tree}`, or `{:conflict, paths}`
+  with the paths as `conflicted_paths/1` reads them. What a merge, its check, and an update step
+  (`Forge.Update`) all ask git.
+  """
+  @spec merge_tree(String.t(), String.t(), String.t()) ::
+          {:ok, String.t()} | {:conflict, [String.t()]} | {:error, term()}
+  def merge_tree(repo, head, approved) do
     case Git.run(
            repo,
            ["merge-tree", "--write-tree", "--messages", {:data, head}, {:data, approved}],
@@ -512,12 +519,20 @@ defmodule Forge.Merge do
   # second platform node or a second `bin/check` in a sibling worktree could remove this file —
   # or write its own message into it — between the write and the commit. That helper is where
   # both git scratch files are made, and where the pid and the exclusive create live.
-  defp commit_tree(repo, tree, head, message, user) do
+  #
+  # **`parents` is a list** because an update step's merge has two (`Forge.Update`): the ticket's
+  # head, then the default branch's. The merge into the default branch passes one.
+  @doc false
+  @spec commit_tree(String.t(), String.t(), [String.t()], String.t(), User.t() | nil) ::
+          {:ok, String.t()} | {:error, term()}
+  def commit_tree(repo, tree, parents, message, user) do
+    parent_args = Enum.flat_map(parents, &["-p", {:data, &1}])
+
     Git.with_scratch_file("merge-message", message, fn file ->
       with {:ok, sha} <-
              Git.run(
                repo,
-               ["commit-tree", {:data, tree}, "-p", {:data, head}, "-F", {:data, file}],
+               ["commit-tree", {:data, tree}] ++ parent_args ++ ["-F", {:data, file}],
                env: author(user),
                stderr: :separate
              ) do

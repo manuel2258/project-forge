@@ -91,9 +91,15 @@ defmodule ForgeCore.Job.Spec do
     # for a job that reads one too: what a second review asks first is what changed since the
     # first (`docs/design/job-prompt.md` § How the job arrived).
     previous_changeset: nil,
+    # The commit the ticket's change is measured from: `git diff <base>..HEAD` is the ticket's own
+    # work whether or not its branch has taken the default branch in. Nil for a job with no ticket
+    # and for a spec made before the key existed, whose manifest then says nothing
+    # (`docs/design/job-prompt.md` § The ticket's base).
+    base: nil,
     # An integrating job's (`docs/design/job-prompt.md` § Integrating the default branch), string
     # keys: `default_branch` when it is made, and at run time `head`, `base`, `paths`,
-    # `changeset`, `merges` (each `sha` and `subject`, newest first) and `more`, for the manifest.
+    # `changeset`, `cause` (`"update"` when an update step's conflict sent the job, else nil), `merges`
+    # (each `sha` and `subject`, newest first) and `more`, for the manifest.
     # Nil for every other job.
     integration: nil,
     # What a person gave this job when they extended it after it ran out of budget, string keys:
@@ -163,6 +169,7 @@ defmodule ForgeCore.Job.Spec do
           command_results: [%{String.t() => term()}],
           entered_commands: [%{String.t() => term()}],
           previous_changeset: String.t() | nil,
+          base: String.t() | nil,
           integration: %{String.t() => term()} | nil,
           secrets: [String.t()],
           secrets_gone: [String.t()],
@@ -322,6 +329,7 @@ defmodule ForgeCore.Job.Spec do
       command_results: or_default(get, :command_results, []),
       entered_commands: or_default(get, :entered_commands, []),
       previous_changeset: get.(:previous_changeset),
+      base: get.(:base),
       integration: get.(:integration),
       produces: or_default(get, :produces, []),
       optional: or_default(get, :optional, []),

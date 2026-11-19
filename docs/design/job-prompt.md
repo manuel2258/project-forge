@@ -101,6 +101,17 @@ would have to guess whether a missing file was a failure.
 The repository's own `CLAUDE.md` is read by Claude Code as usual; project conventions need no
 special handling.
 
+## The ticket's base
+
+Every agent job on a ticket, and a conversation about one, is told the ticket's base commit in its
+manifest — a line *Base: `<sha>` — `git diff <sha>..HEAD` is this ticket's change* — taken from the
+spec's `base`. It is a commit already in the checkout, since the branch is cut from it or moved
+past it, so `git diff <base>..HEAD` is the ticket's own change whether or not the branch has taken
+the default branch in, which an update step does between jobs (`workflow-grammar-v1.md` § Bringing
+the branch up to date). It is what a reviewer diffs against where `origin/<default>` is not a
+revision its checkout can name. `base` is an addition to the spec whose absence means *say nothing*,
+so a worker from before it needs no protocol bump and the line is simply missing from its manifest.
+
 ## Integrating the default branch
 
 A job whose state is some merging state's `on_conflict` target is there because its ticket's
@@ -120,9 +131,14 @@ so a job that waits or parks reads the state of things when it resumes, not when
 - the default branch's head when the run was assigned, and that the checkout has it as
   `origin/<default>` — which may be a little newer, and is the one to merge;
 - the paths the conflict was in and the commit that conflicted, from the ticket's latest
-  `ticket.merge_conflicted` — every way into an integrating state records one, since nothing but
-  a conflict leads there (`workflow-grammar-v1.md` § Merging), and a run of the state again reads
-  the one that sent it;
+  `ticket.merge_conflicted` — the merge's conflict records one on its way into an integrating state
+  (`workflow-grammar-v1.md` § Merging), and a run of the state again reads
+  the one that sent it. **When the conflict was an update step's** (`workflow-grammar-v1.md`
+  § Bringing the branch up to date) it is recorded as a `ticket.branch_updated` with result
+  `conflicted` and no `ticket.merge_conflicted`; the job reads whichever of the two is later, and
+  its `integration` says `cause: "update"`, so the manifest says that bringing the branch up to
+  date conflicted, naming the default branch's head, instead of saying the
+  changeset no longer merges;
 - the merges that landed on the default branch since the ticket's base, first-parent, newest
   first, each as its commit and subject line — at most twenty, with how many more there were —
   because which ticket wrote the other side of a conflict is what says how to resolve it;

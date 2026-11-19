@@ -187,7 +187,7 @@ defmodule ForgeCore.Workflow.MergingTest do
 
       assert messages(map) == [
                {"states.review_ready.on_conflict",
-                "only the state that merges may say where a conflict goes"}
+                "only the state that merges, or an update step, may say where a conflict goes"}
              ]
     end
 
@@ -195,7 +195,9 @@ defmodule ForgeCore.Workflow.MergingTest do
       map = put_in(map, ["states", "verifying", "on_conflict"], "integrating")
 
       assert {"states.verifying.on_conflict",
-              "only the state that merges may say where a conflict goes"} in messages(map)
+              "only the state that merges, or an update step, may say where a conflict goes"} in messages(
+               map
+             )
     end
 
     test "the target must exist", %{map: map} do

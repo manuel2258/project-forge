@@ -482,6 +482,31 @@ defmodule Forge.Events do
     "#{decision} #{from} → #{p["to"]}" <> note(p["comment"], bound)
   end
 
+  # An update step's visit, and what came with it (`docs/design/workflow-grammar-v1.md` § Bringing
+  # the branch up to date): what it did, then what became of the pin. Never the payload's keys.
+  defp describe(%Event{type: "ticket.branch_updated", payload: p}, _bound),
+    do:
+      [Forge.Update.said(p), Forge.Update.repin_said(p)]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("; ")
+
+  defp describe(
+         %Event{type: "ticket.repinned", actor: actor, payload: %{"from" => from, "to" => to}},
+         _bound
+       ),
+       do:
+         "workflow re-pinned #{if actor["kind"] == "system", do: "by the engine, "}" <>
+           "#{short(from)} → #{short(to)}"
+
+  defp describe(
+         %Event{type: "ticket.base_moved", payload: %{"from" => from, "to" => to}},
+         _bound
+       ),
+       do: "base moved #{short(from)} → #{short(to)}"
+
+  defp describe(%Event{type: "chat.merged", payload: %{"sha" => sha}}, _bound),
+    do: "a conversation's work merged as #{short(sha)}"
+
   defp describe(%Event{type: "ticket.merged", payload: %{"sha" => sha} = p}, _bound),
     do: "merged as #{short(sha)}#{if p["already"], do: " (it was already there)"}"
 

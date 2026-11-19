@@ -73,6 +73,7 @@ defmodule ForgeWeb.QueuePast do
   # none, and on a stuck item the current step's latest run is the last attempt drawn below.
   @doc false
   def openable?(%{kind: :human}, _item), do: false
+  def openable?(%{kind: :update}, _item), do: false
   def openable?(%{runs: 0}, _item), do: false
   def openable?(%{current: true}, %{kind: :stuck}), do: false
   def openable?(_step, _item), do: true
@@ -82,6 +83,15 @@ defmodule ForgeWeb.QueuePast do
   @doc false
   def line(%{kind: :human, name: name, runs: runs}),
     do: "#{name} · #{Format.counted(runs, "visit")}"
+
+  # An update step has visits, as a human one, and says what the latest did: *refresh · 2 visits ·
+  # last moved forward to abc123*.
+  def line(%{kind: :update, name: name, runs: runs, last: last}),
+    do:
+      Enum.join(
+        Enum.reject([name, Format.counted(runs, "visit"), last && "last #{last}"], &is_nil/1),
+        " · "
+      )
 
   def line(%{name: name, runs: 0}), do: "#{name} · not run yet"
 

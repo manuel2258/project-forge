@@ -142,10 +142,25 @@ defmodule Forge.Git do
   Pushing over the local transport spawns `receive-pack`, which runs both hooks: the platform's
   writes are enforced by, and mirrored by, the code path a job's push takes
   (`docs/design/git-hosting.md` § The merge). `{:error, reason}` carries git's own report.
+
+  `lease: {ref, sha}` adds `--force-with-lease=<ref>:<sha>`: the push is refused unless `ref` is at
+  `sha`, which is how a write that decided from a head it read keeps from overwriting what was
+  pushed since (`docs/design/git-hosting.md` § Where it runs, and what a conflict does). **A lease is
+  a force that is conditional on `ref` being at `sha`**, so it also lets a push that is not a
+  fast-forward of `sha` replace it: the caller pushes a descendant of `sha`, as `Forge.Update` does
+  by construction (a merge of it, or the default branch it is already in).
   """
-  @spec push_internal(repo(), String.t()) :: :ok | {:error, term()}
-  def push_internal(repo, refspec) do
-    case run(repo, ["push", "--quiet", ".", {:data, refspec}], env: [{"FORGE_INTERNAL", "1"}]) do
+  @spec push_internal(repo(), String.t(), keyword()) :: :ok | {:error, term()}
+  def push_internal(repo, refspec, opts \\ []) do
+    lease =
+      case Keyword.fetch(opts, :lease) do
+        {:ok, {ref, sha}} -> ["--force-with-lease=#{ref}:#{sha}"]
+        :error -> []
+      end
+
+    case run(repo, ["push", "--quiet"] ++ lease ++ [".", {:data, refspec}],
+           env: [{"FORGE_INTERNAL", "1"}]
+         ) do
       {:ok, _out} -> :ok
       {:error, reason} -> {:error, reason}
     end

@@ -414,6 +414,11 @@ defmodule Forge.Engine do
           Ticket.hold_changeset(ticket, %{held_entry: entry})
         )
 
+      # An update step makes nothing here: it runs after the transaction that entered it
+      # (`enter/5`), because its git is not something a transaction can roll back.
+      State.updates?(state) ->
+        multi
+
       true ->
         put_entry_now(multi, ticket, workflow, state, state_name, entered, came_back, opts)
     end
@@ -422,7 +427,12 @@ defmodule Forge.Engine do
   defp makes_work?(%State{chat: true}), do: true
   defp makes_work?(%State{prompt: prompt}) when is_binary(prompt), do: true
   defp makes_work?(%State{invoke: [_ | _]}), do: true
-  defp makes_work?(_human_or_final), do: false
+
+  # An update step makes no job, but entering one while the ticket is held has to be remembered, or
+  # release would take no step and the ticket would stay in it with nothing running
+  # (`docs/design/workflow-grammar-v1.md` § Bringing the branch up to date, Hold).
+  defp makes_work?(%State{} = state), do: State.updates?(state)
+  defp makes_work?(_final), do: false
 
   # A chat step's entry opens a conversation instead of a job: no job, no budget, no outcome from
   # the harness (`docs/design/workflow-grammar-v1.md` § Chat steps). Before the clause below
@@ -836,6 +846,7 @@ defmodule Forge.Engine do
     workflow = Tickets.workflow(ticket)
 
     with :ok <- not_queued(ticket),
+         :ok <- not_updating(ticket, workflow),
          :ok <- no_live_job(ticket),
          {:ok, transition} <-
            Core.choose(workflow, ticket.state, to, Keyword.get(opts, :outcome)),
@@ -871,6 +882,26 @@ defmodule Forge.Engine do
   # a pending decision's, enforced at the operation (`:queued` beside `:pending_approval`).
   defp not_queued(%Ticket{} = ticket) do
     if MergeQueue.queued?(ticket), do: {:error, :queued}, else: :ok
+  end
+
+  # **Nobody acts inside a running update step** (`docs/design/workflow-grammar-v1.md` § Bringing
+  # the branch up to date): while a ticket is active in one it is running or about to, and a by-hand
+  # move, a re-pin or an integration would race it. A step that stuck the ticket is not running, and
+  # offers its one edge out. Nothing starts a step but entering it (`enter/5`): by a transition, by a
+  # release replaying an entry, or by boot's recovery.
+  defp not_updating(%Ticket{status: :active, state: state}, %Workflow{} = workflow) do
+    if Workflow.updates_on_enter?(workflow, state), do: {:error, {:updating, state}}, else: :ok
+  end
+
+  defp not_updating(%Ticket{}, %Workflow{}), do: :ok
+
+  # The same, for a re-pin, which must work for a ticket whose pin can no longer be built: such a pin
+  # cannot be in a step the engine is running, so it is not refused.
+  defp not_updating_by_pin(%Ticket{} = ticket) do
+    case Tickets.parsed_workflow(ticket) do
+      {:ok, workflow} -> not_updating(ticket, workflow)
+      _unreadable -> :ok
+    end
   end
 
   # **A live conversation of a chat step is a live job here**: `Jobs.live?/2` counts its row as it
@@ -1188,7 +1219,8 @@ defmodule Forge.Engine do
           moved = Map.get(changes, :ticket, changes.released)
           MergeQueue.kick(moved.project_id)
           Events.notify(moved.id)
-          {:ok, entered(changes.refresh.ticket, moved)}
+          before = changes.refresh.ticket
+          {:ok, entered(before, moved) |> replayed_update(before, moved)}
 
         {:error, step, reason, _changes} when step in [:open, :refresh, :branch] ->
           {:error, reason}
@@ -1198,6 +1230,24 @@ defmodule Forge.Engine do
       end
     end
   end
+
+  # `entered/2` runs an entry action only when the state changed, and releasing a ticket that rests
+  # in an update step leaves it in that state: the step is run now. **Any active ticket in a step is
+  # one whose step has not run** — a run that finished moved it or stuck it — whether its entry was
+  # kept as `held_entry` (a hold in place when it was entered) or a hold landed after that
+  # transaction and the gate skipped the run (`update_gate/2`), which kept nothing.
+  defp replayed_update(%Ticket{} = entered, %Ticket{state: state}, %Ticket{
+         state: state,
+         status: :active
+       }) do
+    workflow = Tickets.workflow(entered)
+
+    if Workflow.updates_on_enter?(workflow, state),
+      do: enter(entered, workflow, state, nil),
+      else: entered
+  end
+
+  defp replayed_update(%Ticket{} = entered, _before, _moved), do: entered
 
   # What the row says now, read before anything is prepared: a stale struct must not decide
   # whether there is something to release.
@@ -1758,7 +1808,9 @@ defmodule Forge.Engine do
   — a command script is read at the pin, never from the branch (`docs/design/commands.md` § The
   shape). The fix lands on the default branch; without this, the ticket kept failing on the old
   script for ever. Re-pinning is a person's act because it changes what "the build passed" means
-  for this ticket, which is exactly what no job may do.
+  for this ticket, which is exactly what no job may do. **The one exception is the engine's own**:
+  an update step re-pins the ticket at the commit it brought the branch up to (`update_now/3`,
+  `docs/design/workflow-grammar-v1.md` § Pinning), and records it as the engine's.
 
   Refused while a job for the state is live — it was made from the old pin, and would run on it
   — while an approval is pending, whose transition the new workflow may not have, when the new
@@ -1770,19 +1822,12 @@ defmodule Forge.Engine do
       Multi.new()
       |> Multi.run(:open, fn repo, _changes -> lock_open(repo, ticket.id, :not_repinnable) end)
       |> Multi.run(:repinnable, fn _repo, %{open: open} -> repinnable(open, prepared) end)
-      |> Multi.update(:ticket, fn %{open: open} ->
-        Ticket.repin_changeset(open, %{
-          workflow: prepared.yaml_map,
-          workflow_commit: prepared.base
-        })
+      |> Multi.merge(fn %{open: open} ->
+        put_repin(Multi.new(), open, prepared, actor(user_id))
       end)
-      |> Events.log(:repin_event, "ticket.repinned", actor(user_id), %{
-        ticket_id: ticket.id,
-        payload: %{"from" => ticket.workflow_commit, "to" => prepared.base}
-      })
       |> Repo.transaction()
       |> case do
-        {:ok, %{ticket: ticket}} ->
+        {:ok, %{repin: ticket}} ->
           Events.notify(ticket.id)
           {:ok, ticket}
 
@@ -1792,12 +1837,37 @@ defmodule Forge.Engine do
     end
   end
 
+  # The update and its event, shared by a person's re-pin and an update step's
+  # (`docs/design/workflow-grammar-v1.md` § Pinning). Keyed `:repin`, not `:ticket`: the step takes
+  # its edge out in the same transaction and `put_transition` and `put_stuck` write `:ticket`.
+  defp put_repin(multi, %Ticket{} = open, prepared, actor) do
+    multi
+    |> Multi.update(
+      :repin,
+      Ticket.repin_changeset(open, %{workflow: prepared.yaml_map, workflow_commit: prepared.base})
+    )
+    |> Events.log(:repin_event, "ticket.repinned", actor, %{
+      ticket_id: open.id,
+      payload: %{"from" => open.workflow_commit, "to" => prepared.base}
+    })
+  end
+
   defp repinnable(%Ticket{} = ticket, %{base: base, workflow: workflow}) do
     cond do
-      ticket.workflow_commit == base -> {:error, :already_pinned}
-      is_map(ticket.pending_transition) -> {:error, :pending_approval}
-      Workflow.state(workflow, ticket.state) == nil -> {:error, {:no_state, ticket.state}}
-      true -> with(:ok <- not_queued(ticket), :ok <- no_live_job(ticket), do: {:ok, :repinnable})
+      ticket.workflow_commit == base ->
+        {:error, :already_pinned}
+
+      is_map(ticket.pending_transition) ->
+        {:error, :pending_approval}
+
+      Workflow.state(workflow, ticket.state) == nil ->
+        {:error, {:no_state, ticket.state}}
+
+      true ->
+        with :ok <- not_queued(ticket),
+             :ok <- not_updating_by_pin(ticket),
+             :ok <- no_live_job(ticket),
+             do: {:ok, :repinnable}
     end
   end
 
@@ -2601,17 +2671,22 @@ defmodule Forge.Engine do
     end
   end
 
-  # The edge out of where the ticket rests into a merging state that names an `on_conflict` — only
-  # a merging state may name one (`ForgeCore.Workflow.Validator`), so naming one is the test.
+  # The edge out of where the ticket rests into a merging state that names an `on_conflict`. An
+  # update step may name one too (`ForgeCore.Workflow.Validator`), so merging is asked as well: the
+  # check this route makes is a merge's, and an update step is entered by a transition, never sent to.
   defp conflict_route(%Ticket{status: status}, _workflow) when not Ticket.open?(status),
     do: {:error, {:not_open, status}}
 
   defp conflict_route(%Ticket{} = ticket, workflow) do
     with :ok <- not_queued(ticket),
+         :ok <- not_updating(ticket, workflow),
          :ok <- no_live_job(ticket) do
       workflow
       |> Workflow.transitions_from(ticket.state)
-      |> Enum.find(&(Workflow.on_conflict(workflow, &1.to) != nil))
+      |> Enum.find(
+        &(Workflow.merges_on_enter?(workflow, &1.to) and
+            Workflow.on_conflict(workflow, &1.to) != nil)
+      )
       |> case do
         %Transition{} = transition -> {:ok, transition}
         nil -> {:error, :no_conflict_route}
@@ -2965,7 +3040,7 @@ defmodule Forge.Engine do
 
   defp human_state?(workflow, state_name) do
     case Workflow.state(workflow, state_name) do
-      %State{} = state -> not State.job?(state) and not State.command?(state)
+      %State{} = state -> State.human?(state)
       nil -> false
     end
   end
@@ -3026,7 +3101,7 @@ defmodule Forge.Engine do
   @doc """
   Runs what entering `state_name` does, after the transition into it has been recorded.
 
-  `merge` is the only action in v1, and it merges the commit the transition into the state named
+  `merge` merges the commit the transition into the state named
   (`docs/design/workflow-grammar-v1.md` § Merging). It was checked before the transition was taken,
   so a failure here is a race — something else moved the default branch in between.
   `Forge.Merge.perform/4` retries once against the moved head, and what it returns then is final:
@@ -3039,14 +3114,344 @@ defmodule Forge.Engine do
   """
   @spec enter(Ticket.t(), Workflow.t(), String.t(), String.t() | nil, keyword()) :: Ticket.t()
   def enter(%Ticket{} = ticket, %Workflow{} = workflow, state_name, user_id, opts \\ []) do
-    if Workflow.merges_on_enter?(workflow, state_name) do
-      merge_now(ticket, workflow, user_id, Keyword.get_lazy(opts, :by, fn -> by(user_id) end))
-    else
-      # A terminal state that merges nothing still concludes a release, on the default branch's
-      # head. `conclude/2` does nothing for any ticket that is not a release that is `done`.
-      ReleaseRecords.conclude(ticket, :head)
-      ticket
+    cond do
+      Workflow.merges_on_enter?(workflow, state_name) ->
+        merge_now(ticket, workflow, user_id, Keyword.get_lazy(opts, :by, fn -> by(user_id) end))
+
+      Workflow.updates_on_enter?(workflow, state_name) ->
+        update_now(ticket, workflow, state_name)
+
+      true ->
+        # A terminal state that merges nothing still concludes a release, on the default branch's
+        # head. `conclude/2` does nothing for any ticket that is not a release that is `done`.
+        ReleaseRecords.conclude(ticket, :head)
+        ticket
     end
+  end
+
+  # -- bringing the branch up to date ----------------------------------------------------------
+
+  # `docs/design/workflow-grammar-v1.md` § Bringing the branch up to date. Runs after the
+  # transaction that entered the step, in the caller's process as `merge_now/4` does, in two halves:
+  # the git work (`Forge.Update`), which a transaction cannot roll back and so is never inside one
+  # and never holds the ticket's row lock, and the record, one transaction that locks the ticket,
+  # writes what the visit did and takes the edge out.
+  defp update_now(%Ticket{} = ticket, %Workflow{}, state_name) do
+    # **One run of the step per ticket at a time.** A hold and a release while a first run is between
+    # its push and its record start a second (`replayed_update/3`), which would find the first's
+    # merge already in the branch and record it as "already up to date"; boot recovery overlapping a
+    # live entry is the same. The second waits here and then meets a ticket that has moved on, which
+    # the gate skips. The platform runs on one node, as `Forge.MergeQueue.Registry` assumes.
+    :global.trans(
+      {{:forge_update, ticket.id}, self()},
+      fn -> update_locked(ticket, state_name) end,
+      [node()]
+    )
+  end
+
+  defp update_locked(ticket, state_name) do
+    case update_gate(ticket, state_name) do
+      {:run, open} ->
+        project = Forge.Projects.get!(open.project_id)
+        result = update_git(open)
+        record_update(open, project, result, update_repin(project, open, result))
+
+      :skip ->
+        Repo.get!(Ticket, ticket.id)
+    end
+  end
+
+  # Whether there is anything to do: the ticket is still active in the step, not on hold and not
+  # waiting in the merge queue. A held ticket is left for its release, which runs the step
+  # (`replayed_update/3`); a ticket that has moved on or stuck since, or been queued by the step's
+  # edge into the merge, was dealt with by another run of this entry.
+  defp update_gate(%Ticket{id: id}, state_name) do
+    {:ok, gate} =
+      Repo.transaction(fn ->
+        from(t in Ticket, where: t.id == ^id, lock: "FOR UPDATE")
+        |> Repo.one!()
+        |> runnable_update(state_name)
+      end)
+
+    gate
+  end
+
+  # The queue test here keeps the git half from running for a ticket waiting in the line, which would
+  # move its branch with nothing recorded. The one in `lock_updating/2` holds against an entry made
+  # while the git half ran, which this gate cannot see; each has a test that fails without it.
+  defp runnable_update(%Ticket{status: :active, state: state, held_at: nil} = open, state),
+    do: if(MergeQueue.queued?(open), do: :skip, else: {:run, open})
+
+  defp runnable_update(%Ticket{}, _state_name), do: :skip
+
+  # **The step runs under no job of its own ticket** (`docs/design/workflow-grammar-v1.md` § Bringing
+  # the branch up to date). Every way in ends the job before it, so as the product runs this finds
+  # nothing; it is kept against a second writer, and `UpdateFlowTest` builds the state by hand to
+  # show it sticks. A conversation is not counted: a ticket chat commits to `chat/<id>`, so moving
+  # `ticket/<n>` moves nothing under it (`docs/design/conversations.md` § Commits).
+  defp update_git(%Ticket{id: id} = open) do
+    live =
+      Repo.exists?(
+        from j in Job,
+          where:
+            j.ticket_id == ^id and j.kind in [:workflow, :command] and
+              j.status in [:pending, :running, :waiting, :parked]
+      )
+
+    if live, do: {:error, :job_live}, else: Forge.Update.run(open)
+  end
+
+  # The workflow at the commit the code was brought up to, or why not: what a visit that did not
+  # fail does next to its branch. A failed visit moved nothing and re-pins nothing.
+  defp update_repin(_project, _open, {:error, _reason}), do: :none
+
+  defp update_repin(project, %Ticket{} = open, result) do
+    default = Forge.Update.default_of(result)
+
+    case Tickets.prepare_repin(project, open, at: default) do
+      {:ok, %{base: pinned}} when pinned == open.workflow_commit ->
+        :none
+
+      {:ok, prepared} ->
+        repin_if_step(prepared, open)
+
+      {:error, reason} ->
+        {:skip, code_of(reason), Forge.Update.skip_words(reason)}
+    end
+  end
+
+  # The workflow there is only taken when it still has the step: otherwise there is no edge for the
+  # engine to take on it, and the ticket would be left on a workflow it cannot move on.
+  defp repin_if_step(%{workflow: workflow} = prepared, %Ticket{state: name}) do
+    case Workflow.state(workflow, name) do
+      nil -> {:skip, "no_state", "the workflow there has no state #{name}"}
+      state -> if State.updates?(state), do: {:repin, prepared}, else: not_a_step(name)
+    end
+  end
+
+  defp not_a_step(name), do: {:skip, "not_an_update_step", "#{name} is not an update step there"}
+
+  # A code added here is a file's own reason only when `Forge.Update.file_refusal?/1` says so.
+  defp code_of({:ticket_type_gone, _name, _path}), do: "type_gone"
+  defp code_of([%ForgeCore.Error{} | _]), do: "invalid"
+  defp code_of(_other), do: "unreadable"
+
+  # Public, and `@doc false`, so a test can record a visit for a ticket that a hold reached between
+  # the git half and here: that window is not one a test can open from outside.
+  @doc false
+  @spec record_update(Ticket.t(), Forge.Projects.Project.t(), Forge.Update.result(), term()) ::
+          Ticket.t()
+  def record_update(open, project, result, repin) do
+    Multi.new()
+    |> Multi.run(:open, fn repo, _changes -> lock_updating(repo, open) end)
+    |> Multi.merge(fn %{open: locked} -> put_update(locked, project, result, repin) end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, _changes} ->
+        moved = Repo.get!(Ticket, open.id)
+        Events.notify(moved.id)
+        MergeQueue.kick(moved.project_id)
+        entered(open, moved)
+
+      # Another run of this entry recorded first, or the ticket was cancelled, held into a
+      # different state, or stuck meanwhile: nothing more to record.
+      {:error, :open, _moved, _changes} ->
+        Repo.get!(Ticket, open.id)
+
+      {:error, _step, reason, _changes} ->
+        stick_update(open, "could not bring the branch up to date: #{inspect(reason)}")
+    end
+  end
+
+  defp lock_updating(repo, %Ticket{id: id, state: state}) do
+    case repo.one!(from t in Ticket, where: t.id == ^id, lock: "FOR UPDATE") do
+      %Ticket{status: :active, state: ^state} = locked ->
+        if MergeQueue.queued?(locked), do: {:error, :moved}, else: {:ok, locked}
+
+      %Ticket{} ->
+        {:error, :moved}
+    end
+  end
+
+  defp stick_update(ticket, reason) do
+    case stick(ticket, reason) do
+      {:ok, stuck} -> stuck
+      {:error, _reason} -> ticket
+    end
+  end
+
+  # One visit: what it did to the branch, the base and the pin, the visit itself, and the edge out.
+  # **The edge is a `Multi.merge` placed after the version insert**, because `put_source/5` reads
+  # the latest `changeset` when it is *called*: built before the insert, a transition into a merging
+  # state would name the version the step replaced (route (b), `workflow-grammar-v1.md` § Merging).
+  defp put_update(%Ticket{} = locked, project, result, repin) do
+    workflow = update_workflow(locked, repin)
+    decision = update_decision(locked, workflow, project, result)
+
+    Multi.new()
+    |> put_update_changeset(locked, result)
+    |> put_update_base(locked, project, result)
+    |> put_update_repin(locked, repin)
+    |> Events.log(:update_event, "ticket.branch_updated", :system, %{
+      ticket_id: locked.id,
+      payload: update_payload(locked, project, result, repin, decision)
+    })
+    |> Multi.merge(fn changes ->
+      put_update_edge(Multi.new(), moved_by_update(locked, changes, repin), workflow, decision)
+    end)
+  end
+
+  defp update_workflow(%Ticket{}, {:repin, %{workflow: workflow}}), do: workflow
+  defp update_workflow(%Ticket{} = locked, _no_repin), do: Tickets.workflow(locked)
+
+  # Only a merge writes a version: a branch with nothing of its own, or already current, has no
+  # change to record, and an empty one on every ticket that passes a step before it has work would
+  # be noise. The ticket's diff and a job's `changeset` input are the branch against its *base*, not
+  # the latest version, so what the page and the next job read does not depend on this.
+  defp put_update_changeset(multi, %Ticket{id: id}, {:merged, %{to: to}}),
+    do: Artifacts.put_changeset(multi, :update_changeset, id, :system, to)
+
+  defp put_update_changeset(multi, _ticket, _result), do: multi
+
+  # The base follows the branch in every clean result (`Forge.Jobs.put_base/5`, the rule an
+  # integrating job's result moves it by), against the default branch's head the step merged or met.
+  defp put_update_base(multi, %Ticket{} = locked, project, {kind, %{to: to, default: default}})
+       when kind in [:current, :forwarded, :merged] do
+    repo = Forge.Projects.repo_path(project)
+    Jobs.put_base(multi, locked, repo, to, default)
+  end
+
+  defp put_update_base(multi, _ticket, _project, _result), do: multi
+
+  defp put_update_repin(multi, %Ticket{} = locked, {:repin, prepared}),
+    do: put_repin(multi, locked, prepared, :system)
+
+  defp put_update_repin(multi, _ticket, _none_or_skip), do: multi
+
+  # The struct the edge is decided and created on: the locked row with the base and the pin this
+  # visit moved. `Jobs.put_create` reads the prompt at the struct's pin and diffs at its base, so a
+  # stale struct would run the old prompt, or hand the next job the default branch's work as its
+  # change (`Forge.Jobs.moved_base/2` is the precedent).
+  defp moved_by_update(%Ticket{} = locked, changes, repin) do
+    locked =
+      case changes do
+        %{base: %Ticket{base_commit: base}} -> %{locked | base_commit: base}
+        _unmoved -> locked
+      end
+
+    case repin do
+      {:repin, prepared} ->
+        %{locked | workflow: prepared.yaml_map, workflow_commit: prepared.base}
+
+      _none_or_skip ->
+        locked
+    end
+  end
+
+  # What follows the visit, decided on the workflow the ticket then has, in this order: a visit that
+  # failed sticks; a hold that landed during the git half keeps the entry for its release, which
+  # runs the step again; the ticket's own cap; then the step's edge, or a conflict's.
+  defp update_decision(%Ticket{} = locked, %Workflow{} = workflow, project, result) do
+    cond do
+      match?({:error, _reason}, result) ->
+        {:stick, Forge.Update.failed_words(result, project.default_branch)}
+
+      locked.held_at != nil ->
+        :hold
+
+      not Core.within_ticket_budget?(workflow, locked.usage) ->
+        {:stick, "ticket usage cap reached"}
+
+      true ->
+        update_edge(workflow, locked, project, result)
+    end
+  end
+
+  defp update_edge(workflow, %Ticket{state: state} = locked, project, result) do
+    case result do
+      {:conflict, facts, _retried} ->
+        case Core.after_update(workflow, state, :conflict, %{}) do
+          {:conflict, edge} ->
+            {:conflict, edge}
+
+          {:stuck, :no_conflict_state} ->
+            {:stick, Forge.Update.conflict_words(facts.paths, project.default_branch)}
+        end
+
+      _clean ->
+        case Core.after_update(workflow, state, :done, rounds(locked.id)) do
+          {:transition, edge} -> {:transition, edge}
+          # A pin with no edge out of the step, which a validated workflow cannot have
+          # (`ForgeCore.Engine.after_update/4`): stuck with a word, not a crash in the transaction.
+          {:stuck, :no_edge} -> {:stick, "the update step has no transition out"}
+          {:stuck, reason} -> {:stick, stuck_reason(reason, rounds(locked.id))}
+        end
+    end
+  end
+
+  defp put_update_edge(multi, ticket, workflow, {:transition, edge}),
+    do: put_engine_transition(multi, ticket, workflow, edge, Transition.outcome(edge))
+
+  # A conflict is not `ticket.merge_conflicted`: the three-in-a-row bound reads that event only, and
+  # an update step's loop is bounded by the `max` on the edges it runs through, by a person, or by
+  # the ticket's token cap, which `update_decision/4` checks before this edge too
+  # (`docs/design/workflow-grammar-v1.md` § Bringing the branch up to date).
+  defp put_update_edge(multi, ticket, workflow, {:conflict, edge}),
+    do: put_transition(multi, ticket, workflow, edge, Workflow.merge_conflict_outcome(), :system)
+
+  defp put_update_edge(multi, ticket, _workflow, {:stick, reason}),
+    do: put_stuck(multi, ticket, reason)
+
+  defp put_update_edge(multi, ticket, _workflow, :hold) do
+    entry = %{"state" => ticket.state, "entered" => nil, "came_back" => true}
+    Multi.update(multi, :held_entry, Ticket.hold_changeset(ticket, %{held_entry: entry}))
+  end
+
+  defp update_payload(%Ticket{} = locked, project, result, repin, decision) do
+    %{
+      "state" => locked.state,
+      "default_branch" => project.default_branch,
+      "repin" => repin_payload(repin, locked)
+    }
+    |> Map.merge(Forge.Update.payload(result))
+    |> put_went(decision)
+  end
+
+  defp repin_payload({:repin, prepared}, locked),
+    do: %{"from" => locked.workflow_commit, "to" => prepared.base}
+
+  defp repin_payload({:skip, code, reason}, _locked), do: %{"skipped" => code, "reason" => reason}
+  defp repin_payload(:none, _locked), do: nil
+
+  defp put_went(payload, {:transition, edge}), do: Map.put(payload, "went", edge.to)
+  defp put_went(payload, {:conflict, edge}), do: Map.put(payload, "went", edge.to)
+  defp put_went(payload, {:stick, reason}), do: Map.put(payload, "stuck", reason)
+  defp put_went(payload, :hold), do: Map.put(payload, "held", true)
+
+  @doc """
+  Runs the update step again for every ticket left active in one, with nothing running: a crash
+  between the git half and its record. A second run finds the branch current, so this is safe to
+  repeat, and a held ticket is left alone (`update_gate/2`). Returns how many tickets it entered,
+  which counts a queued one the gate then skipped. Called on boot
+  (`docs/design/workflow-grammar-v1.md` § Bringing the branch up to date).
+  """
+  @spec recover_updates() :: non_neg_integer()
+  def recover_updates do
+    from(t in Ticket,
+      where: t.status == :active and is_nil(t.held_at),
+      where: fragment("(?->'states'->?->'on_enter')::text like '%update%'", t.workflow, t.state)
+    )
+    |> Repo.all()
+    |> Enum.count(fn ticket ->
+      case Tickets.parsed_workflow(ticket) do
+        {:ok, workflow} ->
+          Workflow.updates_on_enter?(workflow, ticket.state) and
+            (enter(ticket, workflow, ticket.state, nil) && true)
+
+        _unreadable ->
+          false
+      end
+    end)
   end
 
   defp run_entry_actions(ticket, workflow, %Transition{to: to}, :approved, user_id),

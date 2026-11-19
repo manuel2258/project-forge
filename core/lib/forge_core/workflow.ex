@@ -125,7 +125,7 @@ defmodule ForgeCore.Workflow do
 
   @doc """
   The outcome a transition is recorded on when a merge conflict sends the ticket down its merging
-  state's `on_conflict` (`docs/design/workflow-grammar-v1.md` § Merging). No job ends on it and no
+  state's or update step's `on_conflict` (`docs/design/workflow-grammar-v1.md` § Merging). No job ends on it and no
   `when` selects it; it is what `transition.taken` says and what the next job is told it came on.
   """
   @spec merge_conflict_outcome() :: outcome()
@@ -359,9 +359,19 @@ defmodule ForgeCore.Workflow do
     end
   end
 
+  @doc "Whether entering `name` brings the ticket's branch up to date. See `State`."
+  @spec updates_on_enter?(t(), state_name()) :: boolean()
+  def updates_on_enter?(workflow, name) do
+    case state(workflow, name) do
+      nil -> false
+      state -> State.updates?(state)
+    end
+  end
+
   @doc """
-  Where a merge conflict sends a ticket from the merging state `name`: its `on_conflict`, or nil
-  when it names none. Only a merging state may name one (`ForgeCore.Workflow.Validator`).
+  Where a merge conflict sends a ticket from the merging or updating state `name`: its
+  `on_conflict`, or nil when it names none. Only those two may name one
+  (`ForgeCore.Workflow.Validator`).
   """
   @spec on_conflict(t(), state_name()) :: state_name() | nil
   def on_conflict(workflow, name) do
@@ -372,7 +382,7 @@ defmodule ForgeCore.Workflow do
   end
 
   @doc """
-  The edge a conflict takes into the merging state `merging`'s `on_conflict`, from wherever the
+  The edge a conflict takes into the merging (or update) state `merging`'s `on_conflict`, from wherever the
   ticket is: `from` is the state it was leaving — the merging state itself after a late race, or
   the state whose transition into it the check refused. Nil when `merging` names no target.
 
@@ -388,8 +398,8 @@ defmodule ForgeCore.Workflow do
   end
 
   @doc """
-  Whether `name` is an integrating state: the `on_conflict` of a state that merges. Its job's
-  checkout also fetches the default branch, and its manifest says what conflicted
+  Whether `name` is an integrating state: the `on_conflict` of a state that merges or updates. Its
+  job's checkout also fetches the default branch, and its manifest says what conflicted
   (`docs/design/job-prompt.md` § Integrating the default branch).
   """
   @spec integrating?(t(), state_name()) :: boolean()
@@ -421,7 +431,7 @@ defmodule ForgeCore.Workflow do
   end
 
   @doc """
-  Every edge a ticket can move along: the declared transitions, and each merging state's
+  Every edge a ticket can move along: the declared transitions, and each merging or updating state's
   `on_conflict` as an edge out of it. What a walk of the graph follows — reachability, what runs
   before what — because the ticket reaches an `on_conflict` target only by it. Not what
   `transitions_from/2` answers: that is what a person or an outcome may choose, and the merging

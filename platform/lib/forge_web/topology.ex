@@ -1,7 +1,9 @@
 defmodule ForgeWeb.Topology do
   @moduledoc """
   What kind of state a workflow state is, and the mark that tells them apart (`mark/1`): `▸` for
-  one that runs work on entry, `●` for one that waits on a person, `○` for the end.
+  one that runs work on entry, `●` for one that waits on a person, `↻` for an update step — the
+  platform's own work, which brings the ticket's branch up to date and moves on — and `○` for the
+  end.
 
   Its own module rather than the board's, because the queue, the ticket, the project and the
   review all draw it and the board is going (`docs/design/ui.md` § The projects page).
@@ -11,7 +13,7 @@ defmodule ForgeWeb.Topology do
   alias ForgeCore.Workflow
 
   @doc "The kind of `name` in `workflow`; `:unknown` when either is missing."
-  @spec of(Workflow.t() | nil, String.t()) :: :job | :human | :terminal | :unknown
+  @spec of(Workflow.t() | nil, String.t()) :: :job | :update | :human | :terminal | :unknown
   def of(nil, _name), do: :unknown
 
   def of(workflow, name) do
@@ -19,6 +21,9 @@ defmodule ForgeWeb.Topology do
 
     cond do
       is_nil(state) -> :unknown
+      # The platform's own step (`docs/design/workflow-grammar-v1.md` § Bringing the branch up to
+      # date): not a job's mark and not a person's, though it has no job and no `prompt`.
+      Workflow.State.updates?(state) -> :update
       # A command state runs work on entry as a job state does, and draws as one: `▸`.
       Workflow.State.runs?(state) -> :job
       Workflow.terminal?(workflow, name) -> :terminal
@@ -56,7 +61,9 @@ defmodule ForgeWeb.Topology do
   The kind of the state each of `tickets` rests in, by ticket id, from the workflow it is pinned
   to: what a list of tickets draws its marks from.
   """
-  @spec kinds([Tickets.Ticket.t()]) :: %{String.t() => :job | :human | :terminal | :unknown}
+  @spec kinds([Tickets.Ticket.t()]) :: %{
+          String.t() => :job | :update | :human | :terminal | :unknown
+        }
   def kinds(tickets) do
     workflows = workflows(tickets)
     Map.new(tickets, &{&1.id, of(pinned(workflows, &1), &1.state)})
@@ -66,11 +73,12 @@ defmodule ForgeWeb.Topology do
 
   @doc """
   The mark a kind of state is drawn with (`docs/design/ui.md` § The three axes): `▸` runs work,
-  `●` waits on a person, `○` the end, where nothing will happen, `·` unknown. The one mapping the
-  subline, the state label and the workflow map all draw.
+  `●` waits on a person, `↻` the platform's own update step, `○` the end, where nothing will
+  happen, `·` unknown. The one mapping the subline, the state label and the workflow map all draw.
   """
-  @spec mark(:job | :human | :terminal | :unknown | nil) :: String.t()
+  @spec mark(:job | :update | :human | :terminal | :unknown | nil) :: String.t()
   def mark(:job), do: "▸"
+  def mark(:update), do: "↻"
   def mark(:human), do: "●"
   def mark(:terminal), do: "○"
   def mark(_unknown), do: "·"

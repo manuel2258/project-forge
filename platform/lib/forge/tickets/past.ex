@@ -14,7 +14,8 @@ defmodule Forge.Tickets.Past do
       waiting for a machine and not yet a run;
     * a command step counts its batches (`commands.started`), not the commands an agent invokes
       from inside another step, which have no such event;
-    * a conversation step counts its conversations, a human step the times the ticket arrived.
+    * a conversation step counts its conversations, a human step the times the ticket arrived, and
+      an update step the same — a visit has no run, and what its last visit did is its line.
   """
 
   import Ecto.Query, only: [from: 2]
@@ -28,7 +29,7 @@ defmodule Forge.Tickets.Past do
   @typedoc "A step the ticket has been in."
   @type step :: %{
           name: String.t(),
-          kind: :agent | :command | :conversation | :human,
+          kind: :agent | :command | :conversation | :update | :human,
           runs: non_neg_integer(),
           last: String.t() | nil,
           current: boolean(),
@@ -63,10 +64,7 @@ defmodule Forge.Tickets.Past do
     batches = batches(events)
     started = started_command_jobs(batches)
     arrivals = arrivals(events)
-    accepted = for %{type: "step.accepted"} = e <- events, into: %{}, do: {e.job_id, e.payload}
-
-    decided =
-      for %{type: "commands.decided"} = e <- events, into: %{}, do: {e.payload["batch"], e}
+    %{accepted: accepted, decided: decided, updated: updated} = outcomes(events)
 
     # A state with runs and no arrival is not expected; it is listed after the others rather than
     # lost, in the order its kinds are read here.
@@ -84,7 +82,8 @@ defmodule Forge.Tickets.Past do
           :agent -> agent_step(name, jobs)
           :command -> command_step(name, batches, started, decided)
           :conversation -> conversation_step(name, chats, accepted)
-          :human -> %{runs: Enum.count(arrivals, &(&1 == name)), last: nil, job: nil}
+          :human -> visited_step(name, arrivals, nil)
+          :update -> visited_step(name, arrivals, updated[name])
         end
 
       Map.merge(step, %{name: name, kind: kind, current: name == ticket.state})
@@ -168,7 +167,8 @@ defmodule Forge.Tickets.Past do
   # -- reads ---------------------------------------------------------------------------------
 
   # Only the events that say where the ticket went and what ran, in order; the payloads are small.
-  @types ~w(ticket.admitted transition.taken commands.started commands.decided step.accepted)
+  @types ~w(ticket.admitted transition.taken commands.started commands.decided step.accepted
+            ticket.branch_updated)
 
   defp events(ticket_id) do
     Repo.all(
@@ -217,17 +217,17 @@ defmodule Forge.Tickets.Past do
 
   @doc """
   What kind of step the workflow makes `name`, or nil when it does not declare it (or there is no
-  workflow): `:conversation`, `:agent`, `:command`, or `:human` for a state that waits for a person
-  or ends the workflow.
+  workflow): `:conversation`, `:agent`, `:command`, `:update` for the platform's own update step, or
+  `:human` for a state that waits for a person or ends the workflow.
   """
   @spec declared_kind(Workflow.t() | nil, String.t()) ::
-          :agent | :command | :conversation | :human | nil
+          :agent | :command | :conversation | :update | :human | nil
   def declared_kind(workflow, name) do
     case workflow && Workflow.state(workflow, name) do
       %State{chat: true} -> :conversation
       %State{prompt: prompt} when is_binary(prompt) -> :agent
       %State{invoke: [_ | _]} -> :command
-      %State{} -> :human
+      %State{} = state -> if State.updates?(state), do: :update, else: :human
       nil -> nil
     end
   end
@@ -239,6 +239,33 @@ defmodule Forge.Tickets.Past do
       Enum.any?(chats, &(&1.state == name)) -> :conversation
       true -> :human
     end
+  end
+
+  # How each kind of step ended, by what names it: a conversation's acceptance by job, a batch's
+  # decision by batch, and each update step's latest visit by state (the events are in order, so the
+  # last wins).
+  defp outcomes(events) do
+    %{
+      accepted: for(%{type: "step.accepted"} = e <- events, into: %{}, do: {e.job_id, e.payload}),
+      decided:
+        for(%{type: "commands.decided"} = e <- events, into: %{}, do: {e.payload["batch"], e}),
+      updated:
+        for(
+          %{type: "ticket.branch_updated", payload: %{"state" => state} = payload} <- events,
+          into: %{},
+          do: {state, payload}
+        )
+    }
+  end
+
+  # A step with visits and no runs: how often the ticket arrived, and for an update step what its
+  # latest visit did (`Forge.Update.said/1`).
+  defp visited_step(name, arrivals, visit) do
+    %{
+      runs: Enum.count(arrivals, &(&1 == name)),
+      last: visit && Forge.Update.said(visit),
+      job: nil
+    }
   end
 
   defp agent_step(name, jobs) do

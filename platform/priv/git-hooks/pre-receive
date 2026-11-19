@@ -7,7 +7,7 @@
 #   FORGE_ALLOWED_REFS the refs this credential may write, space-separated, set per request by
 #                      the CGI wrapper: one for a job, every open ticket's for a developer
 #   FORGE_NO_REWRITE   set to 1 for a developer or admin credential: no non-fast-forward anywhere
-#   FORGE_INTERNAL     set to 1 only by the platform's own pushes (the merge, a release's tag), never
+#   FORGE_INTERNAL     set to 1 only by the platform's own pushes (the merge, a release's tag, an update step's write to ticket/<n>), never
 #                      by anything on the network
 set -euo pipefail
 

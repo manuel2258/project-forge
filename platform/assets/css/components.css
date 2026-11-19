@@ -639,6 +639,7 @@
   .ui-state--running .ui-state-mark { color: var(--info); }
   .ui-state--waiting .ui-state-mark { color: var(--accent-text); }
   .ui-state--step .ui-state-mark { color: var(--link); }
+  .ui-state--update .ui-state-mark { color: var(--ink-2); }
   .ui-state--stuck .ui-state-mark { color: var(--accent-text); }
   .ui-state--idle .ui-state-mark { color: var(--ink-3); }
 

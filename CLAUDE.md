@@ -115,6 +115,15 @@ takes screenshots, in a network namespace of its own with a database of its own.
 review lens and shown in the presentation. **It is built**; `bin/look` has run on one machine,
 this ticket's (the gate's browser test has passed on a second), and its § Not verified here says what that leaves.
 
+`docs/design/workflow-grammar-v1.md` § Bringing the branch up to date is the standard for the update
+step: a state with `on_enter: update`, which the platform runs itself with no job, that merges the
+default branch into the ticket's branch (or moves it forward, or leaves it) through its own push,
+re-pins the ticket's workflow at the commit it brought the code up to, moves the base, and sends a
+conflict to the state it names. **It is built, on the platform alone** (ticket 57): the grammar, the
+engine's step, the base in every job's manifest, and the screens; **nothing under `.forge/` uses it
+yet** — forge's own `dev.yml` and `bug.yml` adopt it in a follow-up — and it has not run on a real
+project.
+
 ## Layout
 
 Three Mix projects joined by path dependencies. Not an umbrella.

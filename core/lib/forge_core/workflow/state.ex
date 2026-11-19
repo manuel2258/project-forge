@@ -5,16 +5,18 @@ defmodule ForgeCore.Workflow.State do
   (`docs/design/commands.md`); a human state has neither and waits for a transition taken by a
   person or the engine.
 
-  `on_enter` names actions the platform takes when a ticket arrives in the state. `merge` is
-  the only one in v1: entering the state merges the changeset its transition named into the
-  project's default branch. `on_conflict`, on that state alone, names where a conflict sends the
-  ticket instead (`docs/design/workflow-grammar-v1.md` § Merging).
+  `on_enter` names actions the platform takes when a ticket arrives in the state. `merge`:
+  entering the state merges the changeset its transition named into the project's default branch.
+  `update`: entering the state brings the ticket's branch up to date with the default branch and
+  takes the state's one edge out, running no job (`docs/design/workflow-grammar-v1.md` § Bringing
+  the branch up to date). `on_conflict`, on either state, names where a conflict sends the ticket
+  instead (§ Merging).
   """
 
   alias ForgeCore.Workflow
   alias ForgeCore.Workflow.{Budget, Resources}
 
-  @actions [:merge]
+  @actions [:merge, :update]
 
   @enforce_keys [:name]
   defstruct [
@@ -45,7 +47,7 @@ defmodule ForgeCore.Workflow.State do
   @typedoc "What `may_invoke` grants for one command. `concurrent` nil is no limit of its own."
   @type grant :: %{max: pos_integer(), concurrent: pos_integer() | nil}
 
-  @type action :: :merge
+  @type action :: :merge | :update
 
   @type t :: %__MODULE__{
           name: String.t(),
@@ -74,7 +76,8 @@ defmodule ForgeCore.Workflow.State do
           # the part of that chain this project can see.
           resources: Resources.t() | nil,
           on_enter: [action()],
-          # The merging state's: where a conflict sends the ticket instead of refusing or sticking.
+          # A merging or updating state's: where a conflict sends the ticket instead of refusing or
+          # sticking.
           on_conflict: String.t() | nil,
           # A command state's: what it runs on entry, and the outcome each exit status selects —
           # keyed by the status, or `"*"` for any other.
@@ -96,6 +99,13 @@ defmodule ForgeCore.Workflow.State do
 
   @spec merges?(t()) :: boolean()
   def merges?(%__MODULE__{on_enter: on_enter}), do: :merge in on_enter
+
+  @doc """
+  Whether entering the state brings the ticket's branch up to date and takes its one edge out
+  (`docs/design/workflow-grammar-v1.md` § Bringing the branch up to date).
+  """
+  @spec updates?(t()) :: boolean()
+  def updates?(%__MODULE__{on_enter: on_enter}), do: :update in on_enter
 
   @doc "Whether the state runs an agent: it has a prompt."
   @spec job?(t()) :: boolean()
@@ -120,9 +130,12 @@ defmodule ForgeCore.Workflow.State do
   @spec runs?(t()) :: boolean()
   def runs?(state), do: job?(state) or command?(state)
 
-  @doc "Whether the state waits for a person: it runs nothing."
+  @doc """
+  Whether the state waits for a person: it runs nothing and the platform does not move on from it
+  by itself. An update step runs nothing either, and is not one.
+  """
   @spec human?(t()) :: boolean()
-  def human?(state), do: not runs?(state)
+  def human?(state), do: not runs?(state) and not updates?(state)
 
   @doc """
   The document whose front matter carries the job's outcome, or nil if none.

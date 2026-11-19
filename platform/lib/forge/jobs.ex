@@ -1366,6 +1366,7 @@ defmodule Forge.Jobs do
       branch: chat_branch(job),
       ticket: ticket && %{number: ticket.number, title: ticket.title},
       commit: ticket && ticket.base_commit,
+      base: ticket && ticket.base_commit,
       prompt: opening.prompt,
       replay: opening.replay,
       inputs: chat_inputs(job, ticket),
@@ -1407,6 +1408,7 @@ defmodule Forge.Jobs do
         command_results: results,
         entered_commands: entered,
         previous_changeset: previous_changeset(job, spec),
+        base: ticket.base_commit,
         integration: integration_now(spec.integration, ticket)
     }
 
@@ -1722,6 +1724,32 @@ defmodule Forge.Jobs do
 
   defp previous_changeset(%Job{}, _spec), do: nil
 
+  # The conflict that sent the ticket here: the later of the merge's (`ticket.merge_conflicted`) and
+  # an update step's (`ticket.branch_updated` with result `conflicted`). **Not "the latest
+  # `ticket.branch_updated`"**: a visit that came after a conflict and found the branch current says
+  # nothing about what is wrong now, and a step's conflict is recorded on that event alone
+  # (`docs/design/workflow-grammar-v1.md` § Bringing the branch up to date). `cause` says which, so
+  # the manifest says what conflicted.
+  defp latest_conflict(%Ticket{id: id}) do
+    merge = Events.latest_for_ticket(id, "ticket.merge_conflicted")
+    update = Events.latest_for_ticket(id, "ticket.branch_updated")
+
+    case {merge, update} do
+      {nil, %{payload: %{"result" => "conflicted"} = payload}} ->
+        Map.put(payload, "cause", "update")
+
+      {%{seq: merged}, %{seq: updated, payload: %{"result" => "conflicted"} = payload}}
+      when updated > merged ->
+        Map.put(payload, "cause", "update")
+
+      {%{payload: payload}, _update} ->
+        payload
+
+      {nil, _update} ->
+        %{}
+    end
+  end
+
   # What an integrating job is told, read when it runs: the default branch's head, what the
   # ticket's latest conflict was, and the merges that landed since its base, first-parent and
   # newest first (`docs/design/job-prompt.md` § Integrating the default branch).
@@ -1730,11 +1758,7 @@ defmodule Forge.Jobs do
   defp integration_now(%{"default_branch" => branch} = stored, %Ticket{} = ticket) do
     repo = ticket |> Tickets.project_of() |> Projects.repo_path()
 
-    conflict =
-      case Events.latest_for_ticket(ticket.id, "ticket.merge_conflicted") do
-        %{payload: payload} -> payload
-        nil -> %{}
-      end
+    conflict = latest_conflict(ticket)
 
     {head, landed} =
       with {:ok, head} <- Git.resolve(repo, "refs/heads/" <> branch),
@@ -1747,6 +1771,7 @@ defmodule Forge.Jobs do
     Map.merge(stored, %{
       "head" => head,
       "base" => ticket.base_commit,
+      "cause" => conflict["cause"],
       "paths" => conflict["paths"] || [],
       "changeset" => conflict["changeset"],
       "merges" =>
@@ -2596,10 +2621,15 @@ defmodule Forge.Jobs do
   # from before every other ticket's work since, and show all of it as this ticket's. So the base
   # moves to where the commit and the default branch's head last met — when that is past the base,
   # which it is only once the branch has the default branch's later history in it.
-  defp put_base(multi, %Ticket{base_commit: base} = ticket, repo_path, head) do
+  #
+  # **Public because an update step moves the base the same way** (`Forge.Engine`): `tip` is then the
+  # default branch's head it merged or met, which the base follows rather than a head read again.
+  @doc false
+  @spec put_base(Multi.t(), Ticket.t(), String.t(), String.t(), String.t() | nil) :: Multi.t()
+  def put_base(multi, %Ticket{base_commit: base} = ticket, repo_path, head, tip \\ nil) do
     default = Projects.get!(ticket.project_id).default_branch
 
-    with {:ok, tip} <- Git.resolve(repo_path, "refs/heads/" <> default),
+    with {:ok, tip} <- tip_or_resolve(tip, repo_path, default),
          {:ok, met} when met != base <- Git.merge_base(repo_path, head, tip),
          true <- Git.ancestor?(repo_path, base, met) do
       multi
@@ -2612,6 +2642,11 @@ defmodule Forge.Jobs do
       _unmoved -> multi
     end
   end
+
+  defp tip_or_resolve(nil, repo_path, default),
+    do: Git.resolve(repo_path, "refs/heads/" <> default)
+
+  defp tip_or_resolve(tip, _repo_path, _default), do: {:ok, tip}
 
   # What any run adds to its job, however it ended.
   defp accounting(job, %Result{} = result) do

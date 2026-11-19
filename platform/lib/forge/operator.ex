@@ -561,8 +561,17 @@ defmodule Forge.Operator do
          {:ok, %{sha: sha, already: already}} = merged <- Forge.Merge.perform_chat(chat, user) do
       # What the merge did to the project's open tickets (`Forge.Merge.Watch`). Nothing moved when
       # the branch was already there.
-      unless already,
-        do: Forge.Merge.Watch.after_merge(chat.project_id, sha, %{"chat" => chat.id})
+      unless already do
+        # Recorded so that an update step can say whose merge it brought in
+        # (`Forge.Update`); a ticket's merge records `ticket.merged`.
+        Forge.Events.append("chat.merged", {:user, user.id}, %{
+          project_id: chat.project_id,
+          job_id: chat.id,
+          payload: %{"chat" => chat.id, "sha" => sha}
+        })
+
+        Forge.Merge.Watch.after_merge(chat.project_id, sha, %{"chat" => chat.id})
+      end
 
       merged
     end

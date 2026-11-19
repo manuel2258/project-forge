@@ -675,6 +675,8 @@ defmodule ForgeWeb.QueuePastTest do
     refute open.(%{kind: :agent, runs: 0, current: false})
     refute open.(%{kind: :command, runs: 0, current: false})
     refute open.(%{kind: :human, runs: 3, current: false})
+    # An update step's visits are its line, with nothing behind it to open.
+    refute open.(%{kind: :update, runs: 3, current: false})
     refute ForgeWeb.QueuePast.openable?(%{kind: :agent, runs: 2, current: true}, %{kind: :stuck})
     assert ForgeWeb.QueuePast.openable?(%{kind: :agent, runs: 2, current: true}, %{kind: :review})
   end

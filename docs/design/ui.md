@@ -294,6 +294,7 @@ State is carried by Unicode marks with fixed meanings, never by an icon set:
 | `◆` | waits on you (amber); leads a decision button |
 | `▸` | running (info); also a folded row's disclosure, turned when open |
 | `●` | a workflow step or state |
+| `↻` | an update step: the platform's own work, which brings the ticket's branch up to date and moves on — in ink, neither a job's blue nor a person's link colour (`workflow-grammar-v1.md` § Bringing the branch up to date) |
 | `✓` | done, passed |
 | `✗` | failed |
 | `◇` | a document an approval waits on, where approval is possible (§ Semantics that must not be lost) |
@@ -979,7 +980,11 @@ in words if sent. At the end of the pass, the first item to arrive is drawn.
   counts its agent jobs (a retry is a run, a job that waited for answers and resumed is one), a
   command step its batches (commands an agent invokes are not runs of that step), a conversation
   step its conversations — each drawn as a run — and a human step the times the ticket arrived,
-  drawn as visits. A step the ticket is in whose job never started reads *not run yet*.
+  drawn as visits, and an update step likewise, with what its latest visit did (*refresh · 2 visits ·
+  last moved forward to abc1234*); it does not open, having no run. A step the ticket is in whose job
+  never started reads *not run yet*. A step that stuck the ticket is an ordinary stuck item whose
+  reason says it in words, with the conflicting paths (*bringing the branch up to date with main
+  conflicted in a.ex, b.ex, c.ex and 2 more*).
   Steps and runs are read from what ran, so a step the pinned workflow no longer declares is still
   listed; a loop is every transition with a `max` that has fired, as rounds of its limit
   (*reviewing → implementing on issues_found · 5 of 5*), counted by `Forge.Engine.rounds/1` — the
@@ -1287,6 +1292,19 @@ Workflow view uses, each step its state, its jobs and commands as rows, its outc
 transition it took. The current step is open; done ones fold. Rows new since the person last
 looked are marked.
 
+**An update step's visit is a step of its own**, drawn on the same line-and-dot with the `↻` mark, in
+the order the events were written (`seq`, never time: `events.inserted_at` is whole seconds) among the
+jobs, and never folded into a neighbour — a visit that changed nothing is still drawn, so Steps agrees
+with the ticket's history. Folded it says in one line what it did: *already up to date with `main` at
+`abc1234`*; *moved forward to `abc1234`*; *merged `main` at `abc1234`, bringing in 3 merges*; or
+*conflicted with `main` in `a.ex` and 2 more; went to `resolving`*. Opened, it lists the merges it
+brought in, newest first, by ticket number and title (*#12 Settings screen*, the title cut as titles
+are elsewhere; *a conversation's merge* for a conversation's, drawn by its subject for one that
+predates `chat.merged`), at most ten and *and N more*, and under it the re-pin: *re-pinned from
+`abc1234` to `def5678`*, or *not re-pinned:* with the reason in words. A ticket on hold resting in a step that has
+not run says *brings the branch up to date when released*. Every path, subject and title in it is
+a contributor's and is drawn as text.
+
 **Where the Decide tab's contents went:**
 
 | Was on Decide | Is now |
@@ -1398,6 +1416,12 @@ true:
   under `.forge/` that changed, and **Re-pin at `<sha>`** behind a confirm
   (`workflow-grammar-v1.md` § Pinning). Nothing is said while `.forge/` is unchanged — a default
   branch that moved on for other reasons changes nothing the ticket runs.
+  **When an update step did not re-pin the ticket**, the notice also says why — *The update step did
+  not re-pin it: the workflow there does not validate: …. Re-pinning by hand would meet the same
+  refusal* where the reason is the file's (it is gone, does not validate or cannot be read), and
+  nothing more where it is the step's (the workflow there has no such state, or it is not a step: a
+  hand re-pin asks only that the ticket's own state exist there) — until a re-pin, by anyone, comes after it. Once the engine has re-pinned, the pin is the
+  default branch's head and the notice is gone by itself.
 - **A ticket a merge has put in conflict**, shaped like the re-pin notice: *`main` no longer merges
   with this ticket's changeset since #12 merged* — or *since a conversation merged*, or *`main` no
   longer merges with this ticket's changeset* when it conflicted already — the paths, and **Send to
@@ -1556,7 +1580,7 @@ and the job page draws them the same way. **An event with a form in words is dra
 version written is `wrote commit-message v1 ›`, linked where Docs links that version; a person's
 message is `you: Yes, try it.`; a turn's end is a thin divider, `turn 1`, not a row; the agent's
 words are headed `agent`; a proposal's fate, logged against the job that proposed it, is
-`proposal-1 admitted as #44`, `declined` or `reopened` (review fixes 7, L3). Never a `version_id` or a payload's keys — the raw form is the job
+`proposal-1 admitted as #44`, `declined` or `reopened` (review fixes 7, L3). **An update step's events are said the same way**: a visit is its sentence and what became of the pin (*moved forward to `abc1234`; re-pinned from `0123456` to `def5678`*), the engine's re-pin is *workflow re-pinned by the engine, `a` → `b`*, a base that moved *base moved `a` → `b`*, and a conversation's merge *a conversation's work merged as `abc1234`*. Never a `version_id` or a payload's keys — the raw form is the job
 page's raw log. Every other event keeps the job page's row, a `memory`
 row with its type in warning. **A row wraps rather than truncating**, and a line longer than 200
 characters — an agent's paragraph, a command on one long line — shows its first 200 and expands in
@@ -1990,6 +2014,10 @@ whose workflow has just changed those differ, and saying which is which is the p
 detail.
 
 It is headed **How a new ticket moves**, with the pinning said once as small print under it.
+**An update step is the platform's own work**: its flow row says *brings the branch up to date with
+`main` · conflicts go to `resolving`* (or *a conflict sticks the ticket*), and its map box is drawn
+with the `↻` mark and a dashed border, saying *up to date with main* and *conflict → resolving* with
+the whole sentence on hover; its conflict edge is drawn as a merging state's is.
 **A vertical flow on the line-and-dot Steps uses**, so the two read alike: each state with its
 topology mark — in ink, not the running blue, since a workflow's states are not live — how many
 open tickets rest there (the phone has nowhere else to see it), its job in words (*runs

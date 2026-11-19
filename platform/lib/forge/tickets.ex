@@ -69,15 +69,19 @@ defmodule Forge.Tickets do
     do: {:error, {:invalid_ticket_type, :not_a_name}}
 
   @doc """
-  What `Forge.Engine.repin/2` pins: `ticket`'s own type, read at the default branch's head. A
-  type whose file is gone refuses rather than guessing which type the ticket is now.
+  What `Forge.Engine.repin/2` pins: `ticket`'s own type, read at the default branch's head — or,
+  with `at: sha`, at that commit, which is what an update step passes: the commit it brought the
+  code up to, so the code and the workflow come from one commit. A type whose file is gone refuses
+  rather than guessing which type the ticket is now.
   """
-  @spec prepare_repin(Project.t(), Ticket.t()) :: {:ok, map()} | {:error, term()}
-  def prepare_repin(%Project{} = project, %Ticket{ticket_type: ticket_type} = ticket) do
+  @spec prepare_repin(Project.t(), Ticket.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def prepare_repin(%Project{} = project, %Ticket{ticket_type: ticket_type} = ticket, opts \\ []) do
     with {:ok, prepared} <-
-           prepare(project, fn layout, _releases ->
-             TicketTypes.for_repin(layout, ticket_type)
-           end) do
+           prepare(
+             project,
+             fn layout, _releases -> TicketTypes.for_repin(layout, ticket_type) end,
+             Keyword.get(opts, :at)
+           ) do
       {:ok, keep_release(prepared, Forge.ReleaseTickets.release?(ticket))}
     end
   end
@@ -109,10 +113,10 @@ defmodule Forge.Tickets do
   # What is pinned is the definition with its imports resolved, not the file's own text: a
   # ticket's workflow is read back with no repository to read a library from
   # (`docs/design/ticket-types.md` § Imports).
-  defp prepare(project, select) do
+  defp prepare(project, select, at \\ nil) do
     repo = Projects.repo_path(project)
 
-    with {:ok, base} <- Git.resolve(repo, project.default_branch),
+    with {:ok, base} <- at_or_default(repo, project, at),
          {:ok, layout} <- TicketTypes.layout(repo, base),
          {:ok, ticket_type, path} <- select.(layout, releases(repo, base, layout)),
          {:ok, workflow, flat} <- load(repo, base, path) do
@@ -120,6 +124,9 @@ defmodule Forge.Tickets do
        %{repo: repo, base: base, workflow: workflow, yaml_map: flat, ticket_type: ticket_type}}
     end
   end
+
+  defp at_or_default(repo, project, nil), do: Git.resolve(repo, project.default_branch)
+  defp at_or_default(_repo, _project, sha), do: {:ok, sha}
 
   defp entries(%{form: :single}, true), do: [%{name: nil, path: TicketTypes.single_path()}]
   defp entries(%{form: :single}, false), do: []
@@ -221,8 +228,17 @@ defmodule Forge.Tickets do
   § Pinning), so a fix to `build.sh` that lands on the default branch never reaches a ticket
   already failing on the old one. The ticket page says so, beside the way to re-pin.
   """
-  @spec drift(Ticket.t(), Project.t()) :: %{head: String.t(), paths: [String.t()]} | nil
-  def drift(%Ticket{workflow_commit: pinned, ticket_type: ticket_type}, %Project{} = project) do
+  @spec drift(Ticket.t(), Project.t()) ::
+          %{
+            head: String.t(),
+            paths: [String.t()],
+            skipped: %{code: String.t(), reason: String.t()} | nil
+          }
+          | nil
+  def drift(
+        %Ticket{workflow_commit: pinned, ticket_type: ticket_type} = ticket,
+        %Project{} = project
+      ) do
     repo = Projects.repo_path(project)
     own = TicketTypes.path(ticket_type)
 
@@ -231,9 +247,46 @@ defmodule Forge.Tickets do
     with {:ok, head} when head != pinned <- Git.resolve(repo, project.default_branch),
          {:ok, paths} <- Git.changed_paths(repo, pinned, head, [".forge"]),
          [_ | _] = paths <- Enum.reject(paths, &another_type?(&1, own)) do
-      %{head: head, paths: paths}
+      %{head: head, paths: paths, skipped: skipped_repin(ticket)}
     else
       _none -> nil
+    end
+  end
+
+  # Why the engine did not re-pin the ticket, when an update step left it on its old pin and nothing
+  # has re-pinned it since: where the reason is the file's, a person's Re-pin would meet the same
+  # refusal, and the notice says so
+  # (`docs/design/workflow-grammar-v1.md` § Bringing the branch up to date). Newest visit that
+  # skipped, and only if no `ticket.repinned` came after it.
+  defp skipped_repin(%Ticket{id: id}) do
+    skipped =
+      Repo.one(
+        from e in Forge.Events.Event,
+          where:
+            e.ticket_id == ^id and e.type == "ticket.branch_updated" and
+              not is_nil(fragment("?->'repin'->>'skipped'", e.payload)),
+          order_by: [desc: e.seq],
+          limit: 1,
+          select: %{
+            seq: e.seq,
+            code: fragment("?->'repin'->>'skipped'", e.payload),
+            reason: fragment("?->'repin'->>'reason'", e.payload)
+          }
+      )
+
+    repinned =
+      Repo.one(
+        from e in Forge.Events.Event,
+          where: e.ticket_id == ^id and e.type == "ticket.repinned",
+          select: max(e.seq)
+      )
+
+    case skipped do
+      %{seq: seq, code: code, reason: reason} when is_nil(repinned) or seq > repinned ->
+        %{code: code, reason: reason}
+
+      _none_or_superseded ->
+        nil
     end
   end
 

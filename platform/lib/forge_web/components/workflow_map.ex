@@ -23,14 +23,23 @@ defmodule ForgeWeb.WorkflowMap do
   What a state's job is, in a few words: its prompt's file and what it produces, `chat · brief.md`
   for a chat step, the commands a command state runs, or `no job`.
   """
-  @spec job(State.t()) :: String.t()
-  def job(%State{} = state) do
+  @spec job(State.t(), String.t() | nil) :: String.t()
+  def job(%State{} = state, default \\ nil) do
     cond do
+      # The box is narrow: the whole sentence is `job_words/2`'s, in the box's title and the flow.
+      State.updates?(state) -> "up to date with #{default || "the default"}"
       State.chat?(state) -> Enum.join(["chat" | state.produces], " · ")
       State.job?(state) -> arrow(Path.basename(state.prompt), state.produces)
       State.command?(state) -> "runs " <> Enum.map_join(state.invoke, ", ", & &1.command)
       true -> "no job"
     end
+  end
+
+  # The line under an update step's job: where a conflict goes, since it has no budget to show.
+  defp box_budget(%State{} = state) do
+    if State.updates?(state),
+      do: if(state.on_conflict, do: "conflict → #{state.on_conflict}", else: "conflict sticks"),
+      else: budget(state, :short)
   end
 
   defp arrow(prompt, []), do: prompt
@@ -41,14 +50,23 @@ defmodule ForgeWeb.WorkflowMap do
   not: `runs triage.md · writes triage.md` rather than `triage.md → triage.md`, which only read
   once the convention was known.
   """
-  @spec job_words(State.t()) :: String.t()
-  def job_words(%State{} = state) do
+  @spec job_words(State.t(), String.t() | nil) :: String.t()
+  def job_words(%State{} = state, default \\ nil) do
     cond do
+      State.updates?(state) -> update_words(state, default)
       State.chat?(state) -> writes("a chat", state.produces)
       State.job?(state) -> writes("runs " <> Path.basename(state.prompt), state.produces)
       State.command?(state) -> "runs " <> Enum.map_join(state.invoke, ", ", & &1.command)
       true -> "no job"
     end
+  end
+
+  # What an update step does, in words (`docs/design/ui.md` § Workflow): the platform's own work, and
+  # where a conflict goes. The default branch's name is the project's, which the workflow does not
+  # know, so a caller that has it passes it.
+  defp update_words(%State{on_conflict: target}, default) do
+    "brings the branch up to date with #{default || "the default branch"}" <>
+      if(target, do: " · conflicts go to #{target}", else: " · a conflict sticks the ticket")
   end
 
   defp writes(what, []), do: what
@@ -71,9 +89,10 @@ defmodule ForgeWeb.WorkflowMap do
   attr :id, :string, required: true
   attr :workflow, Workflow, required: true
   attr :counts, :map, default: %{}, doc: "open tickets per state, the phone's only place for them"
+  attr :default_branch, :string, default: nil, doc: "what an update step says it brings in"
 
   def flow(assigns) do
-    assigns = assign(assigns, :rows, rows(assigns.workflow))
+    assigns = assign(assigns, :rows, rows(assigns.workflow, assigns.default_branch))
 
     ~H"""
     <ol id={@id} class="wf-flow">
@@ -103,7 +122,7 @@ defmodule ForgeWeb.WorkflowMap do
     """
   end
 
-  defp rows(workflow) do
+  defp rows(workflow, default) do
     for name <- Topology.order(workflow),
         state = Workflow.state(workflow, name),
         not is_nil(state) do
@@ -111,7 +130,7 @@ defmodule ForgeWeb.WorkflowMap do
         name: name,
         initial: name == workflow.initial,
         topology: ForgeWeb.Topology.of(workflow, name),
-        job: job_words(state),
+        job: job_words(state, default),
         budget: budget(state),
         out: Workflow.transitions_from(workflow, name)
       }
@@ -144,6 +163,7 @@ defmodule ForgeWeb.WorkflowMap do
   attr :dots, :map, default: %{}
   attr :filter, :any, default: nil
   attr :selected, :string, default: nil
+  attr :default_branch, :string, default: nil, doc: "what an update step says it brings in"
 
   def map(assigns) do
     names = Topology.order(assigns.workflow)
@@ -163,7 +183,16 @@ defmodule ForgeWeb.WorkflowMap do
         boxes:
           Enum.map(
             names,
-            &box(assigns.workflow, &1, index[&1], top, box_h, assigns.dots, retries)
+            &box(
+              assigns.workflow,
+              &1,
+              index[&1],
+              top,
+              box_h,
+              assigns.dots,
+              retries,
+              assigns.default_branch
+            )
           ),
         edges: Enum.map(nexts, &next(&1, top, box_h)) ++ arcs,
         width: width,
@@ -316,7 +345,7 @@ defmodule ForgeWeb.WorkflowMap do
     if String.length(text) > max, do: String.slice(text, 0, max - 1) <> "…", else: text
   end
 
-  defp box(workflow, name, i, top, h, dots, retries) do
+  defp box(workflow, name, i, top, h, dots, retries, default) do
     state = Workflow.state(workflow, name)
     dots = Map.get(dots, name, [])
     retried = Map.get(retries, name, [])
@@ -326,14 +355,15 @@ defmodule ForgeWeb.WorkflowMap do
       name: name,
       label: label,
       topology: ForgeWeb.Topology.of(workflow, name),
-      job: job(state),
-      budget: budget(state, :short),
+      job: job(state, default),
+      budget: box_budget(state),
       dots: dots,
       retries: retried,
       # What hovering a box says that its face does not: a name that was cut, and what it retries on.
       title:
         [
           label != name && name,
+          State.updates?(state) && job_words(state, default),
           retried != [] && "Retries on " <> Enum.join(retried, ", ")
         ]
         |> Enum.filter(& &1)

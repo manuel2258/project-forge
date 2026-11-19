@@ -364,7 +364,7 @@ defmodule ForgeCore.Prompt do
     #{about(spec)}
     - Job directory: `#{job_dir}`
     - Branch: `#{spec.branch}`
-
+    #{base(spec)}
     ## Context (read-only)
 
     #{inputs(spec, job_dir)}
@@ -562,6 +562,15 @@ defmodule ForgeCore.Prompt do
   defp about(%Spec{ticket: ticket}),
     do: "- About ticket #{ticket.number}: #{ticket.title}"
 
+  # `docs/design/job-prompt.md` § The ticket's base: a line of its own, with its trailing newline,
+  # or nothing at all for a job whose spec carries no base.
+  defp base(%Spec{base: base}) when is_binary(base),
+    do:
+      "- Base: `#{base}` — `git diff #{base}..HEAD` is this ticket's change, whatever the " <>
+        "branch has taken in from the default branch\n"
+
+  defp base(%Spec{}), do: ""
+
   # The ticket's type, when the project has types: information, not a switch — a prompt shared by
   # two types that behaves differently by type is a branch the workflow file cannot see
   # (`docs/design/ticket-types.md` § What a job is told).
@@ -578,7 +587,7 @@ defmodule ForgeCore.Prompt do
     #{ticket_type(spec.ticket)}- State: `#{spec.state}` (attempt #{spec.attempt})
     - Job directory: `#{job_dir}`
     - Branch: `#{spec.branch}` (workflow pinned at commit `#{spec.commit}`)
-
+    #{base(spec)}
     ## How you got here
 
     #{arrival(spec.entered)}#{entered_commands(spec, job_dir)}#{integration(spec)}
@@ -683,7 +692,7 @@ defmodule ForgeCore.Prompt do
     Enum.join(
       [
         "\n\n## Integrating `#{branch}`",
-        "This ticket's changeset no longer merges into `#{branch}`, which is why you are here. " <>
+        integration_cause(integration, branch) <>
           integration_head(integration["head"], branch, remote),
         integration_conflict(integration["paths"] || [], integration["changeset"], remote),
         integration_merges(integration, branch),
@@ -699,6 +708,14 @@ defmodule ForgeCore.Prompt do
   end
 
   defp integration(%Spec{}), do: ""
+
+  defp integration_cause(%{"cause" => "update"}, branch),
+    do:
+      "Bringing this ticket's branch up to date with `#{branch}` conflicted, which is why you " <>
+        "are here. "
+
+  defp integration_cause(_integration, branch),
+    do: "This ticket's changeset no longer merges into `#{branch}`, which is why you are here. "
 
   defp integration_head(head, branch, remote) when is_binary(head),
     do:

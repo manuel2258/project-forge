@@ -38,7 +38,8 @@ defmodule ForgeWeb.TicketViews do
            merge_queue.left ticket.merged ticket.renamed approval.approved approval.rejected
            ticket.cancelled ticket.restored ticket.repinned ticket.held ticket.released
            ticket.stopped ticket.refreshed transition.held ticket.retitled
-           ticket.milestone_set ticket.moved ticket.retried job.extended ticket.cap_raised)
+           ticket.milestone_set ticket.moved ticket.branch_updated ticket.base_moved
+           ticket.retried job.extended ticket.cap_raised)
 
   @doc "The ticket's event types Activity says in words, beside what its jobs did."
   @spec said_types() :: [String.t()]
@@ -220,11 +221,20 @@ defmodule ForgeWeb.TicketViews do
   # offers the same ways and says the same words (`ForgeWeb.QueueLive`).
   def leads(workflow, to) do
     case Workflow.state(workflow, to) do
-      %Workflow.State{on_enter: :merge} -> "merges the ticket's branch"
       %Workflow.State{chat: true} -> "opens a conversation there, waiting for a person"
       %Workflow.State{prompt: prompt} when is_binary(prompt) -> "starts a job in #{to}"
       %Workflow.State{invoke: [_ | _]} -> "runs #{to}'s commands"
-      _human_or_end -> "rests there for a person"
+      %Workflow.State{} = state -> leads_without_work(state)
+      nil -> "rests there for a person"
+    end
+  end
+
+  # What a state with no job does on entry: the platform's own work, or nothing but wait.
+  defp leads_without_work(%Workflow.State{} = state) do
+    cond do
+      Workflow.State.merges?(state) -> "merges the ticket's branch"
+      Workflow.State.updates?(state) -> "brings the branch up to date, then moves on"
+      true -> "rests there for a person"
     end
   end
 
@@ -516,6 +526,7 @@ defmodule ForgeWeb.TicketViews do
           </summary>
           <div class="ticket-step-body">
             <.step_jobs step={step} {assigns} />
+            <.update_visit :if={step[:update]} step={step} />
             <div :if={step.artifacts != []} class="mt-2 flex flex-wrap gap-2">
               <.artifact_chip
                 :for={entry <- step.artifacts}
@@ -591,6 +602,45 @@ defmodule ForgeWeb.TicketViews do
   end
 
   attr :step, :map, required: true
+
+  # What an update step's visit did, opened: the sentence, the merges it brought in by ticket
+  # number (a conversation's said as such), at most ten and *and N more*, and the re-pin under it
+  # (`docs/design/ui.md` § Steps). Every value is a contributor's and is drawn as text.
+  defp update_visit(assigns) do
+    payload = assigns.step.update
+
+    assigns =
+      assign(assigns,
+        said: Forge.Update.said(payload),
+        repin: Forge.Update.repin_said(payload),
+        merges: payload["merges"] || [],
+        more: payload["more"] || 0,
+        titles: assigns.step[:titles] || %{}
+      )
+
+    ~H"""
+    <div id={"update-visit-#{@step.name}"} class="ticket-update">
+      <p class="break-words text-sm/[1.45]">{@said}</p>
+      <ol :if={@merges != []} class="ticket-update-merges">
+        <li :for={merge <- @merges} class="truncate">
+          <%= cond do %>
+            <% merge["ticket"] -> %>
+              <span class="font-mono text-ink-3">#{merge["ticket"]}</span> {@titles[merge["ticket"]] ||
+                merge["subject"]}
+            <% merge["chat"] -> %>
+              a conversation's merge · {merge["subject"]}
+            <% true -> %>
+              {merge["subject"]}
+          <% end %>
+        </li>
+        <li :if={@more > 0} class="text-ink-3">and {@more} more</li>
+      </ol>
+      <p :if={@repin} class="break-words text-[12.5px] text-ink-2">{@repin}</p>
+    </div>
+    """
+  end
+
+  attr :step, :map, required: true
   attr :accepted, :map, required: true
 
   # How the visit ended, drawn as a job's row draws it: the last job's outcome, or what a chat
@@ -613,9 +663,19 @@ defmodule ForgeWeb.TicketViews do
     """
   end
 
-  # The figure at a step's end: its jobs and what they spent; at a ticket's end, the whole.
+  # The figure at a step's end: its jobs and what they spent; at a ticket's end, the whole. An update
+  # step's visit says what it did in one line, as the folded row shows it (`ui.md` § Steps).
   defp step_detail(%{topology: :terminal}, true, ticket),
     do: if(spent = Format.spent(ticket.usage), do: "#{spent} total")
+
+  defp step_detail(%{update: %{} = payload}, _current, _ticket), do: Forge.Update.said(payload)
+
+  # A ticket resting in an update step with no visit recorded yet is on hold, or about to run it.
+  defp step_detail(%{topology: :update, jobs: []}, true, %{held_at: held}) when held != nil,
+    do: "brings the branch up to date when released"
+
+  defp step_detail(%{topology: :update, jobs: []}, true, _ticket),
+    do: "bringing the branch up to date"
 
   defp step_detail(%{jobs: []}, _current, _ticket), do: nil
 
@@ -1237,6 +1297,13 @@ defmodule ForgeWeb.TicketViews do
   attr :project, :map, required: true
 
   defp pin_drift(assigns) do
+    assigns =
+      assign(
+        assigns,
+        :same_refusal,
+        Forge.Update.file_refusal?(get_in(assigns.drift, [:skipped, :code]))
+      )
+
     ~H"""
     <div id="pin-drift" class="ticket-notice">
       <p class="text-ink-2">
@@ -1245,6 +1312,14 @@ defmodule ForgeWeb.TicketViews do
       <ul class="mt-1 flex flex-col gap-0.5 font-mono break-all text-ink-2">
         <li :for={path <- @drift.paths}>{path}</li>
       </ul>
+      <%!-- An update step that left the pin where it was says why; where the reason is the file's, a
+            Re-pin by hand meets the same refusal (`workflow-grammar-v1.md` § Bringing the branch up
+            to date). Where it is the step's — no such state there, or not a step — a hand re-pin asks
+            only that the ticket's own state exist there, so nothing is promised. --%>
+      <p :if={@drift[:skipped]} id="pin-drift-skipped" class="mt-1 break-words text-ink-2">
+        The update step did not re-pin it: {String.slice(@drift.skipped.reason, 0, 300)}.{if @same_refusal,
+          do: " Re-pinning by hand would meet the same refusal."}
+      </p>
       <.repin :if={@ticket.status in Forge.Tickets.Ticket.open_statuses()} {assigns} />
     </div>
     """

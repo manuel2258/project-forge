@@ -93,6 +93,16 @@ defmodule Forge.Application do
       0 -> :ok
       count -> Logger.info("recovered #{count} interrupted job(s) from a previous run")
     end
+
+    # After the jobs: a ticket left in an update step by a crash between its git work and its record
+    # runs the step again, which finds the branch current (`Forge.Engine.recover_updates/0`).
+    case Forge.Engine.recover_updates() do
+      0 ->
+        :ok
+
+      count ->
+        Logger.info("entered #{count} update step(s) a previous run may have been interrupted in")
+    end
   end
 
   @impl true

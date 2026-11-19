@@ -1059,6 +1059,10 @@ defmodule Forge.Conversations do
   defp humanise({:job_live, state}),
     do: "a job of `#{state}` is still running; the ticket has to be cancelled and restored first"
 
+  defp humanise({:updating, state}),
+    do:
+      "`#{state}` is bringing the branch up to date right now, and the ticket moves on by itself when it is done"
+
   defp humanise({:step_live, state}),
     do:
       "`#{state}` is a conversation with the person; they end it with Accept, and only then does the ticket move"

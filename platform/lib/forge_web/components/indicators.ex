@@ -19,14 +19,15 @@ defmodule ForgeWeb.Indicators do
   A workflow state: mono text led by its topology mark (`docs/design/ui.md` § The three axes), in
   StateLabel's classes (`ForgeWeb.UI.Data.state_label/1`).
 
-  The mark is `ForgeWeb.Topology.mark/1`'s and nothing else's: `▸` runs a job on entry (info), `●`
+  The mark is `ForgeWeb.Topology.mark/1`'s and nothing else's: `▸` runs a job on entry (info), `↻`
+  is the platform's own update step (ink, neither a job's nor a person's), `●`
   waits for a person (link), `○` is terminal and `·` unknown (both muted). A terminal state is
   never `✓` — names are the project's, and the platform cannot tell a `done` from an `abandoned` —
   and a state is never coloured by the ticket's status, which is a word beside it. The one colour
   that is not the topology's is `waiting`: a person is waited on in it, and its mark is amber.
   """
   attr :name, :string, required: true
-  attr :topology, :atom, required: true, values: [:job, :human, :terminal, :unknown]
+  attr :topology, :atom, required: true, values: [:job, :update, :human, :terminal, :unknown]
   attr :waiting, :boolean, default: false, doc: "a person is waited on in it: the mark is amber"
 
   def state(assigns) do
@@ -57,6 +58,7 @@ defmodule ForgeWeb.Indicators do
 
   defp tone(_topology, true), do: "waiting"
   defp tone(:job, false), do: "running"
+  defp tone(:update, false), do: "update"
   defp tone(:human, false), do: "step"
   defp tone(_terminal_or_unknown, false), do: "idle"
 

@@ -25,7 +25,7 @@ defmodule Forge.Tickets.Views do
   # resumed), which says nothing a person deciding about the ticket needs.
   @listed ~w(ticket.admitted transition.taken ticket.stuck ticket.unstuck ticket.retried
              ticket.done ticket.cancelled ticket.restored ticket.renamed ticket.merged
-             ticket.merge_conflicted approval.requested approval.approved approval.rejected
+             ticket.merge_conflicted ticket.branch_updated approval.requested approval.approved approval.rejected
              step.accepted merge_queue.entered merge_queue.left job.finished chat.message
              artifact.version_written job.extended ticket.cap_raised)
 

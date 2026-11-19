@@ -261,6 +261,42 @@ defmodule ForgeCore.PromptTest do
     end
   end
 
+  # `docs/design/job-prompt.md` § The ticket's base: what `git diff` is to be taken against.
+  describe "the ticket's base" do
+    @base String.duplicate("a", 40)
+
+    test "a job is told it, with the diff to run" do
+      manifest = Prompt.manifest(%{spec() | base: @base}, "/j")
+
+      assert manifest =~
+               "- Base: `#{@base}` — `git diff #{@base}..HEAD` is this ticket's change"
+
+      # Beside the branch and before how the job got here, with the blank line kept.
+      assert manifest =~
+               ~r/workflow pinned at commit `[^`]+`\)\n- Base: .*\n\n## How you got here/
+    end
+
+    test "a spec with no base says nothing, and the layout is as it was" do
+      manifest = Prompt.manifest(%{spec() | base: nil}, "/j")
+
+      refute manifest =~ "Base:"
+      assert manifest =~ ~r/workflow pinned at commit `[^`]+`\)\n\n## How you got here/
+    end
+
+    test "a conversation about a ticket is told it, and one about the repository is not" do
+      about_ticket = chat_spec(%{ticket: %{number: 3, title: "T"}, base: @base})
+
+      assert Prompt.chat_manifest(about_ticket, "/j") =~ "- Base: `#{@base}`"
+      refute Prompt.chat_manifest(chat_spec(), "/j") =~ "Base:"
+    end
+
+    test "survives the wire" do
+      {:ok, decoded} = %{spec() | base: @base} |> Spec.to_json() |> Spec.from_json()
+
+      assert decoded.base == @base
+    end
+  end
+
   # `docs/design/job-prompt.md` § Integrating the default branch: a job a conflict sent here is
   # told what conflicted, what landed meanwhile, and to merge rather than rebase.
   describe "an integrating job" do
@@ -320,6 +356,32 @@ defmodule ForgeCore.PromptTest do
       [arrival, rest] = String.split(manifest, "## Integrating `main`", parts: 2)
       assert arrival =~ "The ticket came from `review_ready` on `merge_conflict`"
       assert rest =~ "## Inputs (read-only)"
+    end
+
+    test "an update step's conflict says that bringing the branch up to date conflicted" do
+      manifest =
+        Prompt.manifest(
+          integrating(%{
+            "default_branch" => "main",
+            "cause" => "update",
+            "head" => @head,
+            "paths" => ["a.ex"]
+          }),
+          "/j"
+        )
+
+      assert manifest =~
+               "Bringing this ticket's branch up to date with `main` conflicted, which is why you are here."
+
+      refute manifest =~ "changeset no longer merges"
+      assert manifest =~ "It conflicted in these paths:\n\n- `a.ex`"
+    end
+
+    test "any other cause says the changeset no longer merges" do
+      manifest = Prompt.manifest(integrating(%{"default_branch" => "main"}), "/j")
+
+      assert manifest =~ "This ticket's changeset no longer merges into `main`"
+      refute manifest =~ "Bringing this ticket's branch up to date"
     end
 
     test "sent here by a person with nothing recorded, says so" do

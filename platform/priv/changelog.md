@@ -10,6 +10,36 @@ until it changes) or **may adopt** (new and optional). A project records the rel
 brought up to in `.forge/forge-release`; `platform.md` § Upgrading to a newer forge says how an
 upgrade goes.
 
+## 0.24.0
+
+- **may adopt** — a workflow state may declare `on_enter: update`, a step the platform runs itself with no job: it merges the default branch into the ticket's branch (or moves it forward, or leaves it when already current), re-pins the ticket's workflow at the commit it brought the code up to, moves the ticket's base, and takes the state's one edge out. `on_conflict` names the state a conflict goes to, a job or a human state. Before and after:
+
+  ```
+  # before
+  transitions:
+    - { from: implementing, to: checking }
+  # after
+  states:
+    refresh:
+      on_enter: update
+      on_conflict: resolving
+  transitions:
+    - { from: implementing, to: refresh }
+    - { from: refresh, to: checking }
+  ```
+
+  The step has no prompt, no `produces`, and exactly one edge out with no `when` or `approve`. An edge out of it into a merging state needs an approval of the changeset on record. Nothing is required of a project that does not use it. (`workflow-grammar.md` § Bringing the branch up to date)
+
+- **must change** — where a workflow routes a merge conflict to a job state that rebases and then goes straight on to a merging state (an edge out of an integrating state, with no `approve`), that edge now always waits for a person to approve the changeset, whether or not the workflow lists it. A rebase no longer merges a ticket nobody approved. A workflow that relied on the old behaviour has to expect a decision at that point; the edge itself needs no change. (`workflow-grammar.md` § Merging)
+
+- **may adopt** — a person may move a ticket to any state of its workflow, by a jump, from the ticket page, over the API (`POST /tickets/:project/:number/transition`) or through a ticket chat's `transition.json`. A target that a declared edge reaches is still taken by that edge with its approvals and `max`. Any other target is a jump: it records no approval (except the changeset's, into a merging state), counts against no `max`, and is refused when the target's job would start without a required input. A done ticket may be reopened by one. A chat that repairs a ticket may therefore name any state, not only those a transition reaches. (`workflow-grammar.md` § Jumping; the chat preamble § Moving the ticket)
+
+- **may adopt** — a person may extend an agent job that ran out of tokens or turns (`budget_exhausted`), on the same job and session with more room and a note the run reads first, or run its state again with a note, and may raise the ticket's cap in the same step. Over the API: `POST /tickets/:project/:number/jobs/:job_id/extend`, and `retry` takes an optional note. No workflow edge is involved and no `max` counts either. (`workflow-grammar.md` § Extending a job)
+
+- **may adopt** — a job's manifest names the ticket's *Base*, and a branch may hold a merge of the default branch the platform wrote. `git diff <base>..HEAD` is the ticket's own change. A job that diffed against the default branch, or assumed every commit on the branch was an agent's, should diff against the base. (`platform.md` § Branches and merging)
+
+- **may adopt** — a read of `$FORGE_JOB/archive/` now waits out a busy platform for up to 30 seconds instead of failing: *Connection timed out* means it already waited, and *Input/output error* means the file arrived damaged, so a retry may not help. A prompt or script that retried on the old error can drop it. (the job preamble § Where things are)
+
 ## 0.23.0
 
 - **may adopt** — a member may put an open ticket on hold, of any type, and release it later. While it is held the platform takes no step on it by itself: no job or command goes to a machine, no transition is taken on the engine's own authority, and no chat step opens a conversation. A person's own moves still work. A run already going finishes and its transition waits for the release. A ticket that never started is re-pinned to the default branch's head on release, and the release is refused whole when its workflow file is gone, does not parse, or has no state of the ticket's name. No job or conversation can hold, release or stop a ticket, so nothing in `.forge/` changes. (workflow-grammar.md § Holding a ticket)

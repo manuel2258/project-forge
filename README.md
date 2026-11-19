@@ -70,7 +70,7 @@ mix forge.project.mirror game backup https://github.com/you/game.git --user you 
                         # mirrors need the repository at $FORGE_REPOS_DIR/<name>.git, where the
                         # web page puts a project; one added at another path cannot have them
 mix forge.git.token game --ticket 1               # a clone URL with a short-lived credential
-mix forge.admit game "Persist the high score table" --body-file ticket.md
+mix forge.admit game "Persist the high score table" --body-file ticket.md --start
 mix forge.queue                                   # questions, approvals, stuck, review
 mix forge.show game#1                             # state, jobs, artifacts, events
 mix forge.answer game#1 storage-backend --choice sqlite

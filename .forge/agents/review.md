@@ -1,7 +1,8 @@
 # Review
 
 Run the `review` skill (`.claude/skills/review/SKILL.md`) against this ticket's changeset, over
-`git diff origin/main..HEAD`.
+`git diff <base>..HEAD`, where `<base>` is the ticket's *Base* in the manifest: the branch may hold a merge of
+the default branch the platform wrote, which is not the ticket's own change.
 
 **`feedback.md`, when present, is what a person asked to change** when they declined a presented
 change. Check each request against the diff first, as a finding in its own right: one not done is

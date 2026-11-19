@@ -143,7 +143,7 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
       budget = Workflow.state(workflow, "reviewing").budget
 
       assert budget.tokens == 12_000_000, "#{name}: reviewing has #{budget.tokens}"
-      assert budget.turns == 150, "#{name}: reviewing has #{budget.turns} turns"
+      assert budget.turns == 300, "#{name}: reviewing has #{budget.turns} turns"
     end
   end
 
@@ -402,7 +402,7 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
   # ticket 7's `planning` died at turn 51 of 50 with $1.11 of its $4.00 unspent, and `publishing`
   # has no retry at all, so for it the same ceiling sticks a ticket that has already written to
   # GHCR. 60 is the repository's floor for that, and this asserts the rule rather than each
-  # figure: a state may give more turns, and `reviewing` at 150 and `implementing` at 400 do.
+  # figure: a state may give more turns, and `reviewing` at 300 and `implementing` at 800 do.
   test "a job state costing a few dollars is not stopped by its turn ceiling first" do
     budgets =
       for path <- workflow_files(),
@@ -453,11 +453,30 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
 
     assert Enum.any?(
              edges,
-             &match?(%Transition{to: "diagnosing", approve: ["refinement.md"], when: nil}, &1)
+             &match?(%Transition{to: "refresh", approve: ["refinement.md"], when: nil}, &1)
            )
 
     assert Enum.sort(for %Transition{when: w, to: "refining", max: 1} <- edges, do: w) ==
              ["did_not_converge"]
+  end
+
+  # Refining can take a long time and the branch is cut at admission, so the platform's own update
+  # step brings the default branch in between acceptance and the first agent job. Removing the edge
+  # or the state leaves planning and diagnosing on code as old as the ticket.
+  for {file, first} <- [{"dev", "planning"}, {"bug", "diagnosing"}] do
+    test "#{file}'s refresh is an update step between refining and #{first}" do
+      workflow = load!(Path.join(@forge, "workflows/#{unquote(file)}.yml"))
+
+      assert Workflow.state(workflow, "refresh").on_enter == [:update]
+
+      assert [%Transition{from: "refresh", to: unquote(first), when: nil, approve: []}] =
+               Workflow.transitions_from(workflow, "refresh")
+
+      assert Enum.any?(
+               Workflow.transitions_from(workflow, "refining"),
+               &match?(%Transition{to: "refresh"}, &1)
+             )
+    end
   end
 
   # Wherever the key is declared it is in force, and an edge without it merges at once and skips

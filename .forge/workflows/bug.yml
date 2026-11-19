@@ -21,7 +21,7 @@ states:
     effort: high
     inputs: [ticket]
     produces: [refinement.md]
-    budget: { turns: 100, tokens: 1.6M }
+    budget: { turns: 200, tokens: 1.6M }
 
   # `implementation.md` is here because `implementing` sends the ticket back on
   # `diagnosis_invalid`, and a re-diagnosis that cannot read why it was sent back re-derives the
@@ -39,7 +39,7 @@ states:
     effort: xhigh
     inputs: [ticket, refinement.md, implementation.md]
     produces: [diagnosis.md]
-    budget: { turns: 120, tokens: 1.5M }
+    budget: { turns: 240, tokens: 1.5M }
 
   implementing:
     prompt: agents/implement-bug.md
@@ -65,7 +65,7 @@ states:
     # 1280 MiB. Measured on 2026-11-08 with `/proc/<pid>/smaps_rollup` every 200 ms; the default
     # is above that figure, so nothing is declared. A page much heavier than the shipped setup's
     # would move it, and the figure to correct this with is a look killed at 137.
-    budget: { turns: 400, tokens: 8M }
+    budget: { turns: 800, tokens: 8M }
 
   checking:
     extends: checking
@@ -100,6 +100,14 @@ states:
 
   # `refinement.md` for the reason `dev.yml`'s `rebasing` carries: the prompt is written against
   # the acceptance criteria and did not get them.
+  # **The platform's own step, no job** (`on_enter: update`): refining is a conversation that can
+  # take a while, and the branch is cut at admission and moves no further by itself. This brings
+  # the default branch in once the person accepts, so diagnosing starts from current code and the
+  # ticket's workflow is re-pinned at the commit it was brought up to. The branch has no work of
+  # its own yet, so it moves forward and never conflicts; no `on_conflict` is needed.
+  refresh:
+    on_enter: update
+
   rebasing:
     extends: rebasing
     inputs: [refinement.md, diagnosis.md, changeset]
@@ -138,7 +146,8 @@ states:
 # platform bounds the queue's conflict loop at three rebases in a row, and `needs_review` reaches
 # `merged` again only through `review_ready`'s approval, which is a person.
 transitions:
-  - { from: refining,     to: diagnosing,   approve: [refinement.md] }
+  - { from: refining,     to: refresh,      approve: [refinement.md] }
+  - { from: refresh,      to: diagnosing }
   - { from: diagnosing,   to: implementing }
   - { from: implementing, to: checking }
   - { from: implementing, to: diagnosing,   when: diagnosis_invalid, max: 2 }

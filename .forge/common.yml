@@ -156,7 +156,7 @@ states:
     effort: high
     produces: [report.md]
     outcomes: [done, issues_found]
-    budget: { turns: 150, tokens: 12M }
+    budget: { turns: 300, tokens: 12M }
 
   # A presentation (`produces: [presentation.md!]`): prose for the person deciding, drawn above
   # the diff on the review page with the source it quotes inline, read by no later state and
@@ -196,7 +196,7 @@ states:
     # cost ceiling is the one that should bind. Ticket 7's `planning` died at turn 51 of 50 with
     # $1.11 of its $4.00 unspent, and one of its four refinements — a job then, a conversation now
     # — used 36 of 40.
-    budget: { turns: 60, tokens: 600k }
+    budget: { turns: 120, tokens: 600k }
 
   # Every edge into it queues (`queue: true` in each workflow's transitions), so an approval puts
   # the ticket in the project's line and the merge queue's runner merges the line one ticket at a
@@ -235,4 +235,4 @@ states:
       check: { max: 3 }
     produces: [rebase.md, changeset]
     outcomes: [done, needs_review]
-    budget: { turns: 100, tokens: 1.6M }
+    budget: { turns: 200, tokens: 1.6M }

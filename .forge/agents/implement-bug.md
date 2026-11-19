@@ -35,7 +35,7 @@ already answered is history and not a new request — the newest is the one that
 
 ## Screenshots, when the change is something a person sees
 
-Run this when `git diff --stat origin/main..HEAD -- platform/lib/forge_web platform/assets` is not
+Run this when `git diff --stat <base>..HEAD -- platform/lib/forge_web platform/assets` is not
 empty — the web layer and its styles, which is also what `reviewing` checks. `docs/design/look.md`
 has the tool; this is how to use it here.
 

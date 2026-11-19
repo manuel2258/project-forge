@@ -398,6 +398,32 @@ defmodule ForgeCore.Workflow do
   end
 
   @doc """
+  Every state's name, in the order a reader meets them: the initial state first, then each state
+  the edges reach, breadth first and in the order the transitions declare them
+  (`edges/1`, so an `on_conflict` target is reached through its merging state), then the states
+  nothing reaches, by name. A workflow keeps its states in a map, which has no order of its own,
+  and a list a person reads — the states a ticket may be jumped to — must not change between two
+  draws of the same page.
+  """
+  @spec state_names(t()) :: [state_name()]
+  def state_names(%__MODULE__{initial: initial, states: states} = workflow) do
+    reached = walk([initial], edges(workflow), [initial])
+    reached ++ (states |> Map.keys() |> Enum.sort() |> Kernel.--(reached))
+  end
+
+  defp walk([], _edges, seen), do: Enum.reverse(seen)
+
+  defp walk([from | rest], edges, seen) do
+    next =
+      edges
+      |> Enum.filter(&(&1.from == from and &1.to not in seen))
+      |> Enum.map(& &1.to)
+      |> Enum.uniq()
+
+    walk(rest ++ next, edges, Enum.reverse(next) ++ seen)
+  end
+
+  @doc """
   Whether `name` is an integrating state: the `on_conflict` of a state that merges or updates. Its
   job's checkout also fetches the default branch, and its manifest says what conflicted
   (`docs/design/job-prompt.md` § Integrating the default branch).

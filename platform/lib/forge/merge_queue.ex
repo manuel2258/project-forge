@@ -110,30 +110,38 @@ defmodule Forge.MergeQueue do
   `outcome`), against the changeset `source` and the `commit-message` version that are current now,
   and the ids of the approvals the transaction recorded — and `attrs[:approval_ids]`, approvals
   already on record the entry stands on — for withdrawing exactly those. `who` is an actor. The event names it.
+
+  `transition` is `%Transition{}` for a declared edge, and `{:jump, from, to}` for a jump
+  (`docs/design/workflow-grammar-v1.md` § Jumping): the row has no edge, says `jump`, and the event
+  does too. What the row records as approved is the edge's `approve` list, and a jump's is the
+  changeset alone (`shape/1`): the transaction records one `{:approval, name}` step each, which the
+  row names by id for withdrawing exactly those.
   """
-  @spec put_enter(Multi.t(), Ticket.t(), Transition.t(), String.t() | nil, map(), term(), map()) ::
-          Multi.t()
-  def put_enter(
-        multi,
-        %Ticket{} = ticket,
-        %Transition{} = transition,
-        outcome,
-        source,
-        who,
-        attrs
-      ) do
+  @spec put_enter(
+          Multi.t(),
+          Ticket.t(),
+          Transition.t() | {:jump, String.t(), String.t()},
+          String.t() | nil,
+          map(),
+          term(),
+          map()
+        ) :: Multi.t()
+  def put_enter(multi, %Ticket{} = ticket, edge, outcome, source, who, attrs) do
+    {from, to, names, edge_outcome, jump} = shape(edge)
+
     Multi.run(multi, :merge_queue_entry, fn repo, changes ->
       approvals =
-        Enum.map(transition.approve, &Map.fetch!(changes, {:approval, &1}).id) ++
+        Enum.map(names, &Map.fetch!(changes, {:approval, &1}).id) ++
           List.wrap(attrs[:approval_ids])
 
       %Entry{
         project_id: ticket.project_id,
         ticket_id: ticket.id,
-        from_state: transition.from,
-        to_state: transition.to,
+        from_state: from,
+        to_state: to,
         outcome: outcome,
-        edge_outcome: Transition.outcome(transition),
+        edge_outcome: edge_outcome,
+        jump: jump,
         changeset_sha: source.sha,
         changeset_version: source.version,
         commit_message_version: attrs[:commit_message_version],
@@ -147,15 +155,23 @@ defmodule Forge.MergeQueue do
     end)
     |> Events.log(:merge_queue_entered, "merge_queue.entered", Forge.Actor.of(who), %{
       ticket_id: ticket.id,
-      payload: %{
-        "from" => transition.from,
-        "to" => transition.to,
-        "changeset" => source.sha,
-        "changeset_version" => source.version,
-        "comment" => attrs[:comment]
-      }
+      payload:
+        %{
+          "from" => from,
+          "to" => to,
+          "changeset" => source.sha,
+          "changeset_version" => source.version,
+          "comment" => attrs[:comment]
+        }
+        |> then(&if(jump, do: Map.put(&1, "jump", true), else: &1))
     })
   end
+
+  # A jump approves the changeset and nothing else, whichever edges lead to its target.
+  defp shape(%Transition{} = t), do: {t.from, t.to, t.approve, Transition.outcome(t), false}
+
+  defp shape({:jump, from, to}),
+    do: {from, to, [ForgeCore.Workflow.changeset_artifact()], nil, true}
 
   @doc """
   Puts an integrated ticket back in the line at the place it kept, for the edge it has now taken
@@ -173,6 +189,8 @@ defmodule Forge.MergeQueue do
         to_state: transition.to,
         outcome: outcome,
         edge_outcome: Transition.outcome(transition),
+        # An integration comes back on a real edge, whatever put the ticket in the line.
+        jump: false,
         changeset_sha: source.sha,
         changeset_version: source.version,
         commit_message_version: message

@@ -1912,8 +1912,16 @@ defmodule Forge.ConversationsTest do
       spec = Jobs.assignment(chat, Tickets.get!(ticket.id), project, "token")["spec"]
 
       assert spec["moving"]["transitions"] == [
-               %{"to" => "planning", "approve" => ["refinement.md"], "ambiguous" => false}
+               %{"to" => "planning", "approve" => ["refinement.md"]}
              ]
+
+      # Every other state is a jump, with what its job still lacks: `implementing` reads `plan.md`,
+      # and `merged` needs a changeset and a commit message; the arrow's target is not among them.
+      jumps = Map.new(spec["moving"]["jumps"], &{&1["to"], &1})
+      assert jumps["implementing"]["missing"] == ["plan.md"]
+      assert jumps["merged"]["merges"] == true
+      assert "changeset" in jumps["merged"]["missing"]
+      refute Map.has_key?(jumps, "planning")
 
       # And `job_live` is the state's own answer rather than a constant: with the admission's
       # job put to rest, a conversation starting now is told nothing is in its way.
@@ -1946,11 +1954,10 @@ defmodule Forge.ConversationsTest do
 
       spec = Jobs.assignment(chat, Tickets.get!(ticket.id), project, "token")["spec"]
 
-      # `approve` carries only the surviving edge's names — and `ambiguous` is true, because the
-      # dead edge still *exists*: the engine counts every declared edge to the target, so this
-      # said `false` until round 4 found that the marker and the engine disagreed.
+      # `approve` carries only the surviving edge's names: the dead edge is not offered, so it is
+      # neither taken nor named.
       assert spec["moving"]["transitions"] == [
-               %{"to" => "planning", "approve" => ["refinement.md"], "ambiguous" => true}
+               %{"to" => "planning", "approve" => ["refinement.md"]}
              ]
 
       # The page is offered the same target, which is what makes the two agree.
@@ -1991,11 +1998,9 @@ defmodule Forge.ConversationsTest do
       assert {:ok, _chat} = Conversations.open(project, "move it", ticket: ours)
     end
 
-    # **Finding 2.** Two edges to one target cannot be asked for: the request names a target and
-    # no outcome, so `choose/4` answers `{:ambiguous, _}` every time. This repository's own
-    # `dev.yml` reaches `implementing` twice out of `implementing`, so the manifest would
-    # otherwise advertise a state that can never be taken.
-    test "a target two edges reach is marked as one that cannot be asked for", %{
+    # Two offered edges to one target, one of them the bare edge: the request is the bare edge,
+    # and the manifest lists the target once, as a transition (`ForgeCore.Engine.route/4`).
+    test "a target two edges reach is a transition when one of them is the bare edge", %{
       project: project
     } do
       {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
@@ -2011,16 +2016,34 @@ defmodule Forge.ConversationsTest do
 
       spec = Jobs.assignment(chat, Tickets.get!(ticket.id), project, "token")["spec"]
 
-      assert [%{"to" => "planning", "ambiguous" => true}] = spec["moving"]["transitions"]
+      assert [%{"to" => "planning"}] = spec["moving"]["transitions"]
+      refute "planning" in Enum.map(spec["moving"]["jumps"], & &1["to"])
     end
 
-    # **Finding 1 of round 4.** `ForgeCore.Engine.choose/4` counts its candidates straight off
-    # `transitions_from/2`, with no unversioned-artifact filter, so marking a target askable
-    # because only one edge survived the filter would be a guard using a different model from the
-    # operation it guards. The count is still over every declared edge for that reason; what
-    # ticket 13 changed underneath it is which of those counts the engine then refuses, which the
-    # last assertion records.
-    test "a target stays unaskable when one of its two edges was filtered out", %{
+    # Two edges to one target and no bare one among them used to be refused every time as
+    # ambiguous; the target is a jump now, listed as one and not among the transitions.
+    test "a target two edges reach with no bare edge is listed as a jump", %{project: project} do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+
+      ticket = no_bare_edge!(ticket)
+
+      {:ok, _version} =
+        Forge.Artifacts.record_version(ticket.id, "refinement.md", :document, :system, %{
+          content: "---\noutcome: done\n---\n# R\n"
+        })
+
+      {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+      finish_jobs(ticket)
+
+      spec = Jobs.assignment(chat, Tickets.get!(ticket.id), project, "token")["spec"]
+
+      assert spec["moving"]["transitions"] == []
+      assert Enum.find(spec["moving"]["jumps"], &(&1["to"] == "planning"))
+    end
+
+    # The edge the person would be offered when its document is unversioned is not offered, and
+    # the one that is offered is the one a request takes.
+    test "a target with one of its two edges filtered out is the surviving edge", %{
       project: project
     } do
       {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
@@ -2040,17 +2063,8 @@ defmodule Forge.ConversationsTest do
 
       spec = Jobs.assignment(chat, ticket, project, "token")["spec"]
 
-      assert [%{"to" => "planning", "ambiguous" => true}] = spec["moving"]["transitions"]
-
-      # **And the engine no longer refuses it, so the marker over-marks.** `Engine.choose/4` grew
-      # `default_among/1` in ticket 13 — landed before this test and never run against it — which
-      # takes the bare edge when one of several leads to the target. The marker above counts
-      # declared edges, so it still says unaskable. That is the safe direction (an agent is never
-      # told it may ask for something that would then be refused) but it is not what this test was
-      # written for, and the two cannot both be right. Asserted as it behaves, so that settling it
-      # either way fails here; `proposal-ambiguous-marker.md` is the question.
-      assert {:ok, %ForgeCore.Workflow.Transition{when: nil}} =
-               ForgeCore.Engine.choose(Tickets.workflow(ticket), ticket.state, "planning")
+      assert [%{"to" => "planning", "approve" => ["refinement.md"]}] =
+               spec["moving"]["transitions"]
     end
 
     test "a project chat's spec carries no transitions and no decision", %{project: project} do
@@ -2880,6 +2894,83 @@ defmodule Forge.ConversationsTest do
       assert reason =~ "no version"
     end
 
+    # Ticket 56: any state of the workflow, by a jump, attributed to the opener like any move, with
+    # no approval of the transition it did not take (`docs/design/conversations.md`).
+    test "it jumps to a state no transition leads to", %{
+      ticket: ticket,
+      chat: chat,
+      opener: opener
+    } do
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"to" => "review_ready"}))
+
+      assert Tickets.get!(ticket.id).state == "review_ready"
+
+      assert %{actor: %{"id" => actor_id}, payload: %{"jump" => true, "comment" => "as asked"}} =
+               Events.latest_for_ticket(ticket.id, "transition.taken")
+
+      assert actor_id == opener.id
+      assert refusals(chat) == []
+    end
+
+    # Criterion 21: a refusal that carries another ticket is said by its number, not as the row.
+    test "a release reopened beside another is refused by the other's number", %{
+      ticket: ticket,
+      chat: chat,
+      project: project,
+      opener: opener
+    } do
+      release = fn t ->
+        t
+        |> Ecto.Changeset.change(workflow: Map.put(t.workflow, "release", true))
+        |> Repo.update!()
+      end
+
+      {:ok, other} =
+        Forge.Tickets.admit(project, %{title: "Other", body: "."}, {:user, opener.id})
+
+      other = release.(other)
+      release.(ticket) |> Ecto.Changeset.change(status: :done) |> Repo.update!()
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"to" => "review_ready"}))
+
+      assert [reason] = refusals(chat)
+
+      assert reason ==
+               "a release is already open: ##{other.number}; this one cannot be reopened beside it"
+
+      assert Tickets.get!(ticket.id).status == :done
+    end
+
+    # Criterion 3: what the target's job needs is written in the turn that asks for it, and is
+    # recorded before the request is read.
+    test "a document written in the same turn makes the jump possible", %{
+      ticket: ticket,
+      chat: chat
+    } do
+      {:ok, _chat} =
+        Conversations.record_turn(chat, turn_asking(1, %{"to" => "implementing"}))
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert [reason] = refusals(chat)
+      assert reason =~ "plan.md"
+
+      turn =
+        2
+        |> turn_asking(%{"to" => "implementing"})
+        |> Map.put("documents", %{"plan.md" => "---\noutcome: done\n---\n# Plan\n"})
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn)
+
+      assert Tickets.get!(ticket.id).state == "implementing"
+
+      assert [%{version: version}] =
+               Enum.filter(Forge.Jobs.for_ticket(ticket.id), &(&1.state == "implementing"))
+               |> Enum.flat_map(&(&1 |> Forge.Jobs.spec() |> Map.fetch!(:inputs)))
+               |> Enum.filter(&(&1.name == "plan.md"))
+
+      assert version == Forge.Artifacts.latest(ticket.id, "plan.md").version
+    end
+
     # AC3, approving. The pending decision is the ticket's, whoever asked for it; deciding it
     # takes the transition and records the approval against the latest version at that moment.
     test "it decides a pending transition, and approving takes it", %{
@@ -2991,7 +3082,7 @@ defmodule Forge.ConversationsTest do
 
       assert Tickets.get!(ticket.id).state == "refining"
       assert [reason] = refusals(chat)
-      assert reason =~ "no such transition"
+      assert reason =~ "no state called"
     end
 
     test "a decision with nothing pending is refused", %{ticket: ticket, chat: chat} do
@@ -3419,6 +3510,29 @@ defmodule Forge.ConversationsTest do
       # The validator wants an approved name produced by that state or an earlier one, so the
       # dead edge's document is declared and simply never written — which is the case.
       |> update_in(["states", "refining", "produces"], &(&1 ++ [name]))
+
+    ticket |> Ecto.Changeset.change(%{workflow: workflow}) |> Repo.update!()
+  end
+
+  # Two `refining -> planning` edges and no bare one among them: `done` is renamed `fine`, so the
+  # request for `planning` names a target and cannot say which.
+  defp no_bare_edge!(ticket) do
+    ticket = second_edge!(ticket, "refinement.md")
+
+    workflow =
+      update_in(ticket.workflow, ["transitions"], fn transitions ->
+        Enum.map(transitions, fn
+          %{"from" => "refining", "to" => "planning", "when" => nil} = edge ->
+            Map.put(edge, "when", "fine")
+
+          %{"from" => "refining", "to" => "planning"} = edge when not is_map_key(edge, "when") ->
+            Map.put(edge, "when", "fine")
+
+          other ->
+            other
+        end)
+      end)
+      |> put_in(["states", "refining", "outcomes"], ["fine", "redo"])
 
     ticket |> Ecto.Changeset.change(%{workflow: workflow}) |> Repo.update!()
   end

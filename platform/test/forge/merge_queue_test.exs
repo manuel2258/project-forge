@@ -290,6 +290,41 @@ defmodule Forge.MergeQueueTest do
       assert MergeQueue.entry(ticket) == nil
     end
 
+    # A jump's entry names no edge (`jump = (edge_outcome IS NULL)`); once it is integrated the
+    # ticket is back in the line on a real one, and the row says so.
+    test "a queued jump comes back from its integration on a real edge", context do
+      %{project: project, user: user, bare: bare} = context
+      ticket = ticket!(project, user, "README.md")
+
+      for job <- Jobs.for_ticket(ticket.id) do
+        job |> Ecto.Changeset.change(status: :finished, outcome: :converged) |> Repo.update!()
+      end
+
+      ticket =
+        ticket
+        |> Ecto.Changeset.change(state: "implementing", status: :stuck, pending_transition: nil)
+        |> Repo.update!()
+
+      commit_to(bare, "main", %{"README.md" => "the trunk's version\n"}, "another ticket")
+      assert {:ok, _queued} = Operator.transition(ticket, user, "merged")
+      assert %{jump: true, edge_outcome: nil} = MergeQueue.entry(ticket)
+
+      assert {:integrating, _id} = Engine.advance_queue(project.id)
+      assert %{jump: true, status: :integrating} = MergeQueue.entry(ticket)
+
+      head = integrate!(bare, fresh(ticket))
+      changeset!(fresh(ticket), head)
+      integration_done!(fresh(ticket))
+
+      assert %{status: :waiting, jump: false, from_state: "integrating", to_state: "merged"} =
+               entry = MergeQueue.entry(ticket)
+
+      assert entry.edge_outcome != nil
+      assert {:merged, _id} = Engine.advance_queue(project.id)
+      assert latest_payload(ticket, "transition.taken")["from"] == "integrating"
+      refute Map.has_key?(latest_payload(ticket, "transition.taken"), "jump")
+    end
+
     @tag workflow: :a
     test "an integration on an edge to any other state leaves the line", context do
       %{project: project, user: user, bare: bare} = context

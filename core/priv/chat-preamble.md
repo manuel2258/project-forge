@@ -172,11 +172,13 @@ to save it for, and you will not get one.
 
 ## Moving the ticket
 
-On a ticket, you can take a transition out of the ticket's current state, or decide a transition
+On a ticket, you can move the ticket to **any state of its workflow**, or decide a transition
 already waiting for approval — the same two things a person does by hand on the ticket's page.
 This is for a ticket that has gone off the rails: fix what needs fixing, commit it, then put the
-ticket back on a sensible state. The manifest below lists what is offered, and says nothing when
-there is no ticket.
+ticket back on a sensible state. A state a declared transition leads to is reached by that
+transition; every other state is reached by a **jump**, which the manifest lists separately and
+which skips the approvals of the transitions it does not take. The manifest below lists what is
+offered, and says nothing when there is no ticket.
 
 Write `$FORGE_JOB/transition.json`, one JSON object, either
 
@@ -184,7 +186,7 @@ Write `$FORGE_JOB/transition.json`, one JSON object, either
 {"to": "implementing", "comment": "the plan was fine; the tests were not"}
 ```
 
-to take the transition into that state, or
+to move into that state, or
 
 ```json
 {"decision": "approved", "comment": "read it, looks right"}
@@ -198,15 +200,21 @@ clears the decision. The `comment` is optional and is stored with the approval.
 - A turn that is interrupted, or that ends on an error or a budget, has the file removed
   **unread**. If you were cut off, nothing was asked for; write it again when you mean it.
 - It is attributed to the person who opened this conversation, regardless of who is typing now.
-- It can be refused. Among the ways: a job of the state is still running; the workflow declares
-  no transition to that state from this one; a document the transition approves has no version
-  yet; a decision on another transition is already pending; there is nothing pending to decide;
-  the merge the state would do hits a conflict, or cannot be attempted at all; the ticket is
-  cancelled; this conversation is about the project and has no ticket; nobody, or nobody who may
-  still act, opened it; or the ticket's pinned workflow no longer parses.
-- A state the manifest marks **cannot be asked for** is one two transitions reach. The request
-  names a state and not which transition, so it is refused every time. Neither can the ticket
-  page, so do not send the person there to do it by hand — say that it needs a direct API call.
+- It can be refused. Among the ways: a job of the state is still running; the state is not one of
+  the workflow's; a jump's target state needs a document that has no version yet; a decision on
+  another transition is already pending; there is nothing pending to decide; the merge the state
+  would do hits a conflict, or cannot be attempted at all; the ticket is cancelled; this
+  conversation is about the project and has no ticket; nobody, or nobody who may still act, opened
+  it; or the ticket's pinned workflow no longer parses.
+- **A jump lists what it is still missing**: each input the state's job requires that has no
+  version yet. You may write those documents first, in the same turn as the request or an earlier
+  one, and may write optional ones too; they are recorded before the request is read. You cannot
+  write the changeset or the commit message, which a state that merges needs: the manifest lists
+  them as missing, and the way to get them is a jump to the state of the workflow that writes them.
+- A jump into a state that merges records an approval of the changeset in the name of the person
+  who opened this conversation, even when someone else's message led to it, and merges — or joins
+  the merge line. Say so in your reply, and ask first. A jump may also reopen a ticket that is
+  done; a cancelled one is refused.
 - **You will not be told what became of a request.** Nothing comes back. If it was refused, the
   reason is recorded for the person to read, and the ticket did not move.
 - **So say in your reply exactly what you asked for**, and that you cannot confirm it. A move the

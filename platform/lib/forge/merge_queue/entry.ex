@@ -4,7 +4,8 @@ defmodule Forge.MergeQueue.Entry do
   queue). A ticket has a row exactly while it is queued; the events are the history.
 
   `from_state`, `to_state` and `edge_outcome` name the edge the ticket is queued for, so the runner
-  can take it by `ForgeCore.Engine.choose/4`; `outcome` is the job's outcome behind it, if any; `changeset_*` and `commit_message_version` are what was
+  can take it by `ForgeCore.Engine.choose/4` — or, when `jump` is true, no edge at all: the runner
+  moves the ticket to `to_state` as a jump; `outcome` is the job's outcome behind it, if any; `changeset_*` and `commit_message_version` are what was
   current when it was approved, which is what the merge uses — until an integration puts the row
   back in the line, when they become the integrated changeset and the latest `commit-message`.
   """
@@ -20,6 +21,8 @@ defmodule Forge.MergeQueue.Entry do
     field :to_state, :string
     field :outcome, :string
     field :edge_outcome, :string
+    # A jump has no edge: `edge_outcome` is nil exactly when this is true (a check constraint).
+    field :jump, :boolean, default: false
     field :changeset_sha, :string
     field :changeset_version, :integer
     field :commit_message_version, :integer

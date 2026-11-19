@@ -175,6 +175,68 @@ defmodule ForgeCore.WorkflowTest do
     end
   end
 
+  describe "state_names/1" do
+    test "is the initial state first, then the states the edges reach, breadth first" do
+      workflow =
+        ForgeCore.Workflow.Parser.parse!("""
+        version: 1
+        initial: a
+        states:
+          z: {}
+          b: {}
+          c: {}
+          a: {prompt: p.md, produces: [a.md], outcomes: [done, other], budget: {turns: 1, tokens: 200k}}
+        transitions:
+          - {from: a, to: c}
+          - {from: a, to: b, when: other}
+          - {from: c, to: z}
+        limits: {ticket_tokens: 200k}
+        """)
+
+      assert ForgeCore.Workflow.state_names(workflow) == ["a", "c", "b", "z"]
+    end
+
+    # The validator refuses a state nothing reaches, but a pin written before it did is read
+    # without validating (`Parser.from_pinned/1`), and its list must not change between draws. A map
+    # of up to 32 keys happens to iterate in key order, so a few states cannot tell a sort from none;
+    # past that the order is the hash's and only the sort puts them in a reader's.
+    test "the states nothing reaches follow by name, whatever order the map holds them in" do
+      workflow =
+        ForgeCore.Workflow.Parser.parse!("""
+        version: 1
+        initial: a
+        states:
+          a: {prompt: p.md, produces: [a.md], outcomes: [done], budget: {turns: 1, tokens: 200k}}
+          b: {}
+        transitions:
+          - {from: a, to: b}
+        limits: {ticket_tokens: 200k}
+        """)
+
+      loose =
+        Map.new(1..40, fn n ->
+          name = "s" <> String.pad_leading("#{n}", 2, "0")
+          {name, %ForgeCore.Workflow.State{name: name}}
+        end)
+
+      names =
+        ForgeCore.Workflow.state_names(%{workflow | states: Map.merge(workflow.states, loose)})
+
+      assert Enum.take(names, 2) == ["a", "b"]
+      assert Enum.drop(names, 2) == loose |> Map.keys() |> Enum.sort()
+    end
+
+    test "names every state of the example once" do
+      workflow =
+        ForgeCore.Workflow.Parser.parse!(File.read!("test/fixtures/workflow_example.yml"))
+
+      names = ForgeCore.Workflow.state_names(workflow)
+
+      assert hd(names) == "refining"
+      assert Enum.sort(names) == workflow.states |> Map.keys() |> Enum.sort()
+    end
+  end
+
   describe "humanize/1" do
     # A form offering `8GiB` and filling itself with `8589934592` is a form arguing with its own
     # label, and the number it writes is the one nobody would type.

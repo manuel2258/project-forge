@@ -329,11 +329,12 @@ defmodule Forge.LoopBackTest do
       stuck = Tickets.get!(ticket.id)
       assert stuck.status == :stuck
 
-      assert {:error, {:decides_on_ticket, "planning"}} =
-               Engine.choose(stuck, context.user.id, "planning", approving: false)
+      # No version, so the edge is not offered and a move there is a jump: the queue (`jump: false`)
+      # is refused it as one, and a caller that asks for it meets the rule job creation uses.
+      assert {:error, {:is_jump, "planning"}} =
+               Engine.choose(stuck, context.user.id, "planning", approving: false, jump: false)
 
-      # Without the option it is the operation's own refusal that answers, as on the ticket's page.
-      assert {:error, {:no_version, "refinement.md"}} =
+      assert {:error, {:missing_input, "refinement.md"}} =
                Engine.choose(stuck, context.user.id, "planning")
     end
   end

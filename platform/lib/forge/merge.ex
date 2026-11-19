@@ -115,6 +115,17 @@ defmodule Forge.Merge do
   end
 
   @doc """
+  Whether a merge of this ticket has no `commit-message` to say and would stick for want of one: it
+  has no version and its pin has a state that writes one (`legacy_message?/1` is the other case,
+  and is false for a pin that cannot be built, which therefore counts as missing).
+  The one rule `Forge.Engine`'s jump asks before it records an approval and `Forge.Jobs.missing_inputs/3`
+  asks to say what is missing, so the refusal and the manifest cannot disagree.
+  """
+  @spec commit_message_missing?(Ticket.t()) :: boolean()
+  def commit_message_missing?(%Ticket{} = ticket),
+    do: commit_message_version(ticket) == nil and not legacy_message?(ticket)
+
+  @doc """
   The latest `commit-message` version a merge of this would commit, or nil: the ticket's, or a
   conversation's own.
 
@@ -174,20 +185,107 @@ defmodule Forge.Merge do
     with {:ok, plan} <- chat_plan(chat), do: check_refs(plan)
   end
 
-  defp check_refs(%{repo: repo, head: head, source: source}), do: dry_run(repo, head, source)
-
-  defp dry_run(repo, head, approved) do
-    if Git.ancestor?(repo, approved, head) do
-      :ok
-    else
-      forget_tree(merge_tree(repo, head, approved))
-    end
+  # **A source that has landed merges cleanly**, as `perform/4` treats it (`already: true`): a
+  # squash-merged commit merged again against its old base would conflict with its own change
+  # wherever the default branch has touched the same file since, which is what a reopened ticket
+  # jumped back into its merging state (`Forge.Engine.choose/4`) would meet.
+  defp check_refs(%{repo: repo, head: head, source: source} = plan) do
+    if already_merged?(plan), do: :ok, else: forget_tree(merge_tree(repo, head, source))
   end
 
   # The tree `merge-tree` wrote is not wanted here: a check has no result but whether it worked.
   # It is an unreferenced object and git collects it like any other.
   defp forget_tree({:ok, _tree}), do: :ok
   defp forget_tree(other), do: other
+
+  @doc """
+  What reopening a ticket that merged has to carry onto its branch, so that the next merge lands
+  only what the branch changed since (`docs/design/git-hosting.md` § A reopened ticket's second
+  merge).
+
+  A merge puts one plain commit `M` on the default branch whose only parent is the head before it,
+  so the branch's own history never contains it, and the merge base of the branch and the default
+  branch stays where it was before the first merge. Merged again, the work already landed would be
+  merged a second time against that old base, and conflict with itself wherever the new work
+  touches it. The carry is a commit `R` with the branch's head and `M` as its parents and the tree
+  of their merge, built in the object database only: with `R` the branch's head, `M` is an
+  ancestor of it, the merge base is `M`, and the changeset, the diff a person approves and the
+  merge itself all see only what came after.
+
+    * `{:ok, %{head: head, carry: r, merged: m}}` - move the branch from `head` to `r`, and the
+      base to `m`.
+    * `{:ok, %{head: h, carry: h, merged: m}}` - the same, **already made**: a reopening whose
+      transaction did not finish left the branch at the carry commit and the base where it was
+      (`carried/4`), so only the base moves.
+    * `:nothing` - the ticket has no merge, or its branch already has it and the base moved.
+    * `{:error, {:reopen_conflict, paths}}` - the branch and what the default branch took in that
+      merge do not combine.
+  """
+  @spec carry_merged(Ticket.t()) ::
+          {:ok, %{head: String.t(), carry: String.t(), merged: String.t()}}
+          | :nothing
+          | {:error, term()}
+  def carry_merged(%Ticket{} = ticket) do
+    repo = ticket |> Tickets.project_of() |> Projects.repo_path()
+
+    with %{payload: %{"sha" => merged}} <-
+           Forge.Events.latest_for_ticket(ticket.id, "ticket.merged"),
+         {:ok, head} <- Git.resolve(repo, "refs/heads/" <> ticket.branch) do
+      if Git.ancestor?(repo, merged, head),
+        do: carried(repo, ticket, head, merged),
+        else: carry(repo, head, merged)
+    else
+      {:error, reason} -> {:error, reason}
+      _no_merge -> :nothing
+    end
+  end
+
+  # **A carry that was made and not finished.** The branch moves in the jump's own transaction, last,
+  # and a branch is not rolled back with it: a commit that failed or a node that died after the move
+  # leaves the branch at the carry commit with the base where it was. The carry commit has the merge
+  # as its second parent, and a branch whose head has it so while the base is not yet the merge
+  # (an integrating job merging a default branch that has not moved since would put the same
+  # parent there, and then the base moving to the merge is also right) is answered with the same
+  # carry, which `Git.move_branch/4` finds already made, and the base is moved after. A branch that
+  # merely contains the merge (a rebase onto the default branch, or a carry that was finished) has
+  # nothing to carry.
+  defp carried(repo, %Ticket{base_commit: base}, head, merged) do
+    if base != merged and Git.resolve(repo, head <> "^2") == {:ok, merged},
+      do: {:ok, %{head: head, carry: head, merged: merged}},
+      else: :nothing
+  end
+
+  defp carry(repo, head, merged) do
+    case merge_tree(repo, head, merged) do
+      {:ok, tree} ->
+        message = "Carry #{String.slice(merged, 0, 12)} onto the branch it merged"
+
+        with {:ok, out} <-
+               Git.run(
+                 repo,
+                 [
+                   "commit-tree",
+                   {:data, tree},
+                   "-p",
+                   {:data, head},
+                   "-p",
+                   {:data, merged},
+                   "-m",
+                   message
+                 ],
+                 env: author(nil),
+                 stderr: :separate
+               ) do
+          {:ok, %{head: head, carry: String.trim(out), merged: merged}}
+        end
+
+      {:conflict, paths} ->
+        {:error, {:reopen_conflict, paths}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 
   @doc """
   Merges `sha`, the commit the ticket's transition into its merging state named, as `user`, saying

@@ -69,6 +69,8 @@ defmodule ForgeWeb.TicketLive do
        looked: connected?(socket),
        default_view: nil,
        forward: nil,
+       # The fold of other states, open or not: a field of the ways form, held with the pick.
+       other: false,
        forms: QuestionForm.init(),
        drafts: Drafts.init(),
        refusal: nil
@@ -218,7 +220,7 @@ defmodule ForgeWeb.TicketLive do
       current: current,
       step: step,
       accepted: accepted_steps(ticket),
-      steps: steps(work, artifacts, ticket, workflow),
+      steps: steps(work, artifacts, ticket, workflow, socket.assigns.current_scope.user.id),
       waits: waits(work),
       # Why the last batch sent the ticket where it is, under the commands that failed in it.
       tails: Forge.Jobs.Commands.failure_tails(ticket.id, @tail_bytes),
@@ -231,6 +233,7 @@ defmodule ForgeWeb.TicketLive do
       queue_events: queue_events(ticket),
       activity: if(current, do: Events.for_job(current.id), else: []),
       transitions: Engine.offered_transitions(ticket, workflow),
+      jumps: jumps(ticket, workflow),
       retry: Engine.retryable?(ticket),
       # What a job that ran out may be given, and the cap it is judged against: the Extend and Run
       # again forms are drawn from these (`ForgeWeb.Components.MoreRoom`).
@@ -392,6 +395,24 @@ defmodule ForgeWeb.TicketLive do
     assign(socket, following: current && current.id)
   end
 
+  # What the fold of other states lists: every state a jump reaches, with whether it merges and what
+  # its job would find missing. Read here, on a load, and not in a render.
+  #
+  # **The clause for a cancelled ticket is an equivalent mutant**: `TicketViews.fold/1` draws
+  # nothing for one whatever is read (`moves?/1` is false for it), so this only spares reading the
+  # repository for a page that will not draw the result.
+  defp jumps(%{status: :cancelled}, _workflow), do: []
+
+  defp jumps(ticket, workflow) do
+    for to <- Engine.jumps(ticket, workflow) do
+      %{
+        to: to,
+        merges: Workflow.merges_on_enter?(workflow, to),
+        missing: Forge.Jobs.missing_inputs(ticket, workflow, to)
+      }
+    end
+  end
+
   # What the branch holds against its base: the ticket's own work, whether or not it has been
   # recorded as a changeset yet — and, while an approval of the changeset waits, the commit that
   # approval pins and no other, which is what Approve is pressed on (`ui.md` § Changes).
@@ -470,32 +491,95 @@ defmodule ForgeWeb.TicketLive do
   # (`events.inserted_at` is whole seconds, so `seq` decides). A state the ticket reached without a
   # job — a human state it is resting in — still gets its step, because the operator is looking
   # for where the ticket is, not only for where work happened.
-  defp steps(jobs, artifacts, ticket, workflow) do
-    visits =
-      jobs
-      |> in_order(Forge.Update.visits(ticket.id), ticket)
-      |> chunk_visits()
-      |> Enum.map(fn
-        {:jobs, group} ->
-          %{
-            name: hd(group).state,
-            jobs: group,
-            artifacts: Enum.filter(artifacts, &written_in?(&1, group)),
-            cost: Enum.reduce(group, 0, &(&2 + &1.usage)),
-            update: nil
-          }
+  # A visit per run of jobs in one state, **broken at a jump**: two visits to `implementing` either
+  # side of one are two steps, and the jump is a row of its own between them
+  # (`docs/design/ui.md` § Steps). Each job falls in the segment of jumps made before it — by the
+  # order of the events, and by the clock only for a job with no `job.created` event
+  # (`jumped_before?/3`) — and each update step's visit by the order of the events; within a segment
+  # the jobs and visits are in the order they were made (`in_order/3`). The rows are the segments'
+  # visits in turn with the jump that ends each. The ticket's own state is always the last step,
+  # resting with no job when nothing has run in it since.
+  defp steps(jobs, artifacts, ticket, workflow, me) do
+    jumps = jump_events(ticket)
+    created = Events.job_created_seqs(ticket.id)
+    updates = Forge.Update.visits(ticket.id)
 
-        {:update, payload} ->
-          %{name: payload["state"], jobs: [], artifacts: [], cost: 0, update: payload}
-      end)
+    job_segments =
+      Enum.group_by(jobs, fn job -> Enum.count(jumps, &jumped_before?(&1, job, created)) end)
 
-    if Enum.any?(visits, &(&1.name == ticket.state)) do
-      visits
-    else
-      visits ++ [%{name: ticket.state, jobs: [], artifacts: [], cost: 0, update: nil}]
-    end
-    |> Enum.map(&Map.put(&1, :topology, ForgeWeb.Topology.of(workflow, &1.name)))
+    update_segments =
+      Enum.group_by(updates, fn {seq, _payload} -> Enum.count(jumps, &(&1.seq < seq)) end)
+
+    rows =
+      for segment <- 0..length(jumps)//1,
+          row <-
+            visits(
+              Map.get(job_segments, segment, []),
+              Map.get(update_segments, segment, []),
+              artifacts,
+              ticket
+            ) ++
+              Enum.map(Enum.slice(jumps, segment, 1), &jump_row(&1, me)),
+          do: row
+
+    rows =
+      if match?(%{name: name} when name == ticket.state, List.last(rows)),
+        do: rows,
+        else: rows ++ [%{name: ticket.state, jobs: [], artifacts: [], cost: 0, update: nil}]
+
+    rows
+    |> Enum.map(fn
+      %{jump: _} = jump -> jump
+      visit -> Map.put(visit, :topology, ForgeWeb.Topology.of(workflow, visit.name))
+    end)
     |> name_merges(ticket)
+  end
+
+  defp visits(jobs, updates, artifacts, ticket) do
+    jobs
+    |> in_order(updates, ticket)
+    |> chunk_visits()
+    |> Enum.map(fn
+      {:jobs, group} ->
+        %{
+          name: hd(group).state,
+          jobs: group,
+          artifacts: Enum.filter(artifacts, &written_in?(&1, group)),
+          cost: Enum.reduce(group, 0, &(&2 + &1.usage)),
+          update: nil
+        }
+
+      {:update, payload} ->
+        %{name: payload["state"], jobs: [], artifacts: [], cost: 0, update: payload}
+    end)
+  end
+
+  # Whether the jump was made before the job: by where each was written in the log when the job's
+  # creation is there (a workflow job's is), and else by the clock, in whole seconds — a job's row
+  # is stamped to the second and an event's to the microsecond, so a job made in the jump's own
+  # second reads as after it.
+  defp jumped_before?(%{seq: seq}, %{id: id}, created) when is_map_key(created, id),
+    do: seq < Map.fetch!(created, id)
+
+  defp jumped_before?(%{inserted_at: at}, %{inserted_at: made}, _created),
+    do: stamp(at) <= stamp(made)
+
+  defp stamp(%NaiveDateTime{} = at), do: at |> DateTime.from_naive!("Etc/UTC") |> stamp()
+  defp stamp(%DateTime{} = at), do: DateTime.to_unix(at)
+
+  # The jumps the ticket was moved by, oldest first: what Steps draws between the visits it split.
+  defp jump_events(%{id: id}), do: Events.jumps_for_ticket(id)
+
+  defp jump_row(%{actor: actor, payload: payload}, me) do
+    %{
+      jump: %{
+        from: payload["from"],
+        to: payload["to"],
+        comment: payload["comment"],
+        reopened: payload["reopened"] == true,
+        by: TicketViews.jumper(actor, me)
+      }
+    }
   end
 
   # Jobs and visits in the order they were made: a job by the seq of its `job.created`, a visit by
@@ -707,7 +791,11 @@ defmodule ForgeWeb.TicketLive do
   # The way forward picked, held so the dock button names it and a rejoin gives it back
   # (`docs/design/ui.md` § A reconnect is not a reload). Picking commits nothing.
   def handle_event("forward:pick", params, socket),
-    do: {:noreply, socket |> assign(forward: params["way"]) |> hold_typed(params)}
+    do:
+      {:noreply,
+       socket
+       |> assign(forward: params["way"], other: params["other"] == "open")
+       |> hold_typed(params)}
 
   # The dock button: the way picked, taken by the operation that takes it anywhere — a transition
   # or running the state again, each guarded in `Forge.Operator`.
@@ -728,12 +816,12 @@ defmodule ForgeWeb.TicketLive do
 
   # A way forward taken: the pick is let go when it was done, and kept when it was refused, so that
   # the refusal is drawn under the form with what was typed still in it (`ui.md` § Errors stay where
-  # you acted).
+  # you acted). The fold of other states goes with the pick, so a refused jump stays in sight.
   defp forward_act(event, params, socket) do
     {:noreply, socket} = handle_event(event, params, socket)
 
     if socket.assigns.refusal == nil,
-      do: {:noreply, assign(socket, forward: nil)},
+      do: {:noreply, assign(socket, forward: nil, other: false)},
       else: {:noreply, socket}
   end
 
@@ -748,8 +836,13 @@ defmodule ForgeWeb.TicketLive do
       {"extend",
        params |> Map.take(~w(tokens turns note raise job draft)) |> Map.put("ticket", ticket.id)}
 
+  # Each press says what kind of move it was drawn as, so one drawn before the ticket moved is
+  # refused and not taken as the other kind (`Forge.Engine.choose/4`).
   defp forward(%{"way" => "to:" <> to}, ticket),
-    do: {"transition", %{"ticket" => ticket.id, "to" => to}}
+    do: {"transition", %{"ticket" => ticket.id, "to" => to, "jump" => "false"}}
+
+  defp forward(%{"way" => "jump:" <> to}, ticket),
+    do: {"transition", %{"ticket" => ticket.id, "to" => to, "jump" => "true"}}
 
   defp forward(_nothing, _ticket), do: nil
 
@@ -869,6 +962,8 @@ defmodule ForgeWeb.TicketLive do
         subline: subline(assigns),
         ways: TicketViews.ways(assigns)
       )
+
+    assigns = assign(assigns, fold: TicketViews.fold(assigns))
 
     ~H"""
     <Layouts.app

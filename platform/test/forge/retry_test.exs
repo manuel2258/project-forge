@@ -68,11 +68,13 @@ defmodule Forge.RetryTest do
       assert offered(ticket) == []
     end
 
-    test "refuses that transition with the name of what has no version", %{
+    # Not offered as an edge, so the request is a jump, which meets the rule job creation uses
+    # (`docs/design/workflow-grammar-v1.md` § Jumping): `planning` reads `refinement.md`.
+    test "refuses a move there with the name of what has no version", %{
       ticket: ticket,
       user: user
     } do
-      assert {:error, {:no_version, "refinement.md"}} =
+      assert {:error, {:missing_input, "refinement.md"}} =
                Engine.choose(Tickets.get!(ticket.id), user.id, "planning")
     end
 

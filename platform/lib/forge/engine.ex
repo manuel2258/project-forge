@@ -207,15 +207,12 @@ defmodule Forge.Engine do
         actor,
         opts \\ []
       ) do
-    target = Workflow.state(workflow, transition.to)
-    terminal = Workflow.terminal?(workflow, transition.to)
-    comment = Keyword.get(opts, :comment)
+    comment = blank_to_nil(Keyword.get(opts, :comment))
 
     # The outcome a job ended with, or nil when a person chose the transition with no job's outcome
     # behind it — out of a human state, or to unstick a ticket. The event has always recorded the
     # transition's own `when` in that case; the job is told only what actually happened.
-    comment = blank_to_nil(comment)
-
+    #
     # What the job is told a person wrote: this transition's own comment, then the note a rejection
     # since the last job was made with (`docs/design/ui.md` § The decision row). The event
     # records only the former; the rejection's note is on its own event.
@@ -226,9 +223,36 @@ defmodule Forge.Engine do
       "comment" => with_rejection_note(comment, ticket)
     }
 
+    payload = %{
+      "from" => transition.from,
+      "to" => transition.to,
+      "outcome" => outcome || Transition.outcome(transition)
+    }
+
+    put_move(
+      multi,
+      ticket,
+      workflow,
+      transition.to,
+      payload,
+      actor,
+      entered,
+      Keyword.put(opts, :comment, comment)
+    )
+  end
+
+  # What every move of a ticket writes, whatever took it: a declared transition (`put_transition/7`)
+  # or a jump (`put_jump/5`). The progress, the `transition.taken` event, the changeset and
+  # commit-message a merging target names, and what entering the target makes — so everything that
+  # reads "how did the ticket get here" reads the one shape. `payload` is the event's own keys.
+  defp put_move(multi, ticket, workflow, to, payload, actor, entered, opts) do
+    comment = Keyword.fetch!(opts, :comment)
+    target = Workflow.state(workflow, to)
+    terminal = Workflow.terminal?(workflow, to)
+
     multi
     |> Tickets.put_progress(:ticket, ticket, %{
-      state: transition.to,
+      state: to,
       status: if(terminal, do: :done, else: :active),
       pending_transition: nil,
       # A move out of the state, by whoever, is the transition a held ticket was waiting to make
@@ -240,15 +264,11 @@ defmodule Forge.Engine do
     |> Events.log(:transition_event, "transition.taken", actor, %{
       ticket_id: ticket.id,
       payload:
-        %{
-          "from" => transition.from,
-          "to" => transition.to,
-          "outcome" => outcome || Transition.outcome(transition)
-        }
+        payload
         |> put_comment(comment)
-        |> put_source(ticket, workflow, transition, opts)
+        |> put_source(ticket, workflow, to, opts)
     })
-    |> put_follow_up(ticket, workflow, transition, target, terminal, entered)
+    |> put_follow_up(ticket, workflow, to, target, terminal, entered)
   end
 
   # Nil is a transition nothing checked, which reads the latest version as it is taken.
@@ -270,7 +290,7 @@ defmodule Forge.Engine do
   # The commit a transition into the merging state is taken for and the message it will carry,
   # named on its event: what the merge after it merges and what it says (`merge_now/3`), so
   # neither a changeset nor a `commit-message` written later is what it uses.
-  defp put_source(payload, ticket, workflow, %Transition{to: to}, opts) do
+  defp put_source(payload, ticket, workflow, to, opts) do
     if Workflow.merges_on_enter?(workflow, to) do
       case opts |> Keyword.fetch(:source) |> or_latest(ticket) do
         {:ok, %{sha: sha, version: version}} ->
@@ -346,16 +366,16 @@ defmodule Forge.Engine do
     end
   end
 
-  defp put_follow_up(multi, ticket, _workflow, transition, _target, true, _entered) do
+  defp put_follow_up(multi, ticket, _workflow, to, _target, true, _entered) do
     Events.log(multi, :done_event, "ticket.done", :system, %{
       ticket_id: ticket.id,
-      payload: %{"state" => transition.to}
+      payload: %{"state" => to}
     })
   end
 
-  defp put_follow_up(multi, _ticket, workflow, transition, _target, false, entered) do
+  defp put_follow_up(multi, _ticket, workflow, to, _target, false, entered) do
     Multi.merge(multi, fn %{ticket: ticket} ->
-      put_entry(Multi.new(), ticket, workflow, transition.to, entered, true)
+      put_entry(Multi.new(), ticket, workflow, to, entered, true)
     end)
   end
 
@@ -680,6 +700,10 @@ defmodule Forge.Engine do
       select: e.payload
     )
     |> Repo.all()
+    # A jump is no transition's firing: it counts against no `max`, and a loop drawn from these
+    # counts would otherwise show it as an edge nothing declares (`docs/design/workflow-grammar-v1.md`
+    # § Jumping).
+    |> Enum.reject(& &1["jump"])
     |> Enum.frequencies_by(fn p -> {p["from"], p["to"], p["outcome"]} end)
   end
 
@@ -820,6 +844,9 @@ defmodule Forge.Engine do
   waiting, and while a decision on another transition is pending. A transition that requires
   approval records the approvals as part of the choice.
   Options: `:outcome` picks between parallel edges, `:comment` is stored with approvals.
+  **A target no offered edge reaches is a jump** (`jumps/2`, `docs/design/workflow-grammar-v1.md`
+  § Jumping), and `jump: true | false` is the kind the caller drew: the other kind is refused with
+  `{:is_edge, to}` or `{:is_jump, to}`.
   **`approving: false` refuses an edge that approves or merges** (`decision_edge?/2`) with
   `{:error, {:decides_on_ticket, to}}` and writes nothing: the queue passes it, because what such an
   edge decides is on the ticket's page and not on the queue's. Default `true`, so the page, the API
@@ -848,13 +875,409 @@ defmodule Forge.Engine do
     with :ok <- not_queued(ticket),
          :ok <- not_updating(ticket, workflow),
          :ok <- no_live_job(ticket),
-         {:ok, transition} <-
-           Core.choose(workflow, ticket.state, to, Keyword.get(opts, :outcome)),
-         :ok <- approving(workflow, transition, Keyword.get(opts, :approving, true)) do
+         {:ok, route} <- route(ticket, workflow, to, opts),
+         :ok <- kind_asked(route, to, Keyword.get(opts, :jump)) do
+      follow_route(route, ticket, workflow, user_id, to, opts)
+    end
+  end
+
+  defp follow_route({:edge, transition}, ticket, workflow, user_id, _to, opts) do
+    with :ok <- approving(workflow, transition, Keyword.get(opts, :approving, true)) do
       take(ticket, workflow, transition, nil, user_id, :approved, %{
         comment: Keyword.get(opts, :comment),
         pinned: %{}
       })
+    end
+  end
+
+  defp follow_route(:jump, ticket, workflow, user_id, to, opts),
+    do: jump(ticket, workflow, user_id, to, Keyword.get(opts, :comment))
+
+  # Where the request goes: the edge the ticket is offered to the target, or a jump. A caller that
+  # names an outcome asks for that edge only and meets `no_such_transition` where there is none
+  # (`docs/design/api-and-ui.md`); every other caller names a target, and what is not an edge is a
+  # jump (`ForgeCore.Engine.route/4`).
+  defp route(ticket, workflow, to, opts) do
+    case Keyword.get(opts, :outcome) do
+      nil ->
+        case Core.route(workflow, ticket.state, to, offered_edges(ticket, workflow)) do
+          {:error, reason} -> {:error, reason}
+          routed -> {:ok, routed}
+        end
+
+      outcome ->
+        with {:ok, transition} <- Core.choose(workflow, ticket.state, to, outcome),
+             do: {:ok, {:edge, transition}}
+    end
+  end
+
+  # **The kind the caller drew.** A page draws an arrow or a row of the fold from the ticket it
+  # read, and the ticket may have moved before the press: an arrow that is now a jump, or a jump
+  # that is now an edge — which would approve a document the person never saw — is refused rather
+  # than taken as the other kind. `jump: nil` lets the route decide (chat, API, the command line).
+  defp kind_asked(:jump, to, false), do: {:error, {:is_jump, to}}
+  defp kind_asked({:edge, _transition}, to, true), do: {:error, {:is_edge, to}}
+  defp kind_asked(_route, _to, _asked), do: :ok
+
+  # -- refusal words ------------------------------------------------------------------------------
+
+  @refused_tags [:unknown_state, :missing_input, :is_jump, :is_edge, :reopen_conflict]
+  @refused_merges [:no_changeset, :no_commit_message]
+
+  @doc """
+  Whether `refusal/1` has words for `reason`: the guard the operator's three surfaces ask before
+  asking it, so the sentence for a jump's refusals is written here and once.
+  """
+  defguard refused?(reason)
+           when (is_tuple(reason) and tuple_size(reason) == 2 and
+                   elem(reason, 0) in @refused_tags) or
+                  (is_tuple(reason) and tuple_size(reason) == 2 and
+                     elem(reason, 0) == :merge_impossible and elem(reason, 1) in @refused_merges)
+
+  @doc """
+  The sentence for a refusal a **jump** (`docs/design/workflow-grammar-v1.md` § Jumping) can meet,
+  for the ticket page, the API's `detail` and a chat's `chat.transition_refused`; nil for any other
+  reason, which each surface words as it always has.
+
+  A name in a reason is what a person or an agent sent, so it is clipped and quoted with
+  `inspect/1`, and each surface draws the sentence as text.
+  """
+  @spec refusal(term()) :: String.t() | nil
+  def refusal({:unknown_state, to}), do: "the workflow has no state called #{quoted(to)}"
+
+  def refusal({:missing_input, name}),
+    do:
+      "#{quoted(name)} has no version yet and the state's job needs it; " <>
+        "a ticket chat can write it first"
+
+  def refusal({:is_jump, to}),
+    do:
+      "the ticket has moved since this was drawn: #{quoted(to)} is a jump now, not a " <>
+        "transition; look again before choosing"
+
+  def refusal({:is_edge, to}),
+    do:
+      "the ticket has moved since this was drawn: a transition now leads to #{quoted(to)}; " <>
+        "look again before choosing"
+
+  def refusal({:merge_impossible, :no_changeset}),
+    do: "the ticket has no changeset yet, so there is nothing to merge"
+
+  def refusal({:merge_impossible, :no_commit_message}),
+    do:
+      "the ticket has no commit-message yet, so a merge has nothing to say; run the state that writes it"
+
+  def refusal({:reopen_conflict, paths}),
+    do:
+      "the branch and what the ticket's earlier merge put on the default branch conflict in " <>
+        Enum.map_join(paths, ", ", &quoted/1) <> "; resolve it by hand before reopening"
+
+  def refusal(_other), do: nil
+
+  defp quoted(value) when is_binary(value) do
+    text = if String.length(value) > 80, do: String.slice(value, 0, 80) <> "…", else: value
+    inspect(text)
+  end
+
+  defp quoted(value), do: inspect(value)
+
+  # -- jumping ----------------------------------------------------------------------------------
+
+  @doc """
+  The states of the ticket's pinned workflow a request would move it to by a **jump**, in the
+  workflow's own order: every state `ForgeCore.Engine.route/4` does not send down an offered edge.
+  A jump is a move to a state no declared transition (that the ticket is offered) leads to from
+  where it rests (`docs/design/workflow-grammar-v1.md` § Jumping).
+
+  The state it rests in is among them when no edge of its own reaches itself: a ticket stuck or
+  done in a terminal state, or in a state whose edges to itself are ambiguous, may be jumped to
+  where it is.
+  """
+  @spec jumps(Ticket.t(), Workflow.t()) :: [String.t()]
+  def jumps(%Ticket{} = ticket, %Workflow{} = workflow) do
+    offered = offered_edges(ticket, workflow)
+
+    workflow
+    |> Workflow.state_names()
+    |> Enum.filter(&(Core.route(workflow, ticket.state, &1, offered) == :jump))
+  end
+
+  # A jump (`docs/design/workflow-grammar-v1.md` § Jumping): the move to a state no edge reaches.
+  # It takes no transition, so it records no approval its edges would, and counts against no `max`;
+  # entering the target does what entering it does, and the target's required inputs are the ones
+  # its job is created with, checked in the same transaction (`Forge.Jobs.put_create/7`), so a
+  # missing one rolls the whole move back. A done ticket reopens (`carry/1`).
+  defp jump(ticket, workflow, user_id, to, comment) do
+    plan = %{from: ticket.state, to: to, comment: blank_to_nil(comment), user_id: user_id}
+
+    with {:ok, carry} <- carry(ticket) do
+      plan = Map.put(plan, :carry, carry)
+
+      if Workflow.merges_on_enter?(workflow, to),
+        do: jump_merging(ticket, workflow, plan),
+        else: jump_now(ticket, workflow, plan)
+    end
+  end
+
+  # What reopening a ticket that merged carries onto its branch (`Forge.Merge.carry_merged/1`).
+  # Only a done ticket reopens: any other ticket's branch is as its last merge left it, which
+  # is none.
+  defp carry(%Ticket{status: :done} = ticket) do
+    case Merge.carry_merged(ticket) do
+      {:ok, carry} -> {:ok, carry}
+      :nothing -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp carry(%Ticket{}), do: {:ok, nil}
+
+  # **Reopening a done ticket meets what restoring a cancelled one does** (`restore/2`): a milestone
+  # closed since leaves the ticket in none, and a release may not be open beside another
+  # (`docs/design/ticket-types.md` § Releases). Written first in the transaction, as `restore/2`
+  # writes them, for the lock order (the project's row, then the ticket's). A ticket that is not
+  # done is not being reopened.
+  defp put_reopening(%Ticket{status: :done} = ticket, user_id) do
+    Multi.new()
+    |> Forge.Milestones.put_restored(ticket, actor(user_id))
+    |> Forge.ReleaseTickets.put_restorable(ticket)
+  end
+
+  defp put_reopening(%Ticket{}, _user_id), do: Multi.new()
+
+  # The base a reopened ticket's next merge is read against, put before the move where there is a
+  # job to create so that job reads the base the jump leaves (the merge queue's entry creates none,
+  # and puts it after). Only the database's half: the branch moves last, in `run_jump/3`.
+  defp put_carry(multi, ticket, nil), do: {multi, ticket}
+
+  defp put_carry(multi, %Ticket{} = ticket, %{merged: merged}) do
+    multi =
+      multi
+      |> Multi.update(:base, Ticket.base_changeset(ticket, %{base_commit: merged}))
+      |> Events.log(:reopen_base_event, "ticket.base_moved", :system, %{
+        ticket_id: ticket.id,
+        payload: %{"from" => ticket.base_commit, "to" => merged, "reopened" => true}
+      })
+
+    # The target's job is created from the ticket as it is *after* this: its changeset is the diff
+    # from the base the jump moved.
+    {multi, %{ticket | base_commit: merged}}
+  end
+
+  # **The branch moves last**, as `release/2`'s does, so that nothing which can refuse runs after it
+  # has moved: a branch is not rolled back with the transaction. A compare-and-swap that git
+  # refuses when somebody moved the branch since the carry was built, and refuses the jump whole.
+  # What can still leave it moved is the commit itself failing, or the node dying after the move:
+  # the branch is then at the carry commit with the base where it was, and `Merge.carry_merged/1`
+  # answers the next jump with that same carry, which `Git.move_branch/4` finds made and the base
+  # follows. "A refused reopening leaves the branch and the base where they were" (`JumpTest`) fails
+  # if it moves earlier: the target's missing input refuses the jump after where it would have been.
+  defp put_carry_branch(multi, _ticket, nil), do: multi
+
+  defp put_carry_branch(multi, %Ticket{} = ticket, %{head: head, carry: carry}) do
+    repo = ticket |> Tickets.project_of() |> Forge.Projects.repo_path()
+
+    Multi.run(multi, :carry_branch, fn _repo, _changes ->
+      case Forge.Git.move_branch(repo, ticket.branch, carry, head) do
+        :ok -> {:ok, carry}
+        {:error, _reason} -> {:error, :branch_moved}
+      end
+    end)
+  end
+
+  defp run_jump(multi, ticket, %{carry: carry}) do
+    multi
+    |> put_carry_branch(ticket, carry)
+    |> Repo.transaction()
+    |> case do
+      {:ok, changes} -> {:ok, changes}
+      {:error, _step, reason, _changes} -> {:error, reason}
+    end
+  end
+
+  # The move itself. `entered` says it was a jump, from where and by whom, with the comment: what
+  # the target's job is told (`docs/design/job-prompt.md` § How the job arrived).
+  defp put_jump(multi, ticket, workflow, plan, actor, opts \\ []) do
+    %{from: from, to: to, comment: comment} = plan
+
+    # **The `:system` branch of `by` is an equivalent mutant** (`"person"` is read, and tested): the
+    # only jump the engine makes itself is the merge line's, into a merging state, and the validator
+    # refuses a merging state that starts a job (`entry_action_shape`), so nothing reads the arrival
+    # it makes. It says who made it anyway, so the next state that does can be told.
+    entered = %{
+      "from" => from,
+      "by" => if(actor == :system, do: "engine", else: "person"),
+      "jump" => true,
+      "comment" => with_rejection_note(comment, ticket)
+    }
+
+    payload =
+      %{"from" => from, "to" => to, "jump" => true}
+      |> then(&if(ticket.status == :done, do: Map.put(&1, "reopened", true), else: &1))
+
+    multi
+    |> put_held_inputs(ticket, workflow, to)
+    |> put_move(
+      ticket,
+      workflow,
+      to,
+      payload,
+      actor,
+      entered,
+      Keyword.put(opts, :comment, comment)
+    )
+  end
+
+  # **A held ticket makes nothing when it is moved**, so the creation that refuses a missing input
+  # (`Forge.Jobs.put_create/7`) is not reached: `put_entry/6` keeps the entry for `release/2`, which
+  # would then fail with the input missing. The same rule is asked here, read after the ticket's
+  # row is locked as the hold is.
+  defp put_held_inputs(multi, ticket, workflow, to) do
+    Multi.run(multi, :held_inputs, fn repo, _changes ->
+      with true <- locked_held?(repo, ticket.id),
+           [name | _] <- Jobs.missing_inputs(ticket, workflow, to) do
+        {:error, {:missing_input, name}}
+      else
+        _not_held_or_nothing_missing -> {:ok, nil}
+      end
+    end)
+  end
+
+  defp jump_now(ticket, workflow, %{to: to, user_id: user_id, carry: carry} = plan) do
+    put_reopening(ticket, user_id)
+    |> Multi.run(:locked, fn repo, _changes -> lock_uncancelled(repo, ticket.id) end)
+    |> then(&put_carry(&1, ticket, carry))
+    |> then(fn {multi, moved} -> put_jump(multi, moved, workflow, plan, actor(user_id)) end)
+    |> run_jump(ticket, plan)
+    |> case do
+      {:ok, %{ticket: moved}} -> {:ok, enter(moved, workflow, to, user_id)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp jump_merging(ticket, workflow, %{to: to} = plan) do
+    with {:ok, source} <- jump_source(ticket) do
+      if queues_to?(workflow, to),
+        do: commit_jump_enqueue(ticket, plan, source),
+        else: jump_checked(ticket, workflow, plan)
+    end
+  end
+
+  defp jump_checked(ticket, workflow, %{from: from, to: to} = plan) do
+    case check_merge(ticket, workflow, from, to, :person) do
+      {:ok, source} -> commit_jump(ticket, workflow, plan, source)
+      {:conflict, edge, conflict} -> commit_jump_conflict(ticket, workflow, plan, edge, conflict)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # What a merge needs to be attempted at all, asked before anything is written: a changeset to
+  # merge and, where the pinned workflow has a state that writes one, a `commit-message`. A jump
+  # that records an approval of the changeset in the name of whoever made it must not record it
+  # for a merge that sticks the moment it is entered (`docs/design/workflow-grammar-v1.md`
+  # § Jumping).
+  defp jump_source(%Ticket{} = ticket) do
+    with {:ok, source} <- Merge.changeset(ticket) |> merge_possible() do
+      if Merge.commit_message_missing?(ticket),
+        do: {:error, {:merge_impossible, :no_commit_message}},
+        else: {:ok, source}
+    end
+  end
+
+  defp merge_possible({:ok, source}), do: {:ok, source}
+  defp merge_possible({:error, reason}), do: {:error, {:merge_impossible, reason}}
+
+  # Joined only when the workflow's own transitions into the merging state do (`workflow-grammar-v1.md` § Jumping): a
+  # workflow with no line never gets one from a jump.
+  defp queues_to?(%Workflow{transitions: transitions}, to),
+    do: Enum.any?(transitions, &(&1.to == to and Transition.queues?(&1)))
+
+  defp commit_jump(ticket, workflow, %{to: to, user_id: user_id, carry: carry} = plan, source) do
+    approvals = jump_approvals(ticket, plan, source)
+
+    ticket
+    |> put_reopening(user_id)
+    |> Multi.append(approvals)
+    |> then(&put_carry(&1, ticket, carry))
+    |> then(fn {multi, moved} ->
+      put_jump(multi, moved, workflow, plan, actor(user_id), source: source)
+    end)
+    |> run_jump(ticket, plan)
+    |> case do
+      {:ok, %{ticket: moved}} -> {:ok, enter(moved, workflow, to, user_id)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # The changeset's approval, in the name of whoever made the jump and on the version the merge
+  # merges (`source` is the one the check was made on) — and no other, whatever the edges into the
+  # target would have approved.
+  defp jump_approvals(ticket, %{from: from, to: to, comment: comment, user_id: user_id}, source) do
+    put_approvals(
+      ticket,
+      {from, to},
+      [Workflow.changeset_artifact()],
+      user_id,
+      :approved,
+      comment,
+      source,
+      %{}
+    )
+  end
+
+  defp commit_jump_conflict(
+         ticket,
+         workflow,
+         %{to: to, user_id: user_id, carry: carry} = plan,
+         edge,
+         conflict
+       ) do
+    approvals = jump_approvals(ticket, plan, conflict.source)
+
+    ticket
+    |> put_reopening(user_id)
+    |> Multi.append(approvals)
+    |> then(&put_carry(&1, ticket, carry))
+    |> then(fn {multi, moved} ->
+      put_conflict(multi, moved, workflow, edge, to, conflict, actor(user_id), plan.comment)
+    end)
+    |> run_jump(ticket, plan)
+    |> case do
+      {:ok, %{ticket: moved}} -> {:ok, moved}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp commit_jump_enqueue(
+         ticket,
+         %{from: from, to: to, user_id: user_id, carry: carry} = plan,
+         source
+       ) do
+    approvals = jump_approvals(ticket, plan, source)
+
+    ticket
+    |> put_reopening(user_id)
+    |> Multi.append(approvals)
+    |> MergeQueue.put_enter(ticket, {:jump, from, to}, nil, source, user_id, %{
+      comment: plan.comment,
+      commit_message_version: Merge.commit_message_version(ticket)
+    })
+    |> Tickets.put_progress(:ticket, ticket, %{
+      state: ticket.state,
+      status: :active,
+      pending_transition: nil,
+      usage: ticket.usage
+    })
+    |> then(&put_carry(&1, ticket, carry))
+    |> elem(0)
+    |> run_jump(ticket, plan)
+    |> case do
+      {:ok, %{ticket: queued}} ->
+        MergeQueue.kick(ticket.project_id)
+        {:ok, queued}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -947,16 +1370,19 @@ defmodule Forge.Engine do
   end
 
   @doc """
-  The states a person may move the ticket to from where it rests, each named once — two edges may
-  share a target. `offered_edges/2`'s targets; the ticket page and the queue both ask this, so
-  they cannot disagree.
+  The states a person may move the ticket to **by a transition** from where it rests, each named
+  once — two edges may share a target. `offered_edges/2`'s targets that `ForgeCore.Engine.route/4`
+  sends down an edge: a target several edges reach with no bare one among them is a jump, and
+  `jumps/2` has it. The ticket page and the queue both ask this, so they cannot disagree.
   """
   @spec offered_transitions(Ticket.t(), Workflow.t()) :: [String.t()]
   def offered_transitions(%Ticket{} = ticket, %Workflow{} = workflow) do
-    ticket
-    |> offered_edges(workflow)
+    offered = offered_edges(ticket, workflow)
+
+    offered
     |> Enum.map(& &1.to)
     |> Enum.uniq()
+    |> Enum.filter(&match?({:edge, _}, Core.route(workflow, ticket.state, &1, offered)))
   end
 
   defp unversioned(%Ticket{id: id}, %Transition{approve: names}),
@@ -2027,7 +2453,10 @@ defmodule Forge.Engine do
 
   # The check before a transition into the merging state, for whoever is taking it: the commit it
   # will name, and what a conflict on it does. `{:ok, source}` takes the transition as asked.
-  defp check_merge(ticket, workflow, %Transition{} = transition, by) do
+  defp check_merge(ticket, workflow, %Transition{} = transition, by),
+    do: check_merge(ticket, workflow, transition.from, transition.to, by)
+
+  defp check_merge(ticket, workflow, from, to, by) do
     case Merge.changeset(ticket) do
       {:ok, source} ->
         case Merge.check(ticket, source.sha) do
@@ -2036,7 +2465,7 @@ defmodule Forge.Engine do
 
           {:conflict, paths, head} ->
             conflict = %{paths: paths, head: head, source: source, by: by}
-            on_conflict(ticket, workflow, transition, conflict)
+            on_conflict(ticket, workflow, from, to, conflict)
 
           {:error, reason} ->
             {:error, {:merge_impossible, reason}}
@@ -2047,12 +2476,12 @@ defmodule Forge.Engine do
     end
   end
 
-  defp on_conflict(ticket, workflow, %Transition{} = transition, %{by: by} = conflict) do
+  defp on_conflict(ticket, workflow, from, to, %{by: by} = conflict) do
     # A person is never bounded (`ForgeCore.Engine.conflict/5`), so what is passed for one is an
     # equivalent mutant; nought spares counting the engine's rounds for nothing.
     rounds = if by == :engine, do: engine_rounds(ticket.id), else: 0
 
-    case Core.conflict(workflow, transition.from, transition.to, by, rounds) do
+    case Core.conflict(workflow, from, to, by, rounds) do
       {:route, edge} -> {:conflict, edge, conflict}
       {:stuck, {:conflict_rounds, n}} -> {:stuck, n, conflict}
       :refuse -> {:error, {:merge_conflict, conflict.paths}}
@@ -2385,11 +2814,34 @@ defmodule Forge.Engine do
   # version were recorded between the check and the transaction, which nothing here can open: the
   # only writer of a changeset is a job's result, and no job is live while a person takes an edge.
   # So reading it again is an equivalent mutant as far as any test can tell.
-  defp put_decisions(ticket, transition, user_id, decision, comment, source, pinned) do
-    transition_map = %{"from" => transition.from, "to" => transition.to}
+  defp put_decisions(
+         ticket,
+         %Transition{} = transition,
+         user_id,
+         decision,
+         comment,
+         source,
+         pinned
+       ) do
+    put_approvals(
+      ticket,
+      {transition.from, transition.to},
+      transition.approve,
+      user_id,
+      decision,
+      comment,
+      source,
+      pinned
+    )
+  end
+
+  # `names` are the documents approved, and `{from, to}` the move they are recorded against: a
+  # declared transition's, or a jump's (which approves the changeset and nothing else).
+  defp put_approvals(ticket, {from, to}, names, user_id, decision, comment, source, pinned) do
+    transition_map = %{"from" => from, "to" => to}
 
     multi =
-      Enum.reduce(transition.approve, Multi.new(), fn name, multi ->
+      Enum.reduce(names, Multi.new(), fn name, multi ->
         # `pinned` is Accept's versions, or a decision's (`decide/5`), each checked against what
         # the person was shown. Reading
         # the latest here instead is an equivalent mutant as far as a test can tell: a conversation's
@@ -2413,7 +2865,7 @@ defmodule Forge.Engine do
         end
       end)
 
-    if transition.approve == [] do
+    if names == [] do
       multi
     else
       Events.log(multi, :decision_event, "approval.#{decision}", actor(user_id), %{
@@ -2763,13 +3215,19 @@ defmodule Forge.Engine do
     with %Ticket{status: :active, state: state} = ticket when state == entry.from_state <-
            Repo.get(Ticket, entry.ticket_id),
          workflow = Tickets.workflow(ticket),
-         {:ok, transition} <-
-           Core.choose(workflow, entry.from_state, entry.to_state, entry.edge_outcome) do
+         {:ok, transition} <- entry_edge(workflow, entry) do
       check_entry(ticket, workflow, transition, entry)
     else
       _no_longer_queued -> leave_line(entry, "moved on")
     end
   end
+
+  # A jump's entry names no edge: the runner moves the ticket to `to_state` as a jump, and what
+  # takes its place here is nil (`merge_entry/5`).
+  defp entry_edge(_workflow, %Entry{jump: true}), do: {:ok, nil}
+
+  defp entry_edge(workflow, %Entry{} = entry),
+    do: Core.choose(workflow, entry.from_state, entry.to_state, entry.edge_outcome)
 
   defp check_entry(ticket, workflow, transition, entry) do
     source = %{sha: entry.changeset_sha, version: entry.changeset_version}
@@ -2791,11 +3249,7 @@ defmodule Forge.Engine do
     Multi.new()
     |> Multi.run(:open, fn repo, _changes -> lock_entry(repo, entry) end)
     |> Multi.merge(fn %{open: open} ->
-      put_transition(Multi.new(), open, workflow, transition, entry.outcome, :system,
-        source: source,
-        commit_message_version: entry.commit_message_version,
-        comment: entry.comment
-      )
+      put_entry_move(open, workflow, transition, entry, source)
     end)
     |> Repo.transaction()
     |> case do
@@ -2813,6 +3267,23 @@ defmodule Forge.Engine do
       {:error, _step, reason, _changes} ->
         stick_entry(ticket, entry, "could not merge: #{inspect(reason)}")
     end
+  end
+
+  defp put_entry_move(open, workflow, nil = _jump, %Entry{jump: true} = entry, source) do
+    plan = %{from: entry.from_state, to: entry.to_state, comment: entry.comment}
+
+    put_jump(Multi.new(), open, workflow, plan, :system,
+      source: source,
+      commit_message_version: entry.commit_message_version
+    )
+  end
+
+  defp put_entry_move(open, workflow, %Transition{} = transition, entry, source) do
+    put_transition(Multi.new(), open, workflow, transition, entry.outcome, :system,
+      source: source,
+      commit_message_version: entry.commit_message_version,
+      comment: entry.comment
+    )
   end
 
   defp conflicted_entry(ticket, workflow, entry, conflict) do
@@ -3017,6 +3488,11 @@ defmodule Forge.Engine do
   # an approval is the outcome of the edge it asked on, so the two are equal whenever it matters.
   defp put_unapproved(multi, _ticket, %Entry{status: :integrating}), do: multi
 
+  # A jump's entry had no edge, so there is no pending approval to ask again. **Dropping this clause
+  # is an equivalent mutant**: the fall-through restores one only for an entry with an `outcome`,
+  # and a jump's is always nil (it is entered by a person or token, never by a job's outcome).
+  defp put_unapproved(multi, ticket, %Entry{jump: true}), do: put_unapproved_rest(multi, ticket)
+
   defp put_unapproved(multi, ticket, %Entry{} = entry) do
     workflow = Tickets.workflow(ticket)
 
@@ -3027,10 +3503,14 @@ defmodule Forge.Engine do
         put_pending_approval(multi, ticket, transition, entry.outcome)
 
       _no_approval_to_ask_again ->
-        if human_state?(workflow, ticket.state),
-          do: multi,
-          else: put_stuck(multi, ticket, @taken_out_reason)
+        put_unapproved_rest(multi, ticket)
     end
+  end
+
+  defp put_unapproved_rest(multi, ticket) do
+    if human_state?(Tickets.workflow(ticket), ticket.state),
+      do: multi,
+      else: put_stuck(multi, ticket, @taken_out_reason)
   end
 
   defp approving_edge({:ok, %Transition{} = transition}, workflow),
@@ -3038,10 +3518,17 @@ defmodule Forge.Engine do
 
   defp approving_edge(other, _workflow), do: other
 
+  # A state a person takes an edge out of: one that starts nothing *and* has an edge. A terminal
+  # state has none, and a jump's entry may be taken out of one (a done or stuck ticket jumped to
+  # its own merging state): there is nothing to wait for there, so it sticks, and the page offers
+  # the jump again.
   defp human_state?(workflow, state_name) do
     case Workflow.state(workflow, state_name) do
-      %State{} = state -> State.human?(state)
-      nil -> false
+      %State{} = state ->
+        State.human?(state) and not Workflow.terminal?(workflow, state_name)
+
+      nil ->
+        false
     end
   end
 

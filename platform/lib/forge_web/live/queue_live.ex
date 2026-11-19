@@ -573,7 +573,7 @@ defmodule ForgeWeb.QueueLive do
   # place; refused, the item stays with the refusal in words, drawn where it was sent from.
   # `Actions` leaves `:refusal` for a refusal and only for one, clearing it first.
   defp deciding(event, params, socket) do
-    case Actions.handle(event, params, socket, approving: false) do
+    case Actions.handle(event, params, socket, approving: false, jump: false) do
       {:handled, socket} ->
         socket =
           if socket.assigns.refusal,
@@ -897,8 +897,8 @@ defmodule ForgeWeb.QueueLive do
   defp since_line(%{type: "chat.message", actor: actor} = event, me),
     do: "#{who(actor, me)}: “#{excerpt_text(Events.summary(event))}”"
 
-  defp since_line(%{type: "transition.taken", payload: %{"from" => from, "to" => to}}, _me),
-    do: "#{from} → #{to}"
+  defp since_line(%{type: "transition.taken", payload: %{"from" => from, "to" => to} = p}, _me),
+    do: if(p["jump"], do: "jumped #{from} → #{to}", else: "#{from} → #{to}")
 
   defp since_line(%{type: "job.finished", payload: payload}, _me),
     do: "a job ended #{payload["outcome"] || "without an outcome"}"

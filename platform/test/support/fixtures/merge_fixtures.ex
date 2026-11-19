@@ -110,6 +110,86 @@ defmodule Forge.MergeFixtures do
     ticket
   end
 
+  @jump_workflow """
+  version: 1
+  initial: refining
+  states:
+    refining:
+      prompt: agents/refine.md
+      inputs: [ticket]
+      produces: [refinement.md]
+      budget: { turns: 10, tokens: 100k }
+    planning:
+      prompt: agents/plan.md
+      inputs: [ticket, refinement.md]
+      produces: [plan.md]
+      budget: { turns: 10, tokens: 100k }
+    implementing:
+      prompt: agents/implement.md
+      inputs: [plan.md, notes.md]
+      produces: [implementation.md, changeset, commit-message]
+      outcomes: [done, again]
+      budget: { turns: 10, tokens: 100k }
+    review_ready:
+      produces: [notes.md]
+    chatting:
+      chat: true
+      prompt: agents/chat.md
+      inputs: [plan.md]
+      produces: [chat-notes.md]
+      outcomes: [done]
+    merged:
+      on_enter: merge
+      on_conflict: integrating
+    integrating:
+      prompt: agents/integrate.md
+      inputs: [changeset]
+      produces: [changeset]
+      budget: { turns: 10, tokens: 100k }
+  transitions:
+    - { from: refining, to: planning, approve: [refinement.md] }
+    - { from: planning, to: implementing }
+    - { from: implementing, to: review_ready }
+    - { from: implementing, to: implementing, when: again, max: 1 }
+    - { from: review_ready, to: merged, approve: [changeset] }
+    - { from: review_ready, to: implementing }
+    - { from: integrating, to: review_ready }
+    - { from: review_ready, to: chatting }
+    - { from: chatting, to: review_ready }
+  limits:
+    ticket_tokens: 5M
+  """
+
+  @doc """
+  A workflow whose states are mostly *not* reached by an edge from one another, which is what a
+  jump is for: `refining → planning` approves a document, `planning` has no edge to `review_ready`
+  and `merged` has no edge from `implementing`. `implementing` reads `plan.md`, which is required
+  (every way in passes through `planning`), and `notes.md`, which is not. With `queue: true` the
+  edge into `merged` is declared to queue.
+  """
+  def jump_workflow(opts \\ []) do
+    if Keyword.get(opts, :queue, false),
+      do:
+        String.replace(
+          @jump_workflow,
+          "{ from: review_ready, to: merged, approve: [changeset] }",
+          "{ from: review_ready, to: merged, approve: [changeset], queue: true }"
+        ),
+      else: @jump_workflow
+  end
+
+  @doc "The files of a repository holding `jump_workflow/1` and the prompts it names."
+  def jump_files(opts \\ []) do
+    %{
+      ".forge/workflow.yml" => jump_workflow(opts),
+      ".forge/agents/refine.md" => "refine\n",
+      ".forge/agents/plan.md" => "plan\n",
+      ".forge/agents/implement.md" => "implement\n",
+      ".forge/agents/chat.md" => "chat\n",
+      ".forge/agents/integrate.md" => "integrate\n"
+    }
+  end
+
   @doc "The ticket's events of `type`, oldest first."
   def events_of(ticket, type),
     do: ticket.id |> Events.for_ticket() |> Enum.filter(&(&1.type == type))

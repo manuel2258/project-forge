@@ -233,7 +233,10 @@ Rows are revoked rather than deleted, because they are the audit trail behind th
 **merge_queue_entry** — `project_id`, `ticket_id` (unique: a ticket is queued once), `position`
 (a database sequence, the order approvals were recorded in), `status` (`waiting`, `merging`,
 `integrating`), `from_state`, `to_state`, `edge_outcome` (the edge's own outcome, to pick it again by
-`ForgeCore.Engine.choose/4` among parallel edges), `outcome` (the job's outcome behind it, nil for a
+`ForgeCore.Engine.choose/4` among parallel edges; nil for a **jump**'s entry, which has no edge),
+`jump` (a boolean, true for an entry made by a jump until an integration puts the row back in the
+line on a real edge, which sets it false, `docs/design/workflow-grammar-v1.md` § Jumping,
+and a check constraint holds `jump = (edge_outcome IS NULL)`), `outcome` (the job's outcome behind it, nil for a
 person's choice),
 `changeset_sha`, `changeset_version`, `commit_message_version` (what was current at the approval, replaced by the integrated changeset and
 the latest message when an integration puts the row back in the line),

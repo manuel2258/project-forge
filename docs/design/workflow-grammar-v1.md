@@ -316,7 +316,7 @@ no process — but nothing is asked of a person and the wait ends when the comma
 **Transitions.** `when` names an outcome and defaults to `done`. On job end the engine takes
 the single transition from the current state whose `when` matches the outcome. If none
 matches, the ticket becomes *stuck* (an engine flag, not a workflow state) and appears in the
-queue for the operator to pick any declared transition from that state manually — except one
+queue for the operator to pick any declared transition from that state manually, or to jump (§ Jumping) — except one
 that approves or merges, which is taken on the ticket's page, where what it approves is on screen,
 and which the queue links to. `max` caps
 how many times a transition may fire for one ticket; exceeding it also sticks the ticket.
@@ -478,7 +478,7 @@ it moved into, as after any transition, and a kick of the merge queue. `ticket/N
 transaction's last step, so that nothing which can refuse runs after the branch has moved; only
 the commit can, and an infrastructure fault there is the one way the branch is left at the new
 head under the old pin (a later release is then refused with `:branch_moved`). A move by hand out of the
-state (`choose`, `integrate`, a retry) clears `held_transition`: it replaces the transition that
+state (`choose` — a jump included —, `integrate`, a retry) clears `held_transition`: it replaces the transition that
 waited, which is then not taken.
 
 **A ticket that never started** — `Forge.Tickets.started?/1`: no workflow job or command has
@@ -606,6 +606,82 @@ which is what lets a harness newer than its workers keep working.
 Parsing this file reaches no worker, so the rule above is what the grammar checks, and it is
 unchanged. A workflow may name any level; only the form has a list.
 
+### Jumping
+
+A **jump** moves a ticket to any state of its pinned workflow, whether or not a transition leads
+there from where it rests. It is the escape hatch for a workflow gone wrong — usually one in which
+the transition that would put things right does not exist — made by an active member of the project
+on the ticket's page, through a token with API write access (as API), or through a ticket chat
+(`conversations.md` § Taking a transition). Everyone meets the same operation, `Forge.Engine.choose/4`,
+and the same rules.
+
+**What is an edge and what is a jump.** A request names a target state. When a transition from the
+current state that the ticket *offers* resolves to it — the only edge there, or the bare edge among
+several (`ForgeCore.Engine.choose/4`'s default), or the one an API call's `outcome` names — the
+request takes that transition exactly as before: its approvals, its `queue`, its `max` count.
+Every other target is a jump: one no edge reaches; one several edges reach with no bare edge among
+them; and one whose only edges are not offered because their `approve` names a document with no
+version. An unknown state is refused. A caller may say which kind it drew (`jump: false` for a
+declared way forward, `true` for a fold row), and a request that finds the other kind is refused
+rather than taken, so a press drawn before the ticket moved never becomes the other kind — an edge
+that would approve a document the person never saw. The merge queue says `jump: false`: it offers
+no jumps.
+
+**Required inputs.** A jump into a state that starts a job is refused when the job would be created
+missing an input the engine requires (`required_input?/3`), by the creation itself, in the one
+transaction that moves the ticket: a missing input rolls the whole jump back with the input's
+name, and the version checked is the version the job is created with. **A ticket on hold makes no
+job when it is moved** (§ Holding a ticket), so the same rule is asked there, after the row is
+locked, and a jump that would make a job for `release/2` to find an input missing is refused with
+the input's name. An optional input that does
+not exist is no reason to refuse. A command state or a chat step requires nothing at creation, and
+a human or a terminal state starts nothing. A ticket chat may write a missing document first, in
+the same turn or an earlier one.
+
+**Approvals.** A jump records none, whatever the transitions into its target declare
+(`docs/decisions.md`). The one exception is a jump into a state that merges: it is refused when
+there is no changeset version, or no `commit-message` version where the pin has a state producing
+one, and otherwise it records one approval of the changeset's latest version — the version the
+merge merges — in the name of whoever made it, as an approval by hand does.
+
+**Merging.** A jump into a merging state joins the project's merge line when any declared
+transition into it says `queue: true`: the ticket stays where it is, `active`, with an entry whose
+`jump` is true. Otherwise it merges at once, as an approval in that workflow does, a conflict going
+down the merging state's `on_conflict` with the approval recorded: that move is the conflict route's,
+recorded as an approval's is (`ticket.merge_conflicted`, the edge at outcome `merge_conflict`), and
+not as a jump event — what sent the ticket there was a conflict. **A source that has landed merges
+cleanly**: the check before the jump asks `already_merged?` as the merge does, so a done ticket
+jumped back into its merging state with nothing new is not called a conflict with its own landed
+work (a squash-merged commit merged again against its old base would be, wherever the default branch
+has touched the same file since). A queued jump taken out of the line by a person (`take_out/2`)
+restores no approval to be asked again; the ticket rests where it is, **stuck** where it is in a
+state with no way out — a done or stuck ticket jumped to its own terminal merging state.
+
+**An integrating state** may be entered by a jump with no conflict behind it. Its job is told it
+arrived by a jump and that no conflict sent it, and is handed no conflicting paths
+(`job-prompt.md` § Integrating the default branch). This is the one exception to "nothing but a
+conflict" (§ Merging).
+
+**A ticket that is done may be reopened** by a jump, becoming active in the state named; a
+cancelled one is refused. When it had merged, the branch is first brought to what the default
+branch holds — a merge of the earlier merge commit into the branch head, which moves the branch
+by compare-and-swap, last in the jump's transaction — and the ticket's base becomes that merge
+commit (`git-hosting.md` § The merge), so the next merge, the changeset a person approves for it and
+the diff the page shows are only the work since. **Reopening meets what restoring a cancelled ticket
+does** (`Engine.restore/2`): a milestone closed since leaves the ticket in none, and a release is not
+reopened while another is open (`{:release_open, ticket}`, § Releases in `ticket-types.md`).
+
+**A jump counts against no `max`** and is not a firing of any transition, so it is not drawn as a
+loop. Every other refusal a move by hand meets still applies: a live job or conversation in the
+current state, a pending decision, a ticket in the merge line, a pin that no longer parses, a
+requester who is not an active member. A jump to the state the ticket is in is a jump like any
+other: entering it does what entering it does. A step conversation has none (§ Chat steps).
+
+**The record** of a jump that takes effect is a `transition.taken` event with `jump: true`, no `outcome`, the `from` and `to`,
+the comment, `reopened: true` when the ticket was done, and the changeset and commit message it
+names when the target merges, by whoever made it. The job it starts reads `entered.jump`. Jobs
+arriving by a jump need worker protocol 12 (`worker-channel.md` § What needs a bump).
+
 ## Release keys
 
 Two top-level keys, meaningful only in a workflow that sets `release: true`
@@ -654,7 +730,8 @@ states:
 ```
 
 - **The person alone chooses the outcome.** An `outcome:` in a document's front matter is ignored
-  and the agent is not offered `transition.json` for this ticket in this step. An edge on an
+  and the agent is not offered `transition.json` for this ticket in this step — so no jump either
+  (§ Jumping); a separate ticket chat can be opened to repair. An edge on an
   engine outcome (`error`, `did_not_converge`, …) never fires from a chat step: nothing in it ends
   without a person.
 - **Accept is the approval.** When the edge Accept takes has `approve`, Accept approves those
@@ -880,7 +957,7 @@ to read, unless the pin has no state producing it (§ Merging).
 case, and a job state that is some merging state's `on_conflict` is an *integrating* state: its
 job's checkout also fetches the default branch, read-only, and its manifest says what conflicted
 and how to resolve it (`job-prompt.md` § Integrating the default branch). **Nothing but a conflict
-may lead into an integrating state** — no declared transition names it as `to`. What makes a job
+or a jump (§ Jumping) may lead into an integrating state** — no declared transition names it as `to`. What makes a job
 an integration is the state it is in, so a state that ordinary work also arrives at would make
 every one of its jobs fetch the default branch, need a newer worker, and be told a conflict sent
 it when none had; `implementing` as the target was the case that would have done it. A human
@@ -1019,7 +1096,12 @@ the ticket in its project's line (`merge_queue_entries`, one row per queued tick
 stays in `from`, `active`, with nothing pending, and nothing is checked for a conflict. Wherever
 the key is declared it is always in force — there is no project, user or ticket setting that turns
 it off for that edge, and a workflow with no `queue` key never writes a row, so approval merges
-at once and a conflicting approval takes the conflict route exactly as above. The engine's own
+at once and a conflicting approval takes the conflict route exactly as above. **A jump into the merging state
+queues when any declared edge into it does** (§ Jumping): its entry has no edge, only the states it
+was queued from and for, and `jump` true; the runner merges it by a jump of its own, as the system,
+with the changeset and commit-message versions it was approved on, and a conflict goes down
+`on_conflict` as for any entry. Taking it out restores no pending approval, and the ticket sticks
+(or rests in a human state) as for any other. The engine's own
 edge into a merging state queues the same way (it is the ticket's place that matters, not who
 asked), with the job's outcome behind it — **except out of an integrating state, where it queues
 only a ticket whose approval is on record** (§ Merging, *What follows the rebase*). The row of

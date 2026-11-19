@@ -52,6 +52,9 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* A jump's row: a sentence, in the body face — it carries what a person wrote, which is never
+     mono (ui.md) — and no chevron, because it opens nothing. */
+  .ticket-step-jump { display: flex; min-height: 54px; align-items: center; gap: 10px; }
   .ticket-step-row::after { content: "›"; color: var(--ink-3); }
   .ticket-step > details[open] > .ticket-step-row::after { content: "⌄"; }
   .ticket-step-body { display: flex; flex-direction: column; gap: 12px; padding: 0 0 16px 19px; }

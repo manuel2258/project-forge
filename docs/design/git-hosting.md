@@ -531,6 +531,31 @@ default branch is fast-forward only, so a merge that landed stays landed. The an
 kept beside it for the shape that predates this — every ticket merged as a two-parent commit — so
 no migration is needed. Safe to call twice, safe to retry.
 
+### A reopened ticket's second merge
+
+A ticket that merged and is done may be reopened by a jump (`workflow-grammar-v1.md` § Jumping).
+Its branch does not hold the default branch's commit for what it landed — the merge commit is a
+single plain one with only the default head as parent — so merging again from the old base would
+put the landed work through a three-way merge against itself and show a person the whole of it
+again. So reopening **carries the merge**: `Forge.Merge.carry_merged/1` finds the `sha` of the
+ticket's latest `ticket.merged` event, `M`; unless `M` is already an ancestor of the branch head
+(and the base has moved to it),
+it builds `R` in the object database — `merge-tree` of the head with `M`, `commit-tree -p head -p M`
+— and the jump's transaction moves the branch to it by compare-and-swap (as `Engine.release/2`'s
+refresh does) and the ticket's base becomes `M`, with a `ticket.base_moved` event saying it was a
+reopening. The changeset, the diff a person approves and the next merge are then the work since `M`
+only, and that merge does not conflict with its own earlier change. A conflict between the work
+and `M` refuses the reopen with the paths. A ticket done without a merge is reopened with nothing
+moved.
+
+**The branch moves last in the transaction**, as `Engine.release/2`'s does, so nothing that can
+refuse runs after it has moved: a branch is not rolled back with the database. What can still
+leave it moved is the commit failing or the node dying after the move, which leaves the branch at
+`R` with the base where it was. `carry_merged/1` recognises that — `M` is the second parent of the
+branch head and the base is not `M` — and answers the same carry, which `move_branch/4` finds
+already made, so the next reopening only moves the base. A branch that merely contains `M` (a
+finished carry, or a rebase onto the default branch) has nothing to carry.
+
 ### Where it runs, and what a conflict does
 
 A merge a **queue** makes (`workflow-grammar-v1.md` § The merge queue) runs in the runner's task

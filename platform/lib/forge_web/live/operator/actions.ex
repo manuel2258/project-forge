@@ -12,6 +12,7 @@ defmodule ForgeWeb.Operator.Actions do
   import Phoenix.LiveView, only: [put_flash: 3]
   import ForgeWeb.UI.Feedback, only: [error_note: 1]
 
+  require Forge.Engine
   require Logger
   require ForgeWeb.Operator.Admission
 
@@ -28,7 +29,8 @@ defmodule ForgeWeb.Operator.Actions do
 
   `opts` reaches the `"transition"` event alone, as `Forge.Operator.transition/4`'s options: the
   queue passes `approving: false`, so a way that approves or merges is refused there in words
-  (`describe({:decides_on_ticket, to})`) and taken on the ticket's page instead.
+  (`describe({:decides_on_ticket, to})`) and taken on the ticket's page instead, and `jump: false`,
+  so that it offers no jump either (`docs/design/ui.md` § The queue).
   """
   # Every event clears the last refusal first: a refusal stays only until the next thing done.
   def handle(event, params, socket, opts \\ []) do
@@ -99,13 +101,25 @@ defmodule ForgeWeb.Operator.Actions do
 
   defp keep_typed(socket, _params, _reason), do: socket
 
-  defp act("transition", %{"ticket" => id, "to" => to}, socket, opts) do
+  # **The kind of move a press was drawn as** is sent with it (`jump` is `"true"` for a row of the
+  # fold of other states and `"false"` for an arrow), so a press drawn before the ticket moved is
+  # refused rather than taken as the other kind (`Forge.Engine.choose/4`). The caller's own
+  # options win: the queue's `jump: false` is not something a crafted event can undo.
+  defp act("transition", %{"ticket" => id, "to" => to} = params, socket, opts) do
+    opts = Keyword.merge(kind_option(params), opts)
+
     with {:ok, ticket} <- Operator.transition(ticket(id), user(socket), to, opts) do
-      {:ok, "Moved to #{ticket.state}"}
+      if opts[:jump] == true,
+        do: {:ok, "Jumped to #{to}"},
+        else: {:ok, "Moved to #{ticket.state}"}
     end
   end
 
   defp act(event, params, socket, _opts), do: act(event, params, socket)
+
+  defp kind_option(%{"jump" => "true"}), do: [jump: true]
+  defp kind_option(%{"jump" => "false"}), do: [jump: false]
+  defp kind_option(_params), do: []
 
   defp act("cancel-ticket", %{"ticket" => id}, socket) do
     with {:ok, _ticket} <- Operator.cancel(ticket(id), user(socket)) do
@@ -286,6 +300,8 @@ defmodule ForgeWeb.Operator.Actions do
     |> Enum.map_join("; ", fn {field, messages} -> "#{field} #{Enum.join(messages, ", ")}" end)
   end
 
+  def describe(reason) when Forge.Engine.refused?(reason), do: Forge.Engine.refusal(reason)
+
   def describe(:no_such_transition), do: "no such transition"
   def describe({:no_version, name}), do: "#{name} has no version to approve"
   def describe({:no_job_in, state}), do: "no job runs in #{state}"
@@ -333,9 +349,6 @@ defmodule ForgeWeb.Operator.Actions do
 
   def describe(errors) when is_list(errors),
     do: "the default branch's workflow does not parse: " <> ForgeCore.Error.format(errors)
-
-  def describe({:ambiguous, outcomes}),
-    do: "ambiguous; pick an outcome: #{Enum.join(outcomes, ", ")}"
 
   def describe(other) do
     case Forge.Jobs.Extensions.explain(other) do

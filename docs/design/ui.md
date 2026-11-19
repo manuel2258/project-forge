@@ -1360,6 +1360,25 @@ A way forward is not a
 decision row: it moves the ticket and approves nothing, which is the difference between a dock
 button and an amber one.
 
+**Other states** is a fold below the arrows, in the same form, listing every state of the pinned
+workflow that is not an arrow's target, each a jump (`workflow-grammar-v1.md` § Jumping): a row
+*Jump to implementing* with what it starts and *no transition leads here*, on a choice row like
+the others and taken by the same button. The arrows are the declared transitions the ticket
+offers that route to one edge; a target several edges reach with none the bare one is a row of the
+fold, not an arrow that is refused every time. The fold is drawn whenever the arrows are, **and on
+a ticket that is done**, which offers none, so that it can be reopened; never on a cancelled
+ticket, and not at all when there is no state to list. A row whose job would lack a required input
+is disabled and names each — a document: *a ticket chat can write it*; the changeset or the commit
+message of a state that merges: the state that writes it. A row into a state that merges is drawn
+as the approval it records — *merges, approving the changeset v3 in your name · +12 −4 in 3 files* —
+and, once picked, the commit message the merge will write, as an approval of a change shows them.
+Whether the fold is open is a field of the same form, kept with the pick, so what the client
+replays on a rejoin restores both (§ A reconnect is not a reload). The page draws each press with
+the kind it drew (arrow or jump) and the operation refuses one the ticket has since changed to the
+other, so nothing is approved that the person did not see. **The queue offers no jumps** (§ The
+queue): a jump is a repair, made while reading the ticket. On a phone the fold and its rows are
+the same and the dock button takes the pick.
+
 **A human state's documents are written here**, above its ways forward: one editor per name the
 state declares in `produces` (`workflow-grammar-v1.md` § Semantics), holding the latest version
 when there is one, and a filled *Save* that records what was typed as a new version by the person.
@@ -1598,7 +1617,14 @@ its Activity is where it is read.
 Under the stream, **On the ticket** lists what happened to the ticket itself rather than in a job
 — a decision and its note, a transition, a stick, a merge-queue event, a rename, **a job extended, a
 state run again with its note, a cap raised** — newest first. Each of the last three says who did
-it, and so does every other row a person acted on now: their address, or `API · <token name>`.
+it, and so does every other row a person acted on now but a jump: their address, or `API · <token name>`.
+**A jump reads as one**: *jumped from planning to reviewing, with no transition*, by whoever made
+it as its row on Steps says it (*you*, *a member*, or the token's name), *(reopened)* when the ticket
+was done, and the comment, bounded; a jump into the merge queue says so. On Steps it is a row of
+its own between the visits either side of it, which a jump breaks into two steps even where it
+returns to the same state. **That row is a sentence, not a visit**: set in the body face, since it
+carries the comment a person wrote (mono is never for that, § Type), and with no chevron, because
+it opens nothing.
 Activity also says what the platform's own events mean beside their type: the statuses a command
 batch decided and its outcome, why the ticket stuck, which edge it took, and what each merge-queue
 event means.

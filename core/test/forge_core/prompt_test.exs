@@ -358,6 +358,52 @@ defmodule ForgeCore.PromptTest do
       assert rest =~ "## Inputs (read-only)"
     end
 
+    test "entered by a jump is told no conflict sent it, and shows no paths" do
+      spec =
+        integrating(%{"default_branch" => "main", "jump" => true, "paths" => [], "merges" => []})
+
+      spec = %{
+        spec
+        | entered: %{
+            "from" => "review_ready",
+            "outcome" => nil,
+            "by" => "person",
+            "comment" => "try it",
+            "jump" => true
+          }
+      }
+
+      manifest = Prompt.manifest(spec, "/j")
+
+      assert manifest =~
+               "moved here from `review_ready` by a jump: no transition of the workflow leads here"
+
+      assert manifest =~ "A person moved it."
+      assert manifest =~ "try it"
+      assert manifest =~ "No conflict sent this ticket here: it was moved here by a jump"
+      refute manifest =~ "no longer merges"
+      refute manifest =~ "It conflicted in these paths"
+      # And what to do is the jump's own, not the one for an empty list of paths.
+      assert manifest =~ "there is nothing to resolve unless the merge itself conflicts"
+      refute manifest =~ "No conflict is recorded for this ticket"
+    end
+
+    test "entered by the merge queue's jump says the engine moved it" do
+      spec = %{
+        spec()
+        | entered: %{
+            "from" => "implementing",
+            "outcome" => nil,
+            "by" => "engine",
+            "comment" => nil,
+            "jump" => true
+          }
+      }
+
+      assert Prompt.manifest(spec, "/j") =~
+               "The engine moved it, a merge the ticket waited in line for."
+    end
+
     test "an update step's conflict says that bringing the branch up to date conflicted" do
       manifest =
         Prompt.manifest(
@@ -1066,17 +1112,18 @@ defmodule ForgeCore.PromptTest do
       assert flat =~ "cancels the ticket and restores it"
     end
 
-    # A target two edges reach can never be asked for, because the request names no outcome. Said
-    # so in the list rather than offered as though it could be taken — and said accurately: the
-    # ticket page cannot take one either.
-    test "about a ticket marks a target that cannot be asked for" do
+    # What a ticket's other states are offered as: jumps, marked as such, each with what its job
+    # is still missing, so the agent can write it first (`docs/design/conversations.md`).
+    test "about a ticket lists the jumps and what each is missing" do
       spec =
         chat_spec(%{
           ticket: %{number: 7, title: "Round and round"},
           moving: %{
-            "transitions" => [
-              %{"to" => "implementing", "approve" => [], "ambiguous" => true},
-              %{"to" => "verifying", "approve" => [], "ambiguous" => false}
+            "transitions" => [%{"to" => "verifying", "approve" => []}],
+            "jumps" => [
+              %{"to" => "implementing", "merges" => false, "missing" => ["plan.md"]},
+              %{"to" => "merged", "merges" => true, "missing" => []},
+              %{"to" => "review_ready", "merges" => false, "missing" => []}
             ],
             "pending" => nil,
             "job_live" => false
@@ -1084,12 +1131,30 @@ defmodule ForgeCore.PromptTest do
         })
 
       manifest = Prompt.chat_manifest(spec, "/var/forge/jobs/chat-1")
-      flat = String.replace(manifest, "\n", " ")
 
-      assert flat =~ "`implementing` — **cannot be asked for**"
-      assert flat =~ "Nor can the ticket page"
-      # The one that can be is still plainly offered.
-      assert manifest =~ "- `verifying`"
+      assert manifest =~ "- `verifying`\n"
+      assert manifest =~ "**Jumps**"
+      assert manifest =~ "- `implementing` — still missing: `plan.md`"
+      assert manifest =~ "- `merged` — **merges**, approving the changeset"
+      assert manifest =~ "- `review_ready`\n"
+      refute manifest =~ "cannot be asked for"
+    end
+
+    test "a ticket with only jumps is not told there is nowhere to go" do
+      spec =
+        chat_spec(%{
+          ticket: %{number: 7, title: "Done"},
+          moving: %{
+            "transitions" => [],
+            "jumps" => [%{"to" => "planning", "merges" => false, "missing" => []}],
+            "pending" => nil,
+            "job_live" => false
+          }
+        })
+
+      manifest = Prompt.chat_manifest(spec, "/var/forge/jobs/chat-1")
+      assert manifest =~ "- `planning`"
+      refute manifest =~ "No transition is declared"
     end
 
     # A pinning that no longer parses has nothing to offer, and an empty list would read as a

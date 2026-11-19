@@ -16,7 +16,7 @@ outside `Operator` altogether (§ Operations).
   transaction, resuming the job once (`design/job-prompt.md` § Answering a document's questions
   at once).
 - `decide(ticket, user, :approved | :rejected, comment)` — decides the pending transition.
-- `transition(ticket, user, to, opts)` — takes a declared transition by hand.
+- `transition(ticket, user, to, opts)` — moves the ticket to a state by hand: by the declared transition that resolves to it, or by a jump when none does (`design/workflow-grammar-v1.md` § Jumping). `opts` may carry `jump: true | false`, the kind the caller drew, refused when the target is the other.
 - `retry(ticket, user)` — runs the state the ticket rests in again
   (`design/workflow-grammar-v1.md` § Running a state again).
 - `retry(ticket, user, opts)` also takes `note:` and `raise:` (the ticket's cap, in weighted tokens);
@@ -118,7 +118,7 @@ it. Every refusal to authenticate is the same 401 body.
 | `POST /tickets/:project/:number/artifacts/:name` | New version `{content}` |
 | `POST /tickets/:project/:number/answers` | `{key, choice, text}` |
 | `POST /tickets/:project/:number/approve` | `{decision, comment}` |
-| `POST /tickets/:project/:number/transition` | `{to, outcome, comment}` |
+| `POST /tickets/:project/:number/transition` | `{to, outcome, comment}` — `to` is any state of the pinned workflow; `outcome` asks for that declared edge only, and is refused when there is none; with none, a target no offered edge resolves to is a jump (`design/workflow-grammar-v1.md` § Jumping) |
 | `POST /tickets/:project/:number/retry` | Runs the state the ticket rests in again; `{note, raise}` optional |
 | `POST /tickets/:project/:number/jobs/:job_id/extend` | `{tokens, turns, note, raise}`: reopens the job that ran out of budget; refused 409 `not_extendable`, `job_live` or `step_live` and 422 for a bad figure, a long note (counted in codepoints, as the database counts it) or one the database could not store (a NUL byte, bytes that are not UTF-8), a raise that is not an amount, a raise nothing needs (`raise_not_needed`) or one short of the shortfall. A write token may; a read token or a job's may not |
 | `POST /tickets/:project/:number/cancel`, `…/restore` | Cancels the ticket; brings a cancelled one back — a cancelled release is refused with 409 `release_open` while another release is open (`ticket-types.md` § Releases) |

@@ -25,6 +25,7 @@ defmodule Forge.Conversations do
   alias ForgeCore.Job.Result
   alias ForgeCore.Proposal
 
+  require Forge.Engine
   require Logger
 
   # Matched in a function head, so it is the name itself and not a call to the one definition of
@@ -1039,6 +1040,13 @@ defmodule Forge.Conversations do
 
   # The engine's and the operator's own refusals, in the words the agent and the person read.
   # Every one of them is a reason a person's click is refused too; none is invented here.
+  defp humanise(reason) when Forge.Engine.refused?(reason), do: Forge.Engine.refusal(reason)
+
+  # The one refusal a jump meets that carries a ticket (`Forge.ReleaseTickets.put_restorable/2`):
+  # said by its number, never the row, which `inspect/1` would write out whole.
+  defp humanise({:release_open, %{number: number}}),
+    do: "a release is already open: ##{number}; this one cannot be reopened beside it"
+
   defp humanise(:forbidden),
     do: "the person who opened this conversation is no longer a member of the project"
 
@@ -1088,15 +1096,6 @@ defmodule Forge.Conversations do
 
   defp humanise({:merge_impossible, reason}),
     do: "the merge could not be attempted: #{inspect(reason)}"
-
-  # **Not "a person has to choose by hand".** A person cannot: the ticket page and
-  # `mix forge.transition` pass no outcome either, and the only caller that can is a direct API
-  # call. Saying otherwise sends the agent to tell the person to press a button that is not there.
-  defp humanise({:ambiguous, outcomes}),
-    do:
-      "more than one transition goes there, on " <>
-        Enum.map_join(outcomes, ", ", &"`#{&1 || "no outcome"}`") <>
-        "; neither this nor the ticket page can say which, so only a direct API call can take it"
 
   defp humanise(reason), do: "refused: #{inspect(reason)}"
 

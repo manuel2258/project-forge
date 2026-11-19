@@ -77,8 +77,10 @@ defmodule ForgeCore.Engine do
 
   **Several edges to `to` and none of them the default is still ambiguous**, because nothing here
   can tell which a person meant: `refining → refining` carries `budget_exhausted` and
-  `did_not_converge` and no bare edge. That case needs the outcome sent along with the target,
-  which is the operator surface's to fix, not this function's to guess.
+  `did_not_converge` and no bare edge. The page, the API and a chat name only a target and ask
+  `route/4`, which calls that case a jump. This is for a caller that names an outcome, replays an
+  edge it already chose, or wants the declared edge to a target or nothing — the queue's
+  `decision_edge/3`, which offers no jump and so reads an ambiguous target as no edge.
   """
   @spec choose(
           Workflow.t(),
@@ -100,6 +102,38 @@ defmodule ForgeCore.Engine do
       many -> default_among(many)
     end
   end
+
+  @doc """
+  Where a request to move the ticket from `state_name` to `to` goes, given the edges the ticket
+  is *offered* (`Forge.Engine.offered_edges/2` — the caller passes them, so the filter is the one
+  the page and a chat's manifest already read).
+
+    * `{:edge, t}` - one offered edge leads to `to`, or several do and one is the bare edge: the
+      declared transition, taken exactly as before.
+    * `:jump` - no offered edge leads there, or several do and none is the bare edge. The move is a
+      jump (`docs/design/workflow-grammar-v1.md` § Jumping): a deliberate move to any state of the
+      workflow, taking no transition.
+    * `{:error, {:unknown_state, to}}` - `to` is not a state of the workflow at all, which no jump
+      can reach either.
+  """
+  @spec route(Workflow.t(), Workflow.state_name(), Workflow.state_name(), [Transition.t()]) ::
+          {:edge, Transition.t()} | :jump | {:error, {:unknown_state, String.t()}}
+  def route(%Workflow{} = workflow, state_name, to, offered) when is_list(offered) do
+    if Workflow.state(workflow, to) == nil do
+      {:error, {:unknown_state, to}}
+    else
+      candidates = Enum.filter(offered, &(&1.from == state_name and &1.to == to))
+
+      case candidates do
+        [] -> :jump
+        [transition] -> {:edge, transition}
+        many -> many |> default_among() |> routed()
+      end
+    end
+  end
+
+  defp routed({:ok, transition}), do: {:edge, transition}
+  defp routed({:error, {:ambiguous, _outcomes}}), do: :jump
 
   # At most one, always: the validator refuses two transitions from one state on the same outcome,
   # and a bare edge is the one for `default_outcome/0`.

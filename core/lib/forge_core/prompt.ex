@@ -443,7 +443,7 @@ defmodule ForgeCore.Prompt do
 
     ## Moving the ticket
 
-    You can ask for a transition, or decide a pending one, by writing
+    You can ask for a move to any state, or decide a pending transition, by writing
     `#{Path.join(job_dir, "transition.json")}`; the preamble says how. Everything here is as of
     when this conversation started and the ticket may have moved since. **You will not be told
     what became of a request**: if it is refused, the reason is recorded for the person to read
@@ -460,10 +460,19 @@ defmodule ForgeCore.Prompt do
       "\n- This ticket's pinned workflow no longer parses, so no transition can be offered or\n" <>
         "  taken. A person has to repin it before the ticket can move."
 
-  defp offered(%{"transitions" => []}),
-    do: "\n- No transition is declared out of the ticket's state, so there is none to ask for."
+  defp offered(moving) do
+    case {moving["transitions"] || [], moving["jumps"] || []} do
+      {[], []} ->
+        "\n- No transition is declared out of the ticket's state, and no other state to jump to."
 
-  defp offered(%{"transitions" => transitions}) do
+      {transitions, jumps} ->
+        transitions(transitions) <> jumps(jumps)
+    end
+  end
+
+  defp transitions([]), do: ""
+
+  defp transitions(transitions) do
     """
 
     Transitions out of the ticket's state:
@@ -472,13 +481,31 @@ defmodule ForgeCore.Prompt do
     """
   end
 
-  # A target reached by two edges is listed and marked as not askable: the request carries a
-  # target and no outcome, so the engine refuses it every time. Marked rather than dropped, so
-  # the agent can tell the person the state exists and why it is out of reach.
-  defp edge(%{"to" => to, "ambiguous" => true}),
-    do:
-      "- `#{to}` — **cannot be asked for**: two transitions go there and the request cannot say\n" <>
-        "  which. Nor can the ticket page; only a direct API call can."
+  # Every other state of the workflow is reached by a jump, which takes no transition and so none
+  # of the approvals a transition would record (`docs/design/conversations.md` § Taking a
+  # transition). What a state's job requires and the ticket lacks is said beside it: write those
+  # documents first and the jump can be asked for.
+  defp jumps([]), do: ""
+
+  defp jumps(jumps) do
+    """
+
+    **Jumps** — states no transition above leads to. A jump records no approval of its own, except
+    that one into a state that merges approves the changeset in the name of the person who opened
+    this conversation:
+
+    #{Enum.map_join(jumps, "\n", &jump/1)}
+    """
+  end
+
+  defp jump(%{"to" => to} = jump) do
+    merges = if jump["merges"], do: " — **merges**, approving the changeset", else: ""
+
+    case jump["missing"] || [] do
+      [] -> "- `#{to}`#{merges}"
+      names -> "- `#{to}`#{merges} — still missing: #{Enum.map_join(names, ", ", &"`#{&1}`")}"
+    end
+  end
 
   defp edge(%{"to" => to} = transition) do
     case transition["approve"] || [] do
@@ -656,6 +683,18 @@ defmodule ForgeCore.Prompt do
   # which inputs changed.
   defp arrival(nil), do: "This is the ticket's first state."
 
+  # `docs/design/job-prompt.md` § How the job arrived: a jump is no transition, and saying "took the
+  # transition" of one would send the job looking for an edge that does not exist.
+  defp arrival(%{"from" => from, "by" => by, "jump" => true} = entered) do
+    who =
+      if by == "person",
+        do: "A person moved it",
+        else: "The engine moved it, a merge the ticket waited in line for"
+
+    "The ticket was moved here from `#{from}` by a jump: no transition of the workflow leads " <>
+      "here. #{who}." <> comment(entered["comment"])
+  end
+
   defp arrival(%{"from" => from, "by" => by} = entered) do
     who = if by == "person", do: "a person", else: "the engine"
     on = if entered["outcome"], do: " on `#{entered["outcome"]}`", else: ""
@@ -694,7 +733,7 @@ defmodule ForgeCore.Prompt do
         "\n\n## Integrating `#{branch}`",
         integration_cause(integration, branch) <>
           integration_head(integration["head"], branch, remote),
-        integration_conflict(integration["paths"] || [], integration["changeset"], remote),
+        integration_conflict(integration, remote),
         integration_merges(integration, branch),
         "Merge `#{remote}` into the branch — `git merge #{remote}` — resolve every conflict, and " <>
           "commit the merge. **Do not rebase, and do not reset the branch.** The commit this " <>
@@ -708,6 +747,13 @@ defmodule ForgeCore.Prompt do
   end
 
   defp integration(%Spec{}), do: ""
+
+  # A jump into an integrating state has no conflict behind it (`job-prompt.md` § Integrating the
+  # default branch): the conflict an earlier merge left on the ticket is not what sent it here.
+  defp integration_cause(%{"jump" => true}, branch),
+    do:
+      "No conflict sent this ticket here: it was moved here by a jump, and `#{branch}` may or " <>
+        "may not merge into it cleanly. "
 
   defp integration_cause(%{"cause" => "update"}, branch),
     do:
@@ -724,6 +770,16 @@ defmodule ForgeCore.Prompt do
 
   defp integration_head(_none, branch, remote),
     do: "The checkout has `#{branch}` as `#{remote}`: that is the one to merge."
+
+  # A jump says it in its own opening (`integration_why/2`); a second line about it would only
+  # repeat that nothing conflicted.
+  defp integration_conflict(%{"jump" => true}, remote),
+    do:
+      "Merge `#{remote}` into the branch and say what you found; there is nothing to resolve " <>
+        "unless the merge itself conflicts."
+
+  defp integration_conflict(integration, remote),
+    do: integration_conflict(integration["paths"] || [], integration["changeset"], remote)
 
   defp integration_conflict([], _changeset, remote),
     do:

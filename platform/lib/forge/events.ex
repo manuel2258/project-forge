@@ -129,6 +129,32 @@ defmodule Forge.Events do
     )
   end
 
+  @doc """
+  The `transition.taken` events of a ticket that were **jumps**, oldest first
+  (`docs/design/workflow-grammar-v1.md` § Jumping): what Steps draws between the visits a jump
+  splits.
+  """
+  @spec jumps_for_ticket(String.t()) :: [Event.t()]
+  def jumps_for_ticket(ticket_id) do
+    Repo.all(
+      from e in Event,
+        where: e.ticket_id == ^ticket_id and e.type == "transition.taken",
+        where: fragment("?->>'jump' = 'true'", e.payload),
+        order_by: e.seq
+    )
+  end
+
+  @doc "Where each job's creation was written in the ticket's log: `%{job_id => seq}`."
+  @spec job_created_seqs(String.t()) :: %{String.t() => integer()}
+  def job_created_seqs(ticket_id) do
+    from(e in Event,
+      where: e.ticket_id == ^ticket_id and e.type == "job.created",
+      select: {e.job_id, e.seq}
+    )
+    |> Repo.all()
+    |> Map.new()
+  end
+
   @doc "The newest event of `type` for a ticket, or nil."
   @spec latest_for_ticket(String.t(), String.t()) :: Event.t() | nil
   def latest_for_ticket(ticket_id, type) do
@@ -511,6 +537,12 @@ defmodule Forge.Events do
     do: "merged as #{short(sha)}#{if p["already"], do: " (it was already there)"}"
 
   # The merge queue (`docs/design/workflow-grammar-v1.md` § The merge queue), in plain words.
+  defp describe(
+         %Event{type: "merge_queue.entered", payload: %{"to" => to, "jump" => true}},
+         _bound
+       ),
+       do: "queued to merge into #{to}, by a jump"
+
   defp describe(%Event{type: "merge_queue.entered", payload: %{"to" => to}}, _bound),
     do: "queued to merge into #{to}"
 
@@ -539,6 +571,19 @@ defmodule Forge.Events do
   # wrong.
   defp describe(%Event{type: "chat.transition_refused", payload: %{"reason" => reason}}, bound),
     do: bounded(reason, 160, bound)
+
+  # A jump, said as one: no transition is behind it, and the comment is what it was made with
+  # (`docs/design/ui.md` § Activity). Who made it is the event's actor, drawn beside the line.
+  defp describe(
+         %Event{
+           type: "transition.taken",
+           payload: %{"from" => from, "to" => to, "jump" => true} = p
+         },
+         bound
+       ) do
+    "jumped from #{from} to #{to}, with no transition" <>
+      if(p["reopened"], do: " (reopened)", else: "") <> note(p["comment"], bound)
+  end
 
   defp describe(
          %Event{type: "transition.taken", payload: %{"from" => from, "to" => to} = p},

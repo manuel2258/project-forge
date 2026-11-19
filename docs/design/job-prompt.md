@@ -47,6 +47,13 @@ changes, so neither the worker nor the manifest does: the manifest already says 
 quotes it. A first state run again has no arrival to add to, so its job is told it came from that
 state, by a person, with the note (`Forge.Engine.rejection_note/1`).
 
+**A job a jump starts is told so.** `entered` then carries `jump: true` and has no outcome, and the
+manifest says the ticket was *moved here from `X` by a jump — no transition of the workflow leads
+here*, by a person or by the engine (the merge queue's merge of a queued jump), with the comment
+as before. The worker has to act on that field to render it correctly, so such a job needs
+protocol 12 (`worker-channel.md` § Protocol 12); a job in a ticket chat is not gated, an older
+worker dropping what it does not know.
+
 *A job the note is for* is one the workflow made with an arrival to hand it in: an agent state's
 job, or a chat **step**'s conversation. A command state's commands are made with none — a command
 has no manifest to say it in — so they do not use it up: the note goes on to the agent job the
@@ -138,7 +145,11 @@ so a job that waits or parks reads the state of things when it resumes, not when
   `conflicted` and no `ticket.merge_conflicted`; the job reads whichever of the two is later, and
   its `integration` says `cause: "update"`, so the manifest says that bringing the branch up to
   date conflicted, naming the default branch's head, instead of saying the
-  changeset no longer merges;
+  changeset no longer merges. **Except a jump**: a job whose `entered` is a jump reads neither —
+  the paths are empty and there is no commit — and its manifest opens
+  *No conflict sent this ticket here: it was moved here by a jump*, rather than "no longer merges",
+  then goes on to say the default branch is fetched and what it holds, and to merge it and say what
+  it found (`workflow-grammar-v1.md` § Jumping);
 - the merges that landed on the default branch since the ticket's base, first-parent, newest
   first, each as its commit and subject line — at most twenty, with how many more there were —
   because which ticket wrote the other side of a conflict is what says how to resolve it;

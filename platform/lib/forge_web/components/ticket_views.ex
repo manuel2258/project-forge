@@ -27,7 +27,7 @@ defmodule ForgeWeb.TicketViews do
   alias ForgeCore.Workflow
   alias ForgeWeb.Components.{MoreRoom, StepAccept}
   alias ForgeWeb.{Diff, FileType, Format, WorkScreen}
-  alias ForgeWeb.Operator.{Actions, QuestionForm}
+  alias ForgeWeb.Operator.{Actions, Decision, QuestionForm}
 
   # The events whose type alone does not say what happened: which outcome a batch decided, why the
   # ticket stuck, where it went, why a conversation's request to move it moved nothing, the note a
@@ -40,6 +40,33 @@ defmodule ForgeWeb.TicketViews do
            ticket.stopped ticket.refreshed transition.held ticket.retitled
            ticket.milestone_set ticket.moved ticket.branch_updated ticket.base_moved
            ticket.retried job.extended ticket.cap_raised)
+
+  @doc """
+  Who an event of the ticket's Activity was made by, in the words the product uses: a person by
+  their address in `addresses` and an API token by its name (`Format.author/2`), and a **jump** as
+  its row on Steps says it — *you*, *a member* or *the engine* (the merge line's own move)
+  (`docs/design/ui.md` § Activity). Nil for the engine, and for a person not in `addresses`.
+  """
+  @spec made_by(map(), String.t(), %{String.t() => String.t()}) :: String.t() | nil
+  def made_by(
+        %{actor: actor, type: "transition.taken", payload: %{"jump" => true}},
+        me,
+        _addresses
+      ),
+      do: jumper(actor, me)
+
+  def made_by(%{actor: actor}, _me, addresses), do: Format.author(actor, addresses)
+
+  @doc """
+  Who made a jump, as the product says it (`docs/design/ui.md` § Activity): the viewer as *you*, the
+  API token by its name, another member as *a member* (their address is not shown to the other
+  members), and the merge line's own move as *the engine*. Steps and Activity both say it this way.
+  """
+  @spec jumper(map(), String.t()) :: String.t() | nil
+  def jumper(%{"kind" => "user", "id" => me}, me), do: "you"
+  def jumper(%{"kind" => "user"}, _me), do: "a member"
+  def jumper(%{"kind" => "api"} = actor, _me), do: Format.author(actor)
+  def jumper(_system, _me), do: "the engine"
 
   @doc "The ticket's event types Activity says in words, beside what its jobs did."
   @spec said_types() :: [String.t()]
@@ -211,10 +238,99 @@ defmodule ForgeWeb.TicketViews do
     moves ++ extend ++ again
   end
 
-  defp moves?(assigns) do
+  # Where a way forward may be offered at all: nothing waits on a decision, a question, the merge
+  # line or a live conversation, which have their own ways on.
+  defp resting?(assigns) do
     assigns.ticket.pending_transition == nil and blocking(assigns) == [] and
-      (assigns.ticket.status == :stuck or assigns.human_state) and assigns.queue == nil and
-      not step_live?(assigns.step)
+      assigns.queue == nil and not step_live?(assigns.step)
+  end
+
+  defp moves?(assigns),
+    do: resting?(assigns) and (assigns.ticket.status == :stuck or assigns.human_state)
+
+  @doc """
+  The fold of **other states** under the ways forward (`ui.md` § Steps): every state of the pinned
+  workflow that is not one of the arrows' targets, each a **jump** — a move no transition leads to,
+  taking none and so recording none of its approvals. Drawn where the arrows are, and on a ticket
+  that is done, which has no arrows and is reopened by one; never on a cancelled ticket, and not
+  at all when there is no state to offer.
+
+  `assigns.jumps` is what `ForgeWeb.TicketLive` read of each: its name, whether it merges and what
+  its job would find missing (`Forge.Jobs.missing_inputs/3`, the rule creation uses). A row with
+  something missing is listed and disabled and says what, and that a ticket chat can write it; one
+  into a state that merges is drawn as the approval it records.
+  """
+  @spec fold(map()) :: [map()]
+  def fold(%{workflow: workflow, ticket: ticket} = assigns) do
+    if fold?(assigns) do
+      for jump <- assigns.jumps do
+        %{
+          value: "jump:" <> jump.to,
+          label: "Jump to #{jump.to}",
+          detail: jump_detail(workflow, jump, assigns),
+          disabled: missing_note(workflow, jump.missing),
+          merges: jump.merges,
+          ticket: ticket
+        }
+      end
+    else
+      []
+    end
+  end
+
+  defp fold?(assigns) do
+    # A cancelled ticket is neither stuck, in a human state (that is an *open* ticket's) nor done, so
+    # `moves?/1` and this refuse it without a guard of their own: the fold is never drawn for it.
+    assigns.jumps != [] and
+      (moves?(assigns) or (resting?(assigns) and assigns.ticket.status == :done))
+  end
+
+  defp jump_detail(_workflow, %{merges: true}, assigns) do
+    "merges, approving the changeset#{approving(assigns.changeset)} in your name" <>
+      stat(assigns.diff) <> " · no transition leads here"
+  end
+
+  defp jump_detail(workflow, %{to: to}, _assigns), do: leads_by_jump(workflow, to)
+
+  defp leads_by_jump(workflow, to), do: leads(workflow, to) <> "; no transition leads here"
+
+  defp approving(%{version: version}), do: " v#{version}"
+  defp approving(_none), do: ""
+
+  defp stat(%{added: added, removed: removed, files: files}) when is_list(files),
+    do:
+      " · +#{added} −#{removed} in #{length(files)} #{if length(files) == 1, do: "file", else: "files"}"
+
+  defp stat(_none), do: ""
+
+  # What stops a jump from being taken from the page: the page writes no document, so what is
+  # missing is said with who can write it (`ui.md` § Steps).
+  defp missing_note(_workflow, []), do: nil
+
+  defp missing_note(workflow, names) do
+    made = [Workflow.changeset_artifact(), Workflow.commit_message_artifact()]
+    {produced, written} = Enum.split_with(names, &(&1 in made))
+
+    Enum.join(
+      Enum.reject(
+        [
+          written != [] &&
+            "#{Enum.join(written, ", ")} has no version yet — a ticket chat can write it",
+          produced != [] && produced_by(workflow, produced)
+        ],
+        &(&1 == false)
+      ),
+      "; "
+    )
+  end
+
+  defp produced_by(workflow, names) do
+    Enum.map_join(names, "; ", fn name ->
+      case Workflow.producers(workflow, name) do
+        [] -> "#{name} has no version yet"
+        states -> "#{name} has no version yet — #{Enum.join(states, ", ")} writes it"
+      end
+    end)
   end
 
   # What taking the edge starts, in words: the state's kind decides it. Public because the queue
@@ -270,7 +386,8 @@ defmodule ForgeWeb.TicketViews do
   defp questions?(assigns),
     do: assigns.ticket.pending_transition == nil and blocking(assigns) != []
 
-  defp button?(assigns), do: assigns.view == "steps" and assigns.ways != []
+  defp button?(assigns),
+    do: assigns.view == "steps" and (assigns.ways != [] or assigns.fold != [])
 
   # With nothing waiting, the job running now is a quiet chip that opens its page (`5d`) — on
   # Changes and Docs. Steps and Activity lead with the job's own row, which says the same thing a
@@ -288,6 +405,8 @@ defmodule ForgeWeb.TicketViews do
 
   defp questions_gone?(_assigns), do: false
 
+  defp picked_merge?(fold, forward), do: Enum.any?(fold, &(&1.value == forward and &1.merges))
+
   @doc "The dock: the question pane, the way forward's button, or the job's chip."
   def dock(assigns) do
     assigns =
@@ -295,7 +414,7 @@ defmodule ForgeWeb.TicketViews do
         pane: questions?(assigns),
         dock_button: button?(assigns),
         job_chip: chip?(assigns),
-        picked: Enum.find(assigns.ways, &(&1.value == assigns.forward))
+        picked: Enum.find(assigns.ways ++ assigns.fold, &(&1.value == assigns.forward))
       )
 
     ~H"""
@@ -348,7 +467,7 @@ defmodule ForgeWeb.TicketViews do
       type="submit"
       form="ways-forward"
       id={@id}
-      disabled={is_nil(@picked)}
+      disabled={is_nil(@picked) or @picked[:disabled] != nil}
       phx-disable-with="Sending…"
       class="ui-btn ui-btn--primary ui-btn--lg ui-btn--fill"
     >
@@ -515,9 +634,24 @@ defmodule ForgeWeb.TicketViews do
       <li
         :for={{step, i} <- Enum.with_index(@steps)}
         id={"step-#{i}"}
-        class={["ticket-step", i == @last && ["ticket-step--current", "ticket-step--#{@dot}"]]}
+        class={[
+          "ticket-step",
+          step[:jump] && "ticket-step--jump",
+          i == @last && ["ticket-step--current", "ticket-step--#{@dot}"]
+        ]}
       >
-        <details open={i == @last} phx-mounted={keep_open()}>
+        <p :if={step[:jump]} class="ticket-step-jump text-sm/[1.45] text-ink-2 break-words">
+          <span class="ticket-step-dot" aria-hidden="true" />
+          <span class="min-w-0">
+            Jumped from {step.jump.from} to {step.jump.to}, with no transition{if step.jump.reopened,
+              do: " (reopened)"} · {step.jump.by}<span :if={step.jump.comment}>: {String.slice(
+              step.jump.comment,
+              0,
+              160
+            )}</span>
+          </span>
+        </p>
+        <details :if={!step[:jump]} open={i == @last} phx-mounted={keep_open()}>
           <summary class="ticket-step-row">
             <span class="ticket-step-dot" aria-hidden="true" />
             <.state name={step.name} topology={step.topology} />
@@ -891,13 +1025,13 @@ defmodule ForgeWeb.TicketViews do
       <%!-- A choice row each; the dock's button takes the one picked. Nothing is picked until a
             person picks it, so the button says so and does nothing. --%>
       <form
-        :if={@ways != []}
+        :if={@ways != [] or @fold != []}
         id="ways-forward"
         phx-change="forward:pick"
         phx-submit="forward"
         class="flex flex-col gap-2"
       >
-        <.eyebrow>Ways forward</.eyebrow>
+        <.eyebrow :if={@ways != []}>Ways forward</.eyebrow>
         <%= for way <- @ways do %>
           <.choice_row
             id={"way-#{way.value}"}
@@ -919,13 +1053,48 @@ defmodule ForgeWeb.TicketViews do
             prefix="forward"
           />
         <% end %>
+        <%!-- Other states: each a jump, which takes no transition. The fold is a checkbox of this
+              form, so what the client replays on a rejoin opens it and picks the row together
+              (`ui.md` § A reconnect is not a reload). --%>
+        <div :if={@fold != []} id="ways-other" class="flex flex-col gap-2">
+          <label
+            for="ways-other-toggle"
+            class="flex min-h-[46px] cursor-pointer items-center gap-2 text-sm text-ink-2 hover:text-ink"
+          >
+            <input
+              id="ways-other-toggle"
+              type="checkbox"
+              name="other"
+              value="open"
+              checked={@other}
+              class="sr-only"
+            />
+            <span aria-hidden="true">{if @other, do: "▾", else: "▸"}</span>
+            Other states ({length(@fold)})
+          </label>
+          <.choice_row
+            :for={way <- if(@other, do: @fold, else: [])}
+            id={"way-#{way.value}"}
+            name="way"
+            value={way.value}
+            label={way.label}
+            detail={way.disabled || way.detail}
+            selected={@forward == way.value}
+            disabled={way.disabled != nil}
+          />
+          <Decision.commit_block
+            :if={@other and picked_merge?(@fold, @forward)}
+            id="jump-commit"
+            commit={Decision.commit_of(@ticket)}
+          />
+        </div>
       </form>
       <%!-- From 768 the button sits under the choices it commits, not a screen away in the
             dock (UX pass, B1); the dock keeps it on a phone, under the thumb. --%>
-      <div :if={@ways != []} id="forward-inline" class="ticket-forward-inline">
+      <div :if={@ways != [] or @fold != []} id="forward-inline" class="ticket-forward-inline">
         <.forward_button
           id="forward-button-inline"
-          picked={Enum.find(@ways, &(&1.value == @forward))}
+          picked={Enum.find(@ways ++ if(@other, do: @fold, else: []), &(&1.value == @forward))}
         />
       </div>
       <%!-- Under the ways forward, and drawn without them too: a way sent from a page drawn
@@ -1037,8 +1206,8 @@ defmodule ForgeWeb.TicketViews do
             <span class="work-act-type">{event.type}</span>
             <div class="work-act-detail">
               {said(event)}
-              <span :if={Format.author(event.actor, @addresses)} class="text-ink-2">
-                · {Format.author(event.actor, @addresses)}
+              <span :if={made_by(event, @current_scope.user.id, @addresses)} class="text-ink-2">
+                · {made_by(event, @current_scope.user.id, @addresses)}
               </span>
             </div>
           </div>
@@ -1083,7 +1252,7 @@ defmodule ForgeWeb.TicketViews do
   jobs proposed, and its lifecycle.
   """
   def details(assigns) do
-    visits = Enum.count(assigns.steps, &(&1.name == assigns.ticket.state))
+    visits = Enum.count(assigns.steps, &(&1[:name] == assigns.ticket.state))
     assigns = assign(assigns, :visits, visits)
 
     ~H"""

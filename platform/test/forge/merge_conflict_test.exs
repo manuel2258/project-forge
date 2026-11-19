@@ -156,8 +156,7 @@ defmodule Forge.MergeConflictTest do
       {:ok, _chat} = Forge.Conversations.record_turn(chat, chat_decision(1))
 
       assert [impossible] = chat_refusals(chat)
-      assert impossible =~ "could not be attempted"
-      assert impossible =~ "no_changeset"
+      assert impossible =~ "no changeset"
     end
 
     test "a failure that is not a conflict is refused, not routed", context do

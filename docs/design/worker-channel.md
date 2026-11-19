@@ -864,3 +864,19 @@ against the list (`Forge.Workers.runs?/2`). An assignment carries `harness`, and
 turn report may carry `credential_return` in its harness map: a login Codex rewrote, sealed to the
 job's worker and the job under the `:return` purpose of `ForgeCore.Job.Credential` (`codex.md`
 § Credentials).
+
+## Protocol 12 (ticket 56)
+
+The same 12 as § Protocol 12 (ticket 58): both landed before any release carried a worker at 12, so
+one worker image speaks both `extension` and a jump's arrival, and a worker at 12 does both.
+The minimum is unchanged. A job whose spec's `entered` is a **jump**
+(`workflow-grammar-v1.md` § Jumping) needs 12: its arrival has no outcome and no transition, and
+an integrating state entered by a jump has no conflict behind it, so a worker that does not know
+the field would render the arrival as a person's transition and the integration as one a conflict
+sent — a field the worker has to act on to be correct (§ What needs a bump). `Forge.Jobs.protocol_needs/1`
+gains `jump: 12` for a workflow job in that case and for a **chat step** whose contract's `entered`
+is one (a step renders the same arrival on a return to it, from its second visit, and is gated on
+every visit); every other job is as it was. **A ticket
+chat is not gated**: its `moving` field gains `jumps`, which an older worker drops, and the
+request is made and applied by the platform, so it works unchanged. The scheduler's *Waiting for a
+newer worker image* reason and the workers page say so as they do for the other numbers.

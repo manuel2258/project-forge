@@ -260,6 +260,36 @@ defmodule ForgeCore.Job.SpecTest do
                "comment" => nil
              }
     end
+
+    # Only a jump says so: dropping the key would render a jump as a person's transition, and the
+    # worker is what renders it (`docs/design/worker-channel.md` § Protocol 12).
+    test "an arrival by a jump keeps saying so, and one by a transition does not" do
+      jumped =
+        Spec.from_map(%{
+          "job_id" => "c",
+          "branch" => "b",
+          "entered" => %{"from" => "a", "by" => "person", "jump" => true}
+        })
+
+      assert jumped.entered["jump"] == true
+
+      refute Map.has_key?(
+               Spec.from_map(%{"job_id" => "c", "entered" => %{"from" => "a"}}).entered,
+               "jump"
+             )
+    end
+
+    test "a ticket chat's jumps survive the wire, and an older spec has none" do
+      jumps = [%{"to" => "merged", "merges" => true, "missing" => ["changeset"]}]
+
+      moved =
+        Spec.from_map(%{"job_id" => "c", "moving" => %{"transitions" => [], "jumps" => jumps}})
+
+      assert moved.moving["jumps"] == jumps
+
+      assert Spec.from_map(%{"job_id" => "c", "moving" => %{"transitions" => []}}).moving["jumps"] ==
+               []
+    end
   end
 
   test "a workflow job's grant and a resume's results survive the wire" do

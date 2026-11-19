@@ -526,6 +526,23 @@ defmodule ForgeWeb.QueuePastTest do
       refute has_element?(view, "#item-review-#{ticket.id}[data-decided]")
     end
 
+    # Ticket 56, criterion 17: the queue offers no jump, and one sent anyway — a crafted event, or
+    # one claiming to be a jump — is refused in words with nothing moved.
+    test "a jump is refused when it is sent anyway", %{conn: conn, ticket: ticket} do
+      {:ok, view, _html} = live(conn, ~p"/")
+      before = length(Forge.Events.for_ticket(ticket.id))
+
+      render_hook(view, "transition", %{
+        "ticket" => ticket.id,
+        "to" => "planning",
+        "jump" => "true"
+      })
+
+      assert has_element?(view, "#queue-refusal", "a jump now")
+      assert %{state: "human_testing"} = Tickets.get!(ticket.id)
+      assert length(Forge.Events.for_ticket(ticket.id)) == before
+    end
+
     test "a way that sends it back is taken here", %{conn: conn, ticket: ticket} do
       {:ok, view, _html} = live(conn, ~p"/")
 

@@ -189,14 +189,23 @@ defmodule ForgeWeb.Api.FallbackController do
   def call(conn, {:error, {:invalid_document, errors}}),
     do: error(conn, :unprocessable_entity, "invalid_document", ForgeCore.Error.format(errors))
 
-  def call(conn, {:error, {:ambiguous, outcomes}}),
-    do:
-      error(
-        conn,
-        :unprocessable_entity,
-        "ambiguous_transition",
-        "pass outcome: one of #{Enum.join(outcomes, ", ")}"
-      )
+  # What a jump can be refused for (`Forge.Engine.refusal/1` has the words). The state a request
+  # named is not a state of the workflow: the client's mistake. What it lacks is a conflict with
+  # the ticket as it stands. `is_jump` and `is_edge` are not here: they answer a page's press drawn
+  # before the ticket moved (`Forge.Engine.choose/4`'s `:jump` option), which a request names no
+  # kind for.
+  def call(conn, {:error, {:unknown_state, _name} = reason}),
+    do: error(conn, :unprocessable_entity, "unknown_state", Forge.Engine.refusal(reason))
+
+  def call(conn, {:error, {:missing_input, _name} = reason}),
+    do: error(conn, :conflict, "missing_input", Forge.Engine.refusal(reason))
+
+  def call(conn, {:error, {:merge_impossible, reason} = refusal})
+      when reason in [:no_changeset, :no_commit_message],
+      do: error(conn, :conflict, "merge_impossible", Forge.Engine.refusal(refusal))
+
+  def call(conn, {:error, {:reopen_conflict, _paths} = reason}),
+    do: error(conn, :conflict, "reopen_conflict", Forge.Engine.refusal(reason))
 
   def call(conn, {:error, :already_decided}),
     do:

@@ -123,10 +123,10 @@ defmodule ForgeCore.Job.Spec do
     # told the variable is gone rather than finding it missing (`docs/design/secrets.md`
     # § Conversations). Always empty for a workflow job, which does not run without them.
     secrets_gone: [],
-    # A ticket conversation's, string keys: `transitions`, the edges declared out of the ticket's
-    # state that it may ask for, each `%{"to", "approve", "ambiguous"}` — `ambiguous` marking a
-    # target two edges reach, which cannot be asked for because the request names no outcome;
-    # `pending`, the ticket's pending decision as the engine built it, `%{"from", "to",
+    # A ticket conversation's, string keys: `transitions`, the targets a declared edge out of the
+    # ticket's state reaches, each `%{"to", "approve"}`; `jumps`, every other state of the pinned
+    # workflow, each `%{"to", "merges", "missing"}` — the inputs its job would still lack
+    # (`docs/design/conversations.md` § Taking a transition); `pending`, the ticket's pending decision as the engine built it, `%{"from", "to",
     # "outcome", "approve"}`, or nil; `job_live`, whether a job of the
     # state was live when this started, since a transition is refused while one is; and
     # `workflow_broken`, whether the ticket's pinned workflow still parses — when it does not
@@ -386,6 +386,7 @@ defmodule ForgeCore.Job.Spec do
   defp moving_from_map(map) do
     %{
       "transitions" => nested(map, :transitions) || [],
+      "jumps" => nested(map, :jumps) || [],
       "pending" => nested(map, :pending),
       "job_live" => nested(map, :job_live) == true,
       "workflow_broken" => nested(map, :workflow_broken) == true
@@ -421,10 +422,15 @@ defmodule ForgeCore.Job.Spec do
     }
 
     # Only from a command state, so every other arrival keeps the shape it always had.
-    case nested(map, :batch) do
-      nil -> entered
-      batch -> Map.put(entered, "batch", batch)
-    end
+    entered =
+      case nested(map, :batch) do
+        nil -> entered
+        batch -> Map.put(entered, "batch", batch)
+      end
+
+    # Only a jump says so (`docs/design/job-prompt.md` § How the job arrived): no transition of the
+    # workflow led here.
+    if nested(map, :jump) == true, do: Map.put(entered, "jump", true), else: entered
   end
 
   defp budget_from_map(nil), do: nil

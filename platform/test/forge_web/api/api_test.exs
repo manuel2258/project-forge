@@ -116,6 +116,51 @@ defmodule ForgeWeb.ApiTest do
 
   # The queue serves `retry` on a stuck item; the API is where a client acts on it. A transition
   # with nothing to approve is refused by name, as on the page.
+  # Ticket 56: a state the workflow does not have is the client's mistake, and its name comes back
+  # as data in a JSON string, never as markup.
+  test "a move to a state the workflow lacks is refused with the name as text", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    scenario("invalid_document", "refinement.md")
+    run_pending(ticket.id)
+
+    assert %{"error" => %{"reason" => "unknown_state", "detail" => detail}} =
+             conn
+             |> post(~p"/api/v1/tickets/#{project.name}/1/transition", %{to: "<b>x</b>"})
+             |> json_response(422)
+
+    assert detail =~ ~s("<b>x</b>")
+  end
+
+  # What a jump lacks is the ticket's to say: the client can write it and ask again.
+  test "a jump is refused in words for the input or the merge it lacks", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    scenario("invalid_document", "refinement.md")
+    run_pending(ticket.id)
+
+    assert %{"error" => %{"reason" => "missing_input", "detail" => detail}} =
+             conn
+             |> post(~p"/api/v1/tickets/#{project.name}/1/transition", %{to: "implementing"})
+             |> json_response(409)
+
+    assert detail =~ "has no version yet"
+
+    assert %{"error" => %{"reason" => "merge_impossible", "detail" => merge}} =
+             conn
+             |> post(~p"/api/v1/tickets/#{project.name}/1/transition", %{to: "merged"})
+             |> json_response(409)
+
+    assert merge =~ "no changeset"
+    assert Tickets.get!(ticket.id).state == "refining"
+  end
+
   test "a stuck ticket's state is run again, and a transition with nothing to approve says so", %{
     conn: conn,
     user: user,
@@ -133,10 +178,12 @@ defmodule ForgeWeb.ApiTest do
     assert %{"items" => [%{"kind" => "stuck", "detail" => %{"retry" => true}}]} =
              conn |> get(~p"/api/v1/queue") |> json_response(200)
 
-    assert %{"error" => %{"reason" => "no_version"}} =
+    assert %{"error" => %{"reason" => "missing_input", "detail" => detail}} =
              conn
              |> post(~p"/api/v1/tickets/#{name}/1/transition", %{to: "planning"})
              |> json_response(409)
+
+    assert detail =~ "refinement.md"
 
     assert %{"state" => "refining", "status" => "active"} =
              conn |> post(~p"/api/v1/tickets/#{name}/1/retry") |> json_response(200)

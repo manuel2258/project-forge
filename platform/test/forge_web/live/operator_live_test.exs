@@ -879,8 +879,9 @@ defmodule ForgeWeb.OperatorLiveTest do
     assert has_element?(activity, "#ticket-events", "an older reason")
   end
 
-  # A stale page can still send a transition the surfaces no longer offer; the refusal says
-  # which document has nothing to approve rather than "something went wrong".
+  # A stale page can still send a transition the surfaces no longer offer; the edge is not offered
+  # (its document has no version), so it is a jump, and the refusal says which document the target's
+  # job is missing rather than "something went wrong".
   test "taking a transition with nothing to approve says what is missing", %{
     conn: conn,
     user: user,
@@ -893,7 +894,7 @@ defmodule ForgeWeb.OperatorLiveTest do
     {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
 
     assert render_hook(view, "transition", %{"ticket" => ticket.id, "to" => "planning"}) =~
-             "refinement.md has no version to approve"
+             "has no version yet and the state&#39;s job needs it"
   end
 
   test "a ticket is cancelled from its page, leaves the open tickets, and is restored there", %{

@@ -60,6 +60,61 @@ defmodule ForgeCore.EngineTest do
     end
   end
 
+  describe "route/4" do
+    test "one offered edge to the target is that edge", %{workflow: workflow} do
+      offered = ForgeCore.Workflow.transitions_from(workflow, "review_ready")
+
+      assert {:edge, %Transition{from: "review_ready", to: "merged"}} =
+               Engine.route(workflow, "review_ready", "merged", offered)
+    end
+
+    test "a target no offered edge reaches is a jump", %{workflow: workflow} do
+      offered = ForgeCore.Workflow.transitions_from(workflow, "refining")
+
+      assert :jump = Engine.route(workflow, "refining", "merged", offered)
+    end
+
+    # The edge exists but the caller was not offered it (its `approve` names a document with no
+    # version): counting every declared edge instead of the offered ones would route to it.
+    test "an edge that is declared and not offered is a jump", %{workflow: workflow} do
+      assert :jump = Engine.route(workflow, "review_ready", "merged", [])
+    end
+
+    # The edges are the ones offered *from where the ticket rests*: an edge into the target from
+    # another state is no way there from this one.
+    test "an offered edge from another state is no edge from this one", %{workflow: workflow} do
+      offered = ForgeCore.Workflow.transitions_from(workflow, "review_ready")
+
+      assert [%Transition{from: "review_ready", to: "merged"}] =
+               Enum.filter(offered, &(&1.to == "merged"))
+
+      assert :jump = Engine.route(workflow, "refining", "merged", offered)
+    end
+
+    test "several offered edges take the bare one" do
+      workflow = parallel_edges("- {from: a, to: b}")
+      offered = ForgeCore.Workflow.transitions_from(workflow, "a")
+
+      assert {:edge, %Transition{when: nil}} = Engine.route(workflow, "a", "b", offered)
+    end
+
+    test "several offered edges and no bare one is a jump" do
+      workflow = parallel_edges("- {from: a, to: b, when: done}")
+      offered = ForgeCore.Workflow.transitions_from(workflow, "a")
+
+      assert :jump = Engine.route(workflow, "a", "b", offered)
+    end
+
+    test "a state the workflow does not have is refused whatever is offered", %{
+      workflow: workflow
+    } do
+      offered = ForgeCore.Workflow.transitions_from(workflow, "refining")
+
+      assert {:error, {:unknown_state, "nowhere"}} =
+               Engine.route(workflow, "refining", "nowhere", offered)
+    end
+  end
+
   describe "choose/3" do
     test "lets a person take any declared transition, ignoring max", %{workflow: workflow} do
       assert {:ok, %Transition{from: "review_ready", to: "merged"}} =

@@ -65,6 +65,8 @@ defmodule Forge.Jobs do
   # § Protocol 12).
   @extension_protocol 12
   @step_protocol 10
+  # A workflow job whose arrival is a jump (`docs/design/worker-channel.md` § Protocol 12).
+  @jump_protocol 12
 
   # How many of the merges that landed on the default branch since a ticket's base an integrating
   # job is told about by name; the rest are counted (`docs/design/job-prompt.md` § Integrating the
@@ -918,6 +920,10 @@ defmodule Forge.Jobs do
   - **A chat step needs protocol 10**: the spec's `step` is the contract the worker renders into
     the manifest, and an older worker drops the field and tells the agent there is nothing to
     write (`docs/design/worker-channel.md` § Versions).
+  - **A workflow job, or a chat step, that arrived by a jump needs protocol 12**: an older worker
+    renders the arrival as a person's transition, and an integrating job's manifest as one a
+    conflict sent (`docs/design/worker-channel.md` § Protocol 12). A ticket chat is not gated: its
+    `jumps` are one a worker may drop.
   """
   @spec protocol(Job.t()) :: non_neg_integer()
   def protocol(%Job{} = job), do: job |> protocol_needs() |> Keyword.values() |> Enum.max()
@@ -940,9 +946,28 @@ defmodule Forge.Jobs do
       secrets: secrets_protocol(job),
       outputs: outputs_protocol(job),
       archive: archive_protocol(job),
+      jump: jump_protocol(job),
       extension: extension_protocol(job),
       usage: @usage_protocol
     ]
+
+  defp jump_protocol(%Job{kind: :workflow} = job),
+    do: if(jumped?(spec(job).entered), do: @jump_protocol, else: 0)
+
+  # A chat step entered by a jump renders the same arrival from its contract's `entered` on a
+  # return to the step (`ForgeCore.Prompt`'s `step_arrival/1`, from the second visit), so it is
+  # gated as a workflow job is — on every visit, since what it is entered by does not change; a
+  # conversation a person opened about the ticket has no arrival.
+  #
+  # **`Job.step?(chat) and` is an equivalent mutant**: `step_entered/1` is nil for a conversation
+  # that is not a step (it has no `chat.opened` step), and `jumped?(nil)` is false.
+  defp jump_protocol(%Job{kind: :chat} = chat),
+    do: if(Job.step?(chat) and jumped?(step_entered(chat)), do: @jump_protocol, else: 0)
+
+  defp jump_protocol(%Job{}), do: 0
+
+  defp jumped?(%{"jump" => true}), do: true
+  defp jumped?(_entered), do: false
 
   defp extension_protocol(%Job{kind: :workflow, id: id}),
     do:
@@ -1409,7 +1434,7 @@ defmodule Forge.Jobs do
         entered_commands: entered,
         previous_changeset: previous_changeset(job, spec),
         base: ticket.base_commit,
-        integration: integration_now(spec.integration, ticket)
+        integration: integration_now(spec.integration, spec.entered, ticket)
     }
 
     case Artifacts.latest(ticket_id, Workflow.answers_artifact()) do
@@ -1445,59 +1470,96 @@ defmodule Forge.Jobs do
 
     %{
       "transitions" => chat_transitions(ticket, parsed),
+      "jumps" => chat_jumps(ticket, parsed),
       "pending" => ticket.pending_transition,
       "job_live" => live?(ticket.id, ticket.state),
       "workflow_broken" => match?({:error, _}, parsed)
     }
   end
 
-  # `Engine.offered_edges/2` and no second walk of the workflow: the edges it returns are the
-  # ones that survived the unversioned-artifact filter, so a target reached by two edges carries
-  # only the surviving ones' `approve` names. Grouping on the target names it once, as the page
-  # names it once; asking for it is then refused as `{:ambiguous, outcomes}`, which is what a
-  # person's by-hand choice of the same target already gets.
+  # The targets a request reaches by a declared edge: `Engine.offered_edges/2` and no second walk of
+  # the workflow, routed as the request is (`ForgeCore.Engine.route/4`), so the list says what a
+  # request for each does. A target several edges reach with no bare one is not here: it is a
+  # jump (`chat_jumps/2`).
   defp chat_transitions(%Ticket{} = ticket, {:ok, workflow}) do
-    # **The ambiguity count is over every declared edge, not over the offered ones.**
-    # `ForgeCore.Engine.choose/4` counts its candidates straight off `transitions_from/2` with no
-    # unversioned-artifact filter, so counting the filtered set here would be a guard using a
-    # different model from the operation it guards (CLAUDE.md § Rules): a target reached by two
-    # edges with one of them filtered out would be marked askable and refused `{:ambiguous, _}`
-    # every time — the exact thing the marker exists to stop. No shipped workflow can reach it
-    # today (`dev.yml`, `bug.yml` and `release.yml` have nine two-edge targets between them and
-    # none carries an `approve`), which is why it is a rule broken rather than a bug seen.
-    reaching =
-      workflow
-      |> ForgeCore.Workflow.transitions_from(ticket.state)
-      |> Enum.frequencies_by(& &1.to)
+    offered = Engine.offered_edges(ticket, workflow)
 
-    ticket
-    |> Engine.offered_edges(workflow)
-    # One entry per offered edge, grouped by target.
-    |> Enum.map(&ForgeCore.Workflow.approving(workflow, &1))
-    |> Enum.group_by(& &1.to, & &1.approve)
-    |> Enum.map(fn {to, edge_approvals} ->
-      %{
-        "to" => to,
-        "approve" => edge_approvals |> List.flatten() |> Enum.uniq(),
-        # **Two edges to one target are marked as not askable.** The request carries a target
-        # and no outcome, and this repository's own `dev.yml` reaches `implementing` twice out of
-        # `implementing`, on `budget_exhausted` and `did_not_converge`, where `Engine.choose/4`
-        # answers `{:ambiguous, outcomes}`. Said here rather than left for the agent to discover
-        # by being refused: the ticket page and `mix forge.transition` pass no outcome either, so
-        # the only caller that can take one of these is the HTTP API.
-        #
-        # **Where one of the two is the bare edge the engine now takes it** (`default_among/1`,
-        # ticket 13), so this over-marks that case rather than being wrong about it — an agent is
-        # never told it may ask for a target that is then refused, only the other way round. No
-        # shipped workflow has such a pair today. Whether the marker should narrow to match is a
-        # person's call, not a merge's: `proposal-ambiguous-marker.md`.
-        "ambiguous" => Map.fetch!(reaching, to) > 1
-      }
+    offered
+    |> Enum.map(& &1.to)
+    |> Enum.uniq()
+    |> Enum.flat_map(fn to ->
+      case ForgeCore.Engine.route(workflow, ticket.state, to, offered) do
+        # What taking it records, which out of an integrating state into a merge includes the
+        # changeset whether the edge lists it or not (`ForgeCore.Workflow.approving/2`).
+        {:edge, edge} ->
+          [%{"to" => to, "approve" => ForgeCore.Workflow.approving(workflow, edge).approve}]
+
+        :jump ->
+          []
+      end
     end)
     |> Enum.sort_by(& &1["to"])
   end
 
   defp chat_transitions(%Ticket{}, {:error, _errors}), do: []
+
+  # Every other state of the pinned workflow, each with what a jump there is still missing
+  # (`missing_inputs/3`): the documents a chat may write first.
+  defp chat_jumps(%Ticket{} = ticket, {:ok, workflow}) do
+    for to <- Engine.jumps(ticket, workflow) do
+      %{
+        "to" => to,
+        "merges" => Workflow.merges_on_enter?(workflow, to),
+        "missing" => missing_inputs(ticket, workflow, to)
+      }
+    end
+  end
+
+  defp chat_jumps(%Ticket{}, {:error, _errors}), do: []
+
+  @doc """
+  The inputs a move to `state_name` would find missing: what its job's creation refuses on
+  (`put_create/7` — every input of an agent state that `Workflow.required_input?/3` requires and
+  that has no version), and, into a state that merges, the `changeset` or `commit-message` a merge
+  needs and cannot be attempted without. A command state and a chat step create nothing that
+  checks one, and a human or final state starts nothing, so none of them is missing anything
+  (`docs/design/workflow-grammar-v1.md` § Jumping).
+
+  **The same `input/4` and `required_input?/3` the creation reads**, so what a page or a manifest
+  says is missing is what a jump would be refused for.
+  """
+  @spec missing_inputs(Ticket.t(), Workflow.t(), String.t()) :: [String.t()]
+  def missing_inputs(%Ticket{} = ticket, %Workflow{} = workflow, state_name) do
+    state = Workflow.state(workflow, state_name)
+    merging = Workflow.merges_on_enter?(workflow, state_name)
+
+    job_inputs(ticket, workflow, state) ++ merge_inputs(ticket, merging)
+  end
+
+  defp job_inputs(ticket, workflow, %State{chat: chat, prompt: prompt, inputs: names} = state)
+       when is_binary(prompt) and chat != true do
+    repo_path = ticket |> Tickets.project_of() |> Projects.repo_path()
+
+    for name <- names,
+        Workflow.required_input?(workflow, state.name, name),
+        match?({:error, _}, input(Repo, ticket, repo_path, name)),
+        do: name
+  end
+
+  defp job_inputs(_ticket, _workflow, _state), do: []
+
+  defp merge_inputs(_ticket, false), do: []
+
+  defp merge_inputs(ticket, true) do
+    changeset = if match?({:error, _}, Forge.Merge.changeset(ticket)), do: ["changeset"], else: []
+
+    message =
+      if Forge.Merge.commit_message_missing?(ticket),
+        do: [Workflow.commit_message_artifact()],
+        else: []
+
+    changeset ++ message
+  end
 
   # An integrating job's checkout fetches the default branch too, and so does a conversation's;
   # every other job's does not (`docs/design/git-hosting.md` § The job's own git).
@@ -1753,12 +1815,15 @@ defmodule Forge.Jobs do
   # What an integrating job is told, read when it runs: the default branch's head, what the
   # ticket's latest conflict was, and the merges that landed since its base, first-parent and
   # newest first (`docs/design/job-prompt.md` § Integrating the default branch).
-  defp integration_now(nil, _ticket), do: nil
+  defp integration_now(nil, _entered, _ticket), do: nil
 
-  defp integration_now(%{"default_branch" => branch} = stored, %Ticket{} = ticket) do
+  defp integration_now(%{"default_branch" => branch} = stored, entered, %Ticket{} = ticket) do
     repo = ticket |> Tickets.project_of() |> Projects.repo_path()
 
-    conflict = latest_conflict(ticket)
+    # **A jump into the state has no conflict behind it**, and the one the ticket's last merge or
+    # update left is not what sent it here: reading it would hand the job paths that conflicted
+    # weeks ago (`docs/design/job-prompt.md` § Integrating the default branch).
+    conflict = if jumped?(entered), do: %{}, else: latest_conflict(ticket)
 
     {head, landed} =
       with {:ok, head} <- Git.resolve(repo, "refs/heads/" <> branch),
@@ -1780,6 +1845,7 @@ defmodule Forge.Jobs do
         |> Enum.map(&%{"sha" => &1.sha, "subject" => &1.subject}),
       "more" => max(length(landed) - @landed_shown, 0)
     })
+    |> then(&if(jumped?(entered), do: Map.put(&1, "jump", true), else: &1))
   end
 
   # What the ticket has left of its allowance, beside the job's own budget: a job weighing whether

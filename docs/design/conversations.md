@@ -474,15 +474,21 @@ failed badly, an outcome nothing matched, an approval nobody will give as it sta
 a person's to fix by hand on the ticket page: edit what needs editing, then pick the next
 transition. A conversation is the surface for the fixing half, and without this it has to hand
 the last step back to a person at a keyboard. So it reaches the same two operations a person's
-click does, and nothing more.
+click does — and the click was widened with it: a ticket whose workflow has gone wrong is usually
+one for which the right transition does not exist, so a move to **any state** of the pinned
+workflow, a *jump* (`workflow-grammar-v1.md` § Jumping), is a person's click on the ticket page,
+a token's call and a chat's request alike. The chat has nothing the click lacks. A
+**step** conversation (§ A conversation that is a step) has none: it ends only by Accept.
 
 **One file, read at most once per turn and removed either way**, as `invoke.json` is
 (`docs/design/commands.md` § How an agent invokes): `$FORGE_JOB/transition.json`, holding one
 JSON object, one of
 
-- `{"to": "<state>", "comment": "<optional>"}` — take a transition declared out of the ticket's
-  current state. A target only, no outcome: the ticket page's chooser asks a person for a target
-  only too, so there is nothing more to offer here.
+- `{"to": "<state>", "comment": "<optional>"}` — move to a state of the ticket's pinned workflow:
+  by the transition declared out of the current state when one that the ticket offers resolves to
+  it (one edge, or the bare edge among several), otherwise by a jump. A target only, no outcome:
+  the ticket page's chooser asks a person for a target only too. A target that is not a state of
+  the workflow is refused, the name shown as text.
 - `{"decision": "approved" | "rejected", "comment": "<optional>"}` — decide the ticket's pending
   transition.
 
@@ -497,8 +503,10 @@ A file is a request, not a guarantee. It is read after the turn's own transactio
 applied by calling `Forge.Operator.transition/4` or `Forge.Operator.decide/4` — **the functions
 the ticket page and the API already call**, membership guard included. Every rule a person meets
 is therefore met here with no second copy of it: a live job for the current state refuses the
-request (`Engine.choose/4`'s `no_live_job/1`), so does an `approve` list naming an artifact with
-no version, a rejection leaves the ticket where it is and clears the decision, and an approval
+request (`Engine.choose/4`'s `no_live_job/1`), so does a target job state one of whose required
+inputs has no version (`{:missing_input, name}`, which the chat may first write as a document, in
+the same turn or an earlier one — documents are recorded before the request is applied — though
+never the changeset or the commit message), a rejection leaves the ticket where it is and clears the decision, and an approval
 records against the latest version of each named artifact. The chat does not stop a live job —
 a person cancels the ticket and restores it, which is what they already have.
 
@@ -533,7 +541,9 @@ suspended or un-approved since would otherwise have tickets moved in its name by
 message. `User.active?/1` is asked on the row, not on the struct.
 
 What the ticket records is what a by-hand choice records and nothing beside it: the same
-`transition.taken`, the same approval rows, the same `ticket.stuck`. There is no chat-flavoured
+`transition.taken` (a jump's carries `jump: true`, whoever made it; a jump whose merge conflicted is the conflict route's, as an approval's is), the same approval rows — a
+jump into a state that merges records one, of the changeset, in the opener's name, which this
+widens to every state the ticket may rest in — the same `ticket.stuck`. There is no chat-flavoured
 copy, because "indistinguishable from one taken by hand" is a property of not writing one.
 
 **A refusal is an event, `chat.transition_refused`** on the conversation, carrying the raw
@@ -584,6 +594,12 @@ state performs a real git merge after the engine's transaction commits, which ca
 another one. The turn's own bookkeeping — its cost, its commit, its `chat.turn` event, its
 documents — is unaffected by whether a transition was asked for or what became of it.
 
+**Which refusals have words.** Every reason `Engine.choose/4` can give for a request that names a
+state that a jump can meet — an unknown state, a missing input, a merge with no changeset or no
+commit message, a reopen that conflicts, a drawn kind that no longer holds — is put into a sentence once, by
+`Forge.Engine.refusal/1`, which the page, the API and `chat.transition_refused` all use; the name
+the request gave is data, drawn as text.
+
 **`Engine.choose/4` refuses while a decision is pending**, as `repinnable/2` already does and
 with the same `{:error, :pending_approval}`. It never did before: only the ticket page's
 `:if={!@ticket.pending_transition}` kept a person from reaching it, which was armour nobody could
@@ -591,20 +607,19 @@ walk around by hand. A file is not a hidden button, so the check belongs at the 
 every caller meets it — the chat, the API and the page alike.
 
 **What the chat is told it can do** is in its manifest, in a § Moving the ticket of its own,
-from the spec's one `moving` field: the transitions offered out of the current state with each
-one's `approve` list, the pending decision if there is one, and whether a job is live for the
-state. The edges come from
+from the spec's one `moving` field: `transitions`, the targets that route to a declared edge, each
+with its `approve` list; `jumps`, **every other state** of the pinned workflow, in the workflow's
+order, each with `missing` — the required inputs it still lacks, and for a state that merges the
+`changeset` or `commit-message` — and whether it `merges`; the pending decision if there is one,
+and whether a job is live for the state. The edges come from
 `Engine.offered_edges/2`, which is the one walk of the workflow that both halves read —
 `offered_transitions/2` is its targets, so the page's list and the chat's cannot disagree about
 which *edge* survived the unversioned-artifact filter, not merely about which target did. Two
-edges to one target are named once, with only the surviving edges' `approve` lists; asking for
-such a target is **refused every time**, as `{:ambiguous, outcomes}`: the request names a target
-and no outcome, and neither does the ticket page's chooser or `mix forge.transition`, so the only
-caller that can take one of these is a direct API call. This is not hypothetical — this
-repository's own `dev.yml` reaches `implementing` twice out of `implementing`. So the manifest
-marks such a target as one that cannot be asked for rather than listing it as though it could, and
-the refusal says who can take it instead of telling the agent to send the person to a button that
-does not exist. One field and not
+edges to one target are named once, with only the surviving edges' `approve` lists, when one of
+them is the bare edge; with none the target is a jump, which is what used to be refused every time
+as `{:ambiguous, outcomes}` (this repository's own `dev.yml` reaches `implementing` twice out of
+`implementing`). The `missing` of a jump is read by the rule job creation uses
+(`Jobs.missing_inputs/3`), so what the manifest says is what the request would meet. One field and not
 three, because they are one question — what can this chat do to its ticket now — read in one
 place, and nil for a project chat and for every workflow job. Composed once when the process
 starts, like the rest of its context, and carrying the same caveat — a turn later the ticket may

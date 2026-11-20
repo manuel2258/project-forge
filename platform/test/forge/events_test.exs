@@ -87,6 +87,31 @@ defmodule Forge.EventsTest do
     end
   end
 
+  # A machine stopping for an update says so in the words a person on the ticket reads, and never
+  # names the machine, which is its owner's (`docs/design/worker-tier.md` § Updating a permanent
+  # machine).
+  test "a job or conversation stopped for an update says why and that it carries on" do
+    hibernated = %Event{
+      type: "job.hibernated",
+      payload: %{"reason" => "update", "commit" => "abc"}
+    }
+
+    interrupted = %Event{type: "job.interrupted", payload: %{"reason" => "worker_updating"}}
+    ended = %Event{type: "chat.ended", payload: %{"reason" => "update"}}
+
+    assert Events.summary(hibernated) ==
+             "its machine stopped to update; it resumes where it left off"
+
+    assert Events.summary(interrupted) ==
+             "its machine stopped to update; it resumes, a command from the start"
+
+    assert Events.summary(ended) == "its machine stopped to update; a message carries it on"
+    assert Events.detail(ended) == Events.summary(ended)
+
+    # Any other reason keeps the line it always had.
+    refute Events.summary(%{hibernated | payload: %{"reason" => "cancelled"}}) =~ "update"
+  end
+
   # The event carries the harness's own `total_cost_usd`, which for a run that resumed a session is
   # the session's running total and not what the run spent (`docs/measurements.md` § Session
   # resume), so the line says which it is rather than reading as the run's cost.

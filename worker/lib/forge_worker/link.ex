@@ -18,7 +18,19 @@ defmodule ForgeWorker.Link do
   alias ForgeCore.Job.Result
   alias ForgeCore.WorkerProtocol
   alias ForgeCore.Workflow.Resources
-  alias ForgeWorker.{Checkout, ClaudeUpdate, Config, Health, Log, Slice, Stats, Store}
+
+  alias ForgeWorker.{
+    Checkout,
+    ClaudeUpdate,
+    Config,
+    Disk,
+    Health,
+    Log,
+    Slice,
+    Stats,
+    Store,
+    Update
+  }
 
   alias ForgeWorker.Job.{
     Blobs,
@@ -95,6 +107,10 @@ defmodule ForgeWorker.Link do
       # again after — its join keeps the mark from then on (`docs/design/worker-channel.md` § An
       # unhealthy machine).
       |> assign(:unhealthy_answered, false)
+      # This machine is stopping for an update (`ForgeWorker.Update`): it takes no work, and says
+      # which jobs it hibernated for it, so their reason reads `update` and not `cancelled`.
+      |> assign(:pausing, false)
+      |> assign(:pausing_ids, MapSet.new())
       |> assign(:unacked, %{})
       |> assign(:acks, %{})
       |> assign(:root, Keyword.get(opts, :root, Config.root()))
@@ -113,7 +129,7 @@ defmodule ForgeWorker.Link do
   def handle_connect(socket), do: {:ok, join(socket, socket.assigns.topic, join_payload(socket))}
 
   @impl Slipstream
-  def handle_join(topic, _reply, socket) do
+  def handle_join(topic, reply, socket) do
     # The line M4 watches for: joining is a phase of the cold start, and from outside the
     # machine it is otherwise indistinguishable from the release merely having started. The
     # version is here because a worker can now be updated without its image being rebuilt
@@ -125,6 +141,13 @@ defmodule ForgeWorker.Link do
     )
 
     push(socket, socket.assigns.topic, "ready", ready_payload(socket))
+
+    # The platform's word on what this machine should run, which a platform before protocol 13
+    # does not give: no key, and nothing for the update to act on (`docs/design/worker-channel.md`
+    # § Protocol 13 (ticket 54)).
+    if is_map(reply) and Map.has_key?(reply, "update"), do: Update.told(reply["update"])
+    Update.accepted()
+    Disk.joined()
 
     {:ok, socket |> tick() |> send_held() |> resend_unacked() |> report_unhealthy()}
   end
@@ -218,6 +241,15 @@ defmodule ForgeWorker.Link do
     end)
   end
 
+  # **`update`: the platform's word on what this machine should run** — a target, or nothing — and
+  # the owner's name when the owner pressed *Update now* (`docs/design/worker-tier.md` § Updating
+  # a permanent machine). Not a command: it decides nothing here, and what it does is
+  # `ForgeWorker.Update`'s.
+  def handle_message(_topic, "update", payload, socket) when is_map(payload) do
+    Update.told(payload["target"], requested_by: payload["requested_by"])
+    {:ok, socket}
+  end
+
   def handle_message(topic, event, _payload, socket) do
     Log.line(
       "message.unknown",
@@ -251,6 +283,15 @@ defmodule ForgeWorker.Link do
       # nothing is reported: a result from this machine would be recorded as the job's answer.
       why = Health.unhealthy() ->
         Log.line("job.refused", :warning, "not started: this machine is unhealthy: #{why}",
+          job_id: job_id
+        )
+
+        socket
+
+      # Stopping for an update takes no new work. The platform has stopped assigning here and puts
+      # back in the queue what it had already sent, so, as above, nothing is reported.
+      socket.assigns.pausing ->
+        Log.line("job.refused", :warning, "not started: this machine is updating itself",
           job_id: job_id
         )
 
@@ -332,7 +373,7 @@ defmodule ForgeWorker.Link do
         {:ok, socket |> forget(ref, key) |> assign(:unhealthy_answered, true)}
 
       key ->
-        {:ok, forget(socket, ref, key)}
+        {:ok, socket |> forget(ref, key) |> check_drained()}
     end
   end
 
@@ -416,8 +457,12 @@ defmodule ForgeWorker.Link do
   # finished with it. Its own report would land on the job as it now is, so it goes nowhere.
   def handle_info({:terminal, job_id, message, payload}, socket) do
     if MapSet.member?(socket.assigns.abandoned, job_id),
-      do: {:noreply, withhold(socket, job_id)},
-      else: {:noreply, report(socket, job_id, message, payload)}
+      do: {:noreply, socket |> withhold(job_id) |> check_drained()},
+      else:
+        {:noreply,
+         socket
+         |> report(job_id, message, update_reason(socket, job_id, message, payload))
+         |> check_drained()}
   end
 
   # A conversation that stopped without saying so. One that ends normally has already sent its
@@ -435,6 +480,68 @@ defmodule ForgeWorker.Link do
         :ok
     end
 
+    {:noreply, socket}
+  end
+
+  # **The machine is stopping for an update.** It says what it will hibernate first — the platform
+  # puts back in the queue whatever is running here and is not named — and only then stops it: a
+  # workflow job with a runner is cancelled and hibernates with its work pushed (its reason reads
+  # `update` when it is reported), a conversation is told to end after the turn it is on, and a
+  # command, which has no session, is given up unreported and runs again from the start.
+  def handle_info({:update_pause, _requested_by}, socket) do
+    {resumable, chats, given_up} = pausing_partition(socket.assigns.jobs)
+
+    socket =
+      socket
+      |> assign(:pausing, true)
+      |> assign(:pausing_ids, MapSet.new(resumable))
+
+    push(
+      socket,
+      socket.assigns.topic,
+      "update",
+      Map.merge(Update.snapshot(), %{"step" => "pausing", "jobs" => resumable, "chats" => chats})
+    )
+
+    for job_id <- resumable, do: cancel(socket.assigns.jobs[job_id])
+
+    for job_id <- chats do
+      case Conversation.whereis(job_id) do
+        pid when is_pid(pid) -> Conversation.close(pid, "update")
+        nil -> :ok
+      end
+    end
+
+    socket =
+      Enum.reduce(given_up, socket, fn job_id, socket ->
+        give_up(
+          socket,
+          job_id,
+          "stopped: this machine is updating itself, and the platform puts it back in the queue"
+        )
+      end)
+
+    Log.line(
+      "update.paused",
+      :info,
+      "paused: #{length(resumable)} job(s) hibernating, #{length(chats)} chat(s) ending after " <>
+        "their turn, #{length(given_up)} command(s) to run again"
+    )
+
+    {:noreply, check_drained(socket)}
+  end
+
+  def handle_info(:update_resume, socket) do
+    {:noreply, socket |> assign(:pausing, false) |> assign(:pausing_ids, MapSet.new())}
+  end
+
+  def handle_info({:update_report, snapshot}, socket) do
+    push(socket, socket.assigns.topic, "update", snapshot)
+    {:noreply, socket}
+  end
+
+  def handle_info({:disk_report, report}, socket) do
+    push(socket, socket.assigns.topic, "disk", report)
     {:noreply, socket}
   end
 
@@ -473,6 +580,7 @@ defmodule ForgeWorker.Link do
   @impl Slipstream
   def handle_disconnect(reason, socket) do
     Logger.warning("disconnected from the platform: #{inspect(reason)}")
+    Update.link_down()
     socket = assign(socket, :acks, %{})
 
     socket =
@@ -512,6 +620,11 @@ defmodule ForgeWorker.Link do
   def handle_topic_close(topic, {:failed_to_join, %{"reason" => reason} = reply}, socket)
       when reason in ["protocol", "destroyed"] do
     Logger.error(refused(reason, reply) <> "; asking again in #{div(refused_retry_ms(), 1000)}s")
+
+    # **Told even when refused**, so a raised minimum protocol does not leave the machine stuck: the
+    # target is in the refusal as it is in an accepted reply (`docs/design/worker-channel.md`
+    # § Versions).
+    if Map.has_key?(reply, "update"), do: Update.told(reply["update"])
     retry = make_ref()
     Process.send_after(self(), {:rejoin, topic, retry}, refused_retry_ms())
 
@@ -583,6 +696,49 @@ defmodule ForgeWorker.Link do
           else: send_acked(socket, key, "unhealthy", %{"reason" => reason})
     end
   end
+
+  # Which jobs an update hibernates, which conversations it ends after their turn, and which it
+  # gives up unreported: a workflow job with a runner resumes from its branch and its session; a
+  # command has no session and runs again from the start; a job whose runner is not started yet has
+  # nothing to hibernate.
+  defp pausing_partition(jobs) do
+    Enum.reduce(jobs, {[], [], []}, fn
+      {job_id, %{kind: :chat}}, {resumable, chats, given_up} ->
+        {resumable, [job_id | chats], given_up}
+
+      {job_id, %{kind: :workflow, runner: runner}}, {resumable, chats, given_up}
+      when is_pid(runner) ->
+        {[job_id | resumable], chats, given_up}
+
+      {job_id, _job}, {resumable, chats, given_up} ->
+        {resumable, chats, [job_id | given_up]}
+    end)
+  end
+
+  # A job cancelled for an update is reported as hibernated for it, and not as `cancelled`, which
+  # is what an owner pressing *cancel* on a ticket looks like: the platform and the people reading
+  # the job's page tell them apart by it (`docs/design/worker-tier.md` § Updating a permanent
+  # machine).
+  defp update_reason(socket, job_id, "hibernated", %{"reason" => "cancelled"} = payload) do
+    if MapSet.member?(socket.assigns.pausing_ids, job_id),
+      do: %{payload | "reason" => "update"},
+      else: payload
+  end
+
+  defp update_reason(_socket, _job_id, _message, payload), do: payload
+
+  # **Nothing is running and nothing is waiting to be acknowledged**, which is when an update may
+  # restart the machine: a terminal message the platform has not acked may not have been recorded.
+  # Not asked of a machine whose channel is down — those cannot be acked, and the platform puts such
+  # a machine's jobs back in the queue itself, as it does a lost one's.
+  defp check_drained(%{assigns: %{pausing: true}} = socket) do
+    unacked? = map_size(socket.assigns.unacked) > 0 and joined?(socket, socket.assigns.topic)
+
+    if map_size(socket.assigns.jobs) == 0 and not unacked?, do: Update.drained()
+    socket
+  end
+
+  defp check_drained(socket), do: socket
 
   # Every job here given up at once, for the reason `why`: the machine is unhealthy, or the
   # platform refused it.
@@ -1405,6 +1561,10 @@ defmodule ForgeWorker.Link do
     # For as long as it believes it: a join without it is what clears the platform's mark
     # (`docs/design/worker-channel.md` § An unhealthy machine).
     |> put_unless_nil("unhealthy", Health.unhealthy())
+    # What this machine can say of updating itself — that it cannot, and why, or where an attempt
+    # stands — so the platform draws it before the first `update` message
+    # (`docs/design/worker-channel.md` § Protocol 13 (ticket 54)).
+    |> Map.put("update", Update.snapshot())
   end
 
   defp running_list(socket) do

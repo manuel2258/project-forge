@@ -15,7 +15,7 @@ defmodule Forge.Workers do
   alias Forge.{Engine, Events, ImageBuilds, Projects, Provider, Provisioning, Repo}
   alias Forge.Jobs.Job
   alias Forge.Provisioning.ProjectTemplate
-  alias Forge.Workers.{Log, ProjectWorker, Worker}
+  alias Forge.Workers.{Log, ProjectWorker, Updates, Worker}
   alias ForgeCore.WorkerProtocol
 
   require Logger
@@ -698,6 +698,10 @@ defmodule Forge.Workers do
             protocol: protocol
           })
 
+        # What the machine says of updating itself is kept refused or not: a machine below the
+        # minimum protocol is exactly the one that most needs it (`worker-channel.md` § Versions).
+        worker = Updates.joined(worker, payload["update"])
+
         if first, do: learn(worker, protocol)
         if WorkerProtocol.compatible?(protocol), do: :ok, else: refuse(worker, protocol)
     end
@@ -902,7 +906,9 @@ defmodule Forge.Workers do
     # do. It is only a step towards destruction if nothing arrives before the period is up.
     candidates =
       from(w in serving(demand[:project_id]),
-        where: w.status in [:ready, :busy, :idle] and is_nil(w.unhealthy_at),
+        where:
+          w.status in [:ready, :busy, :idle] and is_nil(w.unhealthy_at) and
+            is_nil(w.updating_at),
         order_by: [asc: w.inserted_at]
       )
       |> Repo.all()

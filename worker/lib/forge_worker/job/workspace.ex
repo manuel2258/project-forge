@@ -106,7 +106,13 @@ defmodule ForgeWorker.Job.Workspace do
     [root, "volumes", "ticket", "*"]
     |> Path.join()
     |> Path.wildcard()
-    |> Enum.count(&remove_if_stale(&1, cutoff))
+    |> Enum.map(&remove_if_stale(&1, cutoff))
+    |> Enum.reject(&(&1 == false))
+    |> then(fn removed ->
+      # What was freed, for the disk report (`ForgeWorker.Disk`).
+      ForgeWorker.Disk.cleaned("volumes", Enum.sum(removed))
+      length(removed)
+    end)
   end
 
   @doc """
@@ -267,10 +273,12 @@ defmodule ForgeWorker.Job.Workspace do
          true <- File.dir?(path),
          {:ok, %File.Stat{mtime: mtime}} <- File.stat(path, time: :posix),
          true <- mtime < cutoff do
+      size = ForgeWorker.Disk.size(path)
+
       case Volume.impl().delete(path) do
         :ok ->
           Logger.info("swept ticket volume #{Path.basename(path)}")
-          true
+          size
 
         {:error, reason} ->
           Logger.warning("could not sweep #{path}: #{inspect(reason)}")

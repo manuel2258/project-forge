@@ -881,6 +881,87 @@ defmodule ForgeWeb.ChatLiveTest do
              "was kept, because it would not merge cleanly"
   end
 
+  # A conversation an update released says so, and that a message carries it on — and not whose
+  # machine it was, which is its owner's (`docs/design/worker-tier.md` § Updating a permanent
+  # machine). It is released like any other, so it keeps its composer and has no Reopen, and once
+  # a message has started it again the update is no longer news.
+  test "a conversation ended by an update says its machine stopped to update", %{
+    conn: conn,
+    chat: chat
+  } do
+    text(chat, "Here it is.")
+    turn(chat, 1)
+    {:ok, _chat} = Conversations.ended(chat, nil, "update")
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+    sub = view |> element("#top-bar .ui-top-title > .ui-top-sub") |> render()
+    assert sub =~ "waiting on you — its machine stopped to update; a message carries it on"
+    assert has_element?(view, "#draft")
+    refute render(view) =~ "Reopen"
+
+    # Started again, on a machine, and answered: waiting on its person, and the update is history.
+    view |> form("#say", %{"text" => "and the lexer?"}) |> render_submit()
+
+    {:ok, running} =
+      chat.id
+      |> Conversations.get!()
+      |> Jobs.Job.progress_changeset(%{status: :running})
+      |> Forge.Repo.update()
+
+    text(running, "The lexer too.")
+    turn(running, 2)
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+    sub = view |> element("#top-bar .ui-top-title > .ui-top-sub") |> render()
+    assert sub =~ "waiting on you"
+    refute sub =~ "update"
+  end
+
+  # The update's `chat.ended` stays in the events for good. What came after it decides whether it
+  # is still the reason the conversation holds no machine.
+  describe "a conversation an update released, and what happened to it since" do
+    defp sub(conn, chat) do
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      view |> element("#top-bar .ui-top-title > .ui-top-sub") |> render()
+    end
+
+    test "that then lost its machine says nothing of the update", %{conn: conn, chat: chat} do
+      text(chat, "Here it is.")
+      turn(chat, 1)
+      {:ok, chat} = Conversations.ended(chat, nil, "update")
+      assert sub(conn, chat) =~ "its machine stopped to update"
+
+      {:ok, chat} = Jobs.requeue(chat.id, :worker_lost)
+      refute sub(conn, chat) =~ "update"
+    end
+
+    test "that was released for another reason after it says that, and not the update", %{
+      conn: conn,
+      chat: chat
+    } do
+      {:ok, chat} = Conversations.ended(chat, nil, "update")
+      {:ok, chat} = Conversations.ended(chat, nil, "restart")
+      refute sub(conn, chat) =~ "update"
+    end
+  end
+
+  test "a conversation an update released with nothing said is idle and says why", %{
+    conn: conn,
+    chat: chat
+  } do
+    {:ok, _chat} = Conversations.ended(chat, nil, "update")
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+    assert view |> element("#top-bar .ui-top-title > .ui-top-sub") |> render() =~
+             "idle — its machine stopped to update; a message carries it on"
+  end
+
+  test "a conversation that was merely idle says nothing of an update", %{conn: conn, chat: chat} do
+    {:ok, _chat} = Conversations.ended(chat, nil, "idle")
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    refute view |> element("#top-bar .ui-top-title > .ui-top-sub") |> render() =~ "update"
+  end
+
   # Ending deletes the branch, and ending is the one control on the page that does. The
   # confirm is where a person finds that out before rather than after, and the line beside the
   # control says it too — both from one definition, so neither can understate the other.

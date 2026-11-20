@@ -539,8 +539,12 @@ machine is yours (`design/identity.md` § Minting a permanent machine).
   nothing prunes them.
 - **Outbound network, and nothing inbound.** From inside the VM: the platform at the address in
   `worker.env` — `/worker`, `/store` and `/git`, the first two routed to wherever the machine is
-  (§ Behind a proxy) — `cache.nixos.org`, the Anthropic API, and whatever a project's
+  (§ Behind a proxy) — `cache.nixos.org`, the Anthropic API, **`ghcr.io` and the storage it
+  redirects a blob download to** (for the machine's own updates, below), and whatever a project's
   `nix develop` and its builds fetch.
+- **A boot partition for two systems.** The image's is 512 MiB. A machine installed from an
+  image before ticket 54 has 128 MiB, holds one system, and **cannot update itself**: *Update
+  automatically* is not drawn for it and its row says to reinstall it once from the current image.
 
 **Booting one under QEMU** is what `Forge.Provider.LocalVm` and `bin/measure m4` do, by hand:
 
@@ -576,10 +580,21 @@ machine that never appears: `no identity` on its serial console means it found n
 disk, and with the disk there, the next thing to check is that the VM can reach the address in
 `worker.env`.
 
-**Updating it is yours.** A permanent machine is never replaced, so a platform that stops
-accepting its protocol refuses it at the next join and its row says so (§ Upgrading).
-`bin/worker-update <ssh-target> [-p port] [-i key]` copies a new release over ssh and restarts the
-worker, keeping the machine's Nix store and seeds. It needs a line `FORGE_SSH_KEY=<public key>`
+**It updates itself.** A permanent machine is never replaced, so since ticket 54 it brings itself
+up to the platform's worker (`design/worker-tier.md` § Updating a permanent machine): it downloads
+the release's published image from `ghcr.io`, checks its size and sha256, installs the system beside
+the running one, pauses its work (jobs hibernate and resume, conversations end after their turn and
+carry on at the next message), and reboots on trial. It keeps the new system once its worker has connected and
+the platform has accepted it, within 15 minutes, and otherwise boots back into the old one. **What
+this means for trust: a machine with automatic updates on reboots itself into a forge release
+that its node names.** It downloads only from the repository its own image names, by digest, so a
+node can choose among what that repository holds and nothing else. **The image is not signed**
+(left out for now: whoever can push to that package can have a machine install it). *Update automatically* on `/workers` is the
+switch, on by default; with it off the machine never updates by itself and its row says one is
+waiting, with *Update now*.
+`bin/worker-update <ssh-target> [-p port] [-i key]` stays as the development tool: it copies a new release over ssh and restarts the
+worker, keeping the machine's Nix store and seeds — **and an automatic update overwrites the build it
+put there unless the machine's switch is off**. It needs a line `FORGE_SSH_KEY=<public key>`
 in `worker.env`, a route to the guest's port 22 — under user-mode networking, add
 `,hostfwd=tcp:127.0.0.1:2222-:22` to `-netdev` and use `-p 2222 root@127.0.0.1` — and a checkout
 of this repository with Nix where you run it.
@@ -608,6 +623,25 @@ which are best-effort.
 
 What changes for a node that is already running, where the change is in what the platform does
 with rows it already has. Newest first.
+
+- **Permanent machines update themselves, which is a migration, a protocol bump and a reinstall**
+  (`design/worker-tier.md` § Updating a permanent machine, ticket 54). Three things:
+  1. **A reinstall, once, for every machine running today.** The boot partition grows from
+     128 MiB to 512 MiB to hold two systems, and a machine cannot repartition itself. Boot it from
+     this release's image (§ A machine you run yourself) with its identity unchanged; until then
+     its row says *cannot update itself: its boot partition holds one system*. Managed machines
+     are untouched: they are replaced from the new snapshot.
+  2. **Worker protocol 13**, the same 13 attachments brought (ticket 60). The minimum stays 4,
+     and a permanent machine below 13 cannot be told to update, so its row says to reinstall it.
+  3. **A migration**, `…_worker_updates`: `workers.auto_update` (on for every row that exists,
+     machines that exist when this lands included), the update state, `updating_at` and the last
+     disk report. It runs with the release and is reversible.
+
+  What it costs the machines: each reboots once per update, **and a machine whose owner turned the
+  switch off is never touched**; `bin/worker-update` builds are overwritten while it is on. Every
+  entry below that tells you to `bin/worker-update` a permanent machine is what a machine on the
+  new layout now does itself; **a machine still on the old layout cannot, and needs the script (or
+  the reinstall above) until it has been reinstalled once.**
 
 - **A chat step needs protocol 10, and a migration changes the `jobs` shape constraint**
   (`design/conversations.md` § A conversation that is a step, `design/worker-channel.md`

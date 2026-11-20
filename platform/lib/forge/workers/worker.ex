@@ -66,6 +66,19 @@ defmodule Forge.Workers.Worker do
     field :unhealthy_reason, :string
     field :rebooted_at, :utc_datetime_usec
 
+    # **Whether a permanent machine updates itself** (`docs/design/worker-tier.md` § Updating a
+    # permanent machine): the owner's switch, on for every row there was when it arrived. What the
+    # machine last said of an update (`ForgeCore.WorkerUpdate.normalise/1`'s keys and nothing else)
+    # and when; when the platform stopped placing work on it for one (cleared as soon as it says
+    # anything but *pausing* or *restarting*, and at a join that does not); and the last report of
+    # what fills its disk, kept while the machine is away.
+    field :auto_update, :boolean, default: true
+    field :update_state, :map
+    field :update_reported_at, :utc_datetime
+    field :updating_at, :utc_datetime_usec
+    field :disk_report, :map
+    field :disk_reported_at, :utc_datetime
+
     # **Provenance, not authority.** The recipe this machine was made from, whose values were
     # copied onto this row at creation and are never read back through
     # (`docs/design/provisioning.md` § Two tables). Null for a machine the operator built by
@@ -108,6 +121,12 @@ defmodule Forge.Workers.Worker do
       :unhealthy_at,
       :unhealthy_reason,
       :rebooted_at,
+      :auto_update,
+      :update_state,
+      :update_reported_at,
+      :updating_at,
+      :disk_report,
+      :disk_reported_at,
       :unanswered_create,
       :template_id,
       :provider_credential_id,

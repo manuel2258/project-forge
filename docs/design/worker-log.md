@@ -80,8 +80,28 @@ channel's `terminate/2`, and its refusal is the line.
 | `machine.unhealthy` | error | its systemd stopped answering — a `systemd-run` that failed on the bus, or PID 1 not answering the probe twice in a row — and that it has stopped its jobs and takes no more (`worker-tier.md` § A machine whose systemd stops answering) |
 | `machine.rebooting` | warning | the platform said to reboot and the machine is one a driver made, so it is rebooting now |
 | `machine.unrebooted` | warning, or error when the reboot command itself failed | it is not rebooting, and why: the platform said no, or it is not a machine a driver made, or the reboot command itself failed. It was `machine.not_rebooting` until the first end-to-end run (2026-09-30, `measurements.md` § The unhealthy machine, end to end) found the platform keeping it as `unknown`: an underscore is not in a type (below) |
-| `job.refused` | warning, or error for a ceiling | an assignment it did not start: its memory ceiling below the minimum or not a number, or the machine is unhealthy |
+| `job.refused` | warning, or error for a ceiling | an assignment it did not start: its memory ceiling below the minimum or not a number, or the machine is unhealthy, or is updating itself |
 | `job.abandoned` | warning | a job it stopped without reporting its ending, because the platform had already given that run up: the machine went unhealthy, the platform cancelled it as no longer this machine's (`not_ours`) or because the row was retired, or the platform refused the machine — its join, or its connection at the socket (`worker-channel.md` § Reconnection, § Versions) |
+
+**Updating itself** (`worker-tier.md` § Updating a permanent machine), each a line the worker sends:
+
+| Type | Level | Says |
+|---|---|---|
+| `update.started` | info | to what version, and whether automatic or which owner pressed *Update now* |
+| `update.downloaded` | info | the image downloaded, and its size and checksum checked |
+| `update.installed` | info | the new system beside the running one |
+| `update.discarded` | info | the platform's build moved while installing (or it now asks for nothing), so the new system was dropped, and it starts again if there is still a target |
+| `update.paused` | info, or warning | how many jobs and chats it paused; at warning level, that some work had not stopped when the 30 minutes ran out and it restarts anyway |
+| `update.restarting` | info | it is rebooting into the new system, on trial |
+| `update.kept` | info | the new system connected and was accepted, and is now the default |
+| `update.reverted` | error | the new system was not accepted within the limit, or never came up, and it is back on the old one, and why |
+| `update.failed` | error | at which step, why, and when the next try is |
+| `update.stopped` | error | three failures for this build; it waits for a new build or its owner |
+| `update.unable` | warning | once per boot: it cannot update itself — the old layout, not on the forge image — and why |
+
+The platform writes one more: `update.switch` (info) when the owner turns automatic updates on or off, naming the owner. A line carries
+the owner's name only where the owner themselves pressed something. The worker's text is
+data: it is drawn escaped and clipped to one line on the row.
 
 And what it could not do for a job, each line carrying the job's id and the failure in the words
 it was reported in (git's, the store's, the filesystem's):

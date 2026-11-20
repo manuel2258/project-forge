@@ -300,15 +300,23 @@
       # The machine a job runs on: a NixOS appliance that boots, learns who it is from a config
       # disk or a metadata service and runs the forge_worker release. docs/design/worker-tier.md § The worker
       # image. x86_64 only, because that is what `Forge.Provider.LocalVm` boots.
-      workerConfiguration = system: nixpkgs.lib.nixosSystem {
+      workerConfiguration = system:
+        workerConfigurationOf system self.packages.${system}.forge-worker
+          (nixpkgs.lib.fileContents ./VERSION);
+
+      # The same machine around a worker release and a version given, which is how
+      # `nix/worker-update-boots.nix` makes the second release a machine updates to.
+      workerConfigurationOf = system: workerPackage: version: nixpkgs.lib.nixosSystem {
         inherit system;
         modules = [
           # No `allowUnfreePredicate` here any more: the image allowed exactly `claude-code`
           # and contained nothing else unfree, and it no longer contains that either — the
           # machine installs Claude Code for itself at first boot (nix/worker-image.nix).
           (import ./nix/worker-image.nix {
-            workerPackage = self.packages.${system}.forge-worker;
-            version = nixpkgs.lib.fileContents ./VERSION;
+            inherit workerPackage version;
+            # The one repository a permanent machine updates itself from
+            # (docs/design/worker-tier.md § Updating a permanent machine).
+            updateRepository = workerImageRepository;
           })
         ];
       };
@@ -321,9 +329,12 @@
       # and without this the image hangs at the firmware (nix/worker-image.nix). The partition
       # is found by its type, so the order repart writes partitions in is not load-bearing.
       workerImage = system:
+        workerImageOf system self.packages.${system}.forge-worker (nixpkgs.lib.fileContents ./VERSION);
+
+      workerImageOf = system: workerPackage: version:
         let
           pkgs = nixpkgs.legacyPackages.${system};
-          nixos = workerConfiguration system;
+          nixos = workerConfigurationOf system workerPackage version;
         in
         pkgs.runCommand "forge-worker-image"
           {
@@ -333,7 +344,7 @@
               # What `bin/hetzner-image` labels a snapshot of this image with, read from the
               # same evaluation that built it rather than typed: the worker release inside it,
               # and the protocol that release speaks.
-              build = workerBuild self.packages.${system}.forge-worker;
+              build = workerBuild workerPackage;
               protocol = workerProtocol;
             };
           }
@@ -400,6 +411,25 @@
         pkgs = nixpkgs.legacyPackages.x86_64-linux;
         image = self.packages.x86_64-linux.worker-image;
       };
+
+      # A machine updating itself from one release to another, on the real image, under both
+      # firmwares. Needs KVM too; see nix/worker-update-boots.nix. **Builds a second worker
+      # release** (the same source under another version), which is the release it updates to.
+      checks.x86_64-linux.worker-update-boots =
+        let
+          system = "x86_64-linux";
+          pkgs = nixpkgs.legacyPackages.${system};
+          version = nixpkgs.lib.fileContents ./VERSION;
+          newVersion = "${version}-update-check";
+          newWorker = self.packages.${system}.forge-worker.overrideAttrs (_old: { version = newVersion; __intentionallyOverridingVersion = true; });
+          newImage = workerImageOf system newWorker newVersion;
+        in
+        import ./nix/worker-update-boots.nix {
+          inherit pkgs;
+          image = self.packages.${system}.worker-image;
+          newImage = newImage;
+          newBuild = newImage.build;
+        };
 
       # The worker at its memory ceiling and with its PID 1 wedged, on the real image. Needs KVM
       # too; see nix/worker-health.nix.

@@ -19,7 +19,13 @@ defmodule ForgeWorker.Application do
         {Task.Supervisor, name: ForgeWorker.TaskSupervisor},
         # Whether this machine can still run anything: asks PID 1 once a minute, hears from a run
         # whose `systemd-run` could not, and is what the link asks before it takes work.
-        ForgeWorker.Health
+        ForgeWorker.Health,
+        # What fills the disk and what each cleanup freed, measured at intervals; started before
+        # the link, which it reports to (`docs/design/worker-tier.md` § The disk report).
+        ForgeWorker.Disk,
+        # A permanent machine bringing itself up to the platform's release: started before the
+        # link, which tells it what the platform says and which it tells to pause.
+        ForgeWorker.Update
       ] ++ link()
 
     # A worker that was killed left its jobs' archives mounted; nothing may walk a job directory

@@ -3,12 +3,12 @@ defmodule Forge.Look.Setups.Chats do
   The chats (`docs/design/ui.md` § Chats, § The Accept area): one project, `game`, holding a
   conversation responding on a machine of the member's with its plan half done and a branch to
   merge (`15a`, `15e`, `15f`, `18e`), one whose machine was released by the idle timeout, drawn as one
-  holding a machine (`15d`, ticket 53), one ended by hand with its branch deleted, one whose reply was
+  holding a machine (`15d`, ticket 53), one released by an update, whose subline says so, one ended by hand with its branch deleted, one whose reply was
   lost with its machine, one idle whose branch conflicts with `main` (`15c`), and a ticket resting in a chat step whose document is at v2
   with one question open (`16e`–`16i`). The project has three secrets, so a new chat offers them
   as chips (`12d`); their values are made up.
 
-  Users: `member`. Paths: `list`, `new`, `responding`, `changes`, `released`, `ended`, `lost`, `conflict`,
+  Users: `member`. Paths: `list`, `new`, `responding`, `changes`, `released`, `updated`, `ended`, `lost`, `conflict`,
   `conflict_changes`, `step`, `step_ticket`.
   """
 
@@ -68,6 +68,7 @@ defmodule Forge.Look.Setups.Chats do
 
     {step, step_chat} = step!(game, member)
     released = released!(game)
+    updated = updated!(game)
     ended = ended!(game, member)
     lost = lost!(game)
     conflict = conflict!(game)
@@ -81,6 +82,7 @@ defmodule Forge.Look.Setups.Chats do
         "responding" => "/chats/#{responding.id}",
         "changes" => "/chats/#{responding.id}?tab=changes",
         "released" => "/chats/#{released.id}",
+        "updated" => "/chats/#{updated.id}",
         "ended" => "/chats/#{ended.id}",
         "lost" => "/chats/#{lost.id}",
         "conflict" => "/chats/#{conflict.id}",
@@ -169,6 +171,22 @@ defmodule Forge.Look.Setups.Chats do
         Jobs.chat_branch(chat)
       ])
 
+    chat
+  end
+
+  # Answered, then released because its machine stopped to update (`worker-tier.md` § Updating a
+  # permanent machine): the one release whose subline says why, and that a message carries it on.
+  defp updated!(project) do
+    {:ok, chat} = Conversations.open(project, "How should scores be stored?")
+    run!(chat)
+
+    said(
+      chat,
+      "A small table keyed by player is enough; an index on the score column is the only extra."
+    )
+
+    turn(chat, 1, "0.03")
+    {:ok, _chat} = Conversations.ended(Jobs.get(chat.id), nil, "update")
     chat
   end
 

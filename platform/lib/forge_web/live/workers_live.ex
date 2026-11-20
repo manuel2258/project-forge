@@ -31,7 +31,7 @@ defmodule ForgeWeb.WorkersLive do
 
   alias Forge.{Jobs, Projects, Provisioning, Workers}
   alias ForgeCore.WorkerProtocol
-  alias ForgeWeb.{Format, Toast}
+  alias ForgeWeb.{Format, Toast, WorkerUpdate}
 
   # Connection and the live figures are read from a registry rather than pushed at us, so the
   # page asks again on a timer — the same five seconds a worker reports its figures on
@@ -118,6 +118,7 @@ defmodule ForgeWeb.WorkersLive do
       connected_count: Enum.count(rows, & &1.connected),
       busy_count: Enum.count(live, &(&1.status == :busy)),
       idle_count: Enum.count(live, &(&1.status in [:ready, :idle])),
+      updating_count: Enum.count(live, &Forge.Workers.Updates.under_way?/1),
       # The title menu's words for a full template: one whose machines are as many as it may make,
       # so new work for its projects waits (`provisioning.md` § Whose account).
       full_count: Enum.count(templates, &(made[&1.id] >= &1.max_workers)),
@@ -390,6 +391,17 @@ defmodule ForgeWeb.WorkersLive do
     end
   end
 
+  # **The owner's two writes about an update**, each read scoped to the viewer first, so somebody
+  # else's id posted by hand is *not here* (`docs/design/ui.md` § The machines view). The switch
+  # saves when flipped and the page re-reads the row: there is no draft for a reconnect to lose.
+  def handle_event("update-auto", params, socket) do
+    {:noreply, owner_write(socket, &WorkerUpdate.set_automatic/2, params)}
+  end
+
+  def handle_event("update-now", params, socket) do
+    {:noreply, owner_write(socket, &WorkerUpdate.update_now/2, params)}
+  end
+
   def handle_event("new-machine", _params, socket) do
     {:noreply, assign(socket, minting: true, error: nil)}
   end
@@ -429,6 +441,13 @@ defmodule ForgeWeb.WorkersLive do
 
   def handle_event("toggle-destroyed", _params, socket) do
     {:noreply, socket |> update(:show_destroyed, &(not &1)) |> load()}
+  end
+
+  defp owner_write(socket, write, params) do
+    case write.(socket.assigns.current_scope.user, params) do
+      {:ok, _nothing} -> socket |> assign(error: nil) |> load()
+      {:error, words} -> socket |> assign(error: words) |> load()
+    end
   end
 
   defp ended(id, jobs), do: "#{String.slice(id, 0, 8)} is gone; #{requeued(length(jobs))}."
@@ -479,10 +498,11 @@ defmodule ForgeWeb.WorkersLive do
   saying so the moment it is.
   """
   @spec refusal(Forge.Workers.Worker.t()) :: String.t() | nil
-  def refusal(%{protocol: protocol}) when is_integer(protocol) do
+  def refusal(%{protocol: protocol} = worker) when is_integer(protocol) do
     unless WorkerProtocol.compatible?(protocol),
       do:
-        "refused: protocol #{protocol}, this platform accepts #{WorkerProtocol.range()} — update it"
+        "refused: protocol #{protocol}, this platform accepts #{WorkerProtocol.range()} — " <>
+          WorkerUpdate.ending(worker, false)
   end
 
   def refusal(_worker), do: nil
@@ -912,6 +932,14 @@ defmodule ForgeWeb.WorkersLive do
         </div>
 
         <p :if={refusal(@row.worker)} class="machine-line text-danger">{refusal(@row.worker)}</p>
+        <%!-- A permanent machine's update, in words, and the owner's two controls over it. The
+              meters and the offer are what the machine is; this is what is being done to it. --%>
+        <WorkerUpdate.update
+          worker={@row.worker}
+          connected={@row.connected}
+          jobs={@row.jobs}
+          now={@now}
+        />
         <p :if={unhealthy(@row.worker)} class="machine-line text-danger [overflow-wrap:anywhere]">
           {unhealthy(@row.worker)}
         </p>
@@ -932,16 +960,20 @@ defmodule ForgeWeb.WorkersLive do
           class="machine-line text-danger"
         >
           takes no job: it speaks protocol {@row.worker.protocol} and counting tokens during a run
-          needs {Jobs.usage_protocol()}; update it
+          needs {Jobs.usage_protocol()}; {WorkerUpdate.ending(@row.worker, @row.connected)}
         </p>
         <p
           :if={not too_old?(@row.worker) and predates?(@row.worker)}
           class="machine-line text-danger"
         >
-          takes no agent job: its release predates per-job credentials; update it
+          takes no agent job: its release predates per-job credentials; {WorkerUpdate.ending(
+            @row.worker,
+            @row.connected
+          )}
         </p>
 
         <.meters row={@row} />
+        <WorkerUpdate.disk_breakdown worker={@row.worker} now={@now} />
 
         <div class="machine-facts">
           <div class="machine-fact-column">
@@ -1092,6 +1124,7 @@ defmodule ForgeWeb.WorkersLive do
     [
       "#{assigns.busy_count} busy",
       assigns.idle_count > 0 && "#{assigns.idle_count} idle",
+      assigns.updating_count > 0 && "#{assigns.updating_count} updating",
       assigns.full_count > 0 &&
         "#{assigns.full_count} #{if assigns.full_count == 1, do: "template", else: "templates"} at its limit"
     ]

@@ -463,7 +463,8 @@ the projects it should fund. The variables can then be removed; leaving them set
 Machines are the other half of the upgrade. A worker made before it holds the old key in its
 environment and a release that does not take one from an assignment, so it takes no inference job
 (§ What a worker offers now): a managed one idles out and its replacement boots the new image, and
-a permanent one needs `bin/worker-update`.
+a permanent one on the new layout updates itself (`worker-tier.md` § Updating a permanent machine),
+and one still on the old layout needs `bin/worker-update` or a reinstall.
 
 ## Deliberately not here
 

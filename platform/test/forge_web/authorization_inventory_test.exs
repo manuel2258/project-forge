@@ -325,6 +325,13 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # Ends one of the caller's own machines: `Workers.retire_by_owner/2` reads the row scoped to
     # them whatever id arrives, and never forces (`docs/design/provisioning.md` § Whose account).
     {"workers_live.ex", "destroy"} => :self,
+    # The owner's switch and *Update now*, on the list and on one machine's page:
+    # `Workers.Updates.set_automatic/3` and `update_now/2` read the row with `Workers.owned/2`, the
+    # caller's own permanent machine whatever id arrives (`docs/design/identity.md` § Sequencing).
+    {"workers_live.ex", "update-auto"} => :self,
+    {"workers_live.ex", "update-now"} => :self,
+    {"worker_live.ex", "update-auto"} => :self,
+    {"worker_live.ex", "update-now"} => :self,
     {"templates_live.ex", "add-credential"} => :self,
     {"templates_live.ex", "delete-credential"} => :self,
     # The caller's own credential, whatever id arrives: `ImageBuilds.set_auto/3` and `build_now/2`
@@ -438,6 +445,8 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # figures a machine reports about itself, for the workers page
     # (`docs/design/worker-channel.md` § Live figures).
     "stats" => :socket_worker,
+    "update" => :socket_worker,
+    "disk" => :socket_worker,
     # A line in the socket's own worker's log, bounded field by field and addressed by the socket,
     # never by the payload (`docs/design/worker-log.md` § The `log` message).
     "log" => :socket_worker,

@@ -143,9 +143,16 @@ defmodule ForgeWorker.Job.Seed do
     |> Path.join("*")
     |> Path.wildcard()
     |> Enum.reject(&(&1 == path or in_flight?(&1)))
-    |> Enum.each(fn stale ->
+    |> Enum.map(fn stale ->
       Logger.info("removing superseded seed #{Path.basename(stale)}")
+      size = ForgeWorker.Disk.size(stale)
       volume.delete(stale)
+      size
+    end)
+    |> then(fn sizes ->
+      # Only when one went: this runs after every fetch, and "freed nothing" is not an event
+      # (`ForgeWorker.Disk`).
+      if sizes != [], do: ForgeWorker.Disk.cleaned("seeds", Enum.sum(sizes))
     end)
   end
 end

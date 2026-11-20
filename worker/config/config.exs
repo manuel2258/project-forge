@@ -14,7 +14,11 @@ if config_env() == :test do
     nix_env: false,
     memory_budget: 8 * 1024 * 1024 * 1024,
     stats_ms: :timer.hours(1),
-    log_stream: false
+    log_stream: false,
+    # Nothing the suite starts may write to the machine's own update directory or `/run`: the
+    # update and the disk report are started with the application, and each tests its own.
+    update_dir: Path.join(System.tmp_dir!(), "forge-worker-test-update"),
+    cleanups_path: Path.join(System.tmp_dir!(), "forge-worker-test-cleanups.json")
 
   config :logger, level: :warning
 end

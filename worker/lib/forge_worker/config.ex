@@ -169,6 +169,38 @@ defmodule ForgeWorker.Config do
   @spec managed?() :: boolean()
   def managed?, do: get(:managed, "FORGE_MANAGED") in [true, "1", "true"]
 
+  @doc "The Nix store whose size the disk report names."
+  @spec nix_store() :: String.t()
+  def nix_store, do: get(:nix_store, "FORGE_NIX_STORE") || "/nix/store"
+
+  @doc """
+  Where the cleanups are recorded: under `/run`, which survives a restart of the worker and is
+  gone at a reboot (`ForgeWorker.Disk`).
+  """
+  @spec cleanups_path() :: String.t()
+  def cleanups_path,
+    do: get(:cleanups_path, "FORGE_CLEANUPS_PATH") || "/run/forge-worker/cleanups.json"
+
+  @doc """
+  The script the image runs to update the machine (`nix/system-update.sh`), or nil on a worker
+  that does not run on the image — a development node's, started by hand — which then says it
+  cannot update itself and why.
+  """
+  @spec update_script() :: String.t() | nil
+  def update_script, do: get(:update_script, "FORGE_UPDATE_SCRIPT")
+
+  @doc "The root-only directory an update works in, and where its state is kept."
+  @spec update_dir() :: String.t()
+  def update_dir, do: get(:update_dir, "FORGE_UPDATE_DIR") || "/var/lib/forge-update"
+
+  @doc "The file whose content `2` says this machine's boot partition holds two systems."
+  @spec update_layout() :: String.t()
+  def update_layout, do: get(:update_layout, "FORGE_UPDATE_LAYOUT") || "/etc/forge/layout"
+
+  @doc "Where the running system is linked from."
+  @spec running_system() :: String.t()
+  def running_system, do: get(:running_system, "FORGE_UPDATE_RUNNING") || "/run/current-system"
+
   defp get(key, env) do
     case Application.get_env(:forge_worker, key) do
       nil -> System.get_env(env)

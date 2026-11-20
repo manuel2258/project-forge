@@ -187,6 +187,11 @@ A NixOS image, built by the flake, that boots unchanged both locally and — aft
 — on the provider.
 
 - btrfs root, so the volume layer below has subvolumes to snapshot.
+- **Room for two systems, and plain boot entries** (ticket 54). A 512 MiB ESP mounted at `/boot`,
+  with each system's kernel and initrd under `/forge/<id>/` and a boot entry per system for
+  systemd-boot (UEFI) and Limine (BIOS) alike, written by `nix/boot-menu.sh` — the unified kernel
+  image is gone. `/etc/forge/layout` says `2`; a machine without it is on the old one-system
+  layout, 128 MiB, and cannot update itself (§ Updating a permanent machine).
 - The Nix daemon, with the binary cache configured, so `nix develop` on the project's flake is a
   download rather than a build.
 - No Claude Code: the machine installs its own at first boot, into a path it owns, because the
@@ -269,9 +274,9 @@ The image pins nothing about any particular project, and it is the one artefact 
 that cannot be built or booted anywhere but the operator's machine.
 
 **It is an appliance, not a host.** `nix/worker-image.nix` builds it with `systemd-repart`: an
-ESP holding systemd-boot and one unified kernel image, and a btrfs root partition holding the
+ESP holding systemd-boot, Limine's files and a kernel and initrd per system, and a btrfs root partition holding the
 closure — plus a BIOS boot partition and Limine, for the firmware that is not UEFI (below). There is no system profile and nothing to `nixos-rebuild`, because a worker is replaced
-rather than updated. `make-disk-image.nix`, the usual route, was not taken: it can only make an
+rather than updated (a permanent machine is the one exception, and adds a system beside the running one rather than changing it: § Updating a permanent machine). `make-disk-image.nix`, the usual route, was not taken: it can only make an
 ext4 root, and the volume layer needs btrfs.
 
 Two consequences the driver carries, and they are why `Forge.Provider.LocalVm` is not the
@@ -287,12 +292,13 @@ firmware is SeaBIOS, which reads the disk's MBR and runs whatever boot code is t
 image that was UEFI only had none. Every machine the Hetzner driver made stopped at *Booting
 from Hard Disk…*, was timed out by `sweep_unreachable/0` as *made a machine that never
 connected*, and was replaced by another that did the same. So the image carries two boot paths
-to the same system: systemd-boot and the unified kernel image under UEFI, and Limine under BIOS,
-with its boot code in the MBR, its second stage in a BIOS boot partition, and the same kernel,
-initrd and command line on the ESP. Limine rather than GRUB because `limine bios-install` writes
-to an image file in the build sandbox, where GRUB's installer wants a block device. The kernel
-and initrd are on the ESP twice, once inside the unified image and once beside it, which its
-128 MiB holds with about 40 MiB to spare. `nix build .#checks.x86_64-linux.worker-image-boots`
+to the same system: systemd-boot under UEFI and Limine under BIOS, each reading a plain entry for
+the same kernel, initrd and command line on the ESP (the unified kernel image was dropped for ticket
+54, so one copy of each serves both firmwares), with Limine's boot code in the MBR and its second
+stage in a BIOS boot partition. Limine rather than GRUB because `limine bios-install` writes
+to an image file in the build sandbox, where GRUB's installer wants a block device. The ESP is
+512 MiB and holds two systems' kernels and initrds (it was 128 MiB, holding the kernel twice,
+for one system). `nix build .#checks.x86_64-linux.worker-image-boots`
 boots the image under SeaBIOS and under OVMF and fails unless both reach a login prompt; it needs
 KVM, so `bin/check` does not run it.
 - **The image is small and the machine's disk is not.** repart minimises the root partition, so
@@ -798,9 +804,11 @@ throw away — not the one that was designed.
 
 ## Updating a worker
 
-The image is an appliance and a worker is replaced rather than updated — that is the rule, and
-it stays the rule for most of the base: NixOS, the Nix settings, the unit that fetches the
-identity. Those change rarely and no-drift is worth having.
+The image is an appliance and a **managed** worker is replaced rather than updated — that is the
+rule, and it stays the rule for most of the base: NixOS, the Nix settings, the unit that fetches the
+identity. Those change rarely and no-drift is worth having. **A permanent machine is the one
+exception, and updates itself, whole-system, with a way back** (§ Updating a permanent machine,
+below, ticket 54): it keeps its disk, so replacing it would throw away what it exists to keep.
 
 **Claude Code is the exception, and it is not in the image at all.** The rule failed for it in
 one direction: Claude Code ships often enough that a fleet on a month-old snapshot is a fleet
@@ -902,7 +910,8 @@ sees on the row.
 remembers: the unit is a oneshot with `RemainAfterExit`, so a restart of `forge-worker.service`
 pulls in a unit that is already active and does nothing. A reconnect never repeats it. That is
 also the answer for a permanent machine an operator wants a later Claude Code on: reboot it, or
-replace it. There is no mid-life re-update, idle or busy.
+replace it. There is no mid-life re-update, idle or busy — a permanent machine's update reboots it,
+which is how it gets one (§ Updating a permanent machine).
 
 **It is the wrong mechanism for the release, and the numbers say so.** The image is 1.8 GiB; the
 worker release's own store path, which is all that changes on a code edit, is 24 MiB. On a
@@ -918,15 +927,16 @@ the raw disk, gzipped, and `release.env` with its checksum, which the platform i
 and the platform puts it into each account that needs it, by a builder server driven by the
 provider's API alone, with no ssh from the platform to anything (`provisioning.md` § Putting the
 release's image into an account). `bin/hetzner-image` remains the by-hand tool for an unreleased
-build. A new snapshot changes only machines made after it; running machines are still replaced, and
-the pulled `update` below stays unbuilt.
+build. A new snapshot changes only machines made after it; running managed machines are still replaced,
+and a permanent one pulls the same published image itself (§ Updating a permanent machine).
 
 So the release is separable from the image. `ExecStart` runs `/var/lib/forge/release`, a symlink
 rather than a store path, and an *indirect* GC root points at it so a release put there by hand
 is not collected by the `min-free` sweep. A machine with nothing overriding it points the symlink
 at the release the image was built with, so the default is exactly what it was.
 
-**`bin/worker-update` is the dev-phase tool and only that.** It builds the release, `nix copy`s
+**`bin/worker-update` is the dev-phase tool and only that**, and since ticket 54 an automatic update
+overwrites the build it put there unless the machine's switch is off. It builds the release, `nix copy`s
 it over the ssh door, repoints the symlink and restarts the unit — seconds, and the machine keeps
 its warm Nix store and its seeds, which a replaced machine does not. It needs the ssh door
 (§ The provider driver), which is shut by default and forwards from loopback, so it works where
@@ -934,14 +944,12 @@ the operator can already reach the machine and nowhere else. **It does not work 
 by construction: a worker there has no inbound port, which is the property the whole channel
 direction exists to give.
 
-What that needs instead is the same operation pulled rather than pushed, and the transport is
-already here: the store serves it blobs under scoped short-lived tokens, and the channel carries
-platform-to-worker messages. An `update` message carrying a store key and a token, a fetch, a
-symlink swap and a restart uses no new transport and no new kind of credential. What it adds is
-a machine that stops taking work while it swaps, which this section once gave to `drain` — a
-message nothing ever sent, and dropped (§ Idle destroy) — so `update` has to mean that itself,
-and the platform has to stop assigning to a machine it has sent one to. It is not built, because
-nothing yet runs a worker the operator cannot ssh to.
+What that needed instead was the same operation pulled rather than pushed, and it was built as an
+`update` message and a whole-system A/B update rather than the release-only symlink swap this
+paragraph first sketched: a release-only swap misses image changes (ticket 49's Codex host, protocol 9's kernel
+modules). The machine stops taking work while it swaps, which this section once gave to `drain` — a
+message nothing ever sent, and dropped (§ Idle destroy) — so `update` means that itself, and the
+platform stops assigning to a machine it has sent one to (§ Updating a permanent machine).
 
 **A machine says which build it is running when it joins.** Once the release is separable from
 the image, "what is this worker running" stops being answerable from the image, and the
@@ -983,19 +991,244 @@ is built:
   `other build`. A hint, not a gate: nothing refuses a machine for its build, only for its
   protocol. A development node has no build to compare with and draws no hint.
 
-What is left to need, and it still gets harder the longer it waits:
+What was left to need here, and ticket 54 filled for permanent machines:
 
-- **Rollback.** A release that will not start leaves a machine that will not work, and the
-  symlink's previous target is the whole of the fix.
-- **A pulled `update`.** The refusal says a machine is out of date; nothing yet brings one up to
-  date on a provider, where there is no ssh door. The `update` message above is still the shape,
-  and it would be the first breaking addition from the platform's side — a worker that ignored
-  it would take work it had been told to stop taking.
+- **Rollback.** A system that will not come up or will not be accepted is left by the machine
+  itself, back onto the old one (§ Updating a permanent machine).
+- **A pulled `update`.** It is protocol 13, the first breaking addition from the platform's side —
+  a worker that ignored it would take work it had been told to stop taking.
 
 **The live figures are memory-only.** A connected machine reports its CPU, memory and disk every
 five seconds (`worker-channel.md` § Live figures) for the workers page to draw, and the platform
 keeps the latest one as the channel's registry value and nothing else: no table, no history, and
 a machine that is not connected shows no figures at all rather than old ones.
+
+### Updating a permanent machine (ticket 54)
+
+**A permanent machine updates itself; a managed one is still replaced.** A machine an owner booted
+(`template_id` null) keeps its disk for ever, and the disk is the point of it — the Nix store,
+the seeds and the ticket volumes are what it accumulated. Replacing it throws that away, and until
+this ticket the only way onto a new release was `bin/worker-update` over an ssh door a provider
+machine does not have, or a reinstall by hand. Once the platform raised the protocol a job needs, or the
+minimum it accepts, the machine waited or was refused until someone did that. Now it brings itself up to the platform's
+worker, whole-system, with a way back. A managed machine is made from a template's snapshot, which
+a release rebuilds, and is destroyed when idle; **nothing here applies to it**.
+
+**What it updates to is the platform's own build**, `Forge.WorkerImage.release/0`, in either
+direction. Not the newest published: a worker the platform does not know may speak a protocol it
+refuses. So a platform rolled back takes its permanent machines down with it, and a node with no release (a development node)
+never sends an update. **The build is the identity**: every release bumps `VERSION`, which is part
+of the worker release, so two releases cannot share a build — which is also why the build names the
+whole image and not just the release. A build `bin/worker-update` put there reads as different and is
+overwritten while the switch is on (below); with it off it is left alone.
+
+**The trust change, said plainly.** A permanent machine with the switch on **reboots itself into a
+forge release that its node names**. This replaces "an unmanaged machine never reboots
+itself" (§ A machine whose systemd stops answering) for that one case, and only that one: an
+unhealthy permanent machine still never reboots itself, and the switch off means it never does.
+Any approved user may boot a permanent machine against somebody else's node (`identity.md` § Minting
+a permanent machine), so what the node sends cannot be trusted by the machine: a checksum the node
+sends defends nothing against that node. **A machine therefore downloads only from the repository
+its own image names** (`FORGE_UPDATE_REPOSITORY`, from `workerImageRepository` in `flake.nix`),
+by digest and over https, whatever the platform sent, and installs only a system whose worker is the
+build the platform named. The node can choose among what that repository holds — which includes an
+older release, because a machine follows its platform down — and nothing else: it cannot send a
+machine to a repository of its own.
+
+**There is no signature, on purpose, for now.** The first design signed the image (`ssh-keygen -Y
+sign`, a key in the image, a second layer on the artifact) so that even a node that could write to
+the repository could not make a machine install something that was not a release. The owner of this
+repository decided to leave that out until later (ticket 54's answer to *signing-key*, which
+replaces criteria 30 and 31 of its refinement). **What that costs, plainly:** whoever can push to the worker image's package in the registry can
+have a permanent machine install what they pushed, once a node names its digest. That is the login
+that publishes a release, and a signature would have made a stolen one not enough. Adding a
+signature later is a second layer on the artifact, a key in the image and a check in `fetch`;
+nothing else here changes. The downloaded file's sha256 is checked against the digest and the raw
+disk against its own size and sha256, which catches a damaged or truncated download and nothing
+more. A raw size the node names is bounded (32 GiB, `FORGE_UPDATE_MAX_RAW`), because the
+space check collects the Nix store by up to three times it.
+
+**The steps**, each one a subcommand of `nix/system-update.sh`, a root-only script in the image, all
+under `/var/lib/forge-update` (0700, root — where no job's user can read or write, as the Claude Code
+install already is; nothing here is handed to a job):
+
+1. **Space.** Three times the raw size (which must be between 1 byte and 32 GiB: a node that named
+   terabytes would have the Nix store emptied, warm toolchains included) — the release does not carry the layer's size, and it is
+   no larger than the raw disk it compresses, so that is the download, then the raw file, then the
+   store paths at most — plus the existing 5 GiB `min-free`. Short: collect the Nix store once, `nix-store --gc
+   --max-freed <shortfall>`, and check again. Still short: the attempt fails and says both figures.
+   The ESP gets the same check for one system's kernel and initrd.
+2. **Fetch.** `curl` of the layer by digest from `FORGE_UPDATE_REPOSITORY`, over
+   https, **anonymously** — the package is public, so no credential is sent and the `update`
+   message carries no secret. The download's sha256 is checked against the target's digest (the release carries no layer size to check), then the decompressed raw disk's size and sha256 against the
+   target. **All of it on the very file that is then installed**, in that directory: nothing is
+   downloaded twice and nothing is read from a path a job could replace. A mismatch is a failed attempt, and the
+   download is deleted. No running job has been touched.
+3. **Install beside the running system.** The raw disk is attached with `losetup -P`, and its root
+   partition given a fresh filesystem id with `btrfstune -m`: every image is made from the same
+   repart seed, so its btrfs id may be the running root's, and mounting a duplicate is refused or
+   confused before Linux 6.7. It is mounted `nosuid,nodev,noexec`, its `/nix-path-registration`
+   loaded into a store of its own with `nix-store --load-db --store local?root=<mnt>`, and the
+   toplevel copied with `nix copy --no-check-sigs --from local?root=<mnt>`; the daemon checks every path's NAR
+   hash against that registration, which came from the image the digest names. The image root names its toplevel in `/forge-system`, and
+   **the script checks that the toplevel's worker is the target build** before anything else goes
+   on: a node naming a genuine but different release is caught here. The room for them on the
+   ESP is checked before anything is copied, from their sizes **inside the mounted image** — in a
+   NixOS system `kernel` and `initrd` are absolute links into `/nix/store`, which the running
+   machine's store would answer for, and does not hold yet. The kernel and initrd go to the
+   ESP under `/forge/<id>/`, and a GC root `forge-system/next` holds the store paths. The image is
+   then deleted, installed or not. The running system and its boot entry are not modified.
+4. **The target is checked again.** After installing, the worker continues only on a target seen on
+   a link that has joined since. If the build moved, the new system is discarded (ESP files, root)
+   and the machine starts again towards the new build, without counting a failure; if the target is
+   now nothing, it discards and stops, **and says it has nothing under way** — its last report was `installing`, which the platform counts as under way, so the row would otherwise read *updating* and offer no *Update now* until the worker restarted. If the link is down it waits for the next join reply. Once
+   pausing has begun the attempt runs to its end.
+5. **Pause** (below), then **arm and reboot on trial.**
+
+**Boot entries: plain ones, for both loaders, from one script (`nix/boot-menu.sh`).** The unified
+kernel image is gone. Each system has `/forge/<id>/{kernel,initrd}` on the ESP; systemd-boot reads
+`loader/entries/forge-<id>.conf`, with `sort-key forge` and a `version` that is a **generation
+number** — not the release version, which is what lets a machine follow its platform down — and
+Limine reads `limine.conf`, listing the same files in the same order. One kernel per system serves
+both firmwares. The image build runs the same script to make the first ESP tree, so the menu at
+build time and at update time cannot differ. The ESP is 512 MiB, mounted at `/boot`
+(`umask=0077`, `nofail`; **an update refuses when `/boot` is not a mount point**, since a boot entry written
+to the directory on the root disk is one no firmware reads) — **room for two systems, which the old 128 MiB was not** — and the image
+writes `/etc/forge/layout` = `2`. **A machine without that file is on the old layout and refuses to update, and says why:** its boot partition holds one system; it needs a
+reinstall from the current image, once; a machine moving itself to the new layout is not built.
+
+**Trying once and falling back.** Arming writes the new entry as `forge-<id>+1.conf`, the highest generation,
+and puts it first in `limine.conf`. Under UEFI, boot counting does the rest: a new kernel that never
+comes up leaves the entry marked bad at the next boot, and the old one is chosen. **That is the
+UEFI guarantee, and it covers a kernel that never boots.** **Nothing but `keep` may bless a trial:**
+NixOS enables `systemd-bless-boot.service`, which renames the entry being counted (`+0-1` by then) to its plain name
+about six seconds after any boot that reaches `boot-complete.target`, long before a worker has joined, and
+a trial that then panicked was booted again for ever (found trying the first build on a KVM machine). The
+image masks the unit and the generator that starts it (`nix/worker-image.nix`), so a trial that boots is
+left as systemd-boot renamed it, `forge-<id>+0-1.conf`, no tries left, until `keep` draws the menus
+again. `boot-menu.sh` deletes every `forge-*.conf` before it draws, so `keep`, `remove` and `prune`
+take that name as readily as `+1`. A trial that boots and then panics or resets therefore comes back on the
+old system under UEFI; the 15-minute service ends one that stays up. Under BIOS Limine has no try-once, so a
+new kernel that never boots needs its owner (out of scope). Both firmwares are covered
+for the case that matters more often, **a system that boots and whose worker does not connect or is
+refused**: `forge-update-fallback.timer` (`OnBootSec=15min`, only while `/var/lib/forge-update/trial`
+exists) runs `system-update.sh fallback`, which removes the new entry from both menus, writes why
+into `result` and removes the trial, and reboots — only if the running system is the one on trial
+(on the old system, where boot counting already went back, it only records). `panic=30` joins the kernel parameters of every
+machine so that a panic reboots instead of hanging; nothing in the modules this image imports
+sets one (only the `headless` profile does, as `panic=1`, and it is not imported).
+
+**Healthy means accepted, within 15 minutes, counted from the new system's boot.** The worst case
+before the worker dials is about 35 s to boot (`docs/measurements.md` § M4 worker cold start), plus the Claude Code
+and Codex install units, which run in parallel and take at most 230 s (`codexUnitTimeout`), plus
+about a minute for the platform to drop the old socket (`already_connected` until then): under six minutes, so 15 leaves
+a margin. **It is kept only when the machine reconnects carrying the build it was updating to**
+and the platform accepts it; a machine back on its old system is a failure, not a success. Keeping
+runs under one `flock` and does three things: draws the entry again without its counter, rewrites
+`limine.conf`, and moves the GC roots. `ExecStartPre` repoints `/var/lib/forge/release` whenever
+`/var/lib/forge/release.system` does not name the running system, then writes that file: a build
+`bin/worker-update` put there survives a reboot of the same system, a new system replaces it. Without
+this the new system would run the old worker.
+
+**Pause: stop taking work, hibernate what runs, end chats after their turn.** The worker sends
+`update` with step `pausing` and the ids it will hibernate. The platform stamps `workers.updating_at`,
+which `assignable/3` and the channel's assignment pass over as for `unhealthy_at`, and re-queues
+every job running there that is not in the list (commands, and any assignment in flight). The worker
+refuses an `assign` while pausing (`job.refused`). Workflow jobs get `Runner.cancel` with their
+`hibernated` reason rewritten to `update`: committed and pushed where their state declares a
+changeset, session uploaded, back in the queue. A **command is given up, unreported**, and runs
+again from the start, since it has no session. **A job parked waiting for its commands does not hold the update back**: it is not
+running, its claim on the machine ends, and it is placed elsewhere. Each conversation gets `close`
+with reason `update`, which ends it after the turn it is on, as dormant — released like an idle
+one, so the person's next message carries it on (`conversations.md` § Lifetime), and its page says
+the update released it until then; one with no turn running ends at once. The machine reboots when its jobs map is empty and no
+terminal message is unacked, or after 30 minutes (`update_pause_ms`) whichever is first; a chat
+still running then goes dormant at the rejoin, as a lost machine's does. **Reasons are what people
+see, and nobody is told the machine** — its owner's.
+
+**Retries.** A failed attempt is tried again twice more for the same platform build, 15 minutes and then an hour after
+the failure before it; after the third failure the machine stops trying that build until the
+platform's build changes or its owner asks. An attempt pauses work only once its system is
+installed, so a failed download or checksum costs no job anything. The retry rules are a
+pure module, `ForgeWorker.Update.State`, persisted to `state.json` in the update directory; an
+attempt that was mid-pause when the worker restarted is counted as a failure. Retries are automatic
+only while the switch is on: a failure of an *Update now* with the switch off waits for the owner. **The owner who pressed it is named only for the attempt it started**: a retry, a switch turned on or a new build after it is logged as automatic.
+
+**The switch, and who acts.** `workers.auto_update`, on by default, including for machines that
+exist when this lands (the migration's default). Off: the machine never updates by itself, the
+page says one is waiting, and the owner can press *Update now*. Only the owner flips it or presses
+it, and each reads the row scoped to the viewer first (`Workers.owned/2`), as *Retire* does; each
+writes a line to the machine's log naming the owner. *Update now* works only on a **connected**
+machine, and no request is kept for one that is away or refused: with the switch on it updates when it next connects,
+refused or not, because the join reply carries the target in both cases, and with it off the
+owner turns the switch on.
+
+**A fallback from a system that is also the fallback root.** A machine that follows its platform down
+can be asked for the release it already keeps as its fallback: the same id, staged over its own files.
+If that trial is then given up, taking the new entry off the boot partition would remove the files the
+`fallback` root names. `discard` and `fallback` remove a system through one step that **drops
+`gcroots/forge-system/fallback` with the files when it names the id being removed**, so the root and the
+boot partition cannot disagree: the machine has no fallback until the next `keep` makes one.
+
+**The loop device does not take the machine's partition labels.** Every image is made from the same
+repart seed, so the one an install attaches has an `ESP`, a `root` and a `bios-boot` of its own, and while
+it was attached `/dev/disk/by-partlabel/*` pointed at `loop0p*` (seen on a KVM machine). udev gives a link to
+the device with the highest `link_priority`, so the image has a rule giving `loop*` the lowest
+(`-100`): the real disk keeps every label it had, `fileSystems."/boot"` included. It was chosen over
+mounting `/boot` by uuid because nothing else resolving a label by name (a later `systemctl daemon-reload`
+re-reading `boot.mount`, an operator's `mount /dev/disk/by-partlabel/ESP`) can then take the wrong disk
+either. `nix/worker-update-boots.nix` reads the links with an image attached.
+
+**The worker's update process does not need the link to exist.** It is started before the link and
+settles what the last boot left (a trial, a fallback's result) as soon as it starts; on a machine with no
+platform configured there is never a link. Its messages to the link are dropped when nothing holds the
+name, and the snapshot it has published to a `:persistent_term` is what the join then carries. Sending
+to the name regardless crashed it four times over until the application went down, sixteen crashes per
+trial boot on a machine with no platform.
+
+**What an update cleans up.** The running system and the fallback are both GC roots,
+`/nix/var/nix/gcroots/forge-system/{current,fallback,next}`; keeping makes the new system `current`,
+the old `fallback`, and removes the root of the system before them, whose ESP files an install
+removes first, so the ESP holds at most three systems — the running one, the fallback and the new one while an update is in flight — and two once it is kept. The existing `min-free` rule then
+collects what is unrooted. NixOS's own `current-system` root (`activation-script.nix`) follows `/run/current-system`
+and so names the running system only; it is not relied on, which is why the update keeps `current`
+as well. `forge-worker-release` (the indirect root of the worker release) stays as it is. The downloaded image is deleted once installed or
+once the attempt fails. Scheduled collection is not here: only the update's own.
+
+**Harnesses refresh because the machine reboots**, and at no other time: `claude-code-update.service` and
+`codex-update.service` run once per boot, so an update's reboot runs them again. Nothing was added for
+that; it is a consequence, and "there is no mid-life re-update" above stays true for them.
+
+**The disk report.** Every worker, managed or permanent, reports its disk use per kind — the Nix
+store, ticket volumes, seeds, job directories, and the rest — and for each cleanup rule when it last ran and what it freed
+(`ForgeWorker.Disk`). Sizes are `du -s -x -P -B1`: one filesystem and no link followed, because a job owns its own
+directory and could plant a link to somewhere large or private. **The ticket volumes and the seeds are sized one entry at a time**, because on the image each is a btrfs subvolume, a device of its own to `du`, and `du -x` of the directory would stop at every one and read about nothing. It is measured one minute after the first join, then
+every 30 minutes, and one minute after a cleanup that freed something, never with the five-second `stats`, since sizing the store walks a large tree. The cleanups are the job-directory
+and volume sweeps, seed replacement and the update's own store collection; **a sweep that ran and removed nothing is still recorded as run, freeing 0**, but asks for no measurement, since it runs at the end of every job; records live in
+`/run/forge-worker/cleanups.json`, which survives a worker restart and goes at a reboot, which is what *not run since boot* means. **Nix's own `min-free` collection happens inside the daemon and
+the worker cannot see it**, so the store line reports only collections the worker ran. The platform keeps the last
+report on the row with its age; totals per kind only, so that an owner who has left a project
+learns nothing of it.
+
+**The end-to-end check, `checks.x86_64-linux.worker-update-boots`.** Boots image A under SeaBIOS and
+under OVMF, puts the raw disk of B (the same source under another version, so another worker build) where
+the worker's download leaves it, and runs `install` and `arm` by hand, with no platform. Then: B is
+running after the reboot and `keep` leaves entries with no counter and survives a reboot (both firmwares);
+a trial given up through `forge-update-fallback.service` is back on A with the entry and files gone and
+its worker having read and cleared the result (both); under UEFI a trial that boots and then panics comes back on A and its worker clears the trial,
+which is what a blessed trial fails; and `systemd-bless-boot.service` is masked and no by-partlabel link
+follows a loop device. `nix build .#checks.x86_64-linux.worker-update-boots -L` on a KVM machine.
+
+**Not verified here.** There is no `/dev/kvm` on the machine this was written on, and **the check above has not run on one**:
+it was written against what a person saw by hand on a KVM machine, which is also how the bless
+and by-partlabel faults were found, so each of its assertions answers something observed, and none has
+yet been seen passing. What a person did see, by hand, on `7b53c1c` under both firmwares: install on a real
+kernel, `arm` and a reboot into B, `keep`, a worker not accepted ended by the fallback service, updating down,
+and a real GHCR download. What has not run at all is this note's fixes to it (bless-boot masked, the
+loop device's priority, the fallback root dropped with its files, the worker no longer crashing without a
+link) on a machine. The scripts run in the suite against stand-ins for `losetup`, `mount`, `btrfstune`, `nix`,
+`nix-store`, `curl` and `systemctl`, with real `gzip` and `sha256sum`. **A broken boot path breaks every new
+Hetzner machine once a release ships it**, and this is the first thing a first release must confirm.
 
 ## What a machine that never dies accumulates
 
@@ -1416,7 +1649,9 @@ two signals marks the machine unhealthy (`ForgeWorker.Health`):
    system` and the console showed a login prompt again 7–8 seconds later, in the same QEMU. `/proc/sysrq-trigger` was not needed. Both
    `--force`s matter: with one, the wedged machine had not rebooted three minutes later.
 
-**An unmanaged machine never reboots itself.** It is somebody's own computer. It says it is
+**An unmanaged machine never reboots itself when it is unhealthy** — with one exception, which
+is not this case: a permanent machine whose owner left automatic updates on reboots itself to
+install a forge release (§ Updating a permanent machine). It is somebody's own computer. It says it is
 unhealthy, the platform places nothing on it, and the workers page says so, until it joins again
 without saying it — its owner restarted the machine, or the worker. There is no button to clear it
 on the page: the worker's own belief is what refuses work, and a platform-side clear would place

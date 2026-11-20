@@ -1511,6 +1511,215 @@ defmodule ForgeWorker.LinkTest do
   # `docs/design/worker-tier.md` § A machine whose systemd stops answering, as the link carries it:
   # the platform is told, the jobs here are stopped and reported to nobody, nothing new is started,
   # and the platform's answer decides the reboot — with the machine's own say on top.
+  # A machine stopping for an update (`docs/design/worker-tier.md` § Updating a permanent machine).
+  # The test process is `ForgeWorker.Update`: it hears what the link would tell it.
+  describe "stopping for an update" do
+    setup do
+      :ok = Supervisor.terminate_child(ForgeWorker.Supervisor, ForgeWorker.Update)
+      Process.register(self(), ForgeWorker.Update)
+
+      on_exit(fn -> Supervisor.restart_child(ForgeWorker.Supervisor, ForgeWorker.Update) end)
+    end
+
+    @target %{
+      "build" => "newnewnewnew",
+      "version" => "0.23.0",
+      "repository" => "ghcr.io/example/forge-worker-image",
+      "digest" => "sha256:" <> String.duplicate("a", 64),
+      "raw_sha256" => String.duplicate("b", 64),
+      "raw_size" => 1000
+    }
+
+    test "says which jobs it will hibernate before it stops one, and they hibernate for the update",
+         context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = assignment(origin, scenario: "hang")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {_payload, _seen} = take_push("event")
+
+      send(client, {:update_pause, nil})
+
+      # The platform puts back in the queue whatever is running here and not named, so the names
+      # come first; only then does anything stop.
+      {%{"step" => "pausing", "jobs" => [^job_id], "chats" => []}, before} = take_push("update")
+      assert Enum.all?(before, fn {name, _payload} -> name == "event" end)
+
+      {%{"job_id" => ^job_id, "reason" => reason, "commit" => commit}, _events} =
+        take_push("hibernated")
+
+      assert reason == "update"
+      assert String.length(commit) == 40
+    end
+
+    test "a job cancelled by its ticket while it is not pausing still says cancelled", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = assignment(origin, scenario: "hang")
+      push(client, @topic, "assign", job)
+      {_payload, _seen} = take_push("event")
+      push(client, @topic, "cancel", %{"job_id" => job["job_id"], "reason" => "ticket_cancelled"})
+
+      assert {%{"reason" => "cancelled"}, _events} = take_push("hibernated")
+    end
+
+    test "ends a conversation after its turn, for the update, so the person can reopen it",
+         context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _before} = take_push("turn")
+
+      send(client, {:update_pause, nil})
+      {%{"step" => "pausing", "jobs" => [], "chats" => [^job_id]}, _before} = take_push("update")
+
+      # Not cancelled: a chat is told to end, and it ends with the reason that says why.
+      {%{"job_id" => ^job_id, "reason" => "update"}, _before} = take_push("hibernated")
+    end
+
+    test "gives a command up unreported, and does not name it among what resumes", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = command_assignment(origin, "#!/bin/sh\nexec sleep 30\n")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      wait_until(fn -> :sys.get_state(client).assigns.jobs[job_id][:runner] end)
+
+      send(client, {:update_pause, nil})
+
+      assert_push(@topic, "update", %{"step" => "pausing", "jobs" => [], "chats" => []})
+      refute_push(@topic, _anything, %{"job_id" => ^job_id}, 500)
+      wait_until(fn -> :sys.get_state(client).assigns.jobs == %{} end)
+    end
+
+    test "does not name a job whose runner has not started among what resumes", context do
+      %{client: client} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      # Assigned and not yet started: there is nothing of it to commit, upload or hibernate, and
+      # naming it would tell the platform to wait for a `hibernated` that cannot come.
+      :sys.replace_state(client, fn state ->
+        job = %{kind: :workflow, runner: nil}
+        %{state | assigns: %{state.assigns | jobs: Map.put(state.assigns.jobs, "unstarted", job)}}
+      end)
+
+      send(client, {:update_pause, nil})
+      assert_push(@topic, "update", %{"step" => "pausing", "jobs" => [], "chats" => []})
+    end
+
+    test "takes no assignment while it pauses", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      send(client, {:update_pause, nil})
+      assert_push(@topic, "update", %{"step" => "pausing"})
+
+      push(client, @topic, "assign", assignment(origin))
+      refute_push(@topic, _anything, %{}, 300)
+      assert :sys.get_state(client).assigns.jobs == %{}
+
+      # And does again once the update has failed and says so.
+      send(client, :update_resume)
+      job = assignment(origin)
+      push(client, @topic, "assign", job)
+      assert {_payload, _seen} = take_push("result")
+    end
+
+    test "says it is drained once nothing runs and the platform has acked what it reported",
+         context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = assignment(origin, scenario: "hang")
+      push(client, @topic, "assign", job)
+      {_payload, _seen} = take_push("event")
+
+      send(client, {:update_pause, nil})
+      take_push("update")
+      refute_received {:"$gen_cast", :drained}
+
+      # Hibernated, and not acked: the platform may not have recorded it, and a reboot now would
+      # lose it.
+      {_hibernated, _events} = take_push("hibernated")
+      ref = last_push_ref()
+      refute_receive {:"$gen_cast", :drained}, 300
+
+      reply(client, ref, {:ok, %{}})
+      assert_receive {:"$gen_cast", :drained}, 2_000
+    end
+
+    test "is drained at once when nothing was running", context do
+      %{client: client} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+      send(client, {:update_pause, nil})
+      assert_push(@topic, "update", %{"step" => "pausing", "jobs" => []})
+      assert_receive {:"$gen_cast", :drained}, 2_000
+    end
+
+    test "tells the update what the platform says, in the join reply and in a message", context do
+      %{client: client} = context
+      connect_and_assert_join(client, @topic, %{}, {:ok, %{"update" => @target}})
+      assert_push(@topic, "ready", %{})
+      assert_receive {:"$gen_cast", {:told, @target, []}}, 2_000
+      assert_receive {:"$gen_cast", :accepted}, 2_000
+
+      push(client, @topic, "update", %{"target" => nil, "requested_by" => nil})
+      assert_receive {:"$gen_cast", {:told, nil, [requested_by: nil]}}, 2_000
+
+      push(client, @topic, "update", %{"target" => @target, "requested_by" => "ada"})
+      assert_receive {:"$gen_cast", {:told, @target, [requested_by: "ada"]}}, 2_000
+    end
+
+    test "says nothing to a platform that gave no word, and is told even when refused", context do
+      %{client: client} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+      refute_receive {:"$gen_cast", {:told, _target, _opts}}, 200
+      assert_receive {:"$gen_cast", :accepted}, 2_000
+      disconnect(client, :closed)
+      assert_receive {:"$gen_cast", :link_down}, 2_000
+
+      Application.put_env(:forge_worker, :refused_retry_ms, 60_000)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        connect_and_assert_join(
+          client,
+          @topic,
+          %{},
+          {:error,
+           %{"reason" => "protocol", "minimum" => 12, "current" => 13, "update" => @target}}
+        )
+      end)
+
+      assert_receive {:"$gen_cast", {:told, @target, []}}, 2_000
+      refute_receive {:"$gen_cast", :accepted}, 200
+    end
+
+    test "carries what the update has to say of itself in its join", context do
+      %{client: client} = context
+      :persistent_term.put({ForgeWorker.Update, :snapshot}, %{"unable" => "layout"})
+      on_exit(fn -> :persistent_term.erase({ForgeWorker.Update, :snapshot}) end)
+
+      disconnect(client, :closed)
+      connect_and_assert_join(client, @topic, %{"update" => %{"unable" => "layout"}}, :ok)
+    end
+  end
+
   describe "an unhealthy machine" do
     setup do
       name = :"link-health-#{System.unique_integer([:positive])}"

@@ -7,7 +7,7 @@
 #
 # See docs/design/worker-tier.md § The worker image. The image pins nothing about any
 # particular project, and it is meant to boot unchanged on a provider later.
-{ workerPackage, version }:
+{ workerPackage, version, updateRepository }:
 { config, lib, pkgs, modulesPath, ... }:
 let
   root = "/var/lib/forge";
@@ -23,6 +23,46 @@ let
   # change through, so the release is separable from it.
   releaseLink = "${root}/release";
   gcRoot = "/nix/var/nix/gcroots/forge-worker-release";
+
+  # A permanent machine updates itself (docs/design/worker-tier.md § Updating a permanent machine).
+  # `updateDir` is root-only, so no job's user can read or write what an update handles.
+  updateDir = "/var/lib/forge-update";
+  updateFallbackMinutes = 15;
+
+  # The two scripts, wrapped so that each carries its own tools and shellcheck runs on them while
+  # the image builds. `nix/boot-menu.sh` draws the same menu at build time (below) and at update
+  # time, which is why it is one script.
+  bootMenu = pkgs.writeShellApplication {
+    name = "boot-menu";
+    runtimeInputs = [ pkgs.coreutils pkgs.gnused pkgs.gnugrep ];
+    text = builtins.readFile ./boot-menu.sh;
+  };
+  systemUpdate = pkgs.writeShellApplication {
+    name = "forge-system-update";
+    runtimeInputs = [
+      pkgs.coreutils pkgs.curl pkgs.jq pkgs.gzip pkgs.gawk pkgs.gnugrep
+      pkgs.util-linux pkgs.btrfs-progs pkgs.nix pkgs.systemd
+    ];
+    text = ''
+      export FORGE_UPDATE_MENU=${bootMenu}/bin/boot-menu
+      ${builtins.readFile ./system-update.sh}
+    '';
+  };
+
+  # What the unit and the fallback service both need to find the script's world.
+  updateEnvironment = {
+    FORGE_UPDATE_DIR = updateDir;
+    FORGE_UPDATE_REPOSITORY = updateRepository;
+  };
+
+  # The first ESP tree: the same script that an update uses, run over this image's own system, so
+  # the menu the image is born with is the one an update leaves behind.
+  espTree = pkgs.runCommand "forge-esp-tree" { } ''
+    mkdir -p $out
+    id=${builtins.substring 0 32 (builtins.baseNameOf config.system.build.toplevel.outPath)}
+    ${bootMenu}/bin/boot-menu $out stage "$id" ${config.system.build.toplevel}
+    ${bootMenu}/bin/boot-menu $out enable "$id"
+  '';
 
   # Claude Code, and the one piece of this image's base that does not wait for a replaced image:
   # see docs/design/worker-tier.md § Updating a worker. **Not `pkgs.claude-code`.** nixpkgs wraps
@@ -168,15 +208,17 @@ in
   # -- the image ------------------------------------------------------------------------------
 
   # An appliance image: no system profile, nothing to `nixos-rebuild`. The bootloader is
-  # installed by putting systemd-boot and one unified kernel image into the ESP, because the
-  # image is built offline and there is no machine to run an installer on.
+  # installed by putting systemd-boot and a plain boot entry per system into the ESP, because the
+  # image is built offline and there is no machine to run an installer on. **One kernel and initrd
+  # per system, `/forge/<id>/`, serve both firmwares** (`nix/boot-menu.sh`): the unified kernel
+  # image this used to carry held a copy no entry for a second system could share, and the ESP
+  # must hold two systems for a permanent machine to update itself.
   #
   # **And Limine, for BIOS.** A Hetzner x86 server boots SeaBIOS, which runs the MBR's boot code
   # and nothing else; a UEFI-only image has none and hangs at "Booting from Hard Disk...". So the
-  # ESP also holds Limine's config and second stage, and the same kernel, initrd and command
-  # line the unified image carries. `flake.nix` writes the MBR and the BIOS boot partition with
-  # `limine bios-install`, which is the one step repart cannot do. UEFI never reads any of it.
-  # See docs/design/worker-tier.md § The worker image.
+  # ESP also holds Limine's config and second stage, naming the same files. `flake.nix` writes the
+  # MBR and the BIOS boot partition with `limine bios-install`, which is the one step repart cannot
+  # do. UEFI never reads any of it. See docs/design/worker-tier.md § The worker image.
   boot.loader.grub.enable = false;
   # The kernel's 9p client and its fd transport, which `trans=unix` rides on. Loaded at boot rather
   # than on the first mount, so that a job's first mount does not wait on `modprobe`.
@@ -211,34 +253,25 @@ in
           {
             "/EFI/BOOT/BOOT${lib.toUpper efiArch}.EFI".source =
               "${config.systemd.package}/lib/systemd/boot/efi/systemd-boot${efiArch}.efi";
-            "/EFI/Linux/${config.system.boot.loader.ukiFile}".source =
-              "${config.system.build.uki}/${config.system.boot.loader.ukiFile}";
 
-            # The BIOS path. The command line is the unified image's own, so the two firmwares
-            # boot the same system with the same parameters.
+            # systemd-boot's entries and the systems they name, drawn by `nix/boot-menu.sh`.
+            "/loader".source = "${espTree}/loader";
+            "/forge".source = "${espTree}/forge";
+
+            # The BIOS path: Limine's second stage and a menu naming the same files.
             "/limine/limine-bios.sys".source = "${pkgs.limine}/share/limine/limine-bios.sys";
-            "/limine/kernel".source =
-              "${config.system.build.kernel}/${config.system.boot.loader.kernelFile}";
-            "/limine/initrd".source =
-              "${config.system.build.initialRamdisk}/${config.system.boot.loader.initrdFile}";
-            "/limine/limine.conf".source = pkgs.writeText "limine.conf" ''
-              timeout: 0
-              serial: yes
-
-              /forge-worker
-                  protocol: linux
-                  path: boot():/limine/kernel
-                  module_path: boot():/limine/initrd
-                  cmdline: ${config.boot.uki.settings.UKI.Cmdline}
-            '';
+            "/limine/limine.conf".source = "${espTree}/limine/limine.conf";
           };
 
         repartConfig = {
           Type = "esp";
           Format = "vfat";
           Label = "ESP";
-          SizeMinBytes = "128M";
-          SizeMaxBytes = "128M";
+          # **Room for three while one installs, two after** (a kernel and an initrd each, about 60 MiB, and the
+          # fallback is the one before): it was 128 MiB for one system, and a machine on that
+          # layout cannot update itself (docs/design/worker-tier.md § Updating a permanent machine).
+          SizeMinBytes = "512M";
+          SizeMaxBytes = "512M";
         };
       };
 
@@ -249,6 +282,9 @@ in
           # systemd.services.nix-store-register below.
           "/nix-path-registration".source =
             "${pkgs.closureInfo { rootPaths = [ config.system.build.toplevel ]; }}/registration";
+          # Which system this image's root holds, for an update that installs it beside a running
+          # one: a machine reads it from the mounted image (nix/system-update.sh).
+          "/forge-system".source = pkgs.writeText "forge-system" "${config.system.build.toplevel}";
         };
 
         repartConfig = {
@@ -281,7 +317,66 @@ in
 
   # The console the provider driver captures (`-serial file:…`), and a video console so the
   # same image is debuggable with a display attached.
-  boot.kernelParams = [ "console=tty0" "console=ttyS0,115200" ];
+  #
+  # `panic=30` so that a panic reboots, and the trial of an updated system (below) can fall back
+  # by itself rather than wait on a hung machine. Nothing in the modules this image imports sets
+  # one: the `headless` profile does and is not imported.
+  boot.kernelParams = [ "console=tty0" "console=ttyS0,115200" "panic=30" ];
+
+  # The ESP at `/boot`, where an update writes the new system's kernel and boot entry. `nofail`: a
+  # machine whose ESP will not mount still runs, instead of hanging in emergency mode, and an
+  # update then refuses because `system-update.sh` finds `/boot` not a mount point.
+  fileSystems."/boot" = {
+    device = "/dev/disk/by-partlabel/ESP";
+    fsType = "vfat";
+    options = [ "umask=0077" "nofail" ];
+  };
+
+  # **The loop device an update attaches must not take the machine's own partition labels.** The
+  # new image has the same partition labels as the running one, and while it is attached
+  # `/dev/disk/by-partlabel/ESP`, `root` and `bios-boot` pointed at `loop0p*`: anything resolving
+  # a label in that window, the `/boot` mount above included, got the image's partitions. udev
+  # gives a link to the device with the highest `link_priority` when several claim it, so the
+  # loop devices (and their partitions, which are `loop0p1`…) are given the lowest, and the
+  # machine's real disk keeps every label it had.
+  services.udev.extraRules = ''
+    SUBSYSTEM=="block", KERNEL=="loop*", OPTIONS+="link_priority=-100"
+  '';
+
+  # **A trial is ended by `keep` and by nothing else.** systemd's `systemd-bless-boot.service`
+  # renames a boot entry that is being counted (`+0-1`, which is what systemd-boot has made of `+1`
+  # by then) to its plain name once the system reaches `boot-complete.target`, which is about six seconds after boot and long before the worker has
+  # joined: it blessed every trial, and a trial that then panicked was booted again for ever. The
+  # unit is masked and its generator, which is what would start it, does not run; the entry is
+  # then left as systemd-boot renamed it (`+0-1`, no tries left) until `nix/boot-menu.sh keep`
+  # draws it without a counter.
+  systemd.services.systemd-bless-boot.enable = false;
+  systemd.generators.systemd-bless-boot-generator = "/dev/null";
+
+  # What a machine reads to know it can update itself. A machine without `layout` is on the old
+  # one-system disk (§ Updating a permanent machine) and refuses to try.
+  environment.etc."forge/layout".text = "2\n";
+
+  # -- updating itself ------------------------------------------------------------------------
+
+  # The trial's own bound. A new system is kept once its worker has been accepted; if that has not
+  # happened this long after boot, the machine goes back to the system it came from — which also
+  # covers a system that boots and whose worker never connects, under BIOS as under UEFI. 15
+  # minutes against a worst case of about 6 before the worker dials (docs/design/worker-tier.md).
+  # It runs only while a trial file exists, and the script reboots only if the running system is the one on trial.
+  systemd.services.forge-update-fallback = {
+    description = "Go back to the previous system if the new one was not accepted";
+    unitConfig.ConditionPathExists = "${updateDir}/trial";
+    environment = updateEnvironment;
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = "${systemUpdate}/bin/forge-system-update fallback";
+    };
+  };
+  systemd.timers.forge-update-fallback = {
+    wantedBy = [ "timers.target" ];
+    timerConfig.OnBootSec = "${toString updateFallbackMinutes}min";
+  };
 
   # -- the Nix store --------------------------------------------------------------------------
 
@@ -688,6 +783,11 @@ in
       FORGE_NIX_ENV = "1";
       FORGE_CLAUDE_EXECUTABLE = claudeExecutable;
       FORGE_CODEX_EXECUTABLE = codexExecutable;
+      # The worker runs this to update the machine (docs/design/worker-tier.md § Updating a
+      # permanent machine); unset on a worker that does not run on this image, which then says so.
+      FORGE_UPDATE_SCRIPT = "${systemUpdate}/bin/forge-system-update";
+      FORGE_UPDATE_LAYOUT = "/etc/forge/layout";
+    } // updateEnvironment // {
       # **This covers the worker's own invocations and nothing else.** `ForgeWorker.Job.Exec`
       # composes a job's environment from an allowlist and `env -i`, so nothing set here reaches a
       # job — an earlier attempt's comment claimed it did, and it did not. What a job gets is set
@@ -706,10 +806,13 @@ in
       EnvironmentFile = envFile;
       ExecStartPre = [
         "${pkgs.coreutils}/bin/mkdir -p ${root}/tmp ${root}/jobs ${root}/worktrees ${root}/volumes"
-        # A machine with nothing overriding it runs the release the image was built with. Only
-        # when absent, so an update put here by hand survives a reboot — which is the whole
-        # point of the indirection.
-        "${pkgs.bash}/bin/sh -c '[ -e ${releaseLink} ] || ln -sfn ${workerPackage} ${releaseLink}'"
+        # A machine with nothing overriding it runs the release the image was built with. **It
+        # follows the system**: the link is repointed whenever `release.system` does not name the
+        # running system, and then that file is written. So a build `bin/worker-update` put here
+        # survives a reboot of the same system, which is the whole point of the indirection, and
+        # an updated system runs its own worker rather than the old one's — without which a new
+        # system could never report the build it was updated to.
+        "${pkgs.bash}/bin/sh -c 'cur=$(readlink -f /run/current-system); if [ ! -e ${releaseLink} ] || [ \"$(cat ${releaseLink}.system 2>/dev/null)\" != \"$cur\" ]; then ln -sfn ${workerPackage} ${releaseLink}; echo \"$cur\" > ${releaseLink}.system; fi'"
         # An *indirect* GC root, the way a NixOS profile is one: nix follows the symlink, so
         # whatever the link currently points at is protected from the min-free sweep. Without
         # this, a release copied here by hand is collectable the moment the disk gets tight.
@@ -725,7 +828,11 @@ in
   # Traversable but not listable: a job runs as its own Unix user and has to reach its own
   # worktree under here, while the directories beside it are the slice's to close (0700, owned
   # by the job's user). A root that nobody but root may traverse stops the unit at CHDIR.
-  systemd.tmpfiles.rules = [ "d ${root} 0711 root root -" ];
+  systemd.tmpfiles.rules = [
+    "d ${root} 0711 root root -"
+    # Root-only, where an update's download, its mounted image and its state live.
+    "d ${updateDir} 0700 root root -"
+  ];
 
   # -- the rest -------------------------------------------------------------------------------
 

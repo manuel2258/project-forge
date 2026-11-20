@@ -30,6 +30,7 @@ defmodule Forge.Look.Setups do
     "signin_provider" => Forge.Look.Setups.SigninProvider,
     "settings" => Forge.Look.Setups.Settings,
     "machines" => Forge.Look.Setups.Machines,
+    "machine_updates" => Forge.Look.Setups.MachineUpdates,
     "codex" => Forge.Look.Setups.Codex,
     "weighted_usage" => Forge.Look.Setups.WeightedUsage,
     "extend" => Forge.Look.Setups.Extend,

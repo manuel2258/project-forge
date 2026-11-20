@@ -125,6 +125,10 @@ defmodule ForgeWorker.Stats do
     end
   end
 
+  @doc "Disk used and total for the filesystem holding `root`, or an empty map when unreadable."
+  @spec disk(String.t()) :: map()
+  def disk(root), do: root |> df() |> parse_df()
+
   # **`df`, because OTP has no `statfs`.** `:disksup` is the one thing in OTP that knows about
   # filesystems, and it gives a percentage per mount on a polling interval measured in minutes, no
   # byte counts, and needs `os_mon` started. `df -P -B1` is POSIX output in bytes from coreutils,

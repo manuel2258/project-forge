@@ -57,6 +57,19 @@
   .machine-more:empty { display: none; }
   .machine-ids { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; font-family: var(--font-mono); font-size: 11.5px; }
   .machine-line { font-size: 13px; line-height: 1.5; }
+  /* A permanent machine's update (ui.md § The machines view): the switch, one line in words and
+     *Update now*. The line is one row, cut short with the whole of it in `title` and the log:
+     what the machine says is text, and a long or hostile reason must not break the row. */
+  .machine-update { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+  .machine-update-switch { min-height: 36px; }
+  .machine-update-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .machine-update-now { align-items: flex-start; align-self: flex-start; }
+
+  /* What fills the disk (ui.md § The machines view): neutral and never amber, as the meters are,
+     and drawn while the machine is away. */
+  .machine-breakdown { display: flex; min-width: 0; flex-direction: column; gap: 2px; font-size: 12.5px; }
+  .machine-breakdown p { margin: 0; overflow-wrap: anywhere; }
+  .machine-breakdown-sizes { display: flex; flex-wrap: wrap; gap: 0 12px; font-family: var(--font-mono); }
   .machine-meters { display: grid; gap: 10px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .machine-meter { min-width: 0; }
   .machine-meter-figure { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-family: var(--font-mono); font-size: 12px; }

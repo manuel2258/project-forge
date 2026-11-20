@@ -12,7 +12,7 @@ defmodule ForgeWeb.WorkerChannel do
   use Phoenix.Channel
 
   alias Forge.{Conversations, Jobs, Workers}
-  alias Forge.Workers.Log
+  alias Forge.Workers.{Log, Updates}
   alias ForgeCore.Job.{Event, Result}
   alias ForgeCore.WorkerProtocol
 
@@ -33,7 +33,9 @@ defmodule ForgeWeb.WorkerChannel do
          :ok <- admit(worker_id, payload),
          :ok <- register(worker_id) do
       send(self(), {:after_join, payload})
-      {:ok, socket}
+      # **What this machine should be running** is in the reply, and in a refusal too: a raised
+      # minimum protocol must not leave it stuck (`docs/design/worker-channel.md` § Versions).
+      {:ok, %{"update" => Updates.target(Workers.get!(worker_id))}, socket}
     end
   end
 
@@ -56,7 +58,8 @@ defmodule ForgeWeb.WorkerChannel do
            reason: "protocol",
            protocol: protocol,
            minimum: WorkerProtocol.minimum(),
-           current: WorkerProtocol.current()
+           current: WorkerProtocol.current(),
+           update: Updates.target(Workers.get!(worker_id))
          }}
 
       {:error, reason} ->
@@ -114,14 +117,25 @@ defmodule ForgeWeb.WorkerChannel do
     mine = socket.assigns.worker_id
 
     case Workers.get!(mine) do
-      %{unhealthy_at: nil} ->
+      %{unhealthy_at: nil, updating_at: nil} ->
         push(socket, "assign", assignment)
 
-      %{} ->
+      worker ->
+        # Marked unhealthy, or stopping for an update (`docs/design/worker-tier.md` § Updating a
+        # permanent machine): either way the worker would drop it.
+        reason = if worker.unhealthy_at, do: :worker_unhealthy, else: :worker_updating
+
         with %{worker_id: ^mine, status: :running} <- Jobs.get(assignment["job_id"]),
-             do: Jobs.requeue(assignment["job_id"], :worker_unhealthy)
+             do: Jobs.requeue(assignment["job_id"], reason)
     end
 
+    {:noreply, socket}
+  end
+
+  # The owner's switch or *Update now*, from `Forge.Workers.Updates`: what this machine should be
+  # running, or nothing. The channel only carries it.
+  def handle_info({:update, %{"target" => _target} = payload}, socket) do
+    push(socket, "update", payload)
     {:noreply, socket}
   end
 
@@ -165,6 +179,20 @@ defmodule ForgeWeb.WorkerChannel do
   # event because the next one is seconds away (`docs/design/worker-channel.md` § Live figures).
   def handle_in("stats", payload, socket) do
     if is_map(payload), do: Workers.put_stats(socket.assigns.worker_id, payload)
+    {:noreply, socket}
+  end
+
+  # Where the machine's update has got to (`docs/design/worker-channel.md` § Messages), and what
+  # fills its disk. Unacked, like `stats` and the log: the next report restates it, and a lost one
+  # costs a stale line on a page — except `pausing`, whose loss leaves the platform assigning to a
+  # machine that drops it until its next report or join.
+  def handle_in("update", payload, socket) do
+    Updates.record(socket.assigns.worker_id, payload)
+    {:noreply, socket}
+  end
+
+  def handle_in("disk", payload, socket) do
+    Updates.record_disk(socket.assigns.worker_id, payload)
     {:noreply, socket}
   end
 

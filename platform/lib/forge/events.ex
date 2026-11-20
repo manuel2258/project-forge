@@ -391,6 +391,21 @@ defmodule Forge.Events do
     |> Enum.join(" · ")
   end
 
+  # A machine stopping for an update (`docs/design/worker-tier.md` § Updating a permanent
+  # machine). **Neither names the machine**, which is its owner's and may be nobody on the
+  # ticket's: only that it stopped to update, and that the work resumes.
+  defp describe(%Event{type: "job.hibernated", payload: %{"reason" => "update"}}, _bound),
+    do: "its machine stopped to update; it resumes where it left off"
+
+  defp describe(
+         %Event{type: "job.interrupted", payload: %{"reason" => "worker_updating"}},
+         _bound
+       ),
+       do: "its machine stopped to update; it resumes, a command from the start"
+
+  defp describe(%Event{type: "chat.ended", payload: %{"reason" => "update"}}, _bound),
+    do: "its machine stopped to update; a message carries it on"
+
   # Without this a message renders as an inspected map, which is how a conversation's own words
   # would read in the timeline and the queue.
   defp describe(%Event{type: "chat.message", payload: %{"text" => text}}, bound),

@@ -23,7 +23,7 @@ defmodule ForgeWeb.WorkerLive do
   alias Forge.Projects
   alias Forge.Workers
   alias Forge.Workers.Log
-  alias ForgeWeb.WorkersLive
+  alias ForgeWeb.{WorkersLive, WorkerUpdate}
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
@@ -37,12 +37,28 @@ defmodule ForgeWeb.WorkerLive do
 
     {:ok,
      socket
-     |> assign(page_title: "Machine #{short(worker.id)}", worker_id: worker.id)
+     |> assign(page_title: "Machine #{short(worker.id)}", worker_id: worker.id, error: nil)
      |> load()}
   end
 
   @impl true
   def handle_info(:refresh, socket), do: {:noreply, load(socket)}
+
+  # The owner's two writes about an update, as on `/workers`: this page is only ever the owner's
+  # (`mount/3` reads the machine scoped to the viewer), and each write reads it scoped again.
+  @impl true
+  def handle_event("update-auto", params, socket),
+    do: {:noreply, owner_write(socket, &WorkerUpdate.set_automatic/2, params)}
+
+  def handle_event("update-now", params, socket),
+    do: {:noreply, owner_write(socket, &WorkerUpdate.update_now/2, params)}
+
+  defp owner_write(socket, write, params) do
+    case write.(socket.assigns.current_scope.user, params) do
+      {:ok, _nothing} -> load(socket)
+      {:error, words} -> socket |> assign(error: words) |> load()
+    end
+  end
 
   defp load(socket) do
     id = socket.assigns.worker_id
@@ -52,6 +68,7 @@ defmodule ForgeWeb.WorkerLive do
     assign(socket,
       worker: worker,
       connected: Workers.connected?(id),
+      running: Forge.Jobs.running_on(id),
       lines: lines,
       jobs: job_paths(socket.assigns.current_scope.user, lines),
       serves: WorkersLive.serving(worker),
@@ -118,6 +135,14 @@ defmodule ForgeWeb.WorkerLive do
         class={["machine-header", @worker.status == :destroyed && "machine--gone"]}
       >
         <WorkersLive.identity worker={@worker} connected={@connected} current_build={@current_build} />
+        <WorkerUpdate.update
+          worker={@worker}
+          connected={@connected}
+          jobs={@running}
+          now={@now}
+        />
+        <.error_note :if={@error} id="machine-error">{@error}</.error_note>
+        <WorkerUpdate.disk_breakdown worker={@worker} now={@now} />
       </header>
 
       <div class="machine-log-head">

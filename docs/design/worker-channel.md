@@ -131,6 +131,7 @@ Platform → worker:
 | `message` | `job_id`, `message_id`, text | A chat only: write this to the harness's stdin. |
 | `interrupt` | `job_id` | A chat only: end this turn, keep the process. |
 | `close` | `job_id`, reason | A chat only: end the conversation, release the machine. |
+| `update` | `target`: `build`, `version`, `repository`, `digest`, `raw_sha256`, `raw_size` — or null, *stand down*; and `requested_by` (the owner's email) when *Update now* pressed it | Bring yourself to this build (protocol 13). Sent when the owner flips the switch on or presses *Update now*; **the join reply carries the same target** (§ Versions), which is how a machine learns it when it connects, refused or not. It carries no secret: the image is public, fetched by digest from the one repository the machine's own image names. |
 
 **There is no `drain`.** This table carried one — *take no new work* — meant to precede idle
 destroy, and nothing ever sent it: `Workers.sweep_idle/0` takes only a worker that is already
@@ -139,9 +140,10 @@ channel could push it, so both ends knew a message neither used, and it was remo
 rather than kept for a use that might come. It was wrong where it was honoured, too: a draining
 worker refused an assignment with a log line and no reply, and the platform — which marks a job
 `running` before the assignment goes out (§ Delivery) — was left holding a job nothing was
-running until the next rejoin. The first thing that would want a worker to stop taking work is
-the pulled `update` `docs/design/worker-tier.md` § Updating a worker sketches, and that can say
-so itself.
+running until the next rejoin. The first thing that wanted a worker to stop taking work was
+the pulled `update`, and it says so itself: protocol 13 adds `update`, which means *take no new work* from the
+moment a machine starts pausing for it (`docs/design/worker-tier.md` § Updating a permanent
+machine). No general `drain` comes back.
 
 Worker → platform:
 
@@ -157,6 +159,8 @@ Worker → platform:
 | `hibernated` | `job_id`, commit sha, reason, the result as far as it got; a chat adds its turn count | yes |
 | `failed` | `job_id`, reason | yes |
 | `unhealthy` | reason; the reply says `reboot` (true or false) and `why` | yes |
+| `update` | the update's state: `step` (`downloading`, `installing`, `pausing`, `restarting`, `trying`, `failed`, `fell_back`, `gave_up`, `kept`), `target_build`, `target_version`, `reason`, `failed_step`, `attempt`, `next_at` and `at` (ms, the machine's own clock when it spoke, by which the platform dates `next_at` by its own), `unable` (a code: `layout`, `not_an_image`) and for `pausing` the `jobs` and `chats` it is hibernating (ids) | no |
+| `disk` | `at` (ms), `kinds`: bytes for `nix_store`, `volumes`, `seeds`, `jobs` and `rest`; `cleanups`: per rule, `at` (ms) and `freed` | no |
 
 **A worker refuses an assignment whose ceiling it will not make a unit with**: a `memory_max`
 below `ForgeCore.Workflow.Resources.minimum_memory/0`, or one that is not a number, ends at once
@@ -382,8 +386,16 @@ is:
   from that snapshot (`docs/design/provisioning.md` § A snapshot that speaks the wrong protocol).
   A first join that is accepted teaches it too, which is what ends the probe an unlabelled image is
   held to.
-- **A permanent machine only gets the reason on its row.** It is not the platform's to power off,
-  and updating it is somebody's errand; the page names it.
+- **A permanent machine only gets the reason on its row** — and, from protocol 13, **the target**:
+  the refused error carries `update` as the accepted reply does, so a raised minimum does not
+  leave a machine stuck, and one with automatic updates on updates itself out of the refusal
+  (`docs/design/worker-tier.md` § Updating a permanent machine). It is not the platform's to power
+  off.
+
+**The accepted reply is `{:ok, %{update: target}}`**, `target` null for a machine that is to stay
+(a managed one, a node with no release, the switch off, an equal build). The join payload
+also carries `update`: whether this machine can update (`layout` says the old boot partition cannot), why not, and the state it was left in.
+A platform before 13 sends no reply body and a worker before 13 drops one, which is why 13 is a bump.
 
 The refused join does **not** write `last_seen_at`. A permanent machine that keeps knocking is
 still not a machine the platform can hear from, and its jobs have to reach
@@ -589,7 +601,10 @@ ships:
 
 1. build and label a snapshot at the new protocol (`bin/hetzner-image`) and move every template
    to it — the templates page shows each snapshot's protocol;
-2. update every permanent machine (`bin/worker-update`) — the workers page shows each machine's;
+2. bring every permanent machine to it — a machine on the new layout (protocol 13 and `/etc/forge/layout`)
+   **updates itself** while its switch is on, and the page's *Update now* does it for one whose switch
+   is off, so there is nothing to run; only a machine still on the old layout needs `bin/worker-update`
+   or a reinstall (§ Versions, protocol 13) — the workers page shows each machine's protocol;
 3. then raise `@minimum` in `ForgeCore.WorkerProtocol`, which is a code change and not the file:
    the file is what this build speaks, and the minimum is what this platform still accepts.
 
@@ -900,3 +915,17 @@ manifest's data for each file and the names not received, no key and no token
 and `files` (that message's own), which the worker applies before it writes the text to the
 harness (`conversations.md` § The wire). The worker's download goes through the store's `GET`
 with the token, which now streams (`storage.md`).
+
+## Protocol 13 (ticket 54)
+
+The same 13 as § Protocol 13 (ticket 60): both landed before any release carried a worker at 13,
+so one worker image speaks both, and a worker at 13 does both. 12 had already shipped, in 0.24.0,
+without `update`, so this could not share it. `minimum` stays 4, and nothing here makes a job need
+more than ticket 60 already does. It is a bump because a worker that ignored `update` would take
+work it had been told to stop taking. New: the join reply's `update` (and the refused error's), the
+platform-to-worker `update`, and the worker-to-platform `update` and `disk` (§ Messages).
+`Forge.Workers.Updates.record/2` and `record_disk/2` keep the last of each on the row, each cleaned
+by its own normaliser. A permanent machine below 13 is shown as unable to update itself, with the
+reinstall sentence. Every value either message carries is text or a number, and anything of
+another type is dropped by `ForgeCore.WorkerUpdate.normalise/1` rather than raised on (the
+`harness_text/1` lesson).

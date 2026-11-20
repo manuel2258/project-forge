@@ -8,11 +8,16 @@
 # the release, repoints the symlink `ExecStart` runs, and restarts the unit: seconds, and the
 # machine keeps the warm Nix store and the seeds that a replaced machine would lose.
 #
+# **Since ticket 54 a permanent machine also updates itself**, to the platform's own build, and
+# **an automatic update overwrites the build this puts there** unless the machine's *Update
+# automatically* switch is off (`docs/design/worker-tier.md` § Updating a permanent machine).
+# This stays the development tool: seconds, and no reboot.
+#
 # **This is the development-phase tool.** It needs the ssh door, which is shut by default and
 # forwards from loopback (docs/design/worker-tier.md § The provider driver), so it works where
 # the operator can already reach the machine and nowhere else. A worker on a provider has no
 # inbound port by construction; what that needs is the same operation pulled over the channel,
-# which is described in § Updating a worker and is not built.
+# which a permanent machine now does by itself (§ Updating a permanent machine).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

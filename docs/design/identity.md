@@ -302,7 +302,7 @@ credentials and worker templates are `Forge.Provisioning`'s, and every human wri
 acting user and scopes itself to them — assigning a template to a project checks membership there,
 as `Forge.Projects` does for members. Workers are `Forge.Workers`'s, and its human writes —
 minting a permanent machine (`mint/2`), its figures (`set_offer/3`), the projects it serves
-(`assign/3`, `unassign/3`) and ending one (`retire_by_owner/2`) — do the same.
+(`assign/3`, `unassign/3`), ending one (`retire_by_owner/2`), and, since ticket 54, its automatic-update switch and *Update now* (`Forge.Workers.Updates.set_automatic/3`, `update_now/2`) — do the same, owner only: a node admin and a project admin may not. The switch logs a line naming the owner; *Update now* names them in the machine's own `update.started` line.
 
 Two of these were guarded only in the LiveView until a review listed them here as exceptions,
 and they are recorded because the shape is the one this section keeps finding:

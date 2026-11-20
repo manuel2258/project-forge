@@ -429,8 +429,16 @@ defmodule ForgeWorker.Job.Dir do
     cutoff = System.os_time(:second) - div(older_than_ms, 1000)
 
     case File.ls(root) do
-      {:ok, entries} -> Enum.count(entries, &remove_if_stale(Path.join(root, &1), cutoff))
-      {:error, _reason} -> 0
+      {:ok, entries} ->
+        # How many bytes each went for, so the disk report can say what this freed
+        # (`ForgeWorker.Disk`); a directory that stayed is `false`.
+        freed = entries |> Enum.map(&remove_if_stale(Path.join(root, &1), cutoff))
+        removed = Enum.reject(freed, &(&1 == false))
+        ForgeWorker.Disk.cleaned("jobs", Enum.sum(removed))
+        length(removed)
+
+      {:error, _reason} ->
+        0
     end
   end
 
@@ -444,13 +452,14 @@ defmodule ForgeWorker.Job.Dir do
       # error on every file (`docs/design/archive.md`); the worker's start has already unmounted
       # those, and this is the second line for one that appeared since.
       ForgeWorker.Archive.release(path)
+      size = ForgeWorker.Disk.size(path)
 
       # Not the bang form: this runs on the path that reports a job's result, and an unlinkable
       # leftover would take the link process down with it and re-queue the worker's jobs. A
       # directory that will not go away is worth a line in the log and nothing more.
       case File.rm_rf(path) do
         {:ok, _removed} ->
-          true
+          size
 
         {:error, reason, file} ->
           Logger.warning("could not sweep #{file}: #{inspect(reason)}")

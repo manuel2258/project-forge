@@ -8,6 +8,7 @@ defmodule ForgeWeb.WorkerChannelTest do
   use ForgeWeb.ChannelCase, async: false
 
   import Forge.ForgeFixtures
+  import Forge.ImageBuildsFixtures, only: [put_release: 0, put_release: 1, release_build: 0]
 
   import Forge.GitFixtures
 
@@ -165,6 +166,106 @@ defmodule ForgeWeb.WorkerChannelTest do
     %{project: project, ticket: ticket, job: job, credential: credential}
   end
 
+  # A permanent machine updating itself (`docs/design/worker-channel.md` § Protocol 13 (ticket
+  # 54)): told what to run in the reply to its join — and in a refusal — and heard from while it
+  # does.
+  describe "updating itself" do
+    setup :ticket_with_job
+
+    setup %{worker: worker} do
+      put_release()
+      {:ok, worker} = Workers.update(worker, %{managed: false})
+      %{worker: worker}
+    end
+
+    test "the join reply carries the platform's build for a machine on another", %{
+      worker: w,
+      token: t
+    } do
+      assert {:ok, %{"update" => %{"build" => build, "version" => "0.20.0", "repository" => _}},
+              _} =
+               join_worker(w, t, %{"build" => "oldoldoldold"})
+
+      assert build == release_build()
+    end
+
+    test "and nothing for a machine on the platform's own build", %{worker: w, token: t} do
+      assert {:ok, %{"update" => nil}, _socket} = join_worker(w, t, %{"build" => release_build()})
+    end
+
+    test "and nothing while its owner's switch is off", %{worker: w, token: t} do
+      {:ok, _worker} = Workers.update(w, %{auto_update: false})
+      assert {:ok, %{"update" => nil}, _socket} = join_worker(w, t, %{"build" => "oldoldoldold"})
+    end
+
+    test "and nothing for a machine the platform made, which is replaced", %{worker: w, token: t} do
+      {:ok, _worker} = Workers.update(w, %{managed: true})
+      assert {:ok, %{"update" => nil}, _socket} = join_worker(w, t, %{"build" => "oldoldoldold"})
+    end
+
+    test "a refusal carries it too, so a raised minimum does not leave the machine stuck", %{
+      worker: w,
+      token: t
+    } do
+      too_new = ForgeCore.WorkerProtocol.current() + 1
+
+      assert {:error, %{reason: "protocol", update: %{"build" => build}}} =
+               join_worker(w, t, %{"protocol" => too_new, "build" => "oldoldoldold"})
+
+      assert build == release_build()
+    end
+
+    test "records what the machine says of an update, and of its disk", %{worker: w, token: t} do
+      {:ok, _reply, socket} = join_worker(w, t, %{"build" => "oldoldoldold"})
+
+      push(socket, "update", %{"step" => "installing", "target_version" => "0.20.0"})
+      push(socket, "disk", %{"at" => 1, "kinds" => %{"nix_store" => 5}, "cleanups" => %{}})
+      ref = push(socket, "heartbeat", %{})
+      assert_reply ref, :ok
+
+      row = Workers.get!(w.id)
+      assert %{"step" => "installing", "target_version" => "0.20.0"} = row.update_state
+      assert row.disk_report["kinds"] == %{"nix_store" => 5}
+    end
+
+    test "what the machine said at its join replaces what a restart left behind", %{
+      worker: w,
+      token: t
+    } do
+      {:ok, _worker} =
+        Workers.update(w, %{update_state: %{"step" => "pausing"}, updating_at: DateTime.utc_now()})
+
+      {:ok, _reply, _socket} = join_worker(w, t, %{"update" => %{"unable" => "layout"}})
+      assert %{update_state: %{"unable" => "layout"}, updating_at: nil} = Workers.get!(w.id)
+    end
+
+    test "pushes what the owner said, as an `update` message", %{worker: w, token: t} do
+      {:ok, _reply, _socket} = join_worker(w, t, %{"build" => "oldoldoldold"})
+      :ok = Workers.push(w.id, {:update, %{"target" => nil, "requested_by" => nil}})
+      assert_push "update", %{"target" => nil, "requested_by" => nil}
+    end
+
+    test "an assignment that reaches it while it is updating goes back to the queue", context do
+      %{worker: worker, token: token, job: job} = context
+      {:ok, _reply, _socket} = join_worker(worker, token)
+      {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000_000_000})
+      {:ok, worker} = Workers.update(worker, %{updating_at: DateTime.utc_now()})
+
+      {:ok, _job} = Jobs.assign(job, worker)
+
+      refute_push "assign", _assignment
+      wait_until(fn -> Jobs.get!(job.id).status == :pending end)
+
+      assert %{payload: %{"reason" => "worker_updating"}} =
+               Events.latest_for_job(job.id, "job.interrupted")
+    end
+
+    test "says nothing without a release, a node being a development one", %{worker: w, token: t} do
+      put_release(nil)
+      assert {:ok, %{"update" => nil}, _socket} = join_worker(w, t, %{"build" => "oldoldoldold"})
+    end
+  end
+
   describe "connecting" do
     test "a worker with its own token gets in", %{worker: worker, token: token} do
       assert {:ok, socket} = connect(WorkerSocket, %{"worker_id" => worker.id}, bearer(token))
@@ -244,7 +345,9 @@ defmodule ForgeWeb.WorkerChannelTest do
                reason: "protocol",
                protocol: too_new,
                minimum: ForgeCore.WorkerProtocol.minimum(),
-               current: ForgeCore.WorkerProtocol.current()
+               current: ForgeCore.WorkerProtocol.current(),
+               # No release on this node, so nothing to tell it.
+               update: nil
              }
 
       # Never registered, so never reachable and never assigned anything.

@@ -637,16 +637,36 @@ defmodule ForgeWeb.ChatLive do
   end
 
   # Nothing says a conversation stopped: one whose machine was released is idle, and the only
-  # ending a person sees is the one they chose.
-  defp subline(%{chat: chat, responding: responding, messages: messages, ending: ending}) do
+  # ending a person sees is the one they chose. One an update released says why, though, beside
+  # whatever it otherwise is.
+  defp subline(%{chat: chat, responding: responding, messages: messages} = assigns) do
+    released = after_update(assigns.live, assigns[:events] || [])
+
     "chat · " <>
       cond do
         responding -> "▸ responding · turn #{chat.turns + 1}"
-        ending -> "ended"
-        waiting?(messages) -> "waiting on you"
+        assigns.ending -> "ended"
+        waiting?(messages) -> "waiting on you" <> released
         chat.status == :pending -> "waiting for a machine"
-        true -> "idle"
+        true -> "idle" <> released
       end
+  end
+
+  # **Released by an update says so, and that a message carries it on** — and not whose machine
+  # it was: that is its owner's (`docs/design/worker-tier.md` § Updating a permanent machine).
+  # Only while the update is the last thing that happened to it: a conversation holding a machine
+  # has been started again, a person's message since has started it, and a machine lost since
+  # (`job.interrupted`) is a different reason, which the update's old `chat.ended` must not speak
+  # for. The events are in order, so the newest `chat.ended` and what followed it are the split.
+  defp after_update(true, _events), do: ""
+
+  defp after_update(false, events) do
+    {since, ended} = events |> Enum.reverse() |> Enum.split_while(&(&1.type != "chat.ended"))
+
+    if match?([%{payload: %{"reason" => "update"}} | _], ended) and
+         not Enum.any?(since, &(&1.type in ["chat.message", "job.interrupted"])),
+       do: " — its machine stopped to update; a message carries it on",
+       else: ""
   end
 
   # A step's conversation carries its ticket's strip, with the ticket's counts

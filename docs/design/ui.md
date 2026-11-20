@@ -2020,7 +2020,11 @@ the composer, the now line, the plan band, and any open question's card.
   which draws a stopped conversation with Reopen) **is drawn as one holding a machine**: its
   composer stays, its transcript is not dimmed, and nothing says it stopped. Sending is how it is
   carried on, and while it waits for a machine it says so with the scheduler's reason. **There is
-  no Reopen anywhere.**
+  no Reopen anywhere.** The one exception to *nothing says it stopped* is a machine that stopped
+  to update (`worker-tier.md` § Updating a permanent machine): while the update is the last thing
+  that happened to it — a person's message since, or a machine lost since, ends the note, because the
+  update's own `chat.ended` stays in its events for good — its subline adds *— its machine stopped to update; a message carries it on*, because nobody
+  chose that and the person would otherwise not know why the agent went quiet.
 - **An ended conversation** is read-only for good: the transcript, a line (`#chat-ended`) saying
   when and by whom it was ended and what became of its branch — deleted, or kept, with *Merge*
   where it was kept — and no composer, no answer rows and no Reopen. A message sent to it anyway is
@@ -2863,7 +2867,36 @@ nothing that commits is inside it. Under it, in this order, each only where it a
 - **A refusal line**, when the machine's last join spoke a protocol this platform does not accept,
   in danger: *refused: protocol 3, this platform accepts 4–8 — update it*. It is drawn from the
   protocol the row recorded and the range the platform accepts now, so it cannot say something the
-  next join would not.
+  next join would not. **On a permanent machine "update it" is replaced by what will happen**
+  (`worker-tier.md` § Updating a permanent machine), from one `WorkerUpdate.ending/2` that also ends the
+  *takes no job … update it* lines: *it is updating itself* when the switch is on and an update
+  can run; *press Update now* when the switch is off and the machine is connected; *turn on automatic
+  updates and it updates when it next connects* when it is off and not connected (a refused
+  machine is not); on the old layout the reinstall sentence (below). A managed machine keeps
+  *update it*: it is replaced.
+- **One update line, in words, under the identifiers**, when the machine's build is not the
+  platform's or an update is under way — permanent machines only, and on a node with a release.
+  It names the target by its **release version** (*0.23.0*), never the build hash, and speaks in
+  steps, not percentages: *update to 0.23.0 waiting: automatic updates are off* with *Update now*;
+  *updating to 0.23.0: downloading* / *installing* / *pausing: 2 jobs paused, 1 chat ends after
+  its turn* / *restarting* / *trying 0.23.0: kept once the platform accepts it*; in danger,
+  *update to 0.23.0 failed while downloading: <reason>: tries again at 15:20 UTC (2 of 3)* or
+  *stopped after 3 tries*, with *Update now*; in danger *0.23.0 was not accepted within 15
+  minutes; back on 0.22.0*; and in warning, on a machine on the old layout, *cannot update itself:
+  its boot partition holds one system; reinstall it once from the current image* — no switch is
+  drawn there. Every reason and step the machine sent is text from the machine: drawn escaped,
+  clipped to one line with the whole of it in `title` and in the log, and a value of the wrong
+  type is left out rather than raised on (`harness_text/1`'s lesson).
+- **The switch**, *Update automatically*, a `role=switch` row as on credentials, on a permanent
+  machine's row of a node with a release and nowhere else. It saves when flipped (no draft, so a
+  reconnect loses nothing) and the page re-reads the row. **Update now** is offered on a connected
+  permanent machine whose build is not the platform's and that has no update under way, whichever
+  way the switch is set; its confirm is one definition, `update_confirm/2`, so the sentence cannot
+  drift: *it pauses its N running jobs, which resume afterwards, ends M conversations after their
+  current turn, and restarts the machine*. A machine that is not connected, including a refused
+  one, offers no button, and no request is kept for it. Only the owner sees any of this, and each
+  write reads the row scoped to the viewer first, as *Retire* does (`identity.md` § Sequencing):
+  a node admin does not, and somebody else's id posted by hand is *not here*.
 - **An unhealthy line**, when the machine said its systemd stopped answering, in danger: *unhealthy
   since 14:02 UTC: <its reason>*, then what happens next — *told to reboot at 14:02 UTC; takes work
   again when it rejoins healthy*, or for a managed machine told within the hour *rebooted within
@@ -2881,6 +2914,16 @@ nothing that commits is inside it. Under it, in this order, each only where it a
   a release sends its first figures one tick after joining, and every machine rejoins at once after
   a deploy. A machine that is not connected draws no meters at all, because a disconnected
   machine's last figures are a guess about now.
+- **The disk breakdown, under the disk meter**, the one thing a disconnected machine **does** still
+  draw (ticket 54): each kind's size (Nix store, ticket volumes, seeds, job directories, the rest),
+  each cleanup rule's last run and what it freed (*ticket volumes swept 2h ago, freed 3.1 GiB*, or
+  *not run since boot*), and how long ago it was measured, neutral and never amber like the
+  meters. *not measured yet* before its first report; *no breakdown: update it* from a release
+  that sends none. The last report is kept on the row and drawn while the machine is away, with
+  its age (*measured 3 days ago*), because it says what was there when measured, not what is
+  happening now — which is what an owner needs to see what filled a machine that stopped
+  connecting. Totals per kind only: no ticket, project or path is named, since an owner who has left
+  the project may not learn what it is doing there.
 - **What it offers the gate**: memory and cores, each free against offered, with the kinds it takes
   beneath; a machine that never reported cores says so rather than showing an invented figure, and
   one whose own report disagrees with its row shows the report in danger — the row governs, so a
@@ -2892,7 +2935,7 @@ nothing that commits is inside it. Under it, in this order, each only where it a
   was invisible on every surface the operator has.
 
 **Destroyed rows stay, dimmed**, because their log is read after they go — hidden until *Show
-destroyed*. The subline adds the fleet up (*3 busy · 1 idle · 1 template at its limit*, a template
+destroyed*. The subline adds the fleet up (*3 busy · 1 idle · 1 updating · 1 template at its limit*, a template
 being at its limit when it has made as many machines as its maximum); the page counts machines
 (`N live · N connected`) beside a row of slots — one per machine that exists, busy ones in the
 running colour, then one per machine the viewer's templates may still make, at most 24 — and the

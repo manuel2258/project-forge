@@ -179,6 +179,29 @@ defmodule Forge.ExtendTest do
       assert Jobs.get!(job.id).spec["budget"]["tokens"] == 12_000_000
     end
 
+    # `docs/design/attachments.md` § Delivery: a file attached to the note is in the pool of the run
+    # that continues, and its manifest says what it came with.
+    test "a file attached to the note reaches the run it reopens", context do
+      %{ticket: ticket, user: user, worker: worker, project: project} = context
+      {ticket, job} = run_out(ticket, worker)
+
+      path = Path.join(tmp_dir("src"), "note")
+      File.write!(path, "pixels")
+      {:ok, upload} = Forge.Attachments.stage(project, user, {:file, path}, "limit.png")
+      batch = %Forge.Attachments.Batch{uploads: [%{id: upload.id, name: "limit.png"}]}
+
+      assert {:ok, _} =
+               Operator.extend(ticket, user, job.id, %{"tokens" => "6M", "turns" => "75"},
+                 attachments: batch
+               )
+
+      assignment = job.id |> Jobs.get!() |> FakeWorker.assign(worker)
+      assert [%{"file" => "limit.png"}] = assignment["attachments"]
+
+      assert [%{"file" => "limit.png", "to" => "a note extending a job"}] =
+               assignment["spec"]["attachments"]["files"]
+    end
+
     test "an extended job needs a worker that speaks protocol 12, and no other does", context do
       %{ticket: ticket, user: user, worker: worker} = context
       {ticket, job} = run_out(ticket, worker)
@@ -187,7 +210,7 @@ defmodule Forge.ExtendTest do
 
       {:ok, _} = extend(ticket, user, job)
       assert Jobs.protocol_needs(Jobs.get!(job.id))[:extension] == 12
-      assert Jobs.protocol(Jobs.get!(job.id)) == 12
+      assert protocol_before_attachments(Jobs.get!(job.id)) == 12
     end
 
     # A Codex run is not bounded by `budget.turns` (`docs/design/codex.md`), so a turn figure sent

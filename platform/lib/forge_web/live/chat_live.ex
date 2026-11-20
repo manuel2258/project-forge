@@ -17,7 +17,19 @@ defmodule ForgeWeb.ChatLive do
 
   use ForgeWeb, :live_view
 
-  alias Forge.{Artifacts, Conversations, Events, Git, Jobs, Merge, Operator, Projects, Tickets}
+  alias Forge.{
+    Artifacts,
+    Attachments,
+    Conversations,
+    Events,
+    Git,
+    Jobs,
+    Merge,
+    Operator,
+    Projects,
+    Tickets
+  }
+
   alias Forge.Git.Url
   alias ForgeWeb.{ChatViews, Diff, JobStream, TicketViews, Transcript, WorkScreen}
   alias ForgeWeb.Components.StepAccept
@@ -88,7 +100,12 @@ defmodule ForgeWeb.ChatLive do
     |> assign(
       chat: chat,
       events: Events.for_job(id),
-      docs: docs(chat, project, ticket),
+      docs: docs(chat, project, ticket) ++ attached_docs(socket, chat, project, ticket),
+      # What the box is drawn with (the pool's room), and what came with each message, read again
+      # whenever the page loads: a file withdrawn since is *withdrawn* where its link was.
+      attach_room: Attachments.room(Conversations.pool(chat)),
+      attach_path: attach_path(chat, project, ticket),
+      attached_ids: nil,
       unrecorded: Conversations.unrecorded(id),
       diff: chat_diff(project, chat),
       commits: commits(project, chat),
@@ -163,9 +180,12 @@ defmodule ForgeWeb.ChatLive do
   # few — not one per message — when they do.
   defp fold(%{assigns: %{events: events}} = socket) do
     messages = Conversations.transcript(events)
+    {attached, attached_ids} = attached(socket, messages)
 
     assign(socket,
       messages: messages,
+      attached: attached,
+      attached_ids: attached_ids,
       now: Conversations.now(events),
       memory: Forge.Jobs.Memory.trouble(events),
       plan: Transcript.plan(messages),
@@ -175,6 +195,26 @@ defmodule ForgeWeb.ChatLive do
       at: DateTime.utc_now()
     )
   end
+
+  # What came with each of the person's messages, by the message's id. Read when the person's
+  # messages are not the ones last read — a streamed block adds none — and forced by `load/1`.
+  defp attached(socket, messages) do
+    ids = for %{role: :user, id: id} <- messages, do: String.to_integer(id)
+
+    if ids == socket.assigns.attached_ids do
+      {socket.assigns.attached, ids}
+    else
+      {Attachments.entries_for_events(ids), ids}
+    end
+  end
+
+  # Where a file's version is served: the ticket's address for a ticket's pool, the conversation's
+  # own for a project chat's.
+  defp attach_path(_chat, project, %Tickets.Ticket{} = ticket),
+    do: &~p"/tickets/#{project.name}/#{ticket.number}/artifacts/#{&1.name}/#{&1.version}"
+
+  defp attach_path(chat, _project, nil),
+    do: &~p"/chats/#{chat.id}/artifacts/#{&1.name}/#{&1.version}"
 
   # What its latest run could not hold because it was deleted since the conversation was opened
   # (`docs/design/secrets.md` § Conversations): said on the page, rather than left for the agent
@@ -229,6 +269,27 @@ defmodule ForgeWeb.ChatLive do
   # ticket's — grouped by document, the latest rendered and the rest linked
   # (`docs/design/ui.md` § Docs). Approval is possible only for a ticket's document that the
   # ticket's workflow approves, so only those carry a mark.
+  # A project chat's files are its own, and the chat's Docs is where they are listed, with who
+  # attached them and a way to withdraw them (`docs/design/ui.md` § Attaching files). A ticket
+  # chat's are the ticket's, on its page.
+  defp attached_docs(socket, chat, project, nil) do
+    scope = Forge.Accounts.Scope.for_project(socket.assigns.current_scope, project)
+    user = socket.assigns.current_scope.user
+
+    for {artifact, versions} <- Attachments.artifacts({:job, chat.id}) do
+      artifact
+      |> WorkScreen.doc(
+        versions,
+        &version_href(chat, project, nil, artifact, &1),
+        false,
+        doc_scope(chat, project, nil, artifact)
+      )
+      |> WorkScreen.mark_attached(versions, scope, user)
+    end
+  end
+
+  defp attached_docs(_socket, _chat, _project, _ticket), do: []
+
   defp docs(chat, project, ticket) do
     approvable = approvable(ticket)
 
@@ -304,7 +365,15 @@ defmodule ForgeWeb.ChatLive do
   # ends; Send while the agent responds is *Interrupt and send*, which the form says in a field
   # drawn beside the button that names it (`15a`); stop ends the turn and sends nothing.
   def handle_event("send", %{"text" => text} = params, socket),
-    do: say(socket, text, force: params["interrupt"] == "true")
+    do:
+      say(socket, text, [force: params["interrupt"] == "true"] ++ ForgeWeb.Attaching.opts(params))
+
+  def handle_event("attachments:withdraw", params, socket),
+    do:
+      {:noreply,
+       socket
+       |> ForgeWeb.Attaching.withdraw(Conversations.pool(socket.assigns.chat), params)
+       |> load()}
 
   def handle_event("stop", _params, socket) do
     :ok = Operator.stop_chat(socket.assigns.chat, socket.assigns.current_scope.user)
@@ -400,7 +469,8 @@ defmodule ForgeWeb.ChatLive do
   defp deliver(socket, text, opts) do
     case Operator.send_chat(socket.assigns.chat, socket.assigns.current_scope.user, text, opts) do
       {:ok, _event} ->
-        {:noreply, socket |> assign(draft: "", chat_error: nil) |> load()}
+        {:noreply,
+         socket |> assign(draft: "", chat_error: nil) |> ForgeWeb.Attaching.sent() |> load()}
 
       {:error, reason} when reason in [:ended, :step_over] ->
         {:noreply, socket |> assign(chat_error: {:dock, refusal(reason)}) |> load()}
@@ -527,7 +597,7 @@ defmodule ForgeWeb.ChatLive do
       </WorkScreen.body>
 
       <WorkScreen.body :if={@tab == "docs"} id="docs">
-        <WorkScreen.docs docs={@docs} unrecorded={@unrecorded} />
+        <WorkScreen.docs docs={@docs} unrecorded={@unrecorded} refusal={@refusal} />
       </WorkScreen.body>
 
       <WorkScreen.body :if={@tab == "activity"} id="activity">

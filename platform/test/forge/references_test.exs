@@ -34,6 +34,7 @@ defmodule Forge.ReferencesTest do
     {:ok, chat} = Conversations.open(project, "talk")
 
     %{
+      user: user,
       project: project,
       one: one,
       two: two,
@@ -348,6 +349,79 @@ defmodule Forge.ReferencesTest do
       # A ticket's file is still reachable by its number.
       version(artifact({:ticket, ctx.one.id}, "t.png"), 1, at(0))
       assert found(ask(chat_scope, moment(0), "archive/1/t.png")) == 1
+    end
+  end
+
+  # A person's file, attached as `Forge.Attachments` does (`docs/design/attachments.md`).
+  defp attach!(ctx, pool, original, bytes \\ "bytes") do
+    path = Path.join(System.tmp_dir!(), "#{System.pid()}-#{System.unique_integer([:positive])}")
+    File.write!(path, bytes)
+    {:ok, upload} = Forge.Attachments.stage(ctx.project, ctx.user, {:file, path}, original)
+    File.rm!(path)
+    batch = %Forge.Attachments.Batch{uploads: [%{id: upload.id, name: original}]}
+    {:ok, %{added: [row]}} = Forge.Attachments.claim(pool, ctx.user, batch, :message, :added)
+    row
+  end
+
+  describe "a person's files" do
+    setup do
+      store = Application.get_env(:forge, Forge.Storage, [])
+
+      dir =
+        Path.join(System.tmp_dir!(), "#{System.pid()}-refs-#{System.unique_integer([:positive])}")
+
+      Application.put_env(:forge, Forge.Storage, Keyword.put(store, :dir, dir))
+
+      on_exit(fn ->
+        Application.put_env(:forge, Forge.Storage, store)
+        File.rm_rf!(dir)
+      end)
+    end
+
+    test "are named attachments/<file> in a ticket's text, and are images when raster", ctx do
+      attach!(ctx, {:ticket, ctx.two.id}, "shot.png")
+      attach!(ctx, {:ticket, ctx.two.id}, "log.txt")
+
+      now = %{at: :now, job: nil, turn_seq: nil}
+
+      assert {:ok, %{where: {:ticket, _, _}, version: 1, raster?: true, withdrawn?: false}} =
+               ask(ctx.scope, now, "attachments/shot.png")
+
+      assert {:ok, %{raster?: false}} = ask(ctx.scope, now, "attachments/log.txt")
+    end
+
+    test "a project chat's are its own: drawn there, and never found from a ticket or another chat",
+         ctx do
+      {:ok, other} = Conversations.open(ctx.project, "elsewhere")
+      attach!(ctx, {:job, ctx.chat.id}, "shot.png")
+      now = %{at: :now, job: nil, turn_seq: nil}
+      mine = References.chat_scope(ctx.project, ctx.chat.id)
+      chat_id = ctx.chat.id
+
+      assert {:ok, %{where: {:chat, ^chat_id}, raster?: true}} =
+               ask(mine, now, "attachments/shot.png")
+
+      assert {:error, {:missing, :chat}} =
+               ask(References.chat_scope(ctx.project, other.id), now, "attachments/shot.png")
+
+      assert {:error, {:missing, :ticket}} = ask(ctx.scope, now, "attachments/shot.png")
+    end
+
+    test "a withdrawn one is still found, and says so", ctx do
+      attach!(ctx, {:ticket, ctx.two.id}, "shot.png")
+      now = %{at: :now, job: nil, turn_seq: nil}
+      assert {:ok, %{withdrawn?: false}} = ask(ctx.scope, now, "attachments/shot.png")
+
+      {:ok, _} =
+        Forge.Attachments.withdraw(
+          {:ticket, ctx.two.id},
+          ctx.user,
+          "attachments/shot.png",
+          :all,
+          nil
+        )
+
+      assert {:ok, %{withdrawn?: true, version: 1}} = ask(ctx.scope, now, "attachments/shot.png")
     end
   end
 

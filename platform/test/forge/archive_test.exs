@@ -55,6 +55,20 @@ defmodule Forge.ArchiveTest do
     version
   end
 
+  # A person's file, attached as `Forge.Attachments` does: staged, then claimed by an act.
+  defp attach!(project, ticket, user, original, bytes) do
+    path = Path.join(System.tmp_dir!(), "#{System.pid()}-#{System.unique_integer([:positive])}")
+    File.write!(path, bytes)
+    {:ok, upload} = Forge.Attachments.stage(project, user, {:file, path}, original)
+    File.rm!(path)
+    batch = %Forge.Attachments.Batch{uploads: [%{id: upload.id, name: original}]}
+
+    {:ok, %{added: [row]}} =
+      Forge.Attachments.claim({:ticket, ticket.id}, user, batch, :note, :added)
+
+    row
+  end
+
   defp paths({:ok, %{"files" => files}}), do: files |> Enum.map(& &1["path"]) |> Enum.sort()
 
   describe "the root" do
@@ -394,6 +408,75 @@ defmodule Forge.ArchiveTest do
       refute Archive.valid_path?(String.duplicate("x", 256))
       refute Archive.valid_path?(<<255>>)
       refute Archive.valid_path?(nil)
+    end
+  end
+
+  describe "a person's files" do
+    setup %{project: project} do
+      %{user: member_fixture(project, :member)}
+    end
+
+    test "are listed under attachments/, the newest under its plain name",
+         %{project: project, ticket: ticket, user: user} do
+      attach!(project, ticket, user, "shot.png", "one")
+      attach!(project, ticket, user, "shot.png", "two")
+
+      assert paths(Archive.ticket(project, 1)) ==
+               [
+                 "attachments/shot.png",
+                 "attachments/shot.v001.png",
+                 "attachments/shot.v002.png",
+                 "jobs.tsv"
+               ]
+    end
+
+    test "a withdrawn one is neither listed nor served, and the next newest takes the plain name",
+         %{project: project, ticket: ticket, user: user} do
+      one = attach!(project, ticket, user, "shot.png", "one")
+      two = attach!(project, ticket, user, "shot.png", "two")
+
+      {:ok, _} =
+        Forge.Attachments.withdraw({:ticket, ticket.id}, user, "attachments/shot.png", 2, nil)
+
+      {:ok, %{"files" => files}} = Archive.ticket(project, 1)
+
+      assert paths({:ok, %{"files" => files}}) == [
+               "attachments/shot.png",
+               "attachments/shot.v001.png",
+               "jobs.tsv"
+             ]
+
+      assert Enum.find(files, &(&1["path"] == "attachments/shot.png"))["ref"] ==
+               one.artifact_version_id
+
+      assert :not_found = Archive.version(project, 1, two.artifact_version_id)
+
+      assert {:ok, _, %{artifact: "attachments/shot.png"}} =
+               Archive.version(project, 1, one.artifact_version_id)
+    end
+
+    test "every version withdrawn leaves nothing, and is not counted in the index",
+         %{project: project, ticket: ticket, user: user} do
+      attach!(project, ticket, user, "gone.png", "x")
+      assert Archive.root(project)["files"] |> hd() |> Map.fetch!("inline") =~ ~r/ 0 \| 1 \| 1\n/
+
+      {:ok, _} =
+        Forge.Attachments.withdraw({:ticket, ticket.id}, user, "attachments/gone.png", :all, nil)
+
+      assert paths(Archive.ticket(project, 1)) == ["jobs.tsv"]
+
+      assert Archive.root(project)["files"] |> hd() |> Map.fetch!("inline") =~
+               ~r/ \| refining \| active \| 0 \| 0 \| 0\n/
+    end
+
+    test "are not found by another project", %{
+      project: project,
+      ticket: ticket,
+      user: user
+    } do
+      row = attach!(project, ticket, user, "shot.png", "one")
+      other = project_fixture()
+      assert :not_found = Archive.version(other, 1, row.artifact_version_id)
     end
   end
 

@@ -45,6 +45,15 @@ defmodule Forge.Storage.Key do
   def artifact("sha256:" <> hex), do: "artifact/#{hex}"
 
   @doc """
+  A file a person uploaded, by the id of its staging row. **Not content-addressed**, on purpose:
+  two identical files would share one object, and withdrawing one would delete the other's bytes;
+  the hash is also unknown until the bytes have arrived and the key has to exist before that
+  (`docs/design/storage.md` § Keys).
+  """
+  @spec upload(String.t()) :: String.t()
+  def upload(id), do: "upload/#{String.downcase(id)}"
+
+  @doc """
   Checks a key before it reaches an implementation, so no implementation has to. Lowercase
   segments, no traversal, no leading or trailing slash, at most #{@max_bytes} bytes.
   """

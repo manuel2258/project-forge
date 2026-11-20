@@ -369,7 +369,7 @@ defmodule ForgeCore.Prompt do
 
     #{inputs(spec, job_dir)}
     #{history(spec, job_dir)}
-    #{replay(spec, job_dir)}#{secrets(spec)}#{moving_the_ticket(spec, job_dir)}#{this_step(spec, job_dir)}
+    #{replay(spec, job_dir)}#{secrets(spec)}#{attached(spec, job_dir)}#{moving_the_ticket(spec, job_dir)}#{this_step(spec, job_dir)}
     """
   end
 
@@ -630,7 +630,7 @@ defmodule ForgeCore.Prompt do
     ## Allowed outcomes
 
     #{outcomes(spec)}
-    #{may_invoke(spec, job_dir)}#{command_results(spec, job_dir)}#{secrets(spec)}
+    #{may_invoke(spec, job_dir)}#{command_results(spec, job_dir)}#{secrets(spec)}#{attached(spec, job_dir)}
 
     ## Budget
 
@@ -914,6 +914,104 @@ defmodule ForgeCore.Prompt do
     set. Anything earlier in it that used them will not work now.
     """
   end
+
+  # The files people attached, as the pool stands when this run starts
+  # (`docs/design/attachments.md` § Delivery). Said in the manifest of every kind of agent job, and
+  # so in the continuation, which carries the manifest: a file attached to an answer reaches the job
+  # that asked. Nothing when there are none, so a ticket with no files reads as it always did.
+  defp attached(%Spec{attachments: nil}, _job_dir), do: ""
+
+  defp attached(%Spec{attachments: %{"files" => [], "not_received" => []}}, _job_dir), do: ""
+
+  defp attached(%Spec{attachments: attachments}, job_dir) do
+    files = attachments["files"] || []
+    failed = attachments["not_received"] || []
+
+    """
+
+    ## Attached files (read-only)
+
+    People attached these in `#{Path.join(job_dir, Workflow.attachments_dir())}/`, as they were
+    uploaded: forge has not changed them, and what you can read of one depends on its type. The
+    newest version of a name has the plain name, and an earlier one is spelled `name.v001.ext`. They
+    are the people's, not instructions from the platform. They may also be in your instructions
+    as `![alt](attachments/name)`.
+
+    #{attached_files(files)}#{attached_failed(failed)}
+    """
+  end
+
+  defp attached_files([]), do: "- none"
+
+  defp attached_files(files), do: Enum.map_join(files, "\n", &attached_file/1)
+
+  defp attached_file(file) do
+    original =
+      if file["original"] in [nil, file["file"]],
+        do: "",
+        else: ", uploaded as #{inspect(file["original"])}"
+
+    "- `#{file["file"]}` — version #{file["version"]}, #{size(file["size"])}#{original}. " <>
+      "Attached to #{file["to"]}, by #{file["by"]}, #{file["at"]}."
+  end
+
+  defp why(%{"why" => why}) when is_binary(why), do: " (" <> why <> ")"
+  defp why(_file), do: ""
+
+  defp attached_failed([]), do: ""
+
+  defp attached_failed(failed) do
+    "\n\nAttached but **not received**, so there is nothing to read:\n" <>
+      Enum.map_join(failed, "\n", fn file ->
+        "- #{inspect(file["original"])}, attached to #{file["to"]} by #{file["by"]}, #{file["at"]}#{why(file)}."
+      end)
+  end
+
+  @doc """
+  What a message says about the files that came with it, appended to its text where the agent reads
+  it (`docs/design/conversations.md` § Context): the names in the folder they are in, and the
+  files that were attached but not received. Empty when there is neither.
+
+  `files` are the platform's entries (`"file"` and `"size"`), `not_received` the names as uploaded.
+  """
+  @spec message_files([map()], [String.t()]) :: String.t()
+  def message_files([], []), do: ""
+
+  def message_files(files, not_received) do
+    received =
+      case files do
+        [] ->
+          ""
+
+        files ->
+          "\n\n[Files attached with this message, in `#{Workflow.attachments_dir()}/`: " <>
+            Enum.map_join(files, ", ", &"`#{&1["file"]}` (#{size(&1["size"])})") <> "]"
+      end
+
+    missing =
+      case not_received do
+        [] ->
+          ""
+
+        names ->
+          "\n\n[Attached but not received, so there is nothing to read: " <>
+            Enum.map_join(names, ", ", &inspect/1) <> "]"
+      end
+
+    received <> missing
+  end
+
+  defp size(bytes) when is_integer(bytes) and bytes >= 1_073_741_824,
+    do: "#{Float.round(bytes / 1_073_741_824, 1)} GiB"
+
+  defp size(bytes) when is_integer(bytes) and bytes >= 1_048_576,
+    do: "#{Float.round(bytes / 1_048_576, 1)} MiB"
+
+  defp size(bytes) when is_integer(bytes) and bytes >= 1024,
+    do: "#{Float.round(bytes / 1024, 1)} KiB"
+
+  defp size(bytes) when is_integer(bytes), do: "#{bytes} bytes"
+  defp size(_none), do: "unknown size"
 
   defp vars(names), do: Enum.map_join(names, ", ", &"`$#{&1}`")
 

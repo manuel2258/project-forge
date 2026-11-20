@@ -84,6 +84,7 @@ defmodule Forge.Application do
         Forge.Jobs.Scheduler,
         Forge.MergeQueue.Runner,
         Forge.ImageBuilds.Runner,
+        Forge.Attachments.Sweeper,
         Forge.Schedules.Runner
       ],
       else: []

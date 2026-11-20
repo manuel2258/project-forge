@@ -178,14 +178,23 @@ defmodule Forge.Archive do
   # What the archive shows of a project: documents, presentations and files of its tickets, and
   # never the changeset (a commit), a proposal (`tickets/` has those) or a transcript. The
   # joins are `[artifact, version, ticket]`, and the project is a clause of the query.
+  #
+  # **A person's file that was withdrawn is not in it** (`docs/design/attachments.md` § Withdrawing):
+  # its bytes are gone, and a listing that names it, or a door that serves it, would promise what
+  # no read can keep. A left join on the withdrawal, which a version has at most one of (the
+  # attachment's version is unique), so it adds no row; the bindings above are still the first
+  # three.
   defp shown(project_id) do
     from a in Artifact,
       join: v in Version,
       on: v.artifact_id == a.id,
       join: t in Ticket,
       on: t.id == a.ticket_id,
+      left_join: w in Forge.Attachments.Attachment,
+      on: w.artifact_version_id == v.id and not is_nil(w.withdrawn_at),
       where:
-        t.project_id == ^project_id and a.name != "changeset" and
+        is_nil(w.id) and
+          t.project_id == ^project_id and a.name != "changeset" and
           not like(a.name, "proposal-%") and not like(a.name, "transcript-%") and
           (is_nil(v.blob_uri) or not like(v.blob_uri, "git:%"))
   end

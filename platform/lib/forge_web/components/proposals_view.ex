@@ -218,6 +218,7 @@ defmodule ForgeWeb.ProposalsView do
   attr :drafts, :map, required: true
   attr :error, :string, default: nil
   attr :now, :any, required: true
+  attr :project, :string, default: nil, doc: "the project's name: with it, files can be attached"
 
   def reader(assigns) do
     assigns =
@@ -293,6 +294,14 @@ defmodule ForgeWeb.ProposalsView do
           enter={:newline}
           label="Note, optional"
           placeholder="Kept with the decision: why it was declined, or why it was admitted"
+        />
+        <%!-- Files go to the ticket this admits; declining takes none, and what was attached is
+              left to the sweep. --%>
+        <ForgeWeb.UI.Attach.box
+          :if={@project}
+          id={"proposal-attach-#{@item.version_id}"}
+          project={@project}
+          label="Attach files to the ticket"
         />
         <.error_note :if={@error} id="proposal-error">{@error}</.error_note>
         <%!-- Admit waits for a type where there is one to choose: the server refuses it without,

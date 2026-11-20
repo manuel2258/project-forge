@@ -37,6 +37,7 @@ defmodule Forge.Look.Setups do
     "usage" => Forge.Look.Setups.Usage,
     "projects" => Forge.Look.Setups.Projects,
     "ticket_views" => Forge.Look.Setups.TicketViews,
+    "attachments" => Forge.Look.Setups.Attachments,
     "project" => Forge.Look.Setups.Project,
     "proposals" => Forge.Look.Setups.Proposals,
     "job" => Forge.Look.Setups.Job,

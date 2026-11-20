@@ -313,6 +313,7 @@ defmodule ForgeWeb.Operator.Components do
   attr :name, :string, required: true
   attr :latest, :map, default: nil
   attr :drafts, :map, required: true, doc: "the page's `:drafts` assign"
+  attr :project, :string, default: nil, doc: "the project's name: with it, files can be attached"
 
   # `phx-debounce` here is an equivalent mutant: it decides how often the client pushes while
   # somebody is typing, and no ExUnit test can press a key. It matches `message_box/1`, which
@@ -356,6 +357,7 @@ defmodule ForgeWeb.Operator.Components do
         phx-debounce="200"
         class="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm placeholder:opacity-40 focus:outline-none focus:border-border-strong"
       >{Drafts.field(@drafts, @draft, "content", @latest && @latest.content)}</textarea>
+      <ForgeWeb.UI.Attach.box :if={@project} id={"write-#{@name}-attach"} project={@project} />
       <button
         type="submit"
         phx-disable-with="Saving…"

@@ -93,12 +93,16 @@ defmodule Mix.Tasks.Forge.Git.TokenTest do
   # read-only branch is just as likely to lose this one.
   test "--minutes sets the lifetime, with or without a ticket" do
     project = project_fixture()
-    before = DateTime.utc_now()
 
     Token.run([project.name, "--minutes", "5"])
 
+    # Measured from after the task ran: the expiry is made from the clock at the second the token was
+    # written, so it can never be more than five minutes past a moment taken afterwards. Measured from
+    # before, a machine slow enough to take a second between the two read 301 and failed the gate.
+    finished = DateTime.utc_now()
+
     assert [token] = Tokens.list(project)
-    assert DateTime.diff(token.expires_at, before) in 240..300
+    assert DateTime.diff(token.expires_at, finished) in 240..300
   end
 
   # The words are the whole of what the operator is told a credential may do, and they are written

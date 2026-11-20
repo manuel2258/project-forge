@@ -1,5 +1,6 @@
 defmodule ForgeWeb.Router do
   use ForgeWeb, :router
+  use Plug.ErrorHandler
 
   import ForgeWeb.UserAuth
 
@@ -8,6 +9,11 @@ defmodule ForgeWeb.Router do
   @csp "default-src 'self'; img-src 'self' data:; script-src 'self' 'unsafe-inline'; " <>
          "style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; " <>
          "base-uri 'self'; form-action 'self'"
+
+  # A request that staged files and ended in an exception leaves them for nobody: `before_send` does
+  # not run when Phoenix renders the error (`ForgeWeb.Plugs.ApiFiles.discard_after_error/1`).
+  @impl Plug.ErrorHandler
+  def handle_errors(_conn, _error), do: ForgeWeb.Plugs.ApiFiles.discard_after_error()
 
   pipeline :browser do
     plug :accepts, ["html"]
@@ -97,6 +103,10 @@ defmodule ForgeWeb.Router do
     get "/tickets/:project/:number/artifacts/:name/:version", ArtifactController, :show
     # A conversation's own artifacts, by the same rule: the address names the scope.
     get "/chats/:id/artifacts/:name/:version", ArtifactController, :chat
+    # The page's way of sending a file to attach: staged here, claimed by the act it rides on.
+    # See docs/design/attachments.md § Staging, claiming and the sweep.
+    post "/projects/:name/uploads", UploadController, :create
+    delete "/projects/:name/uploads/:id", UploadController, :delete
   end
 
   # Account governance, and the only thing `node_admin` unlocks. Not under the operator scope:
@@ -137,6 +147,8 @@ defmodule ForgeWeb.Router do
     get "/tickets/:project/:number/artifacts/:name/:version/raw", TicketController, :raw
     get "/tickets/:project/:number/artifacts/:name", TicketController, :artifact
     post "/tickets/:project/:number/artifacts/:name", TicketController, :edit
+    delete "/tickets/:project/:number/attachments/:file", TicketController, :withdraw
+    delete "/tickets/:project/:number/attachments/:file/:version", TicketController, :withdraw
     post "/tickets/:project/:number/answers", TicketController, :answer
     post "/tickets/:project/:number/approve", TicketController, :approve
     post "/tickets/:project/:number/transition", TicketController, :transition

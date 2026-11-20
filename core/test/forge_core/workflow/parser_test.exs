@@ -879,6 +879,31 @@ defmodule ForgeCore.Workflow.ParserTest do
              ]
     end
 
+    test "people's files are not a workflow's: attachments is reserved, produced, consumed or grouped",
+         %{map: map} do
+      map = put_in(map, ["states", "verifying", "produces"], ["report.md", "attachments"])
+
+      assert [{"states.verifying.produces[1]", "\"attachments\" is reserved" <> _}] =
+               messages(map)
+
+      map = put_in(map, ["states", "verifying", "produces"], ["report.md", "attachments/*"])
+
+      assert [{"states.verifying.produces[1]", "\"attachments\" is reserved" <> _}] =
+               messages(map)
+
+      map = put_in(map, ["states", "verifying", "produces"], ["report.md", "attachments/x.png"])
+
+      assert {"states.verifying.produces[1]", "\"attachments/x.png\" is reserved" <> _} =
+               List.last(messages(map))
+
+      map =
+        map
+        |> put_in(["states", "verifying", "produces"], ["report.md"])
+        |> put_in(["states", "planning", "inputs"], ["ticket", "attachments"])
+
+      assert [{"states.planning.inputs[1]", "\"attachments\" is reserved" <> _}] = messages(map)
+    end
+
     test "declared outcomes are non-empty, unique, not engine outcomes, and carried by a document",
          %{map: map} do
       map =

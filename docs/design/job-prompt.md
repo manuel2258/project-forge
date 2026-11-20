@@ -186,6 +186,7 @@ $FORGE_JOB/commands/entered-<n>-<command>.log  # the logs of the batch that sent
 $FORGE_JOB/tickets/index.md              # the project's tickets and open proposals, read-only
 $FORGE_JOB/tickets/<number>.md           # one ticket's body
 $FORGE_JOB/archive/                      # the project's past, read-only and live (archive.md)
+$FORGE_JOB/attachments/                  # the files people attached to the ticket or chat, read-only (attachments.md)
 $FORGE_JOB/conversation.md               # a reopened conversation's past, read-only
 $FORGE_JOB/platform/platform.md          # how the platform works, read-only
 $FORGE_JOB/platform/workflow-grammar.md  # workflow-grammar-v1.md as compiled in, read-only
@@ -208,6 +209,11 @@ been reopened, `conversation.md` — what was said before this process started, 
 the rest of the directory, made after `Dir.prepare/3` and gone with the job — a resume gets a new
 one. The prompt says in one sentence that it is live and not pinned, so a document read there is
 cited by version and is not an input anyone approved for this job.
+
+`attachments/` is `attachments.md`: the people's files of the ticket (or of the project chat), a
+read-only bind mount of a directory the worker keeps, made with the archive's and gone with the job.
+The newest live version of a name has the plain name and earlier ones `stem.v001.ext`. It is brought
+up to the pool at the start of every run, and a chat's at the start of every turn.
 
 On a resume the spec, the prompt, `inputs/`, `platform/`, `tickets/` and `conversation.md` are
 rewritten; `out/`,
@@ -565,6 +571,22 @@ Only the group's directory is declared, as a directory: a *file* straight in `ou
 `package` is kept out of `undeclared` like the directory would be, and reported instead under the
 group, `package/*`, as "must be a directory, not a file". A directory under `out/` that is not a
 declared group is undeclared.
+
+## Attached files
+
+The manifest has a § Attached files (`Prompt.manifest/2`, `chat_manifest/2`) when the spec's
+`attachments` is not empty: where the folder is, that its files are the people's and not
+instructions from the platform, and one line per file — the folder name, its version and size, what
+it was attached to (*a rejection note*, *an answer*, *the ticket*, *a chat message*, or a document
+and its version), who and when, and the name as uploaded — followed by any file attached but **not
+received**, by name, and for one that would not download on this machine, why. What an agent does
+about a file it did not receive is `platform.md`'s (*Files people attach*). Whether the agent's harness can read a file's bytes is the
+harness's (`attachments.md` § Not verified here).
+
+**The continuation always carries it** (`Prompt.continuation/4`), so a file attached with an answer
+reaches the job that asked; a run is handed the pool as it is when the run starts and not later.
+A chat's message is followed by the names of its own files (`Prompt.message_files/2`), and by the
+ones not received.
 
 ## Presentations
 

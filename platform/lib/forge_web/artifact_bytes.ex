@@ -31,6 +31,74 @@ defmodule ForgeWeb.ArtifactBytes do
   @spec send_version(Plug.Conn.t(), String.t(), Forge.Artifacts.Version.t()) ::
           Plug.Conn.t() | {:error, term()}
   def send_version(conn, artifact, version) do
+    case withdrawn(artifact, version) do
+      nil -> send_live(conn, artifact, version)
+      attachment -> gone(conn, attachment)
+    end
+  end
+
+  # **A withdrawn file is answered before the store is asked** (`docs/design/attachments.md`
+  # § Withdrawing): its bytes are gone, and a 404 would say a file never was. One place for both
+  # doors — the session's and the API's bearer — so they cannot disagree. Only a person's file
+  # (`attachments/<file>`) can be withdrawn, so no other artifact pays the query.
+  defp withdrawn(artifact, version) do
+    if ForgeCore.Workflow.attachment?(artifact) do
+      case Forge.Attachments.for_version(version.id) do
+        %Forge.Attachments.Attachment{withdrawn_at: at} = attachment when not is_nil(at) ->
+          attachment
+
+        _live_or_not_a_person_s_file ->
+          nil
+      end
+    end
+  end
+
+  # `410 Gone`, saying by whom and when. Plain text for a page and the API's own error shape for a
+  # bearer, both under the headers every other response here carries.
+  defp gone(conn, attachment) do
+    by = withdrawn_by(attachment)
+    at = Calendar.strftime(attachment.withdrawn_at, "%Y-%m-%d %H:%M UTC")
+    detail = "withdrawn by #{by} at #{at}"
+
+    detail =
+      if attachment.withdraw_reason,
+        do: detail <> ": " <> attachment.withdraw_reason,
+        else: detail
+
+    # `nosniff` here is an equivalent mutant for the suite: the browser pipeline and the API's set it
+    # on every response before this runs. Said again so a response built here is whole by itself.
+    conn =
+      conn
+      |> put_resp_header("x-content-type-options", "nosniff")
+      |> put_resp_header("content-security-policy", "default-src 'none'; sandbox")
+      |> put_status(:gone)
+
+    if Phoenix.Controller.get_format(conn) == "json" do
+      Phoenix.Controller.json(conn, %{
+        error: %{
+          reason: "withdrawn",
+          detail: detail,
+          withdrawn_by: by,
+          withdrawn_at: DateTime.to_iso8601(attachment.withdrawn_at)
+        }
+      })
+    else
+      conn
+      |> put_resp_content_type("text/plain", "utf-8")
+      |> send_resp(:gone, "This file was " <> detail <> ".\n")
+    end
+  end
+
+  defp withdrawn_by(%{withdrawn_user_id: id}) when is_binary(id) do
+    case Forge.Repo.get(Forge.Accounts.User, id) do
+      %{email: email} -> email
+      nil -> "a person"
+    end
+  end
+
+  defp withdrawn_by(_attachment), do: "a person"
+
+  defp send_live(conn, artifact, version) do
     {:ok, path} = Plug.Upload.random_file("forge-download")
 
     # **A raster image is asked about before the text check**, so that a `.png` whose bytes happen

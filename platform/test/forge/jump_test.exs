@@ -332,7 +332,7 @@ defmodule Forge.JumpTest do
 
       assert {:ok, moved} = Operator.transition(ticket, user, "integrating")
       job = pending(moved)
-      assert Jobs.protocol(job) == 12
+      assert protocol_before_attachments(job) == 12
 
       spec = Jobs.assignment(job, moved, project, "token")["spec"]
       assert %{"jump" => true, "paths" => []} = spec["integration"]
@@ -355,13 +355,13 @@ defmodule Forge.JumpTest do
       chat = moved.id |> Jobs.step_chats_for_ticket() |> List.last()
       assert Forge.Jobs.Job.step?(chat)
       assert Jobs.protocol_needs(chat)[:jump] == 12
-      assert Jobs.protocol(chat) == 12
+      assert protocol_before_attachments(chat) == 12
 
       by_edge = rest_in(moved, "review_ready", :stuck)
       assert {:ok, again} = Operator.transition(by_edge, user, "chatting")
       chat = again.id |> Jobs.step_chats_for_ticket() |> List.last()
       assert Jobs.protocol_needs(chat)[:jump] == 0
-      assert Jobs.protocol(chat) == 11
+      assert protocol_before_attachments(chat) == 11
     end
 
     test "a job of any other arrival needs no newer worker", context do
@@ -369,7 +369,7 @@ defmodule Forge.JumpTest do
       document!(context.ticket, "refinement.md")
       ticket = rest_in(context.ticket, "refining")
       {:ok, moved} = Operator.transition(ticket, user, "planning")
-      assert Jobs.protocol(pending(moved)) < 12
+      assert protocol_before_attachments(pending(moved)) < 12
     end
   end
 

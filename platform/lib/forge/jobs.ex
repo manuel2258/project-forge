@@ -16,6 +16,7 @@ defmodule Forge.Jobs do
 
   alias Forge.{
     Artifacts,
+    Attachments,
     Backlog,
     Conversations,
     Credentials,
@@ -67,6 +68,10 @@ defmodule Forge.Jobs do
   @step_protocol 10
   # A workflow job whose arrival is a jump (`docs/design/worker-channel.md` § Protocol 12).
   @jump_protocol 12
+  # Every agent job and chat: the assignment carries the files people attached, which a worker from
+  # before drops without a word, and a pool can change after a job is scheduled
+  # (`docs/design/worker-channel.md` § Protocol 13).
+  @attachments_protocol 13
 
   # How many of the merges that landed on the default branch since a ticket's base an integrating
   # job is told about by name; the rest are counted (`docs/design/job-prompt.md` § Integrating the
@@ -606,6 +611,25 @@ defmodule Forge.Jobs do
         where:
           j.status == :pending and
             (j.kind == :chat or (t.status == :active and is_nil(t.held_at))),
+        # `locktype = 'advisory'` is an equivalent mutant: another kind of lock with a class of 60, an
+        # object of this hash and a sub-id of 2 would be a lock on an object by that oid, which the
+        # suite cannot make. `objsubid` and `database` are asserted (`attachments_test.exs`).
+        # **Not while an act on the ticket holds its files back** (`Forge.Attachments.hold/2`): the
+        # job that act made is assigned once the files it came with are in the pool. A conversation
+        # claims in the transaction that makes it pending, so it is not held.
+        where:
+          j.kind == :chat or
+            not fragment(
+              """
+              EXISTS (SELECT 1 FROM pg_locks l
+                      WHERE l.locktype = 'advisory' AND l.objsubid = 2
+                        AND l.classid = ?::int::oid
+                        AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                        AND l.objid = ((hashtext(?::text)::bigint + 4294967296) % 4294967296)::oid)
+              """,
+              ^Forge.Attachments.lock_class(),
+              j.ticket_id
+            ),
         order_by: ^pending_order(waited_since),
         limit: ^limit
     )
@@ -946,6 +970,7 @@ defmodule Forge.Jobs do
       secrets: secrets_protocol(job),
       outputs: outputs_protocol(job),
       archive: archive_protocol(job),
+      attachments: attachments_protocol(job),
       jump: jump_protocol(job),
       extension: extension_protocol(job),
       usage: @usage_protocol
@@ -980,6 +1005,13 @@ defmodule Forge.Jobs do
 
   defp archive_protocol(%Job{kind: kind}) when kind in [:workflow, :chat], do: @archive_protocol
   defp archive_protocol(%Job{}), do: 0
+
+  # Not only the jobs whose pool has a file in it now: it can have one by the time the run starts,
+  # and a worker that dropped it would run on without a word.
+  defp attachments_protocol(%Job{kind: kind}) when kind in [:workflow, :chat],
+    do: @attachments_protocol
+
+  defp attachments_protocol(%Job{}), do: 0
 
   defp secrets_protocol(%Job{secret_names: [_ | _]}), do: @secrets_protocol
   defp secrets_protocol(%Job{}), do: 0
@@ -1046,13 +1078,17 @@ defmodule Forge.Jobs do
     # refuses to overwrite one that is already there.
     transcript = Storage.Key.job(job.id, "transcript-#{job.attempt}-#{Storage.Key.nonce()}.jsonl")
 
+    # Read once: the manifest the agent is told and the files the worker fetches are the same
+    # pool, whatever is claimed or withdrawn while this is built (`Forge.Attachments.pool/1`).
+    files = Attachments.pool(Conversations.pool(job))
+
     %{
       "job_id" => job.id,
       "kind" => Atom.to_string(job.kind),
       # Which driver runs it; nil for a command, which has none. A worker from before a job had a
       # harness reads no such key, and runs its own.
       "harness" => harness(job),
-      "spec" => job |> runtime_spec(ticket) |> Spec.to_json() |> Jason.decode!(),
+      "spec" => job |> runtime_spec(ticket, files) |> Spec.to_json() |> Jason.decode!(),
       "git" =>
         %{
           "url" => Url.for_worker(project),
@@ -1073,6 +1109,10 @@ defmodule Forge.Jobs do
             )
         }
         |> Map.merge(session_upload(job)),
+      # The files people attached, with a token to fetch each: the pool as it stands now, so a run
+      # that waited is handed what was attached while it did (`docs/design/attachments.md`
+      # § Delivery). A command has none (`command_assignment/4`).
+      "attachments" => Attachments.deliveries(files, preparation_margin_ms()),
       # Every job, workflow and chat alike, with no grammar key: an unread file costs nothing
       # (`docs/design/ticket-proposals.md` § Reading the backlog).
       "backlog" => Backlog.compose(project),
@@ -1379,7 +1419,7 @@ defmodule Forge.Jobs do
   # A conversation's spec is synthesised at assignment and never stored — the precedent is right
   # below, where a workflow job's assignment spec is already not the row's. What it carries is
   # what a chat actually has: where its work goes, and the context it was opened with.
-  defp runtime_spec(%Job{kind: :chat} = job, ticket) do
+  defp runtime_spec(%Job{kind: :chat} = job, ticket, files) do
     # Read from the log rather than stored on the row, because the log is already the
     # conversation (§ Shape) and a copy on the row would be a second one. A prompt of nil is a
     # reopen with nothing to answer, which the worker holds for the person's next message.
@@ -1392,6 +1432,7 @@ defmodule Forge.Jobs do
       ticket: ticket && %{number: ticket.number, title: ticket.title},
       commit: ticket && ticket.base_commit,
       base: ticket && ticket.base_commit,
+      attachments: Attachments.manifest(Conversations.pool(job), files),
       prompt: opening.prompt,
       replay: opening.replay,
       inputs: chat_inputs(job, ticket),
@@ -1411,7 +1452,7 @@ defmodule Forge.Jobs do
     spec
   end
 
-  defp runtime_spec(%Job{} = job, %Ticket{id: ticket_id} = ticket) do
+  defp runtime_spec(%Job{} = job, %Ticket{id: ticket_id} = ticket, files) do
     # The model and the effort are resolved here rather than frozen into the stored spec at
     # creation. The spec carries what the *state* declared, which is pinned with the workflow and
     # right to keep; the project's defaults are not pinned, and a job created a week before it ran
@@ -1433,6 +1474,7 @@ defmodule Forge.Jobs do
         command_results: results,
         entered_commands: entered,
         previous_changeset: previous_changeset(job, spec),
+        attachments: Attachments.manifest({:ticket, ticket_id}, files),
         base: ticket.base_commit,
         integration: integration_now(spec.integration, spec.entered, ticket)
     }

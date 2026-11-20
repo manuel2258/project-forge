@@ -156,12 +156,28 @@ defmodule Forge.ForgeFixtures do
   end
 
   @doc """
-  What `job` needs of a worker for every reason but counting usage, which protocol 11 added and
-  every kind of job needs: the figure the older assertions about *why* a job needs a newer worker
-  were written against (`Forge.Jobs.protocol_needs/1`).
+  What `job` needs of a worker for every reason but counting usage and handing over attached files,
+  which protocols 11 and 13 added and every agent job needs: the figure the older assertions about
+  *why* a job needs a newer worker were written against (`Forge.Jobs.protocol_needs/1`).
   """
   def protocol_before_usage(job) do
-    job |> Forge.Jobs.protocol_needs() |> Keyword.delete(:usage) |> Keyword.values() |> Enum.max()
+    job
+    |> Forge.Jobs.protocol_needs()
+    |> Keyword.drop([:usage, :attachments])
+    |> Keyword.values()
+    |> Enum.max()
+  end
+
+  @doc """
+  What `job` needs for every reason but the files people attach, which protocol 13 added and every
+  agent job needs: what the assertions about the jump (12) and an extension (12) are written against.
+  """
+  def protocol_before_attachments(job) do
+    job
+    |> Forge.Jobs.protocol_needs()
+    |> Keyword.delete(:attachments)
+    |> Keyword.values()
+    |> Enum.max()
   end
 
   @doc """

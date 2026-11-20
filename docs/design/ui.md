@@ -1002,6 +1002,13 @@ boxes, and each new one joins this list or the inventory says why not: a reject 
 the composers that start a conversation in place, project settings' one form for model and effort,
 the stepper forms, a bulk decline's shared reason.
 
+**An attached file survives a reconnect when it finished.** The attach box (§ Attaching files)
+holds the files that finished uploading and were not yet sent in hidden fields inside the form, so
+the form recovery sends them with the text that survives; one cut off midway is named for picking
+again. A reload, navigating away or another device starts the form over, files included. **The hook
+that holds them has never run in a browser** (§ Not built yet), so this is what it is written to do and
+the suite does not show it.
+
 A chat step's Accept form (§ The Accept area) is in this group too: its outcome pick and its open
 confirm ride in the form's own fields, so the change event the client replays restores them. It
 holds no text box, so `ForgeWeb.ReconnectTest`'s walk and inventory have nothing to say about it;
@@ -1723,6 +1730,15 @@ computes one, and the version links are the way to each.
 
 **A closed row fetches nothing.** A document that refers to an image draws it with a lazy `img`
 inside the row's `<details>`, which a browser does not request until the row is opened.
+
+**People's files are listed here** (`attachments.md`), as file rows under *Built from*, with who
+attached them; earlier versions fold under the row as for any artifact. A withdrawn version says
+*withdrawn*, and a row's *Withdraw* action — shown to the person who attached it and to project
+admins — unfolds a form on the row (not the sheet of § The confirm) with: this version or every
+version, an optional reason, and what withdrawing cannot recall, said before it is pressed. A
+refusal is drawn above the rows, where the press was. A project chat's Docs does the same for that
+chat's files, and a ticket's and a document's text name the files that came with their latest
+version under the row.
 
 **A file has no body here**: its whole row is the link to its bytes, drawn at the same height.
 Reading every one of a build's outputs from the store to draw its row would be a store read per
@@ -3207,6 +3223,46 @@ queue, no usage lines, no version; the logo at 72px or 44px.
 - **Pending** (`/users/pending`) is a sentence and one button, in the sign-in frame: every link the
   frame would draw leads somewhere this account is redirected away from.
 
+## Attaching files
+
+`attachments.md` is the standard for what happens to a file; this is what a person sees. **The files
+are for agents**: the pages draw no thumbnail, gallery or preview, and gain no new way of showing a
+file. What exists stays — a stored file is a download row, and an image a person references with
+`![alt](name)` is drawn by the reference code (§ References).
+
+**Where.** One component, `ForgeWeb.UI.Attach.box/1`, on every place a person writes something an
+agent will read: the new-ticket form and accepting a proposal; a ticket chat's message and a project
+chat's message, and starting either; a question's answer (`questions:send`); a human document's
+editor; the decision row's rejection or approval note; and the *Run again* and *Extend* notes
+(`MoreRoom.fields/1`). A transition's comment has no box on the pages and takes files over the API
+only. `attachments_pages_test.exs` fails when a chat's message form, the forms that start a chat or the
+document editor draw no `[data-attach]`; the other places have no such check yet (§ Not built yet).
+
+**Three ways in**: a button opening the file picker (on a phone, the phone's own picker, camera and
+library included), dropping files onto the form, and pasting a copied image into it. A pasted file is
+named `pasted-<local date-time>.<ext>`, so two pastes are two files.
+
+**While it uploads**, each file shows its name, size and progress and can be removed before
+sending; removing deletes the staged upload, which is un-attaching and not a failure, so no agent is
+told. **Sending waits for the uploads still running**, then goes; a file that failed or was
+cancelled is named as *not sent* beside the box, the rest go, and the agent is told of the file as
+attached but not received wherever the words it came with reach it.
+
+**A refusal names the file and the limit** — 500 MiB a file, 10 with one message or note, 100 files
+or 5 GiB in the pool — before any bytes are sent wherever the size is known in advance (the page is
+drawn with the room the pool has left), and otherwise under the box it was attached in, where the
+act's refusal is shown (§ Errors stay where you acted).
+
+**What was sent says what came with it.** Under a person's chat message, a note or an answer on the
+ticket's Activity (a rejection or approval, a transition's comment, *Run again*, *Extend*; an answer
+is listed there when it came with files), under the ticket's text on Steps and on its Docs row, and
+under a human document's version on its Docs row, the names of the files attached with it, each a
+link to that file's version (`ForgeWeb.UI.Attach.names/1`). A long name is cut on screen with the whole name in the title;
+markup in a name is text; an `.svg` stays a download. A withdrawn file's link says *withdrawn*, and
+one that was attached but not received says *not received*.
+
+Activity says `attachment.added` and `attachment.withdrawn`. *Withdraw* is in § Docs.
+
 ## Documents
 
 An agent's document is rendered, not shown as source. Source is one tap away — every ticket
@@ -3243,9 +3299,10 @@ ticket's bare names are pinned by the clock alone.
 **What is drawn.** An image that resolves to a raster blob (§ Addressable artifact versions: the
 same test serves and draws it) is an `<img>` inside a link to the same numbered address,
 `loading="lazy"`, at its own size scaled down to the column and never up. **Every other image is a
-muted note and is never fetched** — alt text, the name asked for, and why: not on this ticket, no
-such version, not drawn as an image, no such ticket, not on ticket *n*, outside the project, not
-resolved by the caller (*is not shown*), or (in a project chat) *chats keep no images*. A remote
+muted note and is never fetched** — alt text, the name asked for, and why: not on this ticket, not in
+this conversation (a project chat's own files), no such version, not drawn as an image, no such ticket, not on ticket *n*, outside the project, not
+resolved by the caller (*is not shown*), or *withdrawn* (an attached file a person withdrew,
+`attachments.md`). A remote
 URL, a `data:` URI, `//host` and a path into the app are among those: no `<img>` for them exists in
 the page. A link that resolves goes to the numbered address of the version in its own scope; one
 that does not keeps its text and loses its target, except `http:`, `https:`, `mailto:` and
@@ -3255,6 +3312,10 @@ that does not keeps its text and loses its target, except `http:`, `https:`, `ma
 chat's own documents for a project chat's. A message has no version, so its moment stands in: a
 reply sees up to and including the recording of its own turn, a person's message what was recorded
 before it was sent, a reply still streaming what exists as it is drawn.
+
+**Attached files** (`attachments.md`) are `attachments/<file>` in the scope that holds them, so
+`![alt](attachments/shot.png)` is drawn in a ticket's text, its documents and its chats, and in a
+project chat for that chat's own files. A withdrawn version is the muted note *withdrawn*.
 
 **A secret in a picture is not hidden.** The worker masks secrets in text, not in groups of files
 (`secrets.md`), so a key on screen when a screenshot was taken is in the picture, and is now drawn
@@ -3412,6 +3473,9 @@ line below is something this note says that the code does not do yet; a change t
 removes its line. Until then, where the two disagree, the code is the previous design and the
 previous note describes it.
 
+- **Attaching files** (`attachments.md`): no inventory test checks that every place draws the box (only the chat's forms and the document editor are checked); the box's uploading, refused
+  and *not sent* states and drop and paste have not run in a browser, because `bin/look` has no
+  step that chooses a file, so only the server's half and the box's markup are under test.
 - **Dragging**: `bin/look` has no drag step, so only the drag's server half — the event it pushes
   and the reply that says whether the order stands — is under test, for tickets and for milestones;
   the pointer handling, the restore on that reply and the cancel on a dropped socket have not run

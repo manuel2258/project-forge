@@ -231,8 +231,21 @@ defmodule ForgeWeb.Api.FallbackController do
       when reason in [:schedule_gone, :schedule_unreadable, :already_on, :already_off, :no_alert],
       do: error(conn, :conflict, Atom.to_string(reason), ForgeWeb.SchedulesView.explain(reason))
 
+  # What the operation refused a caller who may reach the project but not do this: a schedule's
+  # switch, or the one who may not withdraw a file (`Forge.Attachments.withdraw/5`).
   def call(conn, {:error, :forbidden}),
     do: error(conn, :forbidden, "forbidden", "you are not allowed to do this")
+
+  # A file that passes a limit refuses the whole request (`docs/design/attachments.md` § The API):
+  # each is named with the limit it passed, in the words a page says it in.
+  def call(conn, {:error, {:attachments_refused, refused}}) do
+    detail =
+      Enum.map(refused, fn {file, limit} ->
+        %{file: file, limit: Atom.to_string(limit), detail: limit_words(limit)}
+      end)
+
+    error(conn, :unprocessable_entity, "attachments_refused", detail)
+  end
 
   # Hold, milestones and order (`docs/design/workflow-grammar-v1.md` § Holding a ticket). The
   # state of the ticket or the milestone and so the client's to resolve are 409; a request that
@@ -340,6 +353,11 @@ defmodule ForgeWeb.Api.FallbackController do
     Logger.error("api request failed: #{inspect(reason)}")
     error(conn, :internal_server_error, "internal", nil)
   end
+
+  defp limit_words(limit) when limit in [:file_bytes, :per_act, :pool_files, :pool_bytes],
+    do: Forge.Attachments.limit_text(limit)
+
+  defp limit_words(_other), do: "it could not be kept"
 
   defp error(conn, status, reason, detail) do
     conn

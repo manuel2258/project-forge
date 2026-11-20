@@ -21,9 +21,31 @@ defmodule ForgeWorker.Archive.Mount do
   """
   @callback serves?(dir :: Path.t()) :: boolean()
 
+  @doc """
+  Shows `source`, a directory of the worker's own, at `dir` **read-only** (`docs/design/attachments.md`
+  § The folder): the files people attached. A bind mount where the machine can make one; a plain
+  copy where it cannot, which `refresh/2` brings up to date after the worker has changed `source`.
+  """
+  @callback bind_ro(source :: Path.t(), dir :: Path.t()) :: :ok | {:error, term()}
+
+  @doc """
+  Makes `dir` show what `source` holds now. A bind mount always does, and has nothing to do; a copy
+  is made again.
+  """
+  @callback refresh(source :: Path.t(), dir :: Path.t()) :: :ok | {:error, term()}
+
   @doc "The module in use on this machine."
   @spec impl() :: module()
   def impl, do: Application.get_env(:forge_worker, :archive_mount, ForgeWorker.Archive.Mount.None)
+
+  @doc """
+  The module the attached files' folder is made by. **Its own setting**, `FORGE_ATTACHMENTS=bind` on
+  the image, and not `:archive_mount`'s: a machine can bind a directory without having a kernel
+  that speaks 9p, and the other way round.
+  """
+  @spec attachments_impl() :: module()
+  def attachments_impl,
+    do: Application.get_env(:forge_worker, :attachments_mount, ForgeWorker.Archive.Mount.None)
 
   @doc "The options the kernel's client is given, in the order they are passed."
   @spec options() :: [String.t()]
@@ -43,6 +65,21 @@ defmodule ForgeWorker.Archive.Mount do
       with [before, after_dash] <- String.split(line, " - ", parts: 2),
            [fstype | _] <- String.split(after_dash, " "),
            "9p" <- fstype,
+           [_id, _parent, _dev, _root, mountpoint | _] <- String.split(before, " ") do
+        [unescape(mountpoint)]
+      else
+        _other -> []
+      end
+    end)
+  end
+
+  @doc "Every mountpoint in `/proc/self/mountinfo` text, whatever it is a mount of."
+  @spec mountpoints(String.t()) :: [Path.t()]
+  def mountpoints(mountinfo) do
+    mountinfo
+    |> String.split("\n", trim: true)
+    |> Enum.flat_map(fn line ->
+      with [before, _after_dash] <- String.split(line, " - ", parts: 2),
            [_id, _parent, _dev, _root, mountpoint | _] <- String.split(before, " ") do
         [unescape(mountpoint)]
       else
@@ -89,10 +126,39 @@ defmodule ForgeWorker.Archive.Mount do
       end
     end
 
+    # A bind mount, and then the same one read-only: the first `mount` ignores `ro`, so the options
+    # are applied by a remount of it. `nosuid`, `nodev` and `noexec` are the mount's own refusal to
+    # run from it.
+    @impl true
+    def bind_ro(source, dir) do
+      with :ok <- run("mount", ["--bind", source, dir]),
+           :ok <- run("mount", ["-o", "remount,bind,ro,nosuid,nodev,noexec", dir]) do
+        :ok
+      else
+        {:error, reason} ->
+          unmount(dir)
+          {:error, reason}
+      end
+    end
+
+    @impl true
+    def refresh(_source, _dir), do: :ok
+
+    defp run(command, args) do
+      case System.cmd(command, args, stderr_to_stdout: true) do
+        {_out, 0} -> :ok
+        {out, code} -> {:error, {:mount, code, String.trim(out)}}
+      end
+    end
+
     defp mounted?(dir) do
       case File.read("/proc/self/mountinfo") do
-        {:ok, text} -> dir in ForgeWorker.Archive.Mount.mounted(text)
-        {:error, _reason} -> false
+        {:ok, text} ->
+          dir in ForgeWorker.Archive.Mount.mounted(text) or
+            dir in ForgeWorker.Archive.Mount.mountpoints(text)
+
+        {:error, _reason} ->
+          false
       end
     end
   end
@@ -119,5 +185,27 @@ defmodule ForgeWorker.Archive.Mount do
 
     @impl true
     def unmount(_dir), do: :ok
+
+    # The fallback for the attached files: a copy, made again by `refresh/2`. Nothing stops the job
+    # writing to it, which is why it is the fallback and not the image's setting.
+    @impl true
+    def bind_ro(source, dir) do
+      File.mkdir_p!(dir)
+      copy(source, dir)
+    end
+
+    @impl true
+    def refresh(source, dir) do
+      File.rm_rf!(dir)
+      File.mkdir_p!(dir)
+      copy(source, dir)
+    end
+
+    defp copy(source, dir) do
+      case File.cp_r(source, dir) do
+        {:ok, _files} -> :ok
+        {:error, reason, _file} -> {:error, {:copy, reason}}
+      end
+    end
   end
 end

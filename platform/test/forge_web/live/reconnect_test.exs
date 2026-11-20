@@ -817,6 +817,8 @@ defmodule ForgeWeb.ReconnectTest do
       {"live/project_settings_live.ex", "set-secret"} => "a secret's name and its value",
       {"live/project_settings_live.ex", "add-mirror"} => "a mirror's url, user and token",
       {"live/workers_live.ex", "save"} => "a worker's memory and cores",
+      {"components/work_screen.ex", "attachments:withdraw"} =>
+        "a withdrawal's one-line reason, in a form that is folded until it is wanted",
       {"live/user_live/login.ex", "submit_magic"} => "an email, to be sent a link",
       {"live/user_live/login.ex", "submit_password"} => "an email and a password"
     }

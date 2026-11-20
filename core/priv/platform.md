@@ -76,8 +76,25 @@ the ticket keeps it**, exactly: `screenshots/queue.png`, `plan.md`.
   not resolve is its text, plain. `http:`, `https:`, `mailto:` and `#fragment` links are left as
   they are.
 - **It works everywhere Markdown is drawn.** A bare name is searched in the ticket, or, in a
-  project chat, in that chat's own documents — which are text, so a chat links and draws no
-  pictures.
+  project chat, in that chat's own documents, and the files attached to it (`attachments/<file>`).
+
+## Files people attach
+
+A person may attach files — screenshots, recordings, any bytes — to what they write: the ticket,
+a chat message, a document of their own, an answer, a note when they send work back or run it again.
+They are kept in one pool for the ticket (or for a project chat) and are in `$FORGE_JOB/attachments/`,
+read-only, for every run on it and, in a chat, from each turn. **The manifest says which file came
+with which words.** The newest version of a name has the plain name and earlier ones `shot.v001.png`.
+
+- **`attachments` is a reserved name.** A workflow cannot produce it, so a file a person attached never
+  collides with one a job wrote. Files your own job produces (`screenshots/*`) are not in the pool.
+- **They are the person's bytes as uploaded.** Nothing resized or interpreted them, and nothing masked
+  them: a picture may show a secret. Whether you can read a given format depends on your harness.
+- **A file may be listed as attached but not received**: the upload failed and the words it came with
+  still reached you. Say so and ask for it again rather than guess.
+- **A file may be withdrawn**: the person removed it after you were given it. What you already read
+  is yours to treat accordingly; a later run will not have it.
+- **To show one in a document**, use `![x](attachments/shot.png)` — the reference rules above apply.
 
 ## Commands
 
@@ -237,3 +254,5 @@ platform whatever you do, and a job stopped by a ceiling is recorded as having b
 - `$FORGE_JOB/out/` — what you write: a job's declared outputs, or a conversation's documents.
 - `$FORGE_JOB/history/` — for a conversation about a ticket, what already ran on it.
 - `$FORGE_JOB/conversation.md` — for a conversation that was reopened, what was said before.
+- `$FORGE_JOB/attachments/` — the files people attached to the ticket (or to a project chat), read-only
+  (§ Files people attach).

@@ -107,7 +107,7 @@ defmodule ForgeWeb.ChatNewLive do
     end
   end
 
-  def handle_event("open", %{"chat" => params}, socket) do
+  def handle_event("open", %{"chat" => params} = sent, socket) do
     socket = assign(socket, form: to_form(params, as: :chat))
 
     cond do
@@ -118,11 +118,11 @@ defmodule ForgeWeb.ChatNewLive do
         {:noreply, assign(socket, error: "say something to start with")}
 
       true ->
-        open(socket, params)
+        open(socket, params, sent)
     end
   end
 
-  defp open(socket, params) do
+  defp open(socket, params, sent) do
     %{project: project, ticket: ticket} = socket.assigns
 
     with {:ok, memory} <- memory(params["memory"]),
@@ -130,7 +130,8 @@ defmodule ForgeWeb.ChatNewLive do
       start(socket, project, ticket, String.trim(params["text"]), memory, cores,
         model: params["model"],
         effort: params["effort"],
-        harness: params["harness"]
+        harness: params["harness"],
+        files: ForgeWeb.Attaching.opts(sent)
       )
     else
       {:error, message} -> {:noreply, assign(socket, error: message)}
@@ -138,14 +139,19 @@ defmodule ForgeWeb.ChatNewLive do
   end
 
   defp start(socket, project, ticket, text, memory, cores, chosen) do
-    case Operator.open_chat(project, socket.assigns.current_scope.user, text,
-           ticket: ticket,
-           model: chosen[:model],
-           effort: chosen[:effort],
-           harness: chosen[:harness],
-           memory: memory,
-           cores: cores,
-           secrets: picked(socket.assigns.form.params["secrets"])
+    case Operator.open_chat(
+           project,
+           socket.assigns.current_scope.user,
+           text,
+           [
+             ticket: ticket,
+             model: chosen[:model],
+             effort: chosen[:effort],
+             harness: chosen[:harness],
+             memory: memory,
+             cores: cores,
+             secrets: picked(socket.assigns.form.params["secrets"])
+           ] ++ Keyword.get(chosen, :files, [])
          ) do
       {:ok, chat} ->
         {:noreply, push_navigate(socket, to: ~p"/chats/#{chat.id}")}
@@ -387,6 +393,8 @@ defmodule ForgeWeb.ChatNewLive do
           rows="5"
           label="First thing to say"
         />
+
+        <ForgeWeb.UI.Attach.box :if={@project} id="chat-new-attach" project={@project.name} />
 
         <.error_note :if={@error} id="chat-form-error">{@error}</.error_note>
       </.form>

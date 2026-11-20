@@ -204,7 +204,7 @@ defmodule ForgeWorker.Link do
   # forwarded to the process holding that chat and does nothing at all for a job.
   def handle_message(_topic, "message", %{"job_id" => job_id} = payload, socket) do
     with_conversation(socket, job_id, "message", fn pid ->
-      Conversation.send_message(pid, payload["message_id"], payload["text"])
+      Conversation.send_message(pid, payload["message_id"], payload["text"], payload)
     end)
   end
 
@@ -1091,6 +1091,7 @@ defmodule ForgeWorker.Link do
       wall_clock_ms: assignment["wall_clock_ms"] || :timer.hours(1),
       nix_env: Application.get_env(:forge_worker, :nix_env, true),
       archive: ForgeWorker.Archive.grant(assignment),
+      attachments: assignment["attachments"],
       extra_env: Application.get_env(:forge_worker, :extra_env, []) ++ git_env(assignment)
     )
   end

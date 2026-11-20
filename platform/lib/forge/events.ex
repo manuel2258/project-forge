@@ -544,6 +544,33 @@ defmodule Forge.Events do
     "#{decision} #{from} → #{p["to"]}" <> note(p["comment"], bound)
   end
 
+  # An answer, listed on a ticket's Activity when it came with files: the question it answered, not
+  # the ids of the rows (`docs/design/attachments.md`).
+  defp describe(%Event{type: "question.answered", payload: %{"key" => key}}, _bound),
+    do: "answered #{key}"
+
+  # Files people attached and withdrew (`docs/design/attachments.md`): the names and, where there
+  # is one, the reason — never the payload's keys.
+  defp describe(%Event{type: "attachment.added", payload: p}, bound) do
+    files = Enum.map_join(p["files"] || [], ", ", &"#{&1["name"]} v#{&1["version"]}")
+    failed = p["not_received"] || []
+
+    words =
+      [
+        files != "" && "attached #{files}",
+        failed != [] && "not received: #{Enum.join(failed, ", ")}"
+      ]
+      |> Enum.filter(& &1)
+      |> Enum.join("; ")
+
+    bounded(words, 200, bound)
+  end
+
+  defp describe(%Event{type: "attachment.withdrawn", payload: p}, bound) do
+    versions = p["versions"] |> List.wrap() |> Enum.map_join(", ", &"v#{&1}")
+    bounded("withdrew #{p["name"]} #{versions}" <> note(p["reason"], bound), 200, bound)
+  end
+
   # An update step's visit, and what came with it (`docs/design/workflow-grammar-v1.md` § Bringing
   # the branch up to date): what it did, then what became of the pin. Never the payload's keys.
   defp describe(%Event{type: "ticket.branch_updated", payload: p}, _bound),

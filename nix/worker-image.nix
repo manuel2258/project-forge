@@ -682,6 +682,9 @@ in
       # itself (docs/design/archive.md § The worker's side); the modules are loaded at boot, by
       # `boot.kernelModules` above.
       FORGE_ARCHIVE = "9p";
+      # The files people attached are shown to a job by a read-only bind mount of a directory only
+      # the worker writes to (docs/design/attachments.md § The folder); unset, a copy.
+      FORGE_ATTACHMENTS = "bind";
       FORGE_NIX_ENV = "1";
       FORGE_CLAUDE_EXECUTABLE = claudeExecutable;
       FORGE_CODEX_EXECUTABLE = codexExecutable;

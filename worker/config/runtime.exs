@@ -55,6 +55,15 @@ if config_env() != :test do
     other -> raise ~s(FORGE_ARCHIVE must be "9p", got #{inspect(other)})
   end
 
+  # How the files people attached are shown to a job (docs/design/attachments.md § The folder). The
+  # image says `bind`: a read-only bind mount of a directory the job cannot write to. Unset, they
+  # are copied into a plain folder, which a job could write to.
+  case System.get_env("FORGE_ATTACHMENTS") do
+    "bind" -> config :forge_worker, attachments_mount: ForgeWorker.Archive.Mount.NineP
+    nil -> :ok
+    other -> raise ~s(FORGE_ATTACHMENTS must be "bind", got #{inspect(other)})
+  end
+
   # Where a job's worktree comes from (docs/design/worker-tier.md § Volumes and the seed).
   # Btrfs on the image, whose root is btrfs for exactly this; Copy anywhere else, which is
   # correct without the sharing.

@@ -1189,6 +1189,7 @@ defmodule ForgeWeb.QueueLive do
             drafts={@drafts}
             draft={"ways-#{@item.ticket.id}"}
             prefix={"queue-#{@item.ticket.id}"}
+            project={@item.project}
           />
         <% end %>
       </form>
@@ -1419,6 +1420,7 @@ defmodule ForgeWeb.QueueLive do
         forms={@forms}
         refusal={@refusal}
         submit="questions:send"
+        project={@item.project}
         hidden={[{"ticket", @item.ticket.id}, {"version", @item.version.id}]}
       >
         <:dock><.later /></:dock>
@@ -1436,6 +1438,7 @@ defmodule ForgeWeb.QueueLive do
         forms={@forms}
         refusal={@refusal}
         submit="chat:questions:send"
+        project={@item.project}
         hidden={[{"chat", @item.detail.chat_id}, {"reply", @item.detail.reply}]}
       >
         <:dock><.later /></:dock>

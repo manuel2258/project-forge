@@ -119,6 +119,7 @@ it. Every refusal to authenticate is the same 401 body.
 | `GET /tickets/:project/:number/artifacts` | Every artifact (name, kind) with **all** its versions: number, id, author, `inserted_at`, `content_hash`, and `form` (`text`, `file` or `commit`). One call, no limit |
 | `GET /tickets/:project/:number/artifacts/:name/:version/raw` | The version's stored bytes, `:name` one encoded segment (`group%2Ffile`). The listed `content_hash` is `sha256:` of exactly these bytes for anything a worker's result or a person wrote (a blob recorded without a hash, milestone 1's, lists `uri:…` instead). Text is `text/plain`; a raster image blob (`.png` `.jpg` `.jpeg` `.gif` `.webp` `.avif`) is its `image/*` type, inline; anything else, `.svg` included, an attachment. `nosniff` and `content-security-policy: default-src 'none'; sandbox` on all (`ui.md` § Addressable artifact versions). A commit is 422 `not_a_file` naming the review endpoint; a version that is not a positive integer, or does not exist, is 404 |
 | `POST /tickets/:project/:number/artifacts/:name` | New version `{content}` |
+| `DELETE /tickets/:project/:number/attachments/:file[/:version]` | Withdraws a person's file — every version, or one — with an optional `reason` (`design/attachments.md` § Withdrawing). A user token only; a project token is refused 403, and who may withdraw is the context's rule (the attacher or a project admin; a token's file by an admin). A withdrawn version's `…/raw` answers 410 `withdrawn` |
 | `POST /tickets/:project/:number/answers` | `{key, choice, text}` |
 | `POST /tickets/:project/:number/approve` | `{decision, comment}` |
 | `POST /tickets/:project/:number/transition` | `{to, outcome, comment}` — `to` is any state of the pinned workflow; `outcome` asks for that declared edge only, and is refused when there is none; with none, a target no offered edge resolves to is a jump (`design/workflow-grammar-v1.md` § Jumping) |
@@ -135,6 +136,15 @@ A proposal is named by the **version** id, never the artifact's. A decision atta
 version, so an API that named the artifact would let a client accept text nobody had read. There
 is no endpoint that edits a proposal: `POST /tickets/:project/:number/artifacts/:name` writes at
 ticket scope and a proposal is scoped to its job.
+
+**Files.** The writes that exist — admit, accept a proposal, a new artifact version, an answer, an
+approval, a transition, a retry, an extend — also take `multipart/form-data` with the same fields and
+`files[]` parts (`design/attachments.md`), under the same limits: 500 MiB a file, 10 with one act, a
+pool of 100 files and 5 GiB. A request is **kept whole or refused whole**: a file that passes a limit
+is 422 `attachments_refused` naming the file and the limit, and nothing is written; a body over the
+limit is 413 in the API's JSON shape. A token with *read* is 403 before a byte is read, and a job's
+token is refused. There are no chat endpoints, and a chat cannot be attached to through the API. JSON
+requests are unchanged.
 
 A question is served with its options as objects — `{label, detail, recommended}`, `detail` nil
 only on a question recorded before options had one — and no `default`: the recommendation is the

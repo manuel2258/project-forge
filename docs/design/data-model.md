@@ -298,6 +298,38 @@ run rebuilds from the branch and the manifest.
   extension's, and whose base for the lowering is its tokens. The ticket allowance is the workflow's
   plus the ticket's `cap_raise`.
 
+## Files people attach (ticket 60)
+
+Two tables (`design/attachments.md`). **`attachment_uploads`** is staging, uncounted and swept:
+
+| Column | |
+|---|---|
+| `id` | the key is `upload/<id>` |
+| `project_id` | |
+| `user_id` / `token_id` | exactly one is set |
+| `key`, `original_name`, `size`, `content_hash` | `size` is what the store wrote |
+| `inserted_at` | |
+
+**`attachments`**, one row per file attached in one act, beside the version that holds its bytes:
+
+| Column | |
+|---|---|
+| `id` | |
+| `ticket_id` / `job_id` | the pool: a ticket's, or a project chat's; exactly one, by a CHECK as on `artifacts` |
+| `artifact_version_id` | unique; null for a file that was not received |
+| `name` | `attachments/<file>` |
+| `original_name` | as uploaded, never trusted |
+| `size` | null when not received |
+| `to_kind` | `ticket`, `document`, `message`, `answer` or `note` |
+| `to_version_id` / `to_event_seq` | what it was attached to; exactly one is set |
+| `author` (map), `user_id` / `token_id` | who attached it |
+| `inserted_at` | |
+| `withdrawn_at`, `withdrawn_by` (map), `withdrawn_user_id`, `withdraw_reason` | withdrawal, null until then |
+
+A trigger refuses a delete, and any update but setting the withdrawal columns from null, once. The
+foreign keys restrict, as `artifacts`' do. Withdrawing never touches the version row, which stays
+append-only.
+
 ## Not in v1, but shaped for
 
 `parent_job_id` and `spec.permitted_children` carry subagents. `worker_id` carried the

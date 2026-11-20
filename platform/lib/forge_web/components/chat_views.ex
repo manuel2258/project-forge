@@ -193,6 +193,8 @@ defmodule ForgeWeb.ChatViews do
           now={@at}
           refs={@refs}
           banded={@responding && @plan != []}
+          attached={@attached}
+          attach_path={@attach_path}
         />
       </ol>
 
@@ -247,6 +249,7 @@ defmodule ForgeWeb.ChatViews do
             forms={@forms}
             refusal={@refusal}
             submit="chat:questions:send"
+            project={@project.name}
             hidden={[{"chat", @chat_id}, {"reply", @reply}]}
           />
         </.split_pane>
@@ -279,6 +282,7 @@ defmodule ForgeWeb.ChatViews do
           interrupt={interrupts?(@responding, @draft)}
           phx-debounce="200"
         />
+        <ForgeWeb.UI.Attach.box id="say-attach" project={@project.name} room={@attach_room} />
         <%!-- The gesture that sends, named only where it is true: a fine pointer's Enter. On a
               coarse one Enter is a new line and only the button sends (§ Talk), and the query is
               the same one the field's hook reads, written as CSS. --%>

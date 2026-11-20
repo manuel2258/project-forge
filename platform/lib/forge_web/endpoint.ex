@@ -72,8 +72,11 @@ defmodule ForgeWeb.Endpoint do
   # method override, all of which are meaningless to git and are surface we do not want.
   plug ForgeWeb.Plugs.GitHttp, at: "/git"
 
+  # No `:multipart`: the one multipart body the product takes is an API write's files, read by
+  # `ForgeWeb.Plugs.ApiFiles` once the caller is known to be allowed to write there
+  # (`docs/design/attachments.md` § The API). A parser here would read it for anyone.
   plug Plug.Parsers,
-    parsers: [:urlencoded, :multipart, :json],
+    parsers: [:urlencoded, :json],
     pass: ["*/*"],
     json_decoder: Phoenix.json_library()
 

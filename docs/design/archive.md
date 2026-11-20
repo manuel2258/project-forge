@@ -37,8 +37,13 @@ archive/<n>/jobs.tsv             # the same, that ticket only
 archive/<n>/<name>               # the latest version of a document or file, its original name
 archive/<n>/<stem>.v001<ext>     # each version; zero-padded to 3, wider past 999
 archive/<n>/<group>/<file>       # a `name/*` member: the artifact name's `/` is a folder
+archive/<n>/attachments/<file>   # a file a person attached to the ticket (attachments.md); a withdrawn version is not here
 ```
 
+- **People's files** (`attachments.md`) are blobs of the ticket like any other and are listed and
+  versioned as they are (`attachments/shot.v001.png`). **A withdrawn version is neither listed nor
+  served**, and the newest version not withdrawn takes the plain name. A project chat's files are not
+  here, as its other artifacts are not.
 - **Documents, presentations and blobs** of every ticket, of every status. **Not** the changeset
   (that is git, and the agent has the repository), **not** `proposal-*` (they stay in `tickets/`),
   not a job's transcript or raw harness output, not the artifacts of a project chat (a ticket chat's documents are the ticket's, and are here). A command's log that the

@@ -130,7 +130,7 @@ defmodule ForgeWeb.MarkdownTest do
 
       for {target, resolved, note} <- [
             {"screenshots/q.png", {:error, {:missing, :ticket}}, "is not on this ticket"},
-            {"screenshots/q.png", {:error, {:missing, :chat}}, "chats keep no images"},
+            {"screenshots/q.png", {:error, {:missing, :chat}}, "is not in this conversation"},
             {"screenshots/q.png", {:error, {:missing, 34}}, "is not on ticket 34"},
             {"screenshots/q.png@5", {:error, {:no_version, 5}}, "has no such version"},
             {"archive/99/q.png", {:error, {:no_ticket, 99}}, "this project has no ticket 99"},
@@ -139,7 +139,8 @@ defmodule ForgeWeb.MarkdownTest do
             {"data:image/png;base64,AAAA", {:error, :outside}, "images from outside"},
             {"//x.test/a.png", {:error, :outside}, "images from outside"},
             {"/tickets/game/1/artifacts/x/1", {:error, :outside}, "images from outside"},
-            {"notes.md", {:ok, %{svg | where: {:chat, "c"}}}, "chats keep no images"},
+            {"notes.md", {:ok, %{svg | where: {:chat, "c"}}}, "is not drawn as an image"},
+            {"shot.png", {:ok, Map.put(@png, :withdrawn?, true)}, "withdrawn"},
             {"never-resolved.png", nil, "is not shown"}
           ] do
         resolved_map = if resolved, do: %{target => resolved}, else: %{}

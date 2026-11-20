@@ -82,7 +82,11 @@ defmodule ForgeWeb.Operator.Actions do
         :unknown
 
       {:ok, message} ->
-        {:handled, socket |> Drafts.forget(params["draft"]) |> put_flash(:info, message)}
+        {:handled,
+         socket
+         |> Drafts.forget(params["draft"])
+         |> ForgeWeb.Attaching.sent()
+         |> put_flash(:info, message)}
 
       {:error, reason} ->
         {:handled,
@@ -136,7 +140,7 @@ defmodule ForgeWeb.Operator.Actions do
   # Run again takes the note the new attempt arrives with and, where the ticket's cap is short, the
   # raise (`docs/design/workflow-grammar-v1.md` § Running a state again).
   defp act("retry", %{"ticket" => id} = params, socket) do
-    opts = [note: params["note"], raise: params["raise"]]
+    opts = [note: params["note"], raise: params["raise"]] ++ ForgeWeb.Attaching.opts(params)
 
     with {:ok, ticket} <- Operator.retry(ticket(id), user(socket), opts) do
       {:ok, "Running #{ticket.state} again"}
@@ -148,7 +152,14 @@ defmodule ForgeWeb.Operator.Actions do
   defp act("extend", %{"ticket" => id, "job" => job_id} = params, socket) do
     attrs = Map.take(params, ~w(tokens turns note raise))
 
-    with {:ok, ticket} <- Operator.extend(ticket(id), user(socket), job_id, attrs) do
+    with {:ok, ticket} <-
+           Operator.extend(
+             ticket(id),
+             user(socket),
+             job_id,
+             attrs,
+             ForgeWeb.Attaching.opts(params)
+           ) do
       {:ok, "Extended #{ticket.state}"}
     end
   end
@@ -182,7 +193,15 @@ defmodule ForgeWeb.Operator.Actions do
   # draft typed against v3 would land as v5 over somebody else's v4, silently
   # (`docs/design/ui.md` § A reconnect is not a reload).
   defp act("write_document", %{"ticket" => id, "name" => name, "content" => content} = p, socket) do
-    with {:ok, ticket} <- Operator.edit(ticket(id), user(socket), name, content, p["base"]) do
+    with {:ok, ticket} <-
+           Operator.edit(
+             ticket(id),
+             user(socket),
+             name,
+             content,
+             p["base"],
+             ForgeWeb.Attaching.opts(p)
+           ) do
       {:ok, "Saved #{name}; #{ticket.state} is where it waits"}
     end
   end

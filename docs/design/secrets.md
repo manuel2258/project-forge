@@ -343,6 +343,10 @@ Rewriting a commit would change the agent's work, and the agent can push on its 
 token; a group's files are uploaded as they are, and may be binary, where a substring replaced is
 a file broken. A push carrying a value is § Open.
 
+**People's files are not masked either** (`attachments.md` § Not masked): they are downloaded to the
+machine as uploaded and never uploaded by it, and neither the worker's sync of them nor the bind
+mount that shows them to the job opens the secrets. Nothing looks for a secret in a picture.
+
 **So the archive reads them too** (`archive.md`): a group's files are ticket files, and every job
 and chat of the project can now open them — including one that holds none of the secrets the file
 may contain. Commits were already such a channel, and a project's members can already download the

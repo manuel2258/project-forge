@@ -28,7 +28,38 @@ defmodule ForgeWeb.StoreControllerTest do
     :ok
   end
 
+  # What a request leaves in the temporary directories this controller uses: its own for a body,
+  # and Plug's for a file it sends.
+  defp leftovers do
+    Path.wildcard(Path.join(System.tmp_dir!(), "forge-upload/*")) ++
+      Path.wildcard(Path.join(System.tmp_dir!(), "plug-*/forge-store-*"))
+  end
+
   describe "GET /store/*key" do
+    # Streamed from a file, never a binary: a blob of more than one read of the body is served whole,
+    # and the file it was fetched to is gone once it has been sent.
+    test "serves an object larger than a chunk whole, and leaves no file behind", %{conn: conn} do
+      key = "upload/0f0e0d0c-0b0a-4908-8706-050403020100"
+      body = :crypto.strong_rand_bytes(ForgeWeb.BodyFile.chunk() * 2 + 17)
+      {:ok, _info} = Storage.put(key, body)
+      before = leftovers()
+
+      conn = get(with_token(conn, Token.sign(:get, key)), ~p"/store/#{key}")
+
+      assert response(conn, 200) == body
+      assert leftovers() == before
+    end
+
+    test "a key the store does not have leaves no file behind", %{conn: conn} do
+      before = leftovers()
+      key = "upload/0f0e0d0c-0b0a-4908-8706-050403020101"
+
+      conn = get(with_token(conn, Token.sign(:get, key)), ~p"/store/#{key}")
+
+      assert %{"error" => %{"reason" => "not_found"}} = json_response(conn, 404)
+      assert leftovers() == before
+    end
+
     test "serves the object to a token minted for it", %{conn: conn} do
       key = "job/j1/transcript-1.jsonl"
       {:ok, _info} = Storage.put(key, "{\"type\":\"started\"}")
@@ -257,6 +288,33 @@ defmodule ForgeWeb.StoreControllerTest do
 
       assert %{"error" => %{"reason" => "too_large"}} = json_response(conn, 413)
       assert {:error, :not_found} = Storage.get(key)
+    end
+
+    test "a body refused leaves no temporary file, and neither does one stored", %{conn: conn} do
+      key = "seed/sample/s2"
+      before = leftovers()
+      previous = Application.get_env(:forge, Storage, [])
+      Application.put_env(:forge, Storage, Keyword.put(previous, :max_upload_bytes, 8))
+      on_exit(fn -> Application.put_env(:forge, Storage, previous) end)
+
+      conn
+      |> put_req_header("content-type", "application/octet-stream")
+      |> with_token(Token.sign(:put, key))
+      |> put(~p"/store/#{key}", String.duplicate("x", 64))
+
+      assert leftovers() == before
+
+      Application.put_env(:forge, Storage, previous)
+      key = "seed/sample/s3"
+
+      conn
+      |> recycle()
+      |> put_req_header("content-type", "application/octet-stream")
+      |> with_token(Token.sign(:put, key))
+      |> put(~p"/store/#{key}", "fine")
+
+      assert {:ok, "fine"} = Storage.get(key)
+      assert leftovers() == before
     end
   end
 end

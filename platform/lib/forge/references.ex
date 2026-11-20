@@ -45,7 +45,8 @@ defmodule Forge.References do
           where: {:ticket, String.t(), pos_integer()} | {:chat, String.t()},
           name: String.t(),
           version: pos_integer(),
-          raster?: boolean()
+          raster?: boolean(),
+          withdrawn?: boolean()
         }
 
   @type reason ::
@@ -209,6 +210,9 @@ defmodule Forge.References do
   defp own_key(%{ticket: {id, _number}}), do: {:ticket, id}
   defp own_key(%{chat: chat}) when is_binary(chat), do: {:job, chat}
 
+  # `keys` are the scope's own pool and the other tickets of the project. A row of another chat is
+  # never in `keys`; adding one would be an equivalent mutant, because the lookup that reads these
+  # rows asks for the scope's own key (`own_key/1`) and discards the rest.
   defp rows(keys, names) do
     ticket_ids = for {:ticket, id} <- keys, do: id
     job_ids = for {:job, id} <- keys, do: id
@@ -217,10 +221,16 @@ defmodule Forge.References do
       from a in Artifact,
         join: v in Version,
         on: v.artifact_id == a.id,
+        # A person's file that was withdrawn is still a version, found and then drawn as a note
+        # that says so (`docs/design/attachments.md` § Withdrawing): the left join has at most one
+        # row, because an attachment's version is unique.
+        left_join: w in Forge.Attachments.Attachment,
+        on: w.artifact_version_id == v.id,
         where:
           a.name in ^names and
             (a.ticket_id in ^ticket_ids or a.job_id in ^job_ids),
         select: %{
+          withdrawn?: not is_nil(w.withdrawn_at),
           name: a.name,
           ticket_id: a.ticket_id,
           job_id: a.job_id,
@@ -332,7 +342,8 @@ defmodule Forge.References do
       where: where,
       name: row.name,
       version: row.version,
-      raster?: Artifacts.raster?(row.name, row)
+      raster?: Artifacts.raster?(row.name, row),
+      withdrawn?: row.withdrawn?
     }
   end
 

@@ -30,7 +30,9 @@ defmodule ForgeWeb.Api.TicketController do
               :decline_proposal
             ]
 
-  plug ForgeWeb.Plugs.ApiAccess, :person_only when action in [:queue]
+  # A person's: a file a token attached is an admin's to withdraw, and a token is neither
+  # (`docs/design/attachments.md` § Withdrawing).
+  plug ForgeWeb.Plugs.ApiAccess, :person_only when action in [:queue, :withdraw]
 
   plug :load_ticket
        when action not in [
@@ -41,6 +43,19 @@ defmodule ForgeWeb.Api.TicketController do
               :proposals,
               :accept_proposal,
               :decline_proposal
+            ]
+
+  # After the two above and the lookup: the body of a request that was refused is never read.
+  plug ForgeWeb.Plugs.ApiFiles
+       when action in [
+              :create,
+              :edit,
+              :answer,
+              :approve,
+              :transition,
+              :retry,
+              :extend,
+              :accept_proposal
             ]
 
   def me(%{assigns: %{current_scope: %{token: %{} = token, project: project}}} = conn, _params) do
@@ -137,6 +152,7 @@ defmodule ForgeWeb.Api.TicketController do
   # that says the project is there. `docs/design/api-and-ui.md` § Operations.
   def create(conn, %{"project" => name} = params) do
     attrs = %{
+      attachments: conn.assigns[:attachments],
       title: params["title"] || "",
       body: params["body"] || "",
       ticket_type: params["ticket_type"],
@@ -277,7 +293,8 @@ defmodule ForgeWeb.Api.TicketController do
   end
 
   def edit(conn, %{"name" => name, "content" => content}) do
-    with {:ok, ticket} <- Operator.edit(conn.assigns.ticket, actor(conn), name, content) do
+    with {:ok, ticket} <-
+           Operator.edit(conn.assigns.ticket, actor(conn), name, content, nil, files(conn)) do
       json(conn, Render.version(Artifacts.latest(ticket.id, name), name))
     end
   end
@@ -285,7 +302,8 @@ defmodule ForgeWeb.Api.TicketController do
   def answer(conn, %{"key" => key} = params) do
     attrs = %{choice: params["choice"], text: params["text"]}
 
-    with {:ok, ticket} <- Operator.answer(conn.assigns.ticket, actor(conn), key, attrs) do
+    with {:ok, ticket} <-
+           Operator.answer(conn.assigns.ticket, actor(conn), key, attrs, files(conn)) do
       json(conn, Render.ticket(ticket, conn.assigns.project.name))
     end
   end
@@ -294,13 +312,20 @@ defmodule ForgeWeb.Api.TicketController do
     decision = if params["decision"] == "rejected", do: :rejected, else: :approved
 
     with {:ok, ticket} <-
-           Operator.decide(conn.assigns.ticket, actor(conn), decision, params["comment"]) do
+           Operator.decide(
+             conn.assigns.ticket,
+             actor(conn),
+             decision,
+             params["comment"],
+             nil,
+             files(conn)
+           ) do
       json(conn, Render.ticket(ticket, conn.assigns.project.name))
     end
   end
 
   def transition(conn, %{"to" => to} = params) do
-    opts = [outcome: params["outcome"], comment: params["comment"]]
+    opts = [outcome: params["outcome"], comment: params["comment"]] ++ files(conn)
 
     with {:ok, ticket} <- Operator.transition(conn.assigns.ticket, actor(conn), to, opts) do
       json(conn, Render.ticket(ticket, conn.assigns.project.name))
@@ -311,7 +336,7 @@ defmodule ForgeWeb.Api.TicketController do
   # the raise of the ticket's cap they ask for. The queue serves `retry` on a stuck item, and a
   # client that can read it can act on it.
   def retry(conn, params) do
-    opts = [note: params["note"], raise: params["raise"]]
+    opts = [note: params["note"], raise: params["raise"]] ++ files(conn)
 
     with {:ok, ticket} <- Operator.retry(conn.assigns.ticket, actor(conn), opts) do
       json(conn, Render.ticket(ticket, conn.assigns.project.name, offers: true))
@@ -324,10 +349,52 @@ defmodule ForgeWeb.Api.TicketController do
   def extend(conn, %{"job_id" => job_id} = params) do
     attrs = Map.take(params, ~w(tokens turns note raise))
 
-    with {:ok, ticket} <- Operator.extend(conn.assigns.ticket, actor(conn), job_id, attrs) do
+    with {:ok, ticket} <-
+           Operator.extend(conn.assigns.ticket, actor(conn), job_id, attrs, files(conn)) do
       json(conn, Render.ticket(ticket, conn.assigns.project.name, offers: true))
     end
   end
+
+  # The files that came with the request, for the operation to claim in its own transaction: whole
+  # or not at all (`ForgeWeb.Plugs.ApiFiles`). None for a JSON request.
+  defp files(conn), do: [attachments: conn.assigns[:attachments]]
+
+  @doc """
+  Withdraws a file of the ticket: every version of `:file`, or the one `:version` names, with an
+  optional `reason` (`docs/design/attachments.md` § Withdrawing). A person's only; the rule — the
+  attacher or an admin of the project — is `Forge.Attachments.withdraw/5`'s.
+  """
+  def withdraw(conn, %{"file" => file} = params) do
+    %{ticket: ticket, current_scope: %{user: user}} = conn.assigns
+
+    with {:ok, which} <- withdrawn_version(params["version"]),
+         true <- valid_text?(file) || {:error, :not_found},
+         {:ok, rows} <-
+           Forge.Attachments.withdraw(
+             {:ticket, ticket.id},
+             user,
+             Forge.Attachments.artifact_name(file),
+             which,
+             reason(params)
+           ) do
+      json(conn, %{
+        withdrawn: Enum.map(rows, &Render.withdrawn/1),
+        file: file
+      })
+    end
+  end
+
+  defp withdrawn_version(nil), do: {:ok, :all}
+
+  defp withdrawn_version(version) do
+    case Integer.parse(version) do
+      {n, ""} when n > 0 -> {:ok, n}
+      _other -> {:error, {:bad_request, "version must be a positive integer"}}
+    end
+  end
+
+  defp reason(%{"reason" => reason}) when is_binary(reason), do: reason
+  defp reason(_params), do: nil
 
   def cancel(conn, _params) do
     with {:ok, ticket} <- Operator.cancel(conn.assigns.ticket, actor(conn)) do
@@ -403,8 +470,7 @@ defmodule ForgeWeb.Api.TicketController do
              actor(conn),
              params["comment"],
              params["ticket_type"],
-             on_hold: on_hold(params),
-             milestone_id: params["milestone_id"]
+             [on_hold: on_hold(params), milestone_id: params["milestone_id"]] ++ files(conn)
            ) do
       json(conn, Render.ticket(ticket, project_name(ticket)))
     end

@@ -249,6 +249,19 @@ defmodule ForgeWeb.Api.Render do
     }
   end
 
+  @doc "A file withdrawn: its record, which stays, and who withdrew it and why."
+  def withdrawn(%Forge.Attachments.Attachment{} = a) do
+    %{
+      id: a.id,
+      name: a.name,
+      original_name: a.original_name,
+      size: a.size,
+      withdrawn_at: a.withdrawn_at,
+      withdrawn_by: a.withdrawn_by,
+      reason: a.withdraw_reason
+    }
+  end
+
   def question(%Question{} = q) do
     %{
       id: q.id,

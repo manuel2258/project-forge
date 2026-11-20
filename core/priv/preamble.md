@@ -28,6 +28,10 @@ repository and nothing in it is committed.
   later; *No such file* — it is gone; *Permission denied* — this job's access has ended;
   *Input/output error* — the file arrived damaged or the platform failed, so a retry may not help.
   Not here: transcripts, raw harness output, open proposals, the changeset.
+- `$FORGE_JOB/attachments/` — files people attached to this ticket, read-only, when there are any:
+  screenshots, recordings, anything. The newest version of a name has the plain name and earlier ones
+  sit beside it as `shot.v001.png`; the manifest says which file came with which words. You are
+  given the files as they are when this run starts; one attached while you run reaches the next run.
 - `$FORGE_JOB/spec.json` — this job's full specification.
 - `$FORGE_JOB/platform/platform.md` — how the platform around you works. Reference, not required
   reading.

@@ -18,7 +18,21 @@ defmodule Forge.Conversations do
 
   alias Ecto.Multi
   alias Forge.Accounts.User
-  alias Forge.{Events, Git, Jobs, Operator, Projects, Proposals, Repo, Secrets, Tickets, Workers}
+
+  alias Forge.{
+    Attachments,
+    Events,
+    Git,
+    Jobs,
+    Operator,
+    Projects,
+    Proposals,
+    Repo,
+    Secrets,
+    Tickets,
+    Workers
+  }
+
   alias Forge.Events.Event
   alias Forge.Git.Tokens
   alias Forge.Jobs.{Job, Runs}
@@ -130,6 +144,7 @@ defmodule Forge.Conversations do
     |> Events.log(:first_message, "chat.message", actor, fn %{chat: chat} ->
       %{ticket_id: chat.ticket_id, job_id: chat.id, payload: %{"text" => text}}
     end)
+    |> claim_files(:files, opts[:attachments], actor, & &1.chat, & &1.first_message)
     |> Multi.run(:branch, fn _repo, %{chat: chat} ->
       branch = Jobs.chat_branch(chat)
 
@@ -333,6 +348,7 @@ defmodule Forge.Conversations do
       job_id: chat.id,
       payload: %{"text" => text}
     })
+    |> claim_files(:files, opts[:attachments], actor, fn _changes -> chat end, & &1.message)
     |> Repo.transaction()
     |> case do
       {:ok, %{message: event, path: path} = changes} ->
@@ -350,6 +366,31 @@ defmodule Forge.Conversations do
     end
   end
 
+  # The files that came with a message, claimed in the transaction that records it and anchored to
+  # its event (`docs/design/attachments.md` § Staging, claiming and the sweep). A message with none
+  # adds no step, so a chat that never had a file is exactly what it was.
+  defp claim_files(multi, name, batch, actor, chat_of, event_of) do
+    if Attachments.Batch.empty?(batch) do
+      multi
+    else
+      Multi.run(multi, name, fn _repo, changes ->
+        chat = chat_of.(changes)
+
+        Attachments.claim(pool(chat), actor, batch, :message, {:event, event_of.(changes).seq},
+          job_id: chat.id
+        )
+      end)
+    end
+  end
+
+  @doc """
+  Where a job's files are kept (`docs/design/attachments.md` § The pool): the ticket's, for a
+  workflow job and for a chat about a ticket, and the conversation's own for a project chat.
+  """
+  @spec pool(Job.t()) :: Attachments.pool()
+  def pool(%Job{ticket_id: ticket_id}) when is_binary(ticket_id), do: {:ticket, ticket_id}
+  def pool(%Job{kind: :chat, id: id}), do: {:job, id}
+
   # A live conversation is sent to; one with no machine is started again if `sendable/2` allows it.
   defp path_of(repo, row) do
     if live?(row), do: {:ok, :live}, else: with(:ok <- sendable(repo, row), do: {:ok, :restart})
@@ -359,15 +400,33 @@ defmodule Forge.Conversations do
   # and says so to the lists instead; a live one is pushed to, interrupting first when asked.
   defp told(:restart, _chat, _event, %{job: job}, _opts), do: Events.notify_changed(job)
 
-  defp told(:live, chat, event, _changes, opts) do
+  defp told(:live, chat, event, changes, opts) do
     if Keyword.get(opts, :force, false), do: push(chat, "interrupt", %{})
 
-    push(chat, "message", %{
+    push(chat, "message", message_payload(chat, event, changes))
+  end
+
+  # What the worker is told of a message: its text, the files that came with it (named, so the
+  # agent reads them where they are) and the whole pool as it is now, with a token for each, so
+  # the folder is brought up to it before the turn that reads this message begins
+  # (`docs/design/conversations.md` § The wire).
+  defp message_payload(chat, event, changes) do
+    {files, failed} = message_files(chat, changes)
+
+    %{
       "job_id" => chat.id,
       "message_id" => to_string(event.seq),
-      "text" => event.payload["text"]
-    })
+      "text" => event.payload["text"],
+      "files" => files,
+      "not_received" => failed,
+      "attachments" => Attachments.deliveries(pool(chat), Jobs.preparation_margin_ms())
+    }
   end
+
+  defp message_files(chat, %{files: %{added: added, not_received: failed}}),
+    do: Attachments.message_files(pool(chat), added ++ failed)
+
+  defp message_files(_chat, _changes), do: {[], []}
 
   defp carry_on(:live, _row, _chat, _actor), do: Multi.new()
 
@@ -2050,7 +2109,7 @@ defmodule Forge.Conversations do
   """
   @spec opening(String.t()) :: %{replay: String.t() | nil, prompt: String.t() | nil}
   def opening(job_id) do
-    {said, waiting} = split_at_last_reply(messages(job_id))
+    {said, waiting} = job_id |> messages() |> name_files(job_id) |> split_at_last_reply()
 
     %{
       replay: render_replay(said),
@@ -2060,6 +2119,32 @@ defmodule Forge.Conversations do
           texts -> Enum.join(texts, "\n\n")
         end
     }
+  end
+
+  # A person's message names the files that came with it where the agent reads it, as the push of a
+  # live one does (`docs/design/attachments.md` § Delivery): a reopened conversation, or one that
+  # started after the message was sent, reads the same words.
+  defp name_files(messages, job_id) do
+    seqs = for %{role: :user, id: id} <- messages, do: String.to_integer(id)
+
+    case Attachments.for_events(seqs) do
+      files when map_size(files) == 0 ->
+        messages
+
+      files ->
+        pool = pool(Repo.get!(Job, job_id))
+
+        Enum.map(messages, fn
+          %{role: :user, id: id, text: text} = message ->
+            {named, failed} =
+              Attachments.message_files(pool, Map.get(files, String.to_integer(id), []))
+
+            %{message | text: text <> ForgeCore.Prompt.message_files(named, failed)}
+
+          other ->
+            other
+        end)
+    end
   end
 
   defp split_at_last_reply(messages) do

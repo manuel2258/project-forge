@@ -39,6 +39,10 @@ checkout is yours until the conversation ends or goes idle.
   *Permission denied* — this conversation's access has ended; *Input/output error* — the file
   arrived damaged or the platform failed, so a retry may not help. Not here: transcripts (that is
   `history/`), open proposals, the changeset.
+- `$FORGE_JOB/attachments/` — files people attached to the ticket (or to this conversation, in a
+  project chat), read-only, when there are any. It is brought up to date before every turn, and a
+  message's own files are there before you read it; the message names them. The newest version of a
+  name has the plain name and earlier ones sit beside it as `shot.v001.png`.
 - `$FORGE_JOB/out/<name>` — documents you write to be kept; see below.
 - `$FORGE_JOB/out/proposals/<name>.md` — ticket proposals; see below.
 - `$FORGE_JOB/spec.json` — the specification this conversation was started with.

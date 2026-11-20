@@ -3536,6 +3536,85 @@ defmodule ForgeWorker.LinkTest do
       assert harness["session_blob"] == "job/c1/session-s/2.jsonl"
     end
 
+    # `docs/design/attachments.md` § Delivery: a message carries the pool as it is now, and the
+    # folder is brought up to it before the turn that reads the message begins; a file withdrawn
+    # since is gone from the machine at the same moment.
+    test "brings the folder of attached files up to the pool before the turn that reads a message",
+         context do
+      %{client: client, origin: origin, root: root} = context
+      test = self()
+      version = uuid()
+      key = "upload/" <> uuid()
+      bytes = "pixels"
+
+      Application.put_env(:forge_worker, :req_options,
+        plug: fn conn ->
+          cond do
+            conn.method == "GET" and conn.request_path == "/store/" <> key ->
+              send(test, :fetched)
+              Plug.Conn.send_resp(conn, 200, bytes)
+
+            conn.method == "GET" ->
+              Plug.Conn.send_resp(conn, 404, "")
+
+            true ->
+              {:ok, body, conn} = Plug.Conn.read_body(conn, length: 8_000_000)
+              Req.Test.json(conn, %{"key" => conn.request_path, "size" => byte_size(body)})
+          end
+        end
+      )
+
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = origin |> chat() |> Map.put("attachments", [])
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      folder = Path.join([root, "jobs", job_id <> ".worker", "attachments", "shot.png"])
+      refute File.exists?(folder)
+
+      entry = %{
+        "file" => "shot.png",
+        "version_id" => version,
+        "key" => key,
+        "token" => "get",
+        "size" => byte_size(bytes),
+        "hash" => "sha256:" <> Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
+      }
+
+      push(client, @topic, "message", %{
+        "job_id" => job_id,
+        "message_id" => "m-2",
+        "text" => "look at this",
+        "files" => [%{"file" => "shot.png", "size" => byte_size(bytes)}],
+        "not_received" => [],
+        "attachments" => [entry]
+      })
+
+      {%{"turn" => 2}, _} = take_push("turn")
+      assert_received :fetched
+      assert File.read!(folder) == bytes
+
+      # And what the job sees: this machine has no bind mount, so the folder is a copy made again.
+      shown = Path.join([root, "jobs", job_id, "attachments", "shot.png"])
+      assert File.read!(shown) == bytes
+
+      # Withdrawn since: the next message's pool lacks it, and the machine no longer holds it.
+      push(client, @topic, "message", %{
+        "job_id" => job_id,
+        "message_id" => "m-3",
+        "text" => "again",
+        "files" => [],
+        "attachments" => []
+      })
+
+      {%{"turn" => 3}, _} = take_push("turn")
+      refute File.exists?(folder)
+      refute File.exists?(shown)
+    end
+
     # `docs/measurements.md` § Session resume: the reopened process's total starts from what the
     # session had spent, and every turn reports its own running total beside the session's.
     test "a reopened conversation's turns report what the process spent, not its session's",

@@ -529,7 +529,12 @@ defmodule ForgeWeb.ProjectLive do
 
     with false <- text == "",
          {:ok, chat} <-
-           Operator.open_chat(socket.assigns.project, socket.assigns.current_scope.user, text) do
+           Operator.open_chat(
+             socket.assigns.project,
+             socket.assigns.current_scope.user,
+             text,
+             ForgeWeb.Attaching.opts(params)
+           ) do
       {:noreply,
        socket
        |> Drafts.forget("chat")
@@ -581,9 +586,13 @@ defmodule ForgeWeb.ProjectLive do
   def handle_event("decide_proposal", %{"version_id" => id, "admit" => how} = params, socket)
       when how in ["start", "hold"] do
     decide_proposal(socket, id, params, fn user ->
-      Operator.accept_proposal(id, user, params["comment"], params["ticket_type"],
-        on_hold: how == "hold",
-        milestone_id: blank_to_nil(params["milestone_id"])
+      Operator.accept_proposal(
+        id,
+        user,
+        params["comment"],
+        params["ticket_type"],
+        [on_hold: how == "hold", milestone_id: blank_to_nil(params["milestone_id"])] ++
+          ForgeWeb.Attaching.opts(params)
       )
     end)
   end
@@ -778,7 +787,11 @@ defmodule ForgeWeb.ProjectLive do
   # decided proposal is not in `Proposals.open/1` any more, so `propose-<version_id>` is never
   # drawn again and keeping it changes nothing anybody could see.
   defp decided(socket, params, message),
-    do: socket |> Drafts.forget(params["draft"]) |> ForgeWeb.Toast.put(message)
+    do:
+      socket
+      |> Drafts.forget(params["draft"])
+      |> ForgeWeb.Attaching.sent()
+      |> ForgeWeb.Toast.put(message)
 
   defp explain(:already_decided), do: "Someone has already decided that one."
   defp explain(:not_found), do: "One of them is not yours to decide."
@@ -1416,6 +1429,7 @@ defmodule ForgeWeb.ProjectLive do
             drafts={@drafts}
             error={@proposal_error}
             now={@now}
+            project={@project.name}
           />
         </div>
       </div>
@@ -1963,6 +1977,7 @@ defmodule ForgeWeb.ProjectLive do
         value={Drafts.field(@drafts, "chat", "text")}
         placeholder={"Start a chat about #{@project.name}"}
       />
+      <ForgeWeb.UI.Attach.box id="chat-start-attach" project={@project.name} />
     </.form>
     """
   end

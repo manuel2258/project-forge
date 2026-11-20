@@ -976,6 +976,56 @@ defmodule Forge.ConversationsTest do
     end
   end
 
+  describe "a message with files" do
+    # `docs/design/attachments.md` § Delivery, `conversations.md` § The wire: the files of a
+    # message are named in the push, and the pool as it is now rides with it with a token for each,
+    # so the worker's folder is brought up to date before the turn that reads the message begins.
+    test "is pushed with its files named and the whole pool with a token for each", %{
+      project: project
+    } do
+      user = Forge.AccountsFixtures.user_fixture()
+      Forge.ForgeFixtures.join!(project, user)
+      store = Application.get_env(:forge, Forge.Storage, [])
+      Application.put_env(:forge, Forge.Storage, Keyword.put(store, :dir, tmp_dir("store")))
+      on_exit(fn -> Application.put_env(:forge, Forge.Storage, store) end)
+
+      {:ok, opened} = Conversations.open(project, "hello")
+      {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
+      {:ok, worker} = Forge.Workers.ready(worker, %{"memory_budget" => 8_000_000_000})
+      :ok = Forge.Workers.connected(worker.id)
+
+      {:ok, _running} =
+        opened
+        |> Jobs.Job.progress_changeset(%{status: :running, worker_id: worker.id})
+        |> Repo.update()
+
+      path = Path.join(tmp_dir("src"), "shot")
+      File.write!(path, "pixels")
+      {:ok, upload} = Forge.Attachments.stage(project, user, {:file, path}, "Shot 1.png")
+
+      batch = %Forge.Attachments.Batch{
+        uploads: [%{id: upload.id, name: "Shot 1.png"}],
+        not_received: ["big.mov"]
+      }
+
+      {:ok, _event} =
+        Conversations.send(opened, "look", actor: {:user, user.id}, attachments: batch)
+
+      assert_receive {"message", payload}
+      assert payload["files"] == [%{"file" => "Shot-1.png", "size" => 6}]
+      assert payload["not_received"] == ["big.mov"]
+
+      assert [%{"file" => "Shot-1.png", "key" => "upload/" <> _, "token" => token, "size" => 6}] =
+               payload["attachments"]
+
+      assert is_binary(token)
+
+      # A message with none names none, and the pool is still the whole of it.
+      {:ok, _event} = Conversations.send(opened, "and again", actor: {:user, user.id})
+      assert_receive {"message", %{"files" => [], "attachments" => [%{"file" => "Shot-1.png"}]}}
+    end
+  end
+
   describe "history" do
     # The transcript is fetched by the worker, not inlined: they run past a hundred kilobytes
     # each and a ticket has several, so inlining would put a megabyte through the channel and

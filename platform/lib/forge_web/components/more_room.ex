@@ -106,6 +106,7 @@ defmodule ForgeWeb.Components.MoreRoom do
   attr :drafts, :map, required: true
   attr :draft, :string, required: true, doc: "the form's key in `drafts`"
   attr :prefix, :string, required: true, doc: "makes the ids unique where several are drawn"
+  attr :project, :string, default: nil, doc: "the project's name: with it, files can be attached"
 
   attr :form, :string,
     default: nil,
@@ -191,6 +192,13 @@ defmodule ForgeWeb.Components.MoreRoom do
         maxlength={4000}
         class="[overflow-wrap:anywhere] whitespace-pre-wrap"
         hint={note_hint(@way)}
+      />
+
+      <ForgeWeb.UI.Attach.box
+        :if={@project}
+        id={"#{@prefix}-#{@way}-attach"}
+        project={@project}
+        form={@form}
       />
 
       <div :if={@m.raise?} id={"#{@prefix}-#{@way}-raise"} class="ui-room-raise">

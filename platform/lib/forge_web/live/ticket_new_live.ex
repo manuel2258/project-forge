@@ -144,11 +144,11 @@ defmodule ForgeWeb.TicketNewLive do
          assign(socket, form: to_form(params, as: :ticket), error: "a title is required")}
 
       true ->
-        admit(socket, params, title)
+        admit(socket, params, title, sent)
     end
   end
 
-  defp admit(socket, params, title) do
+  defp admit(socket, params, title, sent) do
     project = socket.assigns.project
 
     attrs = %{
@@ -158,6 +158,9 @@ defmodule ForgeWeb.TicketNewLive do
       on_hold: on_hold(params["on_hold"]),
       milestone_id: if(params["milestone_id"] in [nil, ""], do: nil, else: params["milestone_id"])
     }
+
+    # The files that came with the form ride on the admission and are attached to the ticket's text.
+    attrs = Map.merge(attrs, Map.new(ForgeWeb.Attaching.opts(sent)))
 
     case Operator.admit(project, socket.assigns.current_scope.user, attrs) do
       {:ok, ticket} ->
@@ -332,6 +335,12 @@ defmodule ForgeWeb.TicketNewLive do
           label="Milestone"
           prompt="None"
           options={Enum.map(@milestones, &{&1.name, &1.id})}
+        />
+
+        <ForgeWeb.UI.Attach.box
+          :if={@project && Admission.ready?(@workflow)}
+          id="ticket-attach"
+          project={@project.name}
         />
 
         <.error_note :if={@error} id="ticket-new-error">{@error}</.error_note>

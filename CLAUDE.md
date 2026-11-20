@@ -126,6 +126,15 @@ protocol 12** (the spec's `extension`, and `resumed` in the result). **Not verif
 Claude Code's `--max-turns` counts only the new turns of a `--resume`d session, which the rest of the
 design assumes as the resume after a question already does; no real job has been extended.
 
+`docs/design/attachments.md` is the standard for files people attach: a pool per ticket and per project
+chat of `attachments/<file>` versions, staged under `upload/<id>`, claimed by the act they ride on,
+handed to every run and to a chat each turn as a read-only folder `$FORGE_JOB/attachments/`, and
+withdrawable by the attacher or a project admin — the one way a blob's bytes leave the store. **It is
+being built** (ticket 60), and it needs **worker protocol 13**; read it before changing anything an
+operator attaches, and `docs/design/worker-channel.md` § Protocol 13 for the wire. **Not verified here:**
+the bind mount on a real machine, whether Claude Code or Codex can read an image from the folder (Codex
+has never run against OpenAI here), drop and paste on a phone, and a 500 MiB body through a proxy.
+
 `docs/design/look.md` is the standard for looking at the platform: `bin/look` opens a page in
 headless Chromium as a fixture user over a setup built from the suite's fixtures, runs steps and
 takes screenshots, in a network namespace of its own with a database of its own. Every change to

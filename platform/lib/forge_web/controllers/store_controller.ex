@@ -4,9 +4,9 @@ defmodule ForgeWeb.StoreController do
   door is the authenticated routes, which serve blobs through the platform rather than
   redirecting anywhere. See `docs/design/storage.md` § Serving.
 
-  A body is streamed to a temporary file and handed to the store as a path. A seed is
-  hundreds of megabytes; reading one into a binary to write it straight back out is the thing
-  the behaviour's path form exists to avoid.
+  A body is streamed to a temporary file and handed to the store as a path, and a blob is served
+  from a file the store fetched it to. A seed is hundreds of megabytes; reading one into a binary
+  to write it straight back out is the thing the behaviour's path form exists to avoid.
   """
 
   use ForgeWeb, :controller
@@ -16,18 +16,29 @@ defmodule ForgeWeb.StoreController do
 
   require Logger
 
-  @chunk 1024 * 1024
-
   def show(conn, %{"key" => segments}) do
     key = Enum.join(segments, "/")
 
     with {:ok, token} <- bearer(conn),
          :ok <- Token.verify(token, :get, key),
-         {:ok, content} <- Storage.get(key) do
-      # No charset: these are bytes, and the only reader is a worker writing them to a file.
-      conn
-      |> put_resp_content_type("application/octet-stream", nil)
-      |> send_resp(:ok, content)
+         {:ok, path} <- Plug.Upload.random_file("forge-store") do
+      # Streamed from a file, as `ForgeWeb.ArtifactBytes` serves one: a seed or a person's upload is
+      # hundreds of megabytes and never passes through a binary. The file is removed after it is
+      # sent, and Plug removes it if the request dies first.
+      try do
+        case Storage.fetch(key, path) do
+          {:ok, _info} ->
+            # No charset: these are bytes, and the only reader is a worker writing them to a file.
+            conn
+            |> put_resp_content_type("application/octet-stream", nil)
+            |> send_file(200, path)
+
+          {:error, reason} ->
+            fail(conn, reason)
+        end
+      after
+        Plug.Upload.delete(path)
+      end
     else
       {:error, reason} -> fail(conn, reason)
     end
@@ -37,10 +48,20 @@ defmodule ForgeWeb.StoreController do
     key = Enum.join(segments, "/")
 
     with {:ok, token} <- bearer(conn),
-         :ok <- Token.verify(token, :put, key),
-         {:ok, temp} <- temp_file(),
-         {:ok, conn} <- stream_body(conn, temp),
-         {:ok, info} <- put(key, temp) do
+         :ok <- Token.verify(token, :put, key) do
+      # The temporary file goes whatever the body did: a body past the limit or a connection cut
+      # off leaves nothing behind.
+      ForgeWeb.BodyFile.with_temp(&store(conn, key, &1))
+    else
+      {:error, reason} -> fail(conn, reason)
+    end
+  end
+
+  defp store(conn, key, temp) do
+    max = Storage.config(:max_upload_bytes, 8 * 1024 * 1024 * 1024)
+
+    with {:ok, conn, _size} <- ForgeWeb.BodyFile.write(conn, temp, max),
+         {:ok, info} <- Storage.put(key, {:file, temp}) do
       json(conn, %{key: key, size: info.size, hash: info.hash})
     else
       {:error, reason} -> fail(conn, reason)
@@ -53,48 +74,6 @@ defmodule ForgeWeb.StoreController do
     case get_req_header(conn, "authorization") do
       ["Bearer " <> token] -> {:ok, token}
       _other -> {:error, :unauthorized}
-    end
-  end
-
-  defp put(key, temp) do
-    Storage.put(key, {:file, temp})
-  after
-    File.rm(temp)
-  end
-
-  defp temp_file do
-    dir = Path.join(System.tmp_dir!(), "forge-upload")
-    File.mkdir_p!(dir)
-    {:ok, Path.join(dir, Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false))}
-  end
-
-  defp stream_body(conn, path) do
-    file = File.open!(path, [:write, :binary])
-
-    try do
-      copy(conn, file, 0)
-    after
-      File.close(file)
-    end
-  end
-
-  defp copy(conn, file, written) do
-    max = Storage.config(:max_upload_bytes, 8 * 1024 * 1024 * 1024)
-
-    case Plug.Conn.read_body(conn, length: @chunk) do
-      {:ok, chunk, conn} ->
-        IO.binwrite(file, chunk)
-        if written + byte_size(chunk) > max, do: {:error, :too_large}, else: {:ok, conn}
-
-      {:more, chunk, conn} ->
-        IO.binwrite(file, chunk)
-
-        if written + byte_size(chunk) > max,
-          do: {:error, :too_large},
-          else: copy(conn, file, written + byte_size(chunk))
-
-      {:error, reason} ->
-        {:error, reason}
     end
   end
 

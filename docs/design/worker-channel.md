@@ -880,3 +880,23 @@ every visit); every other job is as it was. **A ticket
 chat is not gated**: its `moving` field gains `jumps`, which an older worker drops, and the
 request is made and applied by the platform, so it works unchanged. The scheduler's *Waiting for a
 newer worker image* reason and the workers page say so as they do for the other numbers.
+
+## Protocol 13 (ticket 60)
+
+Protocol 12 → 13, a breaking change: the platform hands every run the files people attached
+(`attachments.md`), which the worker has to act on — download, check and show to the job — and a
+worker that drops the field would run a job that was told to look at a picture without it.
+`Forge.Jobs.protocol_needs/1` gains `attachments: 13` for every workflow job and chat, **not only
+those whose pool has a file**, because a pool can change after a job is scheduled; a command needs
+no more than before, as it is given no pool. A worker below 13 therefore takes no workflow job or
+chat, and the scheduler's *Waiting for a newer worker image* reason and the workers page say so.
+`minimum` stays.
+
+The assignment gains `attachments`: per file the `file` name in the folder, the `version_id`, the
+store `key`, a `get` token, the `size` and the `hash`, tokens that outlast the preparation margin
+as a history file's do (`conversations.md` § Context). The spec gains `attachments` — the
+manifest's data for each file and the names not received, no key and no token
+(`ForgeCore.Job.Spec`). A chat's `message` gains `attachments` (the pool as it is now, with tokens)
+and `files` (that message's own), which the worker applies before it writes the text to the
+harness (`conversations.md` § The wire). The worker's download goes through the store's `GET`
+with the token, which now streams (`storage.md`).

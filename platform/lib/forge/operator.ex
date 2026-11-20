@@ -18,11 +18,15 @@ defmodule Forge.Operator do
   line, which is past every gate there is.
   """
 
+  require Logger
+
   alias Forge.Access
   alias Forge.Accounts.Scope
   alias Forge.Accounts.User
   alias Forge.Actor
   alias Forge.Artifacts
+  alias Forge.Attachments
+  alias Forge.Attachments.Batch
   alias Forge.Conversations
   alias Forge.Engine
   alias Forge.Events
@@ -49,15 +53,124 @@ defmodule Forge.Operator do
   the same transaction once no blocking question on the ticket remains open, whoever wrote
   the document that carries it.
   """
-  @spec answer(Ticket.t(), actor(), String.t(), map()) :: {:ok, Ticket.t()} | {:error, term()}
-  def answer(%Ticket{} = ticket, actor, key, attrs) do
+  @spec answer(Ticket.t(), actor(), String.t(), map(), keyword()) ::
+          {:ok, Ticket.t()} | {:error, term()}
+  def answer(%Ticket{} = ticket, actor, key, attrs, opts \\ []) do
     with :ok <- allow(ticket, actor, :use),
          %{} = question <-
            Artifacts.find_open_question(ticket.id, key) || {:error, {:no_open_question, key}},
-         {:ok, _answer} <-
-           Forge.Repo.transact(fn -> answer_and_resume(ticket, question, actor, attrs) end) do
+         {:ok, _answer} <- attached_answer(ticket, question, actor, attrs, opts) do
       notify(ticket)
     end
+  end
+
+  # **Files ride on the act they came with** (`docs/design/attachments.md` § Staging, claiming and
+  # the sweep). The guard of the act has already run — a person who may not act never reaches the
+  # claim. `opts[:attachments]` is a `Forge.Attachments.Batch`, or absent, in which case this is
+  # `act` and nothing else, so a ticket with no files is exactly what it was.
+  #
+  # A whole request (the API's) is checked against the limits first (`Attachments.preflight/4`) and
+  # refused before anything is done. After that there are two orders, because two things must hold:
+  # the files are in the pool **before the job the act makes can be assigned** (a file attached to an
+  # answer must reach the run that asked), and a refusal after the act's git work cannot take back
+  # what it pushed (a merge pushed, then the approval rolled back):
+  #
+  # - **An act that makes the ticket** (`{:new, project_id}`: admit, accept) runs with its claim in
+  #   one transaction. Nothing there pushes after commit, and the ticket does not exist until the
+  #   transaction does, so the first job cannot be assigned before the files are in.
+  # - **An act on a ticket** runs in its own transaction, as it always did, **under the ticket's
+  #   assignment lock** (`Attachments.hold/2`), and the claim follows in a transaction of its own,
+  #   lenient. The scheduler skips a pending job of a ticket whose lock is held, so the job the act
+  #   makes is not assigned until the claim has committed — or the act has failed. A file that cannot
+  #   be had because a race filled the pool in between is *not received* and the act stands.
+  #
+  # `target` is `{:ticket, id}`, the pool the files go into, or `{:new, project_id}` for an act that
+  # makes the ticket (its pool is the new ticket's). `where` says what the act wrote that the files
+  # are anchored to: `{:events, types}` — the first event of one of these types by this actor after
+  # the act began — or `{:version, fun}`, a version `fun` finds in the result.
+  defp attach(opts, actor, kind, target, where, act) do
+    case Keyword.get(opts, :attachments) do
+      %Batch{} = batch ->
+        if Batch.empty?(batch),
+          do: act.(),
+          else: attach_batch(batch, actor, kind, target, where, act)
+
+      _none ->
+        act.()
+    end
+  end
+
+  defp attach_batch(batch, actor, kind, {:new, project_id} = target, where, act) do
+    with :ok <- Attachments.preflight(batch, actor, project_id, nil) do
+      Repo.transact(fn -> act_and_claim(batch, actor, kind, target, where, act) end)
+    end
+  end
+
+  defp attach_batch(batch, actor, kind, {:ticket, ticket_id} = pool, where, act) do
+    Attachments.hold(ticket_id, fn ->
+      with :ok <- Attachments.preflight(batch, actor, Attachments.project_of(pool), pool),
+           mark = Attachments.mark(),
+           {:ok, result} <- act.() do
+        claim_after(batch, actor, kind, pool, anchor(where, result, mark))
+        {:ok, result}
+      end
+    end)
+  end
+
+  defp pool_of({:new, _project_id}, %Ticket{id: id}), do: {:ticket, id}
+  defp pool_of(pool, _result), do: pool
+
+  # An act that makes the ticket: the act and the claim in the transaction the caller opened, so a
+  # claim that fails — `{:error, _}` — rolls the admission or the acceptance back with it, and the
+  # ticket (so its first job) does not exist until the files are in. Matching the claim's result is
+  # an equivalent mutant for the suite: a claim fails inside a nested transaction (`record_version/5`),
+  # which marks the caller's transaction rolled back, so the admission goes whether or not the result
+  # is matched; it is matched so that the code says what happens.
+  defp act_and_claim(batch, actor, kind, target, where, act) do
+    mark = Attachments.mark()
+
+    with {:ok, result} <- act.(),
+         anchor = anchor(where, result, mark),
+         {:ok, _claimed} <-
+           Attachments.claim(
+             pool_of(target, result),
+             actor,
+             %{batch | whole?: false},
+             kind,
+             anchor
+           ) do
+      {:ok, result}
+    end
+  end
+
+  # The act has happened; what the files do now cannot undo it. A claim that fails is said in the log
+  # and the files stay staged for the sweep, so a person is never told an act failed that did not.
+  defp claim_after(batch, actor, kind, pool, anchor) do
+    # Equivalent mutant: dropping `whole?: false` changes nothing the suite can see, because the
+    # preflight has refused every whole request this claim would refuse but for a race with another
+    # writer between the two, which needs two connections.
+    lenient = %{batch | whole?: false}
+
+    case Repo.transact(fn -> Attachments.claim(pool, actor, lenient, kind, anchor) end) do
+      {:ok, _claimed} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("files not attached to #{inspect(pool)}: #{inspect(reason)}")
+    end
+  rescue
+    error -> Logger.error("files not attached to #{inspect(pool)}: #{Exception.message(error)}")
+  end
+
+  defp anchor({:events, types}, _result, mark), do: {:events_after, mark, types}
+  defp anchor({:version, fun}, result, _mark), do: {:version, fun.(result)}
+
+  defp attached_answer(ticket, question, actor, attrs, opts) do
+    answered = fn ->
+      Forge.Repo.transact(fn -> answer_and_resume(ticket, question, actor, attrs) end)
+    end
+
+    attach(opts, actor, :answer, {:ticket, ticket.id}, {:events, ["question.answered"]}, answered)
   end
 
   defp answer_and_resume(ticket, question, actor, attrs) do
@@ -82,16 +195,22 @@ defmodule Forge.Operator do
   - `{:error, :no_answers}` — nothing to send.
   - whatever `Forge.Artifacts.answer_all/2` refuses: an empty answer, a choice that is no label.
   """
-  @spec answer_all(Ticket.t(), actor(), String.t(), %{String.t() => map()}) ::
+  @spec answer_all(Ticket.t(), actor(), String.t(), %{String.t() => map()}, keyword()) ::
           {:ok, Ticket.t()} | {:error, term()}
-  def answer_all(%Ticket{} = ticket, actor, version_id, answers) when is_map(answers) do
+  def answer_all(%Ticket{} = ticket, actor, version_id, answers, opts \\ [])
+      when is_map(answers) do
     with :ok <- allow(ticket, actor, :use),
-         {:ok, _answers} <-
-           Forge.Repo.transact(fn ->
-             answer_all_and_resume(ticket, actor, version_id, answers)
-           end) do
+         {:ok, _answers} <- attached_answers(ticket, actor, version_id, answers, opts) do
       notify(ticket)
     end
+  end
+
+  defp attached_answers(ticket, actor, version_id, answers, opts) do
+    answered = fn ->
+      Forge.Repo.transact(fn -> answer_all_and_resume(ticket, actor, version_id, answers) end)
+    end
+
+    attach(opts, actor, :answer, {:ticket, ticket.id}, {:events, ["question.answered"]}, answered)
   end
 
   # Read inside the transaction that writes, so what is checked is what is answered.
@@ -150,12 +269,21 @@ defmodule Forge.Operator do
           actor(),
           :approved | :rejected,
           String.t() | nil,
-          %{String.t() => pos_integer()} | nil
+          %{String.t() => pos_integer()} | nil,
+          keyword()
         ) :: {:ok, Ticket.t()} | {:error, term()}
-  def decide(%Ticket{} = ticket, actor, decision, comment, seen \\ nil)
+  def decide(%Ticket{} = ticket, actor, decision, comment, seen \\ nil, opts \\ [])
       when decision in [:approved, :rejected] do
     with :ok <- allow(ticket, actor, :use),
-         {:ok, ticket} <- Engine.decide(ticket, Actor.of(actor), decision, comment, seen) do
+         {:ok, ticket} <-
+           attach(
+             opts,
+             actor,
+             :note,
+             {:ticket, ticket.id},
+             {:events, ["approval.approved", "approval.rejected"]},
+             fn -> Engine.decide(ticket, Actor.of(actor), decision, comment, seen) end
+           ) do
       notify(ticket)
     end
   end
@@ -164,8 +292,20 @@ defmodule Forge.Operator do
   @spec transition(Ticket.t(), actor(), String.t(), keyword()) ::
           {:ok, Ticket.t()} | {:error, term()}
   def transition(%Ticket{} = ticket, actor, to, opts \\ []) do
+    {files, opts} = Keyword.split(opts, [:attachments])
+
     with :ok <- allow(ticket, actor, :use),
-         {:ok, ticket} <- Engine.choose(ticket, Actor.of(actor), to, opts) do
+         {:ok, ticket} <-
+           attach(
+             files,
+             actor,
+             :note,
+             {:ticket, ticket.id},
+             {:events, ["transition.taken"]},
+             fn ->
+               Engine.choose(ticket, Actor.of(actor), to, opts)
+             end
+           ) do
       notify(ticket)
     end
   end
@@ -181,15 +321,25 @@ defmodule Forge.Operator do
   """
   @spec retry(Ticket.t(), actor(), keyword()) :: {:ok, Ticket.t()} | {:error, term()}
   def retry(%Ticket{} = ticket, actor, opts \\ []) do
+    {files, opts} = Keyword.split(opts, [:attachments])
+
     with :ok <- allow(ticket, actor, :use),
          {:ok, ticket} <-
-           Engine.retry(
-             ticket,
-             Actor.of(actor),
-             Keyword.put(opts, :allow, fn -> allow(ticket, actor, :use) end)
-           ) do
+           attached_retry(ticket, actor, files, opts) do
       notify(ticket)
     end
+  end
+
+  defp attached_retry(ticket, actor, files, opts) do
+    retried = fn ->
+      Engine.retry(
+        ticket,
+        Actor.of(actor),
+        Keyword.put(opts, :allow, fn -> allow(ticket, actor, :use) end)
+      )
+    end
+
+    attach(files, actor, :note, {:ticket, ticket.id}, {:events, ["ticket.retried"]}, retried)
   end
 
   @doc """
@@ -198,13 +348,16 @@ defmodule Forge.Operator do
   may, or a project token with write access — the guard every write passes — checked again inside
   the transaction that acts.
   """
-  @spec extend(Ticket.t(), actor(), String.t(), map()) :: {:ok, Ticket.t()} | {:error, term()}
-  def extend(%Ticket{} = ticket, actor, job_id, attrs) do
+  @spec extend(Ticket.t(), actor(), String.t(), map(), keyword()) ::
+          {:ok, Ticket.t()} | {:error, term()}
+  def extend(%Ticket{} = ticket, actor, job_id, attrs, opts \\ []) do
     with :ok <- allow(ticket, actor, :use),
          {:ok, ticket} <-
-           Engine.extend(ticket, job_id, Actor.of(actor), attrs,
-             allow: fn -> allow(ticket, actor, :use) end
-           ) do
+           attach(opts, actor, :note, {:ticket, ticket.id}, {:events, ["job.extended"]}, fn ->
+             Engine.extend(ticket, job_id, Actor.of(actor), attrs,
+               allow: fn -> allow(ticket, actor, :use) end
+             )
+           end) do
       notify(ticket)
     end
   end
@@ -273,14 +426,34 @@ defmodule Forge.Operator do
   not a reload). It guards an accident, not a member who means it: anybody who may write here may
   reload and write the same content again.
   """
-  @spec edit(Ticket.t(), actor(), String.t(), String.t(), String.t() | nil) ::
+  @spec edit(Ticket.t(), actor(), String.t(), String.t(), String.t() | nil, keyword()) ::
           {:ok, Ticket.t()} | {:error, term()}
-  def edit(%Ticket{} = ticket, actor, name, content, base \\ nil) do
+  def edit(%Ticket{} = ticket, actor, name, content, base \\ nil, opts \\ []) do
     with :ok <- allow(ticket, actor, :use),
+         :ok <- not_reserved(name),
          {:ok, _version} <-
-           Forge.Repo.transact(fn -> write_version(ticket, actor, name, content, base) end) do
+           attached_version(ticket, actor, name, content, base, opts) do
       notify(ticket)
     end
+  end
+
+  # A person's document may not take a name the platform keeps for something else — the files
+  # people attach, the proposals, the transcripts. `attachments/x.png` written as a document would
+  # make attaching `x.png` fail on a kind mismatch ever after (`docs/design/attachments.md`
+  # § The pool).
+  defp not_reserved(name) do
+    case ForgeCore.Workflow.reserved_name_error(name) do
+      nil -> :ok
+      why -> {:error, {:invalid_document, [ForgeCore.Error.new(name, why)]}}
+    end
+  end
+
+  defp attached_version(ticket, actor, name, content, base, opts) do
+    written = fn ->
+      Forge.Repo.transact(fn -> write_version(ticket, actor, name, content, base) end)
+    end
+
+    attach(opts, actor, :document, {:ticket, ticket.id}, {:version, & &1.id}, written)
   end
 
   # Read inside the transaction that writes, so what is checked is what is overwritten.
@@ -314,11 +487,29 @@ defmodule Forge.Operator do
   """
   @spec admit(Project.t(), actor(), map()) :: {:ok, Ticket.t()} | {:error, term()}
   def admit(%Project{} = project, actor, attrs) do
+    {files, attrs} = Map.pop(attrs, :attachments)
+
     with :ok <- allow(project, actor, :use),
-         :ok <- start_or_hold(attrs) do
-      Tickets.admit(project, attrs, Actor.of(actor))
+         :ok <- start_or_hold(attrs),
+         {:ok, ticket} <-
+           attach(
+             [attachments: files],
+             actor,
+             :ticket,
+             {:new, project.id},
+             {:version, &ticket_version/1},
+             fn -> Tickets.admit(project, attrs, Actor.of(actor)) end
+           ) do
+      # `Tickets.admit/3` told subscribers inside the transaction that holds the files, before they
+      # were committed; this is the one they can read.
+      Events.notify(ticket.id)
+      {:ok, ticket}
     end
   end
+
+  # The version of the ticket's text the admission wrote: files attached to a ticket are attached to it.
+  defp ticket_version(%Ticket{id: id}),
+    do: Artifacts.latest(id, ForgeCore.Workflow.ticket_artifact()).id
 
   defp start_or_hold(%{on_hold: on_hold}) when is_boolean(on_hold), do: :ok
   defp start_or_hold(_attrs), do: {:error, :start_or_hold}
@@ -529,16 +720,16 @@ defmodule Forge.Operator do
   reply the form was drawn for: when the last reply is another one, nothing is sent and the
   answer is `{:error, :stale}`, because the conversation moved on while the form was open.
   """
-  @spec answer_chat(Job.t(), User.t(), String.t(), %{String.t() => map()}) ::
+  @spec answer_chat(Job.t(), User.t(), String.t(), %{String.t() => map()}, keyword()) ::
           {:ok, term()} | {:error, term()}
-  def answer_chat(%Job{kind: :chat} = chat, %User{} = user, reply, answers) do
+  def answer_chat(%Job{kind: :chat} = chat, %User{} = user, reply, answers, opts \\ []) do
     with :ok <- allow(chat, user, :use),
          messages = Conversations.messages(chat.id),
          true <-
            (reply != nil and Conversations.reply_ref(messages) == reply) || {:error, :stale},
          {:ok, text} <-
            Conversations.answer_text(Conversations.questions(List.last(messages)), answers) do
-      Conversations.send(chat, text, actor: {:user, user.id})
+      Conversations.send(chat, text, Keyword.put(opts, :actor, {:user, user.id}))
     end
   end
 
@@ -753,10 +944,19 @@ defmodule Forge.Operator do
     # As `admit/3`, start or hold is the person's to say and nothing is written without it. A
     # proposal that is not there is still `:not_found` whatever else was left out, so it is the
     # one case that is not asked.
+    {files, opts} = Keyword.split(opts, [:attachments])
+
     with :ok <- allow_proposal(version_id, actor),
          :ok <- if(Proposals.get(version_id), do: start_or_hold(Map.new(opts)), else: :ok),
          {:ok, %Ticket{} = ticket} <-
-           Proposals.accept(version_id, Actor.of(actor), comment, ticket_type, opts) do
+           attach(
+             files,
+             actor,
+             :ticket,
+             {:new, proposal_project(version_id)},
+             {:version, &ticket_version/1},
+             fn -> Proposals.accept(version_id, Actor.of(actor), comment, ticket_type, opts) end
+           ) do
       # Both: the ticket the proposal came out of has a page that lists it, and the ticket it
       # became has one of its own that nobody is looking at yet.
       notify_origin(version_id)
@@ -841,6 +1041,13 @@ defmodule Forge.Operator do
 
   defp allow(%Project{} = project, %Token{} = token, capability) do
     Access.ensure(Scope.for_token(token, project), capability)
+  end
+
+  defp proposal_project(version_id) do
+    case Proposals.get(version_id) do
+      %{job: %{project_id: project_id}} -> project_id
+      _absent -> nil
+    end
   end
 
   defp allow_proposal(version_id, actor) do

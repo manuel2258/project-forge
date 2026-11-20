@@ -17,6 +17,8 @@ defmodule ForgeWeb.TokenRoutes do
     {:get, "/api/v1/queue"} => :token_never,
     {:get, "/api/v1/projects"} => :token_read,
     {:post, "/api/v1/projects"} => :token_never,
+    {:delete, "/api/v1/tickets/:project/:number/attachments/:file"} => :token_never,
+    {:delete, "/api/v1/tickets/:project/:number/attachments/:file/:version"} => :token_never,
     {:get, "/api/v1/tickets"} => :token_read,
     {:post, "/api/v1/projects/:project/tickets"} => :token_write,
     {:get, "/api/v1/tickets/:project/:number"} => :token_read,

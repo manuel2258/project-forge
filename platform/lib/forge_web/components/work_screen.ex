@@ -12,6 +12,7 @@ defmodule ForgeWeb.WorkScreen do
   use Phoenix.Component
 
   import ForgeWeb.Actions, only: [clip: 1, keep_open: 0, line: 1]
+  import ForgeWeb.CoreComponents, only: [button: 1]
   import ForgeWeb.UI.Data, only: [eyebrow: 1]
 
   alias Forge.Artifacts
@@ -61,11 +62,21 @@ defmodule ForgeWeb.WorkScreen do
   attr :empty, :string, default: "Nothing written yet."
   attr :now, :any, default: nil, doc: "the moment ages are measured from; none drawn without it"
 
+  attr :refusal, :map,
+    default: nil,
+    doc: "the page's `:refusal`: a withdrawal refused is drawn above the rows"
+
   def docs(assigns) do
     assigns = assign(assigns, :groups, groups(assigns.docs))
 
     ~H"""
     <p :if={@docs == [] and @unrecorded == %{}} class="text-sm text-ink-2">{@empty}</p>
+
+    <ForgeWeb.Operator.Actions.refused
+      id="withdraw-refusal"
+      refusal={@refusal}
+      at={["attachments:withdraw"]}
+    />
 
     <div :for={{group, docs} <- @groups} id={group && "docs-#{group}"} class="work-docs">
       <div :if={group} class="work-docs-head">
@@ -136,6 +147,14 @@ defmodule ForgeWeb.WorkScreen do
         </span>
       </.link>
 
+      <ForgeWeb.UI.Attach.names
+        :if={@doc[:came_with] && @doc.came_with != []}
+        files={@doc.came_with}
+        path={& &1.href}
+      />
+
+      <.withdraw :if={@doc[:attached] && @doc.attached.withdrawable} doc={@doc} />
+
       <%!-- Folded: the latest is what is read, and a long history would push the next row away. --%>
       <details :if={@doc.earlier != []} class="work-doc-earlier-fold">
         <summary class="work-doc-earlier-count">
@@ -149,7 +168,12 @@ defmodule ForgeWeb.WorkScreen do
           class="work-doc-earlier"
         >
           <span>
-            {meta(["v#{version.version}", "superseded", version.author, ago(version.at, @now)])}
+            {meta([
+              "v#{version.version}",
+              if(version[:withdrawn], do: "withdrawn", else: "superseded"),
+              version.author,
+              ago(version.at, @now)
+            ])}
           </span>
           <span aria-hidden="true">›</span>
         </.link>
@@ -157,6 +181,97 @@ defmodule ForgeWeb.WorkScreen do
     </section>
     """
   end
+
+  attr :doc, :map, required: true
+
+  # What withdrawing a person's file says it cannot do is said before it is done, where it is done
+  # (`docs/design/attachments.md` § Withdrawing): it stops the file going further, and recalls
+  # nothing that was read.
+  defp withdraw(assigns) do
+    live =
+      for {version, %{state: :live}} <- assigns.doc.attached.versions, do: version
+
+    assigns = assign(assigns, live: Enum.sort(live), dom: dom_id(assigns.doc.name))
+
+    ~H"""
+    <details :if={@live != []} class="work-doc-withdraw" id={"withdraw-#{@dom}"}>
+      <summary class="work-doc-earlier-count">Withdraw</summary>
+      <form phx-submit="attachments:withdraw" class="work-doc-withdraw-form">
+        <input type="hidden" name="name" value={@doc.name} />
+        <label class="text-sm">
+          Which
+          <select name="which" aria-label={"Which version of #{@doc.name}"}>
+            <option value="all">Every version</option>
+            <option :for={version <- @live} value={version}>Version {version} only</option>
+          </select>
+        </label>
+        <label class="text-sm">
+          Why (optional) <input type="text" name="reason" maxlength="500" autocomplete="off" />
+        </label>
+        <p class="ui-field-hint">
+          The file's bytes are deleted and nothing after this is given it; the record that it was
+          attached stays. An agent that already read it may have quoted it in a reply, a document,
+          a commit or a transcript, and a machine that downloaded it may hold it until that job's
+          directory goes. Withdrawing stops it going further; it does not recall what was read.
+          There is no undo.
+        </p>
+        <.button type="submit" variant="danger" phx-disable-with="Withdrawing…">Withdraw</.button>
+      </form>
+    </details>
+    """
+  end
+
+  defp dom_id(name), do: String.replace(name, ~r/[^A-Za-z0-9_-]/, "-")
+
+  @doc """
+  Marks a Docs entry that is a person's file (`Forge.Attachments`): each version's state, which a
+  row says as *withdrawn*, and whether this viewer may withdraw it. Any other entry is as it was.
+  `scope` is the viewer's scope on the project, `user` the viewer.
+  """
+  @spec mark_attached(map(), [struct()], struct() | nil, struct() | nil) :: map()
+  def mark_attached(%{name: "attachments/" <> _} = doc, versions, scope, user) do
+    entries =
+      versions
+      |> Enum.map(& &1.id)
+      |> Forge.Attachments.for_versions()
+      |> Map.values()
+      |> Forge.Attachments.entries()
+      |> Map.new(&{&1.version, &1})
+
+    withdrawn? = fn version -> match?(%{state: :withdrawn}, entries[version]) end
+
+    # Who attached the latest version, as every Docs row says who wrote it: a person by their
+    # address, a token by its name (`Forge.Attachments.describe/1`).
+    by =
+      case entries[doc.latest.version] do
+        nil ->
+          nil
+
+        %{row: row} ->
+          row
+          |> List.wrap()
+          |> Forge.Attachments.describe()
+          |> Map.values()
+          |> hd()
+          |> Map.get(:by)
+      end
+
+    %{
+      doc
+      | latest: Map.put(doc.latest, :withdrawn, withdrawn?.(doc.latest.version)),
+        earlier: Enum.map(doc.earlier, &Map.put(&1, :withdrawn, withdrawn?.(&1.version)))
+    }
+    |> Map.put(:by, by || doc[:by])
+    |> Map.put(:attached, %{
+      versions: entries,
+      withdrawable:
+        Enum.any?(entries, fn {_version, entry} ->
+          Forge.Attachments.withdrawable_by?(scope, user, entry.row)
+        end)
+    })
+  end
+
+  def mark_attached(doc, _versions, _scope, _user), do: doc
 
   defp ago(_at, nil), do: nil
   defp ago(nil, _now), do: nil
@@ -175,7 +290,16 @@ defmodule ForgeWeb.WorkScreen do
       <%!-- The version once, at the row's end, where its link is: drawn here as well it was
             `plan.md v2 … v2 ›` (UX pass, B29). --%>
       <span class="work-doc-name">
-        <span class="min-w-0 break-all">{@entry.name}</span>
+        <%!-- A person's file is cut short with the whole name in the title; any other name breaks,
+              which is how a long artifact name has always read (criterion 22). --%>
+        <span
+          :if={@entry[:attached]}
+          class="min-w-0 work-doc-name-cut"
+          title={@entry.name}
+        >
+          {@entry.name}
+        </span>
+        <span :if={!@entry[:attached]} class="min-w-0 break-all">{@entry.name}</span>
       </span>
       <span class="work-doc-meta">
         {meta([@entry[:by] || @entry.latest.author, ago(@entry.latest[:at], @now)])}
@@ -185,6 +309,7 @@ defmodule ForgeWeb.WorkScreen do
     </span>
     <span class="work-doc-mark">
       <span :if={@entry.kind == :presentation} class="text-ink-3">view only</span>
+      <span :if={@entry.latest[:withdrawn]} class="text-ink-3">withdrawn</span>
       <span :if={@entry.approved} class="text-success">✓ approved</span>
       <span :if={@entry.approvable and not @entry.approved} class="text-accent-text">◇ unapproved</span>
     </span>

@@ -48,7 +48,8 @@ These decisions are settled. They are not to be reopened.
 ## Artifacts and the human loop
 
 - Artifacts live in the platform's own store, not in git. Code is git's job.
-- Artifacts are immutable and versioned. Approval attaches to a specific version. Human edits produce a new version like any other.
+- Artifacts are immutable and versioned. Approval attaches to a specific version. Human edits produce a new version like any other. **A version's record is never changed or deleted; the one way the bytes of a blob an act claimed leave the store is a person withdrawing a file — the attacher, or an admin of the project (an admin only, for a file a project token attached)** (`design/attachments.md` § Withdrawing), which keeps the record and says it was withdrawn.
+- People may attach files of any kind to what they write; every run on the ticket (and a chat, each turn) is handed the pool as files to open, and the pages draw no new preview (`design/attachments.md`).
 - Three kinds: documents (the contract between steps, approvable), blobs (behind a storage behaviour, referenced by URI), presentations (rich, human-only, never consumed downstream).
 - Blobs are served to the operator through the platform, not via provider-specific signed links.
 - Questions are embedded in the document, next to the passage they concern, with a small set of options and a recommended default.

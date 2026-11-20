@@ -145,6 +145,10 @@ defmodule ForgeWeb.Markdown do
 
   # The only place an `img` is made: a raster blob that resolved. Its address is the numbered one
   # of the ticket or chat it is on, and a tap on it opens that version.
+  # **A withdrawn file is a note before it is an image**: its bytes are gone, and the address
+  # answers that it was withdrawn (`docs/design/attachments.md` § Withdrawing).
+  defp image(src, alt, {:ok, %{withdrawn?: true}}, _in_link?), do: note(src, alt, "withdrawn")
+
   defp image(_src, alt, {:ok, %{raster?: true} = found}, in_link?) do
     address = address(found)
 
@@ -154,21 +158,14 @@ defmodule ForgeWeb.Markdown do
     if in_link?, do: img, else: {:a, %{href: address}, [img]}
   end
 
-  defp image(src, alt, {:ok, %{where: {:chat, _id}}}, _in_link?),
-    do: note(src, alt, "chats keep no images")
-
   defp image(src, alt, {:ok, _found}, _in_link?),
     do: note(src, alt, "is not drawn as an image")
-
-  # A project chat's artifacts are documents, so a bare image there is never found — and the
-  # reader is told why rather than that the name is missing.
-  defp image(src, alt, {:error, {:missing, :chat}}, _in_link?),
-    do: note(src, alt, "chats keep no images")
 
   defp image(src, alt, {:error, reason}, _in_link?), do: note(src, alt, why(reason))
   defp image(src, alt, nil, _in_link?), do: note(src, alt, "is not shown")
 
   defp why({:missing, :ticket}), do: "is not on this ticket"
+  defp why({:missing, :chat}), do: "is not in this conversation"
   defp why({:missing, number}), do: "is not on ticket #{number}"
   defp why({:no_version, _n}), do: "has no such version"
   defp why({:no_ticket, number}), do: "— this project has no ticket #{number}"

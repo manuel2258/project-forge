@@ -161,6 +161,8 @@ defmodule ForgeWeb.TicketLive do
       workflow: nil,
       errors: errors,
       docs: docs(project, ticket, artifacts, [], %{}),
+      attached_events: %{},
+      ticket_files: [],
       events: ticket.id |> Events.for_ticket() |> Enum.reverse() |> Enum.take(10),
       drift: Tickets.drift(ticket, project),
       paused: false,
@@ -202,7 +204,7 @@ defmodule ForgeWeb.TicketLive do
     diff = ticket_diff(project, ticket)
     conflict = Forge.Merge.Watch.notice(ticket)
     step = step_view(ticket)
-    events = ticket_events(ticket)
+    {events, attached_events} = ticket_events(ticket)
 
     # Subscribed before the stream is read, so an event written between the two is heard rather
     # than missing until the next reload; one read and heard both is skipped as seen.
@@ -228,6 +230,11 @@ defmodule ForgeWeb.TicketLive do
       diff: diff,
       commits: commits(project, ticket),
       events: events,
+      # What came with the notes and answers listed, by event (`Forge.Attachments`).
+      attached_events: attached_events,
+      # The files that came with the ticket's text, named under it on Steps.
+      ticket_files:
+        came_with(project, ticket, Artifacts.latest(ticket.id, Workflow.ticket_artifact())),
       addresses:
         Forge.Accounts.addresses(for %{actor: %{"kind" => "user", "id" => id}} <- events, do: id),
       queue_events: queue_events(ticket),
@@ -284,7 +291,12 @@ defmodule ForgeWeb.TicketLive do
   # chat step's Accept would approve.
   defp assign_docs(%{assigns: %{project: project, ticket: ticket} = assigns} = socket, art, jobs) do
     jobs = Map.new(jobs ++ Jobs.step_chats_for_ticket(ticket.id), &{&1.id, &1})
-    assign(socket, docs: docs(project, ticket, art, waiting(assigns.decision), jobs))
+    scope = Forge.Accounts.Scope.for_project(assigns.current_scope, project)
+    user = assigns.current_scope.user
+
+    assign(socket,
+      docs: docs(project, ticket, art, waiting(assigns.decision), jobs, scope, user)
+    )
   end
 
   defp waiting(%{kind: :approval, pins: pins}), do: for(p <- pins, not p.changeset, do: p.name)
@@ -327,12 +339,19 @@ defmodule ForgeWeb.TicketLive do
 
   # The ticket's own events that say something its jobs do not — a decision and its note, a
   # transition, why it stuck — newest first, for Activity (`ui.md` § Activity).
+  # What Activity lists on the ticket, and what came with each: the events it says in words, and an
+  # answer **that came with files**, which is listed so that the names are under it
+  # (`docs/design/ui.md` § Attaching files) — an answer without files is in the document it answers.
   defp ticket_events(ticket) do
-    ticket.id
-    |> Events.for_ticket()
-    |> Enum.filter(&(&1.type in TicketViews.said_types() and listed_admission?(&1)))
-    |> Enum.reverse()
-    |> Enum.take(12)
+    all = Events.for_ticket(ticket.id)
+    said = Enum.filter(all, &(&1.type in TicketViews.said_types() and listed_admission?(&1)))
+    answered = Enum.filter(all, &(&1.type == "question.answered"))
+
+    files = Forge.Attachments.entries_for_events(Enum.map(said ++ answered, & &1.seq))
+    answered = Enum.filter(answered, &Map.has_key?(files, &1.seq))
+
+    events = (said ++ answered) |> Enum.sort_by(& &1.seq, :desc) |> Enum.take(12)
+    {events, Map.take(files, Enum.map(events, & &1.seq))}
   end
 
   # An admission is on the ticket's Activity only when a schedule made it: a person's own is the
@@ -480,7 +499,7 @@ defmodule ForgeWeb.TicketLive do
   # Every artifact the ticket has, a row each — a document's rendered when opened — its latest
   # version first and the earlier ones linked, grouped by what it asks of the person. The
   # changeset is not one: it is Changes.
-  defp docs(project, ticket, artifacts, waiting, jobs) do
+  defp docs(project, ticket, artifacts, waiting, jobs, scope \\ nil, user \\ nil) do
     for %{artifact: artifact, latest: latest} = entry <- artifacts, TicketViews.doc?(entry) do
       href = fn version ->
         ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/#{artifact.name}/#{version}"
@@ -495,9 +514,30 @@ defmodule ForgeWeb.TicketLive do
           Forge.References.ticket_scope(project.name, ticket)
         )
 
+      versions = Artifacts.versions(ticket.id, artifact.name)
+
       doc
       |> Map.put(:group, group(doc, latest, waiting))
       |> Map.put(:by, TicketViews.written_by(latest.author, jobs))
+      |> WorkScreen.mark_attached(versions, scope, user)
+      |> Map.put(:came_with, came_with(project, ticket, latest))
+    end
+  end
+
+  # The files that came with this version of a document or the ticket's text, named under its row
+  # (`docs/design/ui.md` § Attaching files), each live one carrying its address.
+  defp came_with(_project, _ticket, nil), do: []
+
+  defp came_with(project, ticket, latest) do
+    for entry <- Map.get(Forge.Attachments.entries_for_versions([latest.id]), latest.id, []) do
+      if entry.state == :live,
+        do:
+          Map.put(
+            entry,
+            :href,
+            ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/#{entry.name}/#{entry.version}"
+          ),
+        else: entry
     end
   end
 
@@ -506,6 +546,8 @@ defmodule ForgeWeb.TicketLive do
   defp group(doc, latest, waiting) do
     cond do
       doc.name in waiting -> :waiting
+      # A person's file is what the ticket was built from, whoever attached it — a token too.
+      Workflow.attachment?(doc.name) -> :built_from
       doc.approved or match?(%{"kind" => "user"}, latest.author) -> :built_from
       true -> :produced
     end
@@ -777,6 +819,10 @@ defmodule ForgeWeb.TicketLive do
 
   def handle_event("more", params, socket), do: JobStream.handle_event("more", params, socket)
 
+  def handle_event("attachments:withdraw", params, socket),
+    do:
+      {:noreply, ForgeWeb.Attaching.withdraw(socket, {:ticket, socket.assigns.ticket.id}, params)}
+
   def handle_event("notices", params, socket),
     do: JobStream.handle_event("notices", params, socket)
 
@@ -1046,6 +1092,7 @@ defmodule ForgeWeb.TicketLive do
         <WorkScreen.docs
           docs={@docs}
           now={@now}
+          refusal={@refusal}
           empty="A document an agent writes appears here when its job declares it."
         />
       </WorkScreen.body>

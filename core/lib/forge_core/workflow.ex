@@ -55,6 +55,7 @@ defmodule ForgeCore.Workflow do
   @proposal_prefix "proposal-"
   @tickets_dir "tickets"
   @archive_dir "archive"
+  @attachments "attachments"
   @replay "conversation.md"
 
   @enforce_keys [:initial, :states, :transitions, :limits]
@@ -205,6 +206,19 @@ defmodule ForgeCore.Workflow do
   def archive_dir, do: @archive_dir
 
   @doc """
+  The reserved artifact name people's files are kept under, and the read-only folder of a job
+  directory they are handed in (`docs/design/attachments.md`): `attachments/<file>` is the
+  artifact, `$FORGE_JOB/attachments/<file>` the file. No state or command may produce, or ask for,
+  that name, so a file a person attached can never be the same artifact as one a job writes.
+  """
+  @spec attachments_dir() :: String.t()
+  def attachments_dir, do: @attachments
+
+  @doc "Whether an artifact name is one of people's files: `attachments/<file>`."
+  @spec attachment?(artifact_name()) :: boolean()
+  def attachment?(name), do: is_binary(name) and String.starts_with?(name, @attachments <> "/")
+
+  @doc """
   The file in `$FORGE_JOB` holding what a reopened conversation had already said, for the new
   process to read. See `docs/design/conversations.md` § Lifetime.
   """
@@ -273,9 +287,17 @@ defmodule ForgeCore.Workflow do
   @spec reserved_name_error(String.t()) :: String.t() | nil
   def reserved_name_error(name) do
     cond do
-      name == @proposals or proposal?(name) -> "#{inspect(name)} is reserved for ticket proposals"
-      transcript?(name) -> "#{inspect(name)} is reserved for job transcripts"
-      true -> nil
+      name == @proposals or proposal?(name) ->
+        "#{inspect(name)} is reserved for ticket proposals"
+
+      transcript?(name) ->
+        "#{inspect(name)} is reserved for job transcripts"
+
+      name == @attachments or attachment?(name) ->
+        "#{inspect(name)} is reserved for attached files"
+
+      true ->
+        nil
     end
   end
 

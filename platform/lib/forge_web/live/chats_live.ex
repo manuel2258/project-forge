@@ -110,7 +110,12 @@ defmodule ForgeWeb.ChatsLive do
         {:noreply, assign(socket, start: start, start_error: "Say what the chat is about first.")}
 
       true ->
-        case Operator.open_chat(project, socket.assigns.current_scope.user, text) do
+        case Operator.open_chat(
+               project,
+               socket.assigns.current_scope.user,
+               text,
+               ForgeWeb.Attaching.opts(params)
+             ) do
           {:ok, chat} ->
             {:noreply, push_navigate(socket, to: ~p"/chats/#{chat.id}")}
 
@@ -220,6 +225,10 @@ defmodule ForgeWeb.ChatsLive do
               phx-debounce="200"
             />
           </div>
+          <ForgeWeb.UI.Attach.box
+            id="chat-start-attach"
+            project={picked(@start, @summaries, @projects)}
+          />
         </.form>
       </:composer>
     </Layouts.app>

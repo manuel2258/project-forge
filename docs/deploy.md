@@ -425,7 +425,7 @@ from, or simply asserting the scheme because Traefik is authoritative for it —
 `config/prod.exs` and a rebuild, not a variable an operator sets. Until somebody wants it enough
 to make that change, the network *is* the control.
 
-**Three of the eight routes are not public.** `/worker`, `/store` and `/archive` are for machines,
+**Three of the nine routes are not public.** `/worker`, `/store` and `/archive` are for machines,
 and with the local-VM provider those machines are on this host. Routing them publicly adds attack
 surface and nothing else. A machine anywhere else — one the Hetzner driver made, or one you run
 yourself (§ A machine you run yourself) — has to reach all three, so route them to the network
@@ -441,7 +441,16 @@ either way, the worker's, a signed store token or the job's.
 | `/health` | proxy only | liveness. `ok`, to anyone, with no database behind it |
 | `/worker` | **no** | the worker channel |
 | `/store` | **no** | blobs and seeds |
+| `/projects/:name/uploads` | yes | a person's staged file, a raw body of up to 500 MiB: session, CSRF header and membership. **Not one of the rate-limited routes**, and the proxy has to pass such a body (below) |
 | `/archive` | **no** | the project's past, read by every job: one request per file it opens, in bursts (`grep -r` is hundreds in a second). The job's own token authorises it. **Not one of the rate-limited routes** |
+
+**Request bodies are large on two routes.** A person's file is up to 500 MiB (`design/attachments.md`),
+sent as a raw body to `/projects/:name/uploads` and as a `files[]` multipart part to the API's
+writes, up to ten of them (10 × 500 MiB and a megabyte of fields). A proxy with a body limit —
+Traefik's `buffering` middleware, nginx's `client_max_body_size`, a cloud load balancer's — has to
+allow that on those two routes, or an upload is refused by the proxy before the platform can say which
+limit it was; and a request timeout has to be long enough to send 500 MiB from a phone. Not
+verified here: a body that size through any real proxy.
 
 **Rate limiting is the proxy's job.** Nothing in the platform throttles, and four public routes
 are reachable without a session: `/users/log-in`, `/api/v1`, `/git` and `/auth/oidc`. A Traefik

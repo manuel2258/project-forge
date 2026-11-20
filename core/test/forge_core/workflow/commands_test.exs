@@ -170,6 +170,12 @@ defmodule ForgeCore.Workflow.CommandsTest do
       map = put_in(base_map(), ["commands", "build", "produces"], "transcript-x")
       assert [{"commands.build.produces", "\"transcript-x\" is reserved" <> _}] = messages(map)
 
+      map = put_in(base_map(), ["commands", "build", "produces"], "attachments")
+      assert [{"commands.build.produces", "\"attachments\" is reserved" <> _}] = messages(map)
+
+      map = put_in(base_map(), ["commands", "build", "produces"], "attachments/*")
+      assert [{_path, "\"attachments\" is reserved" <> _}] = messages(map)
+
       map = put_in(base_map(), ["commands", "build", "produces"], "../log")
       assert [{"commands.build.produces", "artifact name must be" <> _}] = messages(map)
     end

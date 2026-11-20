@@ -16,6 +16,21 @@ defmodule ForgeCore.Job.SpecTest do
     assert Spec.from_map(map) == spec()
   end
 
+  test "the files attached round-trip with both lists, and a spec without them has none" do
+    attached = %{
+      "files" => [%{"file" => "shot.png", "version" => 1, "size" => 10}],
+      "not_received" => [%{"original" => "big.mov"}]
+    }
+
+    assert {:ok, %Spec{attachments: ^attached}} =
+             %{spec() | attachments: attached} |> Spec.to_json() |> Spec.from_json()
+
+    assert Spec.from_map(%{"job_id" => "j", "branch" => "b", "attachments" => %{}}).attachments ==
+             %{"files" => [], "not_received" => []}
+
+    assert spec().attachments == nil
+  end
+
   test "knows its groups of files, an agent's and a command's" do
     spec = %{spec() | produces: ["plan.md", "shots/*", "changeset", "pkg/*"]}
     assert Spec.group_outputs(spec) == ["shots", "pkg"]

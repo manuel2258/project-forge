@@ -402,7 +402,11 @@ defmodule ForgeWeb.WorkflowMapTest do
   test "an arrow to the next state is straight only when its sole outcome is done" do
     map = draw(dev_with_budget_edges())
 
-    for {from, to} <- [{"refining", "planning"}, {"planning", "implementing"}] do
+    for {from, to} <- [
+          {"refining", "refresh"},
+          {"refresh", "planning"},
+          {"planning", "implementing"}
+        ] do
       assert [edge] = Enum.filter(map.edges, &(&1.from == from and &1.to == to))
       assert edge.d =~ " L"
       assert edge.label == nil
@@ -497,9 +501,9 @@ defmodule ForgeWeb.WorkflowMapTest do
       for edge <- draw(workflow).edges, edge.link, do: {edge.from, edge.to}
     end
 
-    # `refining → planning` approves and does not queue; `rebasing → merged` queues and does not
+    # `refining → refresh` approves and does not queue; `rebasing → merged` queues and does not
     # approve; `review_ready → merged` does both.
-    assert {"refining", "planning"} in links.(dev())
+    assert {"refining", "refresh"} in links.(dev())
     assert {"rebasing", "merged"} in links.(dev())
     assert {"review_ready", "merged"} in links.(dev())
     refute {"checking", "implementing"} in links.(dev())

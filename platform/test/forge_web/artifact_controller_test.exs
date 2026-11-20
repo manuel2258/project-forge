@@ -511,4 +511,80 @@ defmodule ForgeWeb.ArtifactControllerTest do
       assert redirected_to(conn) == ~p"/users/log-in"
     end
   end
+
+  # `docs/design/attachments.md` § Withdrawing: a person's file whose bytes were deleted answers 410,
+  # saying by whom and when, from both doors, ahead of the store.
+  describe "a person's file" do
+    setup %{project: project, user: user} do
+      %{ticket: admitted(project, user)}
+    end
+
+    defp attach!(project, pool, user, original, bytes) do
+      path = Path.join(System.tmp_dir!(), "#{System.pid()}-#{System.unique_integer([:positive])}")
+      File.write!(path, bytes)
+      {:ok, upload} = Forge.Attachments.stage(project, user, {:file, path}, original)
+      File.rm!(path)
+      batch = %Forge.Attachments.Batch{uploads: [%{id: upload.id, name: original}]}
+      {:ok, %{added: [row]}} = Forge.Attachments.claim(pool, user, batch, :note, :added)
+      row
+    end
+
+    test "is served as any blob is, and a withdrawn version answers 410 with who and when",
+         %{conn: conn, project: project, user: user, ticket: ticket} do
+      pool = {:ticket, ticket.id}
+      attach!(project, pool, user, "shot.png", "one")
+      attach!(project, pool, user, "shot.png", "two")
+
+      address =
+        &"/tickets/#{project.name}/#{ticket.number}/artifacts/attachments%2Fshot.png/#{&1}"
+
+      assert get(conn, address.(1)) |> response(200) == "one"
+
+      {:ok, _} =
+        Forge.Attachments.withdraw(pool, user, "attachments/shot.png", 1, "wrong picture")
+
+      gone = get(conn, address.(1))
+      assert response(gone, 410) =~ "withdrawn by #{user.email}"
+      assert response(gone, 410) =~ "wrong picture"
+      assert get_resp_header(gone, "x-content-type-options") == ["nosniff"]
+      assert get_resp_header(gone, "content-security-policy") == ["default-src 'none'; sandbox"]
+      refute get_resp_header(gone, "content-disposition") != []
+      # The other version is as it was.
+      assert get(conn, address.(2)) |> response(200) == "two"
+    end
+
+    test "a project chat's is gone the same way at the chat's address",
+         %{conn: conn, project: project, user: user} do
+      {:ok, chat} = Forge.Conversations.open(project, "look")
+      pool = {:job, chat.id}
+      attach!(project, pool, user, "shot.png", "pixels")
+      address = "/chats/#{chat.id}/artifacts/attachments%2Fshot.png/1"
+
+      assert get(conn, address) |> response(200) == "pixels"
+      {:ok, _} = Forge.Attachments.withdraw(pool, user, "attachments/shot.png", :all, nil)
+      assert get(conn, address) |> response(410) =~ "withdrawn by #{user.email}"
+    end
+
+    test "the API's door answers in its own error shape", %{
+      project: project,
+      user: user,
+      ticket: ticket
+    } do
+      pool = {:ticket, ticket.id}
+      row = attach!(project, pool, user, "shot.png", "one")
+      {:ok, _} = Forge.Attachments.withdraw(pool, user, "attachments/shot.png", :all, "oops")
+      version = Forge.Repo.get!(Forge.Artifacts.Version, row.artifact_version_id)
+
+      conn =
+        build_conn()
+        |> Phoenix.Controller.put_format("json")
+        |> ForgeWeb.ArtifactBytes.send_version("attachments/shot.png", version)
+
+      assert %{"error" => %{"reason" => "withdrawn", "detail" => detail, "withdrawn_by" => by}} =
+               json_response(conn, 410)
+
+      assert detail =~ "oops"
+      assert by == user.email
+    end
+  end
 end

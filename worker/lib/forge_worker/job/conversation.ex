@@ -43,8 +43,9 @@ defmodule ForgeWorker.Job.Conversation do
   end
 
   @doc "Sends a message. `id` is the platform's, and comes back with the delivery."
-  @spec send_message(pid(), String.t(), String.t()) :: :ok
-  def send_message(pid, id, text), do: GenServer.cast(pid, {:message, id, text})
+  @spec send_message(pid(), String.t(), String.t(), map()) :: :ok
+  def send_message(pid, id, text, files \\ %{}),
+    do: GenServer.cast(pid, {:message, id, text, files})
 
   @doc "Ends the turn in flight, keeping the process."
   @spec interrupt(pid()) :: :ok
@@ -297,6 +298,7 @@ defmodule ForgeWorker.Job.Conversation do
       wall_clock_ms: assignment["wall_clock_ms"] || :timer.hours(24),
       nix_env: Application.get_env(:forge_worker, :nix_env, true),
       archive: ForgeWorker.Archive.grant(assignment),
+      attachments: assignment["attachments"],
       extra_env: Application.get_env(:forge_worker, :extra_env, []) ++ git_env(assignment)
     ]
   end
@@ -329,9 +331,28 @@ defmodule ForgeWorker.Job.Conversation do
 
   # -- what the operator asks for -------------------------------------------------------------
 
+  # The folder is brought up to the pool before the turn that reads this message begins, and the
+  # message names the files that came with it, and those that did not arrive — here or on the
+  # platform's side (`docs/design/attachments.md` § Delivery, `conversations.md` § The wire). A
+  # platform that sends no pool leaves the folder as it is.
+  defp attached(state, %{"attachments" => entries} = payload) when is_list(entries) do
+    job_dir = job_dir(state)
+    failed = ForgeWorker.Attachments.sync(job_dir, entries)
+    ForgeWorker.Attachments.refresh(job_dir)
+
+    files = Enum.reject(payload["files"] || [], &(&1["file"] in failed))
+    lost = for %{"file" => file} <- payload["files"] || [], file in failed, do: file
+
+    ForgeCore.Prompt.message_files(files, (payload["not_received"] || []) ++ lost)
+  end
+
+  defp attached(_state, _payload), do: ""
+
   @impl true
-  def handle_cast({:message, id, text}, state) do
-    case Runner.send_message(state.runner, text) do
+  def handle_cast({:message, id, text}, state), do: handle_cast({:message, id, text, %{}}, state)
+
+  def handle_cast({:message, id, text, files}, state) do
+    case Runner.send_message(state.runner, text <> attached(state, files)) do
       :ok ->
         {:noreply, reset_idle(%{state | pending: state.pending ++ [id]})}
 

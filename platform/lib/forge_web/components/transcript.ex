@@ -35,6 +35,15 @@ defmodule ForgeWeb.Transcript do
     default: false,
     doc: "whether the dock's plan band is drawn: the open turn's checklist is then the band's"
 
+  attr :attached, :map,
+    default: %{},
+    doc:
+      "what came with each person's message, by the message's id (`Forge.Attachments.entries_for_events/1`)"
+
+  attr :attach_path, :any,
+    default: nil,
+    doc: "a file entry's address (`ForgeWeb.UI.Attach.names/1`)"
+
   def transcript(assigns) do
     assigns = assign(assigns, entries: entries(assigns.messages))
 
@@ -62,6 +71,11 @@ defmodule ForgeWeb.Transcript do
         <div class="doc msg text-sm/[1.6] break-words">
           {Markdown.to_html(message.text, Map.get(@refs, {index, :user}, %{}))}
         </div>
+        <ForgeWeb.UI.Attach.names
+          :if={@attach_path}
+          files={Map.get(@attached, String.to_integer(message.id), [])}
+          path={@attach_path}
+        />
       </div>
 
       <.turn

@@ -182,7 +182,15 @@ Reusing the document was not economy; it was instructing the agent to be a job. 
 says where it is, how to reach its context, that questions here always wait, and that the
 conversation is not its to end.
 
-Context is composed once per process, when it starts, and is not refreshed while it runs; a
+**It also gets the files people attached** (`attachments.md`): `attachments/`, read-only, in the
+ticket's pool for a ticket chat and the conversation's own for a project chat. This is the one part
+of the context that is refreshed while the process runs: the folder is brought up to the pool at the
+start of every turn, and a message's own files are there before the turn that reads it begins.
+Whether Claude Code or Codex can read an image from the folder is not verified here, and Codex has
+never run against OpenAI.
+
+The rest of the context is composed once per process, when it starts, and is not refreshed while it
+runs; a
 reopen composes it again (§ Lifetime). A conversation that has been open across a merge is
 looking at what it started with, and says so.
 
@@ -988,6 +996,13 @@ sends a `turn` per turn, so two unacked `turn`s for one chat would collide and o
 for ever — taking its cost with it. So the key is the caller's: `send_acked/4` takes it,
 `send_terminal/4` passes `{job_id, message}`, and a turn passes `{job_id, "turn", index}`.
 
+**`message` carries the files** (protocol 13, `worker-channel.md`): `attachments`, the pool as the
+platform lists it now — each file with its folder name, version, size, hash, key and a `get` token —
+and `files`, the names this message was sent with, with any *not received*. The worker syncs the
+folder before it writes the text to the harness, and the text it writes names the files under the
+message (`ForgeCore.Prompt.message_files/2`). A reopen's opening and the replay name a message's
+files the same way.
+
 `close` exists because stdin EOF is enough to end the process cleanly — the spike measured that —
 so closing a conversation is closing the pipe, not killing anything.
 
@@ -1093,8 +1108,9 @@ without opening the conversation.
 
 A conversation's messages are Markdown, and `![alt](name)` and `[text](name)` in them resolve as
 anywhere (`ui.md` § Documents → References): against the ticket for a ticket conversation, whose
-documents are the ticket's, and against the chat's own documents for a project chat, where a bare
-image name says *chats keep no images*. A message has no version, so its moment stands in for the
+documents are the ticket's, and against the chat's own documents for a project chat, **which now draws an image it attached
+itself** (`![x](attachments/shot.png)`; a project chat used to say *chats keep no images*, and no
+longer does — a non-raster file there is *not drawn as an image*). A message has no version, so its moment stands in for the
 referring version: an agent's reply sees what was recorded up to and including its own turn
 (`chat.turn`, after the turn's documents), a person's message what was recorded before it was sent
 (`chat.message`), and a reply still streaming what exists as it is drawn, pinned once its turn is

@@ -206,7 +206,9 @@ state would each have to carry it, and a transition a person takes by hand down 
 skip it silently. `on_enter` is not allowed on a job state, whose entry already runs a job.
 `merge` and `update` are not both on one state.
 
-**Inputs** are artifact names. `ticket` is reserved and means the ticket body as a document. Every
+**Inputs** are artifact names. `ticket` is reserved and means the ticket body as a document;
+`attachments/…` is reserved too, and is not an input: a job is handed the pool whatever it declares
+(`attachments.md`). Every
 other name must be produced by a state that can run before the consumer (one from which the
 consumer is reachable). At job start the engine resolves each input to the latest version of that
 artifact on the ticket and pins it in the job's manifest.
@@ -1487,7 +1489,11 @@ merges: re-pinning takes the default branch, never the ticket's own.
 - State and artifact names are single path segments: letters, digits, `.`, `_`, `-`.
 - Every `inputs` entry is `ticket`, a command's log, or produced by a state that can run before the
 consumer; every `produces` entry other than `changeset` is produced by exactly one state. `ticket`
-is never produced; `answers.md` is platform-managed and never declared.
+is never produced; `answers.md` is platform-managed and never declared. **`attachments` and
+  every name beginning `attachments/` is reserved** for the files people attach (`attachments.md`):
+  no state or command may produce it, consume it as an input, or name it as a group, so an attached
+  file can never collide with an artifact a job writes. The release's changelog section says so,
+  because a hosted project's workflow could be using the name.
 - A job state declaring outcomes other than `done` produces at least one document. A command
   state does not, because its outcomes come from `exit`.
 - Every state is reachable from `initial` through transitions.

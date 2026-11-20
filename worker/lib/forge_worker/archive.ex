@@ -109,6 +109,10 @@ defmodule ForgeWorker.Archive do
   @doc "Unmounts the folder and stops its server. Idempotent: a job with none finds nothing to do."
   @spec release(Path.t()) :: :ok
   def release(job_dir) do
+    # The attached files' folder is released wherever the archive's is, because the same three
+    # places end a job and a `chown -R` over either mount is the same walk.
+    ForgeWorker.Attachments.release(job_dir)
+
     case Mount.impl().unmount(dir(job_dir)) do
       :ok -> :ok
       {:error, reason} -> Logger.warning("could not unmount #{dir(job_dir)}: #{inspect(reason)}")
@@ -131,10 +135,14 @@ defmodule ForgeWorker.Archive do
         0
 
       text ->
-        text
-        |> Mount.mounted()
-        |> Enum.filter(&String.starts_with?(&1, Path.expand(root) <> "/"))
-        |> Enum.count(fn mountpoint -> Mount.impl().unmount(mountpoint) == :ok end)
+        archives =
+          text
+          |> Mount.mounted()
+          |> Enum.filter(&String.starts_with?(&1, Path.expand(root) <> "/"))
+          |> Enum.count(fn mountpoint -> Mount.impl().unmount(mountpoint) == :ok end)
+
+        # The attached files' folders are mounts too, of whatever the directory they show is on.
+        archives + ForgeWorker.Attachments.sweep(root, text)
     end
   end
 

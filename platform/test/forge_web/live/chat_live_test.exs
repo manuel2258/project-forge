@@ -99,7 +99,7 @@ defmodule ForgeWeb.ChatLiveTest do
                ["/chats/#{chat.id}/artifacts/notes.md/1"]
 
       assert Floki.find(html, "img") == []
-      assert Floki.text(html) =~ "chats keep no images"
+      assert Floki.text(html) =~ "is not in this conversation"
       # A link that does not resolve is its words, with no target.
       assert Floki.text(html) =~ "and a."
     end

@@ -39,7 +39,8 @@ defmodule ForgeWeb.TicketViews do
            ticket.cancelled ticket.restored ticket.repinned ticket.held ticket.released
            ticket.stopped ticket.refreshed transition.held ticket.retitled
            ticket.milestone_set ticket.moved ticket.branch_updated ticket.base_moved
-           ticket.retried job.extended ticket.cap_raised ticket.admitted)
+           ticket.retried job.extended ticket.cap_raised ticket.admitted attachment.added
+           attachment.withdrawn)
 
   @doc """
   Who an event of the ticket's Activity was made by, in the words the product uses: a person by
@@ -436,6 +437,7 @@ defmodule ForgeWeb.TicketViews do
         forms={@forms}
         refusal={@refusal}
         submit="questions:send"
+        project={@project.name}
         hidden={[{"ticket", @ticket.id}, {"version", version_id}]}
       />
     </div>
@@ -629,6 +631,12 @@ defmodule ForgeWeb.TicketViews do
     >
       {@ticket.body}
     </p>
+    <ForgeWeb.UI.Attach.names
+      :if={!@release}
+      files={@ticket_files}
+      path={& &1.href}
+      class="mb-5"
+    />
 
     <ol id="steps-list" class="ticket-steps">
       <li
@@ -707,6 +715,7 @@ defmodule ForgeWeb.TicketViews do
           refusal={@refusal}
           any_refusal={false}
           submit="questions:send"
+          project={@project.name}
           hidden={[{"ticket", @ticket.id}, {"version", version_id}]}
         />
       </div>
@@ -1016,6 +1025,7 @@ defmodule ForgeWeb.TicketViews do
           name={name}
           latest={latest}
           drafts={@drafts}
+          project={@project.name}
         />
       </div>
       <%!-- Outside the editors: a Save refused because an approval arrived meanwhile finds them
@@ -1051,6 +1061,7 @@ defmodule ForgeWeb.TicketViews do
             drafts={@drafts}
             draft="ways-forward"
             prefix="forward"
+            project={@project.name}
           />
         <% end %>
         <%!-- Other states: each a jump, which takes no transition. The fold is a checkbox of this
@@ -1209,6 +1220,12 @@ defmodule ForgeWeb.TicketViews do
               <span :if={made_by(event, @current_scope.user.id, @addresses)} class="text-ink-2">
                 · {made_by(event, @current_scope.user.id, @addresses)}
               </span>
+              <ForgeWeb.UI.Attach.names
+                files={Map.get(@attached_events, event.seq, [])}
+                path={
+                  &~p"/tickets/#{@project.name}/#{@ticket.number}/artifacts/#{&1.name}/#{&1.version}"
+                }
+              />
             </div>
           </div>
           <span class="work-act-time">{Calendar.strftime(event.inserted_at, "%m-%d %H:%M")}</span>

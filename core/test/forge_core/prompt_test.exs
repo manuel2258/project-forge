@@ -47,6 +47,99 @@ defmodule ForgeCore.PromptTest do
     assert manifest =~ "- Turns: 40\n- Weighted tokens: 400k"
   end
 
+  describe "the files people attached" do
+    defp attached do
+      %{
+        "files" => [
+          %{
+            "file" => "shot.png",
+            "name" => "attachments/shot.png",
+            "version" => 2,
+            "size" => 2048,
+            "to" => "the note on plan.md v1",
+            "by" => "Ada",
+            "at" => "2026-11-19 10:00",
+            "original" => "Screen Shot.png"
+          },
+          %{"file" => "shot.v001.png", "version" => 1, "size" => 5, "original" => "shot.v001.png"}
+        ],
+        "not_received" => [
+          %{"original" => "big.mov", "to" => "the ticket", "by" => "Ada", "at" => "2026-11-19"}
+        ]
+      }
+    end
+
+    test "the manifest lists each with its version, size, what it came with, who and when" do
+      manifest = Prompt.manifest(%{spec() | attachments: attached()}, "/j")
+
+      assert manifest =~ "## Attached files (read-only)"
+      assert manifest =~ "`/j/attachments/`"
+
+      assert manifest =~
+               "- `shot.png` — version 2, 2.0 KiB, uploaded as \"Screen Shot.png\". " <>
+                 "Attached to the note on plan.md v1, by Ada, 2026-11-19 10:00."
+
+      assert manifest =~ "- `shot.v001.png` — version 1, 5 bytes. "
+      assert manifest =~ "**not received**"
+      assert manifest =~ "- \"big.mov\", attached to the ticket by Ada"
+    end
+
+    test "the conversation's manifest and the continuation say the same" do
+      assert Prompt.chat_manifest(chat_spec(%{attachments: attached()}), "/j") =~
+               "- `shot.png` — version 2"
+
+      assert Prompt.continuation(%{spec() | attachments: attached()}, "/j", "abc") =~
+               "## Attached files (read-only)"
+    end
+
+    test "a ticket with none says nothing at all" do
+      refute Prompt.manifest(spec(), "/j") =~ "Attached files"
+      empty = %{"files" => [], "not_received" => []}
+      refute Prompt.manifest(%{spec() | attachments: empty}, "/j") =~ "Attached files"
+
+      # Byte for byte what it was before there were any: nothing of the section is left behind.
+      assert Prompt.manifest(%{spec() | attachments: empty}, "/j") ==
+               Prompt.manifest(spec(), "/j")
+
+      refute Prompt.chat_manifest(chat_spec(%{attachments: empty}), "/j") =~ "Attached files"
+    end
+
+    test "a file that would not download on this machine says why" do
+      lost = %{
+        "files" => [],
+        "not_received" => [
+          %{
+            "original" => "a.png",
+            "to" => "the ticket",
+            "by" => "Ada",
+            "at" => "now",
+            "why" => "it could not be downloaded to this machine"
+          }
+        ]
+      }
+
+      assert Prompt.manifest(%{spec() | attachments: lost}, "/j") =~
+               "- \"a.png\", attached to the ticket by Ada, now (it could not be downloaded to this machine)."
+    end
+
+    test "only files not received still make the section, saying none were" do
+      only = %{"files" => [], "not_received" => attached()["not_received"]}
+      manifest = Prompt.manifest(%{spec() | attachments: only}, "/j")
+      assert manifest =~ "- none\n"
+      assert manifest =~ "big.mov"
+    end
+
+    test "a message names the files that came with it, and the ones that did not" do
+      assert Prompt.message_files([], []) == ""
+
+      assert Prompt.message_files([%{"file" => "a.png", "size" => 3 * 1_048_576}], ["b.mov"]) =~
+               "[Files attached with this message, in `attachments/`: `a.png` (3.0 MiB)]"
+
+      assert Prompt.message_files([], ["b.mov", "c.mov"]) =~
+               "[Attached but not received, so there is nothing to read: \"b.mov\", \"c.mov\"]"
+    end
+  end
+
   # `docs/design/secrets.md` § Delivery: a job is told which variables it holds — by name, never
   # by value — and asked not to print them; one that holds none is told nothing about secrets.
   describe "secrets" do

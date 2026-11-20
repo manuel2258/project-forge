@@ -49,6 +49,10 @@ at most 512 bytes. The behaviour validates; implementations do not have to. The 
   see `docs/design/worker-tier.md` § Volumes and the seed.
 - `artifact/<sha256>` — content-addressed blobs an artifact version points at that are not tied
   to one job.
+- `upload/<id>` — a file a person attached, staged and then claimed by an act
+  (`attachments.md`). **Not content-addressed**, on purpose: identical files would share bytes and
+  withdrawing one would delete the other's, and the hash is unknown until the bytes have arrived
+  while the key has to exist before.
 
 A job's groups of files are under its own prefix: `job/<job_id>/out-<nonce>/<n>`, the nonce one per
 assignment as a transcript's is, and `<n>` a counter rather than the file's name — the name is
@@ -125,7 +129,13 @@ Three properties this must have, and why:
   who the worker is; that is the channel's job, and it happened before any token was minted.
 
 A `put` to a key that exists is refused (409). Blobs are immutable — the artifact model says so —
-and the store is not the place to discover that a job ran twice.
+and the store is not the place to discover that a job ran twice. **The one exception is a person's
+file withdrawn** (`attachments.md` § Withdrawing): its version's record stays and its bytes are
+deleted, and the staging sweep deletes bytes no act ever claimed.
+
+**A `get` streams.** `GET /store` fetches the blob to a temporary file and sends that, as the
+operator's door does, and removes it after; it used to read a whole blob into memory, which a 500 MiB
+attachment would make a cost per download. A `put`'s temporary file is removed on failure too.
 
 **The archive is a third door** (`archive.md`): `/archive`, authorised by the job's git token and
 not by a store token, and it reads through `Forge.Artifacts.served/2` like the operator's route
@@ -181,7 +191,11 @@ two keys.
 
 - **Deletion has no policy.** Nothing deletes a transcript or an old seed today. The store grows
   monotonically for the PoC, which is fine on the operator's disk and is not fine on the host.
-  Retention lands with the closing step, when there is a bill attached.
+  Retention lands with the closing step, when there is a bill attached. Bytes are now deleted
+  by the staging sweep and by taking an upload back (bytes no act ever claimed) and by a person
+  withdrawing a file (`attachments.md`) — which is the only way a claimed blob's bytes go.
+- **People's files are now the fastest way the store grows**: 500 MiB a file and 5 GiB a pool, with
+  no limit per project or node beyond that and no retention. Attachers are trusted project members.
 - **The seed's transport form is not settled here**, because it is the worker tier's question —
   and it has settled it: a compressed tar, not a `btrfs send` stream. See
   `docs/design/worker-tier.md` § Volumes and the seed.

@@ -60,6 +60,8 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/chats/new" => :member,
     "/chats/:id" => :member,
     "/chats/:id/artifacts/:name/:version" => :member,
+    "/projects/:name/uploads" => :member,
+    "/projects/:name/uploads/:id" => :member,
 
     # The caller's own credentials' windows; spend in a project they are not in is one unnamed
     # line (`Forge.Usage.breakdown/5`).
@@ -115,6 +117,10 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # Extending a job that ran out: `Forge.Operator.extend/4`, the guard every ticket write passes,
     # asked again inside the engine's transaction after the ticket is locked.
     "/api/v1/tickets/:project/:number/jobs/:job_id/extend" => :member,
+    # Withdrawing a file: a person's, and the rule — the attacher or an admin of the project — is
+    # `Forge.Attachments.withdraw/5`'s, asked inside the transaction that locks the pool.
+    "/api/v1/tickets/:project/:number/attachments/:file" => :member,
+    "/api/v1/tickets/:project/:number/attachments/:file/:version" => :member,
     "/api/v1/tickets/:project/:number/cancel" => :member,
     "/api/v1/tickets/:project/:number/restore" => :member,
     # The hold, titles and milestones: `Forge.Operator` guards every one, a project token with API
@@ -183,6 +189,9 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"chat_live.ex", "form:open"} => :local,
     {"chat_live.ex", "chat:questions:send"} => :member,
     {"chat_live.ex", "stop"} => :member,
+    # Withdrawing a file: `Forge.Attachments.withdraw/5` refuses all but the person who attached it
+    # and a project admin, inside the transaction that locks the pool.
+    {"chat_live.ex", "attachments:withdraw"} => :member,
     {"chat_live.ex", "close"} => :member,
     {"chat_live.ex", "draft"} => :local,
     {"chat_live.ex", "ask"} => :local,
@@ -202,6 +211,7 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"job_live.ex", "notices"} => :local,
     {"job_live.ex", "pane"} => :local,
     {"job_live.ex", "show"} => :local,
+    {"ticket_live.ex", "attachments:withdraw"} => :member,
     # Navigates to a conversation with the reference in the address; sends nothing.
     {"ticket_live.ex", "ask"} => :local,
     {"ticket_live.ex", "more"} => :local,

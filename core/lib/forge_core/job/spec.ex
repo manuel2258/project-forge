@@ -139,6 +139,16 @@ defmodule ForgeCore.Job.Spec do
     # project chat, for a chat step's (the person ends it, so there is nothing to ask for) and for
     # every workflow job, none of which reads it.
     moving: nil,
+    # The files people attached on this ticket (or, for a project chat, to it), as the pool stands
+    # when this run starts, string keys: `files`, each `%{"file", "name", "version", "size", "to",
+    # "by", "at", "original"}` — `file` being the name in `$FORGE_JOB/attachments/`, `to` what it was
+    # attached to in words — and `not_received`, each `%{"original", "to", "by", "at"}`, a file whose
+    # upload failed that the words it came with still reach the agent. Filled at run time and never
+    # stored; the keys and tokens to fetch them travel beside the spec, in the assignment
+    # (`docs/design/attachments.md` § Delivery). Nil for a command, and for a run on a platform
+    # before this existed. The worker composes the manifest's § Attached files from it, which is why
+    # a worker has to speak protocol 13 to be given a job.
+    attachments: nil,
     # A chat step's contract (`docs/design/conversations.md` § A conversation that is a step),
     # string keys: `state`, `prompt` (the state's text), `visit`, `inputs` (the declared input
     # names), `produces` (the documents it must write, by name on disk), `optional`, `outcomes`
@@ -174,6 +184,7 @@ defmodule ForgeCore.Job.Spec do
           secrets: [String.t()],
           secrets_gone: [String.t()],
           moving: %{String.t() => term()} | nil,
+          attachments: %{String.t() => [%{String.t() => term()}]} | nil,
           step: %{String.t() => term()} | nil,
           extension: %{String.t() => term()} | nil,
           ticket:
@@ -339,10 +350,20 @@ defmodule ForgeCore.Job.Spec do
       secrets: or_default(get, :secrets, []),
       secrets_gone: or_default(get, :secrets_gone, []),
       moving: moving_from_map(get.(:moving)),
+      attachments: attachments_from_map(get.(:attachments)),
       step: step_from_map(get.(:step)),
       extension: extension_from_map(get.(:extension))
     }
   end
+
+  # Both lists always, so the manifest folds over them whichever way the spec arrived.
+  defp attachments_from_map(nil), do: nil
+
+  defp attachments_from_map(map),
+    do: %{
+      "files" => nested(map, :files) || [],
+      "not_received" => nested(map, :not_received) || []
+    }
 
   # String keys whichever way it arrived, for the reason `moving` is.
   defp extension_from_map(nil), do: nil

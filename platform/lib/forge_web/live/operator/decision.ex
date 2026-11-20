@@ -381,10 +381,18 @@ defmodule ForgeWeb.Operator.Decision do
     user = socket.assigns.current_scope.user
     pinned = pinned_words(ticket)
 
-    case Operator.decide(ticket, user, decision, params["note"], seen) do
+    case Operator.decide(
+           ticket,
+           user,
+           decision,
+           params["note"],
+           seen,
+           ForgeWeb.Attaching.opts(params)
+         ) do
       {:ok, moved} ->
         socket
         |> decided()
+        |> ForgeWeb.Attaching.sent()
         |> Toast.put(decided_title(decision, pinned), decided_detail(decision, moved))
         |> reload.()
 
@@ -568,6 +576,8 @@ defmodule ForgeWeb.Operator.Decision do
               label="Note"
               hint="Needed to reject. Kept with the decision either way."
             />
+
+            <ForgeWeb.UI.Attach.box id="decision-attach" project={@decision.project.name} />
 
             <.refusal error={@error} />
 

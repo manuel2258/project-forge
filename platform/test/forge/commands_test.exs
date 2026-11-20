@@ -817,16 +817,21 @@ defmodule Forge.CommandsTest do
       # reads from.
       for each <- [job, %Job{kind: :command}, %Job{kind: :chat}] do
         assert Jobs.protocol_needs(each)[:usage] == 11
-        assert Jobs.protocol(each) == 11
+        # An agent job and a conversation also need 13, which hands them the files people attached
+        # (`docs/design/worker-channel.md` § Protocol 13); a command is given none.
+        assert Jobs.protocol(each) == if(each.kind == :command, do: 11, else: 13)
       end
 
       old = Workers.get!(FakeWorker.connect(protocol: 2, project: context.project).id)
-      new = Workers.get!(FakeWorker.connect(protocol: 11, project: context.project).id)
+      new = Workers.get!(FakeWorker.connect(protocol: 13, project: context.project).id)
+      before_files = Workers.get!(FakeWorker.connect(protocol: 12, project: context.project).id)
       agent = %{kind: :workflow, memory: 1, cores: 1, project_id: context.project.id}
       agent = Map.put(agent, :protocol, Jobs.protocol(job))
 
       refute Workers.fits?(old, agent)
+      refute Workers.fits?(before_files, agent)
       assert Workers.fits?(new, agent)
+      assert Workers.fits?(before_files, %{agent | kind: :command, protocol: 11})
       refute Workers.fits?(old, %{agent | kind: :command, protocol: 11})
       assert Workers.fits?(new, %{agent | kind: :command, protocol: 11})
     end

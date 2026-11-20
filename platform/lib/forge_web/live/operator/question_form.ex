@@ -61,6 +61,11 @@ defmodule ForgeWeb.Operator.QuestionForm do
   attr :forms, :map, required: true, doc: "the page's `:forms` assign"
   attr :submit, :string, required: true
   attr :hidden, :list, default: [], doc: "`{name, value}` pairs sent with the form"
+
+  attr :project, :string,
+    default: nil,
+    doc: "the project's name: with it the card draws a box to attach files to the answers"
+
   attr :refusal, :map, default: nil, doc: "the page's `:refusal`: a Send refused is drawn here"
 
   attr :any_refusal, :boolean,
@@ -137,6 +142,8 @@ defmodule ForgeWeb.Operator.QuestionForm do
           />
         </div>
       </div>
+
+      <ForgeWeb.UI.Attach.box :if={@project} id={"attach-#{@id}"} project={@project} />
 
       <div class="qcard-foot">
         <Actions.refused
@@ -427,13 +434,20 @@ defmodule ForgeWeb.Operator.QuestionForm do
     ticket = Actions.row!(ticket_id, &Tickets.get!/1, Forge.Tickets.Ticket)
     answers = sent(params)
 
-    case Operator.answer_all(ticket, Actions.user(socket), params["version"], answers) do
+    case Operator.answer_all(
+           ticket,
+           Actions.user(socket),
+           params["version"],
+           answers,
+           ForgeWeb.Attaching.opts(params)
+         ) do
       {:ok, _ticket} ->
         count = map_size(answers)
 
         {:handled,
          socket
          |> forget(id)
+         |> ForgeWeb.Attaching.sent()
          |> put_flash(:info, "Sent #{count} #{if count == 1, do: "answer", else: "answers"}")}
 
       {:error, reason} ->
@@ -446,8 +460,14 @@ defmodule ForgeWeb.Operator.QuestionForm do
 
     # Forgetting here is housekeeping, an equivalent mutant: once the answer is sent the last
     # thing said is the person's, so no form is drawn for that reply again.
-    case Operator.answer_chat(chat, Actions.user(socket), params["reply"], sent(params)) do
-      {:ok, _event} -> {:handled, forget(socket, id)}
+    case Operator.answer_chat(
+           chat,
+           Actions.user(socket),
+           params["reply"],
+           sent(params),
+           ForgeWeb.Attaching.opts(params)
+         ) do
+      {:ok, _event} -> {:handled, socket |> forget(id) |> ForgeWeb.Attaching.sent()}
       {:error, reason} -> {:handled, refused(socket, id, reason)}
     end
   end

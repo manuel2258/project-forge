@@ -97,6 +97,14 @@ defmodule ForgeWorker.RecordingMount do
     end
   end
 
+  # The attached files' folder is `ForgeWorker.RecordingBind`'s, by a setting of its own; these
+  # are here only because the behaviour has them.
+  @impl true
+  def bind_ro(source, dir), do: None.bind_ro(source, dir)
+
+  @impl true
+  def refresh(source, dir), do: None.refresh(source, dir)
+
   @doc "Sends `message` to the test that watches the root `dir` is under, if any."
   def tell(dir, message) do
     case lookup(dir) do

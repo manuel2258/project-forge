@@ -4,6 +4,11 @@
 ForgeWorker.RecordingMount.start()
 Application.put_env(:forge_worker, :archive_mount, ForgeWorker.RecordingMount)
 
+# The attached files' folder is chosen by a setting of its own, and routed the same way
+# (`ForgeWorker.RecordingBind`).
+ForgeWorker.RecordingBind.start()
+Application.put_env(:forge_worker, :attachments_mount, ForgeWorker.RecordingBind)
+
 # `:root` tests make and remove Unix users, so they run only when asked for, as root:
 # `mix test --include root` (`ForgeWorker.JobUserTest`).
 #

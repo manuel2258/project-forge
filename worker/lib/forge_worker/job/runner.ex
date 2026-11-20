@@ -153,6 +153,16 @@ defmodule ForgeWorker.Job.Runner do
     resume? = Keyword.get(harness_opts, :resume_session) != nil
     fork? = Keyword.get(harness_opts, :fork_session, false)
 
+    # The files people attached, downloaded before anything is written for the agent to read, so
+    # that what the manifest names is in the folder: a file that would not download is told to
+    # the agent as not received (`docs/design/attachments.md` § The folder).
+    spec =
+      ForgeWorker.Attachments.prepare(
+        Keyword.fetch!(opts, :root),
+        spec,
+        Keyword.get(opts, :attachments)
+      )
+
     job_dir =
       Dir.prepare(Keyword.fetch!(opts, :root), spec,
         resume: resume? and not fork? and spec.kind != :chat,
@@ -316,19 +326,38 @@ defmodule ForgeWorker.Job.Runner do
         {executable, args} = slice.wrap(executable, args, context)
 
         {:noreply,
-         with_archive(state, opts, fn ->
-           spawn_harness(
-             state,
-             opts,
-             Keyword.get(opts, :harness_opts, []),
-             executable,
-             args,
-             plain
-           )
+         with_attachments(state, opts, fn ->
+           with_archive(state, opts, fn ->
+             spawn_harness(
+               state,
+               opts,
+               Keyword.get(opts, :harness_opts, []),
+               executable,
+               args,
+               plain
+             )
+           end)
          end)}
 
       {:error, reason} ->
         {:noreply, conclude_without_starting(state, reason)}
+    end
+  end
+
+  # The files people attached, shown read-only at `$FORGE_JOB/attachments/`, in the same place and
+  # for the same reasons as the archive: after the slice has handed the directory to the job's user
+  # (a recursive `chown` would walk a mount), and before the process that reads it. A run given no
+  # `:attachments` — a command, a platform before them — has no folder.
+  defp with_attachments(state, opts, start) do
+    case Keyword.get(opts, :attachments) do
+      nil ->
+        start.()
+
+      _entries ->
+        case ForgeWorker.Attachments.start(state.job_dir) do
+          :ok -> start.()
+          {:error, reason} -> conclude_without_starting(state, reason)
+        end
     end
   end
 

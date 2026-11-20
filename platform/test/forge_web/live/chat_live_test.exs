@@ -797,6 +797,18 @@ defmodule ForgeWeb.ChatLiveTest do
     refute render(view) =~ "Reopen"
   end
 
+  # The agent had said something and no turn ended it before the machine went.
+  test "a reply cut off mid-turn by a lost machine says it was lost", %{conn: conn, chat: chat} do
+    text(chat, "Let me look at the")
+    {:ok, _chat} = Conversations.ended(chat, nil, "worker_lost")
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+    assert view |> element("#chat-lost") |> render() =~ "The reply was lost with its machine"
+    refute has_element?(view, "#top-bar .ui-top-title > .ui-top-sub", "waiting on you")
+    assert has_element?(view, "#draft")
+  end
+
   test "a reply that came is not lost when the machine goes", %{conn: conn, chat: chat} do
     text(chat, "Here it is.")
     turn(chat, 1)

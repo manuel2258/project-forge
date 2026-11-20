@@ -78,7 +78,7 @@
   .queue-tally { font-family: var(--font-mono); font-size: 12.5px; opacity: .7; }
   .queue-left { display: flex; flex-direction: column; border-top: 1px solid var(--border-soft); }
 
-  /* The whole queue: rows, decided ones dimmed with ✓, then the two quiet groups. */
+  /* The whole queue: rows, decided ones dimmed with ✓, then the three quiet groups. */
   .queue-list { display: flex; flex-direction: column; gap: 18px; }
   .queue-list-head { display: flex; align-items: baseline; gap: 10px; }
   .queue-list-title { font-size: 15px; font-weight: 600; }
@@ -103,7 +103,7 @@
   .frame-columns:has(.queue-page) > .frame-list,
   .frame-columns:has(.queue-page) > .frame-aside { display: none; }
 
-  /* The two quiet groups are drawn twice (QueueLive): in the list column, and after the end of the
+  /* The three quiet groups are drawn twice (QueueLive): in the list column, and after the end of the
      pass in the item's column, where 13d draws them. Below 1440px only the end's is shown — on a
      phone and on a portrait desktop alike — and from 1440px only the list column's. The end's
      is not drawn at all while an item is on screen. */

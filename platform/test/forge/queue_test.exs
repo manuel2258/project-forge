@@ -606,14 +606,15 @@ defmodule Forge.QueueTest do
       job_fixture(%{ticket: held})
       refute open?(context.user, held)
 
-      # Once it has started, a question on it is an item as on any ticket, and still not here.
+      # Once it has started, a question on it is not an item either (`Queue.held/1` lists it),
+      # and still not here.
       asked = ticket_fixture(%{project: context.project})
       job = job_fixture(%{ticket: asked})
       Repo.update!(Ecto.Changeset.change(job, started_at: DateTime.utc_now(:second)))
       ask(asked, job, [blocking("backend")])
       Repo.update!(Ecto.Changeset.change(asked, held_at: DateTime.utc_now(:second)))
 
-      assert [%{kind: :question}] = of(asked)
+      assert [] = of(asked)
       refute open?(context.user, asked)
     end
 
@@ -675,6 +676,253 @@ defmodule Forge.QueueTest do
     assert [%{id: id}] = Queue.open_tickets(user, Queue.items(user))
     assert id == ticket.id
     assert Queue.items(user) == []
+  end
+
+  # A ticket on hold: its decisions are no items, are counted nowhere and are listed in `held/1`
+  # (`docs/design/ui.md` § What the queue counts). Each case is a guard of its own — the split in
+  # `build/1`, the assumption that stays, the step conversation's two queries, `for_chat/1`, and
+  # the filter and scoping in `held/1`.
+  describe "a ticket on hold" do
+    setup do
+      project = project_fixture()
+      %{project: project, user: member_fixture(project)}
+    end
+
+    defp started!(ticket) do
+      job = job_fixture(%{ticket: ticket})
+      Repo.update!(Ecto.Changeset.change(job, started_at: DateTime.utc_now(:second)))
+      job
+    end
+
+    defp hold!(ticket),
+      do: Repo.update!(Ecto.Changeset.change(ticket, held_at: DateTime.utc_now(:second)))
+
+    defp release!(ticket), do: Repo.update!(Ecto.Changeset.change(ticket, held_at: nil))
+
+    defp held_kinds(user),
+      do: Enum.map(Queue.held(user), fn {t, items} -> {t.id, Enum.map(items, & &1.kind)} end)
+
+    test "its blocking question is in held/1 and in no item, count or summary", context do
+      ticket = ticket_fixture(%{project: context.project})
+      ask(ticket, started!(ticket), [blocking("backend")])
+      assert Queue.count(context.user) == 1
+
+      hold!(ticket)
+
+      assert Queue.items(context.user) == []
+      assert Queue.items() |> Enum.filter(&(&1.ticket && &1.ticket.id == ticket.id)) == []
+      assert Queue.count(context.user) == 0
+
+      assert [%{waiting: 0, first_waiting: nil}] =
+               context.user
+               |> Forge.Projects.summaries()
+               |> Enum.filter(&(&1.project.id == context.project.id))
+
+      assert held_kinds(context.user) == [{ticket.id, [:question]}]
+      assert Forge.CLI.queue() == "queue is empty"
+    end
+
+    test "released, its decisions are items again, oldest first by when each started", context do
+      older = ticket_fixture(%{project: context.project})
+      newer = ticket_fixture(%{project: context.project})
+      first = ask(older, started!(older), [blocking("backend")])
+      second = ask(newer, started!(newer), [blocking("format")])
+      aged(first, 7200)
+      aged(second, 60)
+      newer = hold!(newer)
+      older = hold!(older)
+
+      assert Queue.items(context.user) == []
+
+      release!(newer)
+      release!(older)
+
+      assert Queue.items(context.user) |> Enum.map(& &1.question.key) == ["backend", "format"]
+      assert Queue.count(context.user) == 2
+      assert Queue.held(context.user) == []
+    end
+
+    test "an approval, a stuck flag and a rest in a human state are not items", context do
+      approving = ticket_fixture(%{project: context.project})
+      stuck = ticket_fixture(%{project: context.project})
+      resting = ticket_fixture(%{project: context.project})
+      for ticket <- [approving, stuck, resting], do: started!(ticket)
+
+      approving
+      |> Ecto.Changeset.change(
+        pending_transition: %{"from" => approving.state, "to" => "planning", "approve" => []}
+      )
+      |> Repo.update!()
+
+      {:ok, _} = Forge.Engine.stick(stuck, "it ran out", :placement)
+
+      resting
+      |> Ecto.Changeset.change(state: "review_ready", status: :active)
+      |> Repo.update!()
+
+      assert [:approval, :review, :stuck] ==
+               context.user |> Queue.items() |> Enum.map(& &1.kind) |> Enum.sort()
+
+      for ticket <- [approving, stuck, resting],
+          do: hold!(Repo.get!(Forge.Tickets.Ticket, ticket.id))
+
+      assert Queue.items(context.user) == []
+      assert Queue.count(context.user) == 0
+
+      assert context.user |> held_kinds() |> Map.new() ==
+               %{approving.id => [:approval], stuck.id => [:stuck], resting.id => [:review]}
+
+      # Held, none is a row of Open tickets either.
+      assert Queue.open_tickets(context.user, []) == []
+    end
+
+    test "an assumption stays where it was, and leaves nothing to list", context do
+      ticket = ticket_fixture(%{project: context.project})
+      ask(ticket, started!(ticket), [blocking("backend"), non_blocking("naming")])
+      hold!(ticket)
+
+      assert [%{kind: :assumption}] = Queue.items(context.user)
+      assert Queue.count(context.user) == 0
+      assert held_kinds(context.user) == [{ticket.id, [:question]}]
+
+      # With only the assumption, nothing waits and the ticket is in no group.
+      only = ticket_fixture(%{project: context.project})
+      ask(only, started!(only), [non_blocking("format")])
+      hold!(only)
+
+      refute only.id in Enum.map(Queue.held(context.user), fn {t, _} -> t.id end)
+    end
+
+    test "a held ticket with nothing waiting, or never started, is in no group", context do
+      parked = hold!(ticket_fixture(%{project: context.project}))
+      job_fixture(%{ticket: parked})
+      never = ticket_fixture(%{project: context.project})
+      ask(never, job_fixture(%{ticket: never}), [blocking("backend")])
+      hold!(never)
+
+      assert Queue.held(context.user) == []
+      assert Queue.items(context.user) == []
+    end
+
+    test "its step conversation is no item, in either of the queue's two reads", context do
+      live = ticket_fixture(%{project: context.project})
+      released = ticket_fixture(%{project: context.project})
+
+      worker = elem(Forge.Workers.create(%{provider: "fake"}), 1)
+
+      live_chat =
+        chat_fixture(%{
+          ticket_id: live.id,
+          state: live.state,
+          project: context.project,
+          worker_id: worker.id,
+          status: :running
+        })
+
+      released_chat =
+        chat_fixture(%{
+          ticket_id: released.id,
+          state: released.state,
+          project: context.project,
+          status: :hibernated
+        })
+
+      for chat <- [live_chat, released_chat], do: said_and_turned(chat)
+
+      # The second holds no machine: released by the idle timeout, it is read by the queue's other
+      # query, the step conversations of the tickets that are in the step.
+      {:ok, released_chat} =
+        Forge.Conversations.ended(Repo.get!(Forge.Jobs.Job, released_chat.id), nil, "idle")
+
+      refute Forge.Conversations.live?(released_chat)
+      assert [:chat, :chat] = context.user |> Queue.items() |> Enum.map(& &1.kind)
+
+      hold!(live)
+      hold!(released)
+
+      assert Queue.items(context.user) == []
+      assert Queue.for_chat(Repo.get!(Forge.Jobs.Job, live_chat.id)) == []
+      assert Queue.for_chat(Repo.get!(Forge.Jobs.Job, released_chat.id)) == []
+
+      assert context.user |> held_kinds() |> Map.new() ==
+               %{live.id => [:chat], released.id => [:chat]}
+    end
+
+    test "an ordinary conversation about it stays an item", context do
+      ticket = ticket_fixture(%{project: context.project})
+      started!(ticket)
+      hold!(ticket)
+
+      chat =
+        chat_fixture(%{
+          ticket_id: ticket.id,
+          project: context.project,
+          worker_id: elem(Forge.Workers.create(%{provider: "fake"}), 1).id,
+          status: :running
+        })
+
+      said_and_turned(chat)
+
+      assert [%{kind: :chat}] = Queue.items(context.user)
+      assert Queue.count(context.user) == 1
+      assert [%{kind: :chat}] = Queue.for_chat(chat)
+      # It is an item, and the ticket has nothing of its own waiting.
+      assert Queue.held(context.user) == []
+    end
+
+    test "held/1 is the viewer's projects, newest change first, with no cap", context do
+      older = ticket_fixture(%{project: context.project})
+      newer = ticket_fixture(%{project: context.project})
+      elsewhere = ticket_fixture()
+
+      for ticket <- [older, newer, elsewhere] do
+        ask(ticket, started!(ticket), [blocking("backend")])
+        hold!(ticket)
+      end
+
+      Repo.update_all(from(t in Forge.Tickets.Ticket, where: t.id == ^older.id),
+        set: [updated_at: DateTime.add(DateTime.utc_now(:second), -3600, :second)]
+      )
+
+      assert [newer.id, older.id] == Enum.map(Queue.held(context.user), fn {t, _} -> t.id end)
+
+      # A node admin sees their own projects' only.
+      admin = Forge.AccountsFixtures.user_fixture(%{node_admin: true})
+      join!(context.project, admin)
+      assert [newer.id, older.id] == Enum.map(Queue.held(admin), fn {t, _} -> t.id end)
+
+      assert Queue.held(member_fixture(Forge.Projects.get!(elsewhere.project_id))) |> length() ==
+               1
+    end
+
+    test "a finished ticket is not listed, and a ticket not on hold has no entry", context do
+      done = ticket_fixture(%{project: context.project})
+      ask(done, started!(done), [blocking("backend")])
+      hold!(done)
+      Repo.update!(Ecto.Changeset.change(done, status: :done))
+
+      open = ticket_fixture(%{project: context.project})
+      ask(open, started!(open), [blocking("format")])
+
+      assert Queue.held(context.user) == []
+      assert Queue.held_items([Repo.get!(Forge.Tickets.Ticket, open.id)]) == %{}
+    end
+
+    defp said_and_turned(chat) do
+      :ok =
+        Jobs.record_harness_event(chat.id, %{type: "job.harness.text", payload: %{text: "well?"}})
+
+      {:ok, _chat} =
+        Forge.Conversations.record_turn(chat, %{
+          "turn" => 1,
+          "harness" => %{
+            "turns" => 1,
+            "usage" => 2_000,
+            "cost_usd" => 0.01,
+            "subtype" => "success"
+          }
+        })
+    end
   end
 
   defp event_types(ticket), do: ticket.id |> Events.for_ticket() |> Enum.map(& &1.type)

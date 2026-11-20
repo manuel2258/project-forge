@@ -473,19 +473,35 @@ defmodule Forge.Conversations do
   end
 
   @doc """
-  Whether a conversation's reply was lost with its machine: it holds none, and the person's
-  message — or nothing at all — is the last word of `messages` (`messages/1`), so no reply came
-  (`docs/design/conversations.md` § Lifetime). The page says so in one quiet line, and a step's
-  is a queue item.
+  Whether a conversation waits on its person: the last thing said is an agent reply whose turn
+  has ended — a `chat.turn` closed it (`turn` is stamped on it) — in `messages` as `said/1`
+  returns them. **The one rule** the queue and the conversation's page ask, and the conversation
+  lists ask the same question of the log without folding it (`decorate/1`)
+  (`docs/design/conversations.md` § In the queue): words the agent says mid-turn, before the
+  command it is running or the next sentence, are the conversation working and not waiting.
+  """
+  @spec waiting?([message()]) :: boolean()
+  def waiting?(messages) do
+    case List.last(messages) do
+      %{role: :assistant, turn: turn} -> turn != nil
+      _other -> false
+    end
+  end
 
-  One whose last word is the agent's is not lost: its machine was merely released. **It does not
-  ask whether a person ended it**, because both callers — the page and the queue — have asked
+  @doc """
+  Whether a conversation's reply was lost with its machine: it holds none, and it is not waiting
+  on its person (`waiting?/1`) — the person's message, or nothing at all, is the last word of
+  `messages` (`messages/1`), or the agent's reply was cut off before its turn ended — so no
+  reply came (`docs/design/conversations.md` § Lifetime). The page says so in one quiet line,
+  and a step's is a queue item.
+
+  One whose last word is a finished reply is not lost: its machine was merely released. **It does
+  not ask whether a person ended it**, because both callers — the page and the queue — have asked
   `sendable/2` first, and a conversation that cannot be sent to has no reply to lose; asking here
   as well was a query on every streamed block of the page.
   """
   @spec lost?(Job.t(), [message()]) :: boolean()
-  def lost?(%Job{} = chat, messages),
-    do: not live?(chat) and (messages == [] or List.last(messages).role == :user)
+  def lost?(%Job{} = chat, messages), do: not live?(chat) and not waiting?(messages)
 
   @doc """
   Whether a message may be sent to this conversation: `:ok`, or why not — `{:error, :step_over}`
@@ -2257,20 +2273,20 @@ defmodule Forge.Conversations do
     projects = by_id(Projects.Project, Enum.map(chats, & &1.project_id))
     tickets = by_id(Tickets.Ticket, Enum.reject(Enum.map(chats, & &1.ticket_id), &is_nil/1))
     said = last_said(Enum.map(chats, & &1.id))
+    turns = last_turn(Enum.map(chats, & &1.id))
     first = first_said(Enum.map(chats, & &1.id))
     ended = ended_ids(Enum.map(chats, & &1.id))
 
     chats
     |> Enum.map(fn chat ->
-      {last, at} = said[chat.id] || {nil, chat.inserted_at}
+      {last, at, seq} = said[chat.id] || {nil, chat.inserted_at, 0}
 
       %{
         chat: chat,
         project: projects[chat.project_id],
         ticket: tickets[chat.ticket_id],
         live: live?(chat),
-        # Waiting on a person is the agent having spoken last, which is what the queue reads too.
-        waiting: live?(chat) and match?({:agent, _text}, last),
+        waiting: live?(chat) and turn_ended?(last, turns[chat.id], seq),
         # Told from the events, not the status (`ended?/1`), in the one query above. A list draws
         # *End* on a live row that is not a step's, and *ended* on one a person ended.
         ended: chat.id in ended,
@@ -2299,6 +2315,12 @@ defmodule Forge.Conversations do
     end)
   end
 
+  # Waiting on a person is the agent having spoken last and its turn having ended, which is what
+  # the queue reads too (`waiting?/1`): a `chat.turn` after the last words, in the log and not in a
+  # folded transcript, because a list folds none.
+  defp turn_ended?({:agent, _text}, turn_seq, last_seq), do: (turn_seq || 0) > last_seq
+  defp turn_ended?(_last, _turn_seq, _last_seq), do: false
+
   defp by_id(_schema, []), do: %{}
 
   defp by_id(schema, ids),
@@ -2315,9 +2337,23 @@ defmodule Forge.Conversations do
         where: fragment("(? ->> 'parent_tool_use_id') IS NULL", e.payload),
         distinct: e.job_id,
         order_by: [asc: e.job_id, desc: e.seq],
-        select: {e.job_id, e.type, e.payload, e.inserted_at}
+        select: {e.job_id, e.type, e.payload, e.inserted_at, e.seq}
     )
-    |> Map.new(fn {id, type, payload, at} -> {id, {{role(type), payload["text"] || ""}, at}} end)
+    |> Map.new(fn {id, type, payload, at, seq} ->
+      {id, {{role(type), payload["text"] || ""}, at, seq}}
+    end)
+  end
+
+  # The newest `chat.turn` of each conversation, as its sequence: the same DISTINCT ON.
+  defp last_turn(job_ids) do
+    Repo.all(
+      from e in Event,
+        where: e.job_id in ^job_ids and e.type == "chat.turn",
+        distinct: e.job_id,
+        order_by: [asc: e.job_id, desc: e.seq],
+        select: {e.job_id, e.seq}
+    )
+    |> Map.new()
   end
 
   # The first thing a person said in each conversation, in one query: the same DISTINCT ON as

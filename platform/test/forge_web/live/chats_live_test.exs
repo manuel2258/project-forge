@@ -42,6 +42,16 @@ defmodule ForgeWeb.ChatsLiveTest do
       :ok =
         Jobs.record_harness_event(chat.id, %{type: "job.harness.text", payload: %{text: text}})
 
+  # The agent's turn ending, which is when what it said is waiting on its person
+  # (`Conversations.waiting?/1`).
+  defp turn_ended(chat) do
+    {:ok, _chat} =
+      Conversations.record_turn(chat, %{
+        "turn" => System.unique_integer([:positive]),
+        "harness" => %{"turns" => 1, "usage" => 2_000, "cost_usd" => 0.01, "subtype" => "success"}
+      })
+  end
+
   # A message at a chosen time: events are append-only, so one is inserted with it, later in the
   # log than any before, which is what the list reads as the last thing said.
   defp said_at(chat, text, at) do
@@ -139,6 +149,11 @@ defmodule ForgeWeb.ChatsLiveTest do
     {:ok, theirs} = Conversations.open(project("engine", user), "and this one?")
     agent_said(theirs, "It is a workflow engine.")
 
+    # Still speaking, its turn not over: working, not waiting.
+    {:ok, view, _html} = live(conn, ~p"/chats")
+    refute view |> element(row(theirs)) |> render() =~ "waiting on you"
+
+    turn_ended(theirs)
     {:ok, view, _html} = live(conn, ~p"/chats")
 
     assert view |> element(row(theirs)) |> render() =~ "waiting on you"

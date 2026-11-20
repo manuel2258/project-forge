@@ -394,6 +394,12 @@ defmodule Forge.Look.Setups.Project do
   defp chats!(project) do
     {:ok, ci} = Conversations.open(project, "Why is the build so slow on CI?")
     said!(ci, "The asset step rebuilds every texture because the cache key includes the commit.")
+    # Its turn ended: only then is it waiting on you (`Conversations.waiting?/1`).
+    {:ok, _ci} =
+      Conversations.record_turn(ci, %{
+        "turn" => 1,
+        "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"}
+      })
 
     {:ok, coop} = Conversations.open(project, "Ideas for a two-player mode")
     {:ok, _ended} = Conversations.ended(coop, nil, "closed")

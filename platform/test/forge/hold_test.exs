@@ -709,7 +709,9 @@ defmodule Forge.HoldTest do
       refute_receive {:push, _endpoint, _payload, _opts}, 200
     end
 
-    test "a decision waiting on a held ticket that has started reaches the queue", %{
+    # Ticket 63: the person parked it, so its decisions are neither items nor counted nor pushed;
+    # they are listed in *On hold* (`Queue.held/1`), and made on the ticket's own page.
+    test "a decision waiting on a held ticket that has started is no item and is listed", %{
       project: project,
       user: user,
       worker: worker
@@ -719,12 +721,51 @@ defmodule Forge.HoldTest do
       assignment = FakeWorker.assign(job, worker)
       {:ok, _} = FakeWorker.finish(assignment, "success", doc: "refinement.md")
       assert Tickets.started?(Tickets.get!(ticket.id))
+      assert Forge.Queue.count(user) == 1
 
       {:ok, held} = Operator.hold(Tickets.get!(ticket.id), user)
       assert held.pending_transition
 
+      # Still what the ticket waits on, read for the page and the push watch; but no item.
       assert [%{kind: :approval}] = Forge.Queue.for_ticket(held)
-      assert Enum.any?(Forge.Queue.items(user), &(&1.ticket && &1.ticket.id == ticket.id))
+      refute Enum.any?(Forge.Queue.items(user), &(&1.ticket && &1.ticket.id == ticket.id))
+      assert Forge.Queue.items() |> Enum.filter(&(&1.ticket && &1.ticket.id == ticket.id)) == []
+      assert Forge.Queue.count(user) == 0
+      assert Forge.CLI.queue() == "queue is empty"
+
+      summary =
+        Forge.Projects.summaries(user) |> Enum.find(&(&1.project.id == project.id))
+
+      assert %{waiting: 0, first_waiting: nil} = summary
+
+      assert [{%{id: id}, [%{kind: :approval}]}] = Forge.Queue.held(user)
+      assert id == ticket.id
+
+      # Released, it is an item again at once.
+      {:ok, _} = Operator.release(Tickets.get!(ticket.id), user)
+      assert [%{kind: :approval}] = Forge.Queue.items(user)
+      assert Forge.Queue.count(user) == 1
+      assert Forge.Queue.held(user) == []
+    end
+
+    # The decision arose *while* the ticket was held: a run it started before the hold finishing
+    # into a human state.
+    test "a decision that arises while held is out of the queue too", %{
+      project: project,
+      user: user,
+      worker: worker
+    } do
+      ticket = admit!(project, user)
+      [job] = pending(ticket)
+      assignment = FakeWorker.assign(job, worker)
+
+      {:ok, _} = Operator.hold(Tickets.get!(ticket.id), user)
+      {:ok, _} = FakeWorker.finish(assignment, "success", doc: "refinement.md")
+
+      assert Tickets.get!(ticket.id).pending_transition
+      assert Forge.Queue.items(user) == []
+      assert Forge.Queue.count(user) == 0
+      assert [{_ticket, [%{kind: :approval}]}] = Forge.Queue.held(user)
     end
 
     test "a held ticket never started, moved by hand to where a person decides, asks nothing", %{

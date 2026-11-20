@@ -17,7 +17,7 @@ defmodule ForgeWeb.ProjectTickets do
 
   alias Forge.Queue
   alias Forge.Tickets.Ticket
-  alias ForgeWeb.{Format, Indicators, Topology}
+  alias ForgeWeb.{Format, Indicators, QueueItems, Topology}
 
   @typedoc "Everything a row draws."
   @type row :: %{
@@ -43,10 +43,13 @@ defmodule ForgeWeb.ProjectTickets do
   @doc """
   One row per open ticket, ordered: the tickets waiting on you, then the rest, each by last change,
   newest first. `facts` holds `:items` (the project's queue items), `:live`, `:said`, `:places`,
-  `:paused`, `:milestones` (milestone names by id) and `:now`.
+  `:paused`, `:milestones` (milestone names by id), `:held` (what waits on each ticket on hold,
+  by ticket id: `Forge.Queue.held_items/1`) and `:now`.
 
-  **A ticket on hold is drawn quietly, below the rest**, unless something on it waits on a person:
-  then it is with what waits on you, where the decision is (`docs/design/ui.md` § Tickets).
+  **A ticket on hold is drawn quietly, below the rest**, whatever waits on it: its decisions are
+  not items (`docs/design/ui.md` § Tickets), so none is amber and none is under *Waiting*, and its
+  latest line says what waits, in the queue's kicker words (`ForgeWeb.QueueItems.waits/1`). Only an
+  ordinary conversation about it is an item, and that one marks it waiting.
   """
   @spec rows([Ticket.t()], map()) :: [row()]
   def rows(tickets, facts) do
@@ -71,7 +74,7 @@ defmodule ForgeWeb.ProjectTickets do
     live = facts.live[ticket.id]
     {doing, doing_tone, tone} = doing(ticket, items, live, facts)
     running = is_nil(facts.places[ticket.id]) and match?(%{status: :running}, live)
-    {latest, decision} = latest(items, facts.said[ticket.id])
+    {latest, decision} = latest(items, facts.said[ticket.id], facts[:held][ticket.id])
 
     %{
       ticket: ticket,
@@ -112,19 +115,22 @@ defmodule ForgeWeb.ProjectTickets do
   defp usage_high?(_ticket, _workflow), do: false
 
   # What the ticket is doing, its colour, and the tone the map's dot takes.
+
+  # On hold, with nothing waiting on a person: neither amber nor info, because nothing is waiting
+  # and nothing is moving. A held ticket's decision is not an item, whether it is stuck or resting
+  # in a human state, so this comes before *stuck*. A run it started before the hold is still
+  # finishing, and says so.
+  defp doing(%Ticket{held_at: held_at}, [], live, _facts) when held_at != nil do
+    finishing = if match?(%{status: :running}, live), do: " · its run is finishing", else: ""
+    {"on hold" <> finishing, nil, :held}
+  end
+
   defp doing(%Ticket{status: :stuck} = ticket, _items, _live, facts),
     do: {"stuck #{Format.lasted(ticket.updated_at, facts.now)}", "accent", :stuck}
 
   defp doing(_ticket, [first | _] = items, _live, facts) do
     since = items |> Enum.map(& &1.since) |> Enum.min(DateTime, fn -> first.since end)
     {"waiting #{Format.lasted(since, facts.now)}", "accent", :waiting}
-  end
-
-  # On hold, with nothing waiting on a person: neither amber nor info, because nothing is waiting
-  # and nothing is moving. A run it started before the hold is still finishing, and says so.
-  defp doing(%Ticket{held_at: held_at}, [], live, _facts) when held_at != nil do
-    finishing = if match?(%{status: :running}, live), do: " · its run is finishing", else: ""
-    {"on hold" <> finishing, nil, :held}
   end
 
   defp doing(ticket, [], live, facts) do
@@ -157,10 +163,12 @@ defmodule ForgeWeb.ProjectTickets do
 
   defp attempt(_job), do: ""
 
-  # The decision a waiting ticket needs, at full strength; else the agent's last line.
-  defp latest([item | _] = items, _said), do: {decision(item, items), true}
-  defp latest([], {text, _at}) when text != "", do: {"agent · " <> text, false}
-  defp latest([], _said), do: {nil, false}
+  # The decision a waiting ticket needs, at full strength; else, for a ticket on hold, what waits
+  # on it, quietly; else the agent's last line.
+  defp latest([item | _] = items, _said, _held), do: {decision(item, items), true}
+  defp latest([], _said, [_ | _] = held), do: {QueueItems.waits(held), false}
+  defp latest([], {text, _at}, _held) when text != "", do: {"agent · " <> text, false}
+  defp latest([], _said, _held), do: {nil, false}
 
   defp decision(%{kind: :approval, detail: detail}, _items) do
     names = Enum.join(detail["approve"] || [], ", ")

@@ -368,6 +368,169 @@ defmodule Forge.PushTest do
       assert body =~ "to done"
     end
 
+    # A ticket on hold pushes nothing, and neither does its release (`Push.Watch` @moduledoc): the
+    # person releasing it knows. Started, so that its decisions are read at all.
+    defp started!(ticket) do
+      job = job_fixture(%{ticket: ticket})
+      Repo.update!(Ecto.Changeset.change(job, started_at: DateTime.utc_now(:second)))
+    end
+
+    defp hold!(ticket),
+      do: Repo.update!(Ecto.Changeset.change(ticket, held_at: DateTime.utc_now(:second)))
+
+    defp release!(ticket), do: Repo.update!(Ecto.Changeset.change(ticket, held_at: nil))
+
+    test "a decision that arises while held is not pushed, nor at the release", %{ticket: ticket} do
+      started!(ticket)
+      seen = Push.Watch.changed(%{}, ticket.id)
+
+      hold!(ticket)
+      seen = Push.Watch.changed(seen, ticket.id)
+      stuck!(Forge.Tickets.get!(ticket.id))
+      seen = Push.Watch.changed(seen, ticket.id)
+      Push.flush()
+      refute_receive {:push, _endpoint, _payload, _opts}
+
+      release!(Forge.Tickets.get!(ticket.id))
+      seen = Push.Watch.changed(seen, ticket.id)
+      Push.flush()
+      refute_receive {:push, _endpoint, _payload, _opts}
+
+      # Seen, so another read of the same wait is quiet too; and it is not forgotten: a ticket
+      # that stops waiting and starts again after the release is pushed.
+      seen = Push.Watch.changed(seen, ticket.id)
+
+      {:ok, active} =
+        Repo.update(Ecto.Changeset.change(Forge.Tickets.get!(ticket.id), status: :active))
+
+      seen = Push.Watch.changed(seen, ticket.id)
+      stuck!(active)
+      _seen = Push.Watch.changed(seen, ticket.id)
+      Push.flush()
+      assert_receive {:push, _endpoint, %{"title" => "Stuck: " <> _}, _opts}
+    end
+
+    # The release that itself takes the ticket into a human state — a transition the hold deferred —
+    # arrives at one read as the release and the wait together: only the mark `:held` in what was
+    # seen says that this read is the first after the hold, and the wait it finds is not news.
+    test "a release that is itself the start of a wait pushes nothing", %{ticket: ticket} do
+      started!(ticket)
+      hold!(ticket)
+      seen = Push.Watch.changed(%{}, ticket.id)
+
+      released = release!(Forge.Tickets.get!(ticket.id))
+      stuck!(released)
+      seen = Push.Watch.changed(seen, ticket.id)
+      Push.flush()
+      refute_receive {:push, _endpoint, _payload, _opts}
+
+      # Seen from then on: another read of the same wait is quiet, and the mark is gone.
+      assert seen[ticket.id] == MapSet.new([{:stuck, ticket.state}])
+    end
+
+    # The hold and a wait reach the watch in one read, with nothing seen before: no `:held` mark has
+    # been planted yet, so only the ticket being held now says this is not news.
+    test "a ticket already held when first read pushes nothing", %{ticket: ticket} do
+      started!(ticket)
+      stuck!(ticket)
+      hold!(Forge.Tickets.get!(ticket.id))
+
+      _seen = Push.Watch.changed(%{}, ticket.id)
+      Push.flush()
+      refute_receive {:push, _endpoint, _payload, _opts}
+    end
+
+    # A restart while it is held seeds it marked, even with nothing waiting: the first read after
+    # is the release, and brings a wait the seed did not see.
+    test "a watch seeded while a ticket is held takes a wait that comes with the release as seen",
+         %{ticket: ticket} do
+      started!(ticket)
+      hold!(ticket)
+
+      start_supervised!(Push.Watch)
+      Push.Watch.sync()
+
+      released = release!(Forge.Tickets.get!(ticket.id))
+      stuck!(released)
+      Forge.Events.notify(ticket.id)
+      Push.Watch.sync()
+      Push.flush()
+
+      refute_receive {:push, _endpoint, _payload, _opts}
+    end
+
+    # Closed while held, it has nothing to release: its entry is dropped like any ticket's with
+    # nothing waiting, and not kept for the length of the node's life.
+    test "a ticket cancelled while held is not kept in what is seen", %{ticket: ticket} do
+      started!(ticket)
+      hold!(ticket)
+      seen = Push.Watch.changed(%{}, ticket.id)
+      assert Map.has_key?(seen, ticket.id)
+
+      Repo.update!(Ecto.Changeset.change(Forge.Tickets.get!(ticket.id), status: :cancelled))
+
+      refute Map.has_key?(Push.Watch.changed(seen, ticket.id), ticket.id)
+    end
+
+    test "something that starts waiting after the release pushes as usual", %{ticket: ticket} do
+      started!(ticket)
+      hold!(ticket)
+      seen = Push.Watch.changed(%{}, ticket.id)
+      assert seen[ticket.id] == MapSet.new([:held])
+
+      release!(Forge.Tickets.get!(ticket.id))
+      seen = Push.Watch.changed(seen, ticket.id)
+      refute Map.has_key?(seen, ticket.id)
+
+      stuck!(Forge.Tickets.get!(ticket.id))
+      _seen = Push.Watch.changed(seen, ticket.id)
+      Push.flush()
+      assert_receive {:push, _endpoint, %{"title" => "Stuck: " <> _}, _opts}
+    end
+
+    test "a watch started while a ticket is held does not push it at the release", %{
+      ticket: ticket
+    } do
+      started!(ticket)
+      stuck!(ticket)
+      hold!(Forge.Tickets.get!(ticket.id))
+
+      start_supervised!(Push.Watch)
+      Push.Watch.sync()
+
+      release!(Forge.Tickets.get!(ticket.id))
+      Forge.Events.notify(ticket.id)
+      Push.Watch.sync()
+      Push.flush()
+
+      refute_receive {:push, _endpoint, _payload, _opts}
+    end
+
+    test "a reply of a held step conversation pushes nothing", %{ticket: ticket} do
+      chat = chat_fixture(%{ticket_id: ticket.id, state: ticket.state, ticket: ticket})
+      hold!(ticket)
+
+      :ok =
+        Forge.Jobs.record_harness_event(chat.id, %{
+          type: "job.harness.text",
+          payload: %{text: "well?"}
+        })
+
+      {:ok, _chat} =
+        Forge.Conversations.record_turn(chat, %{
+          "turn" => 1,
+          "harness" => %{
+            "turns" => 1,
+            "usage" => 2_000,
+            "cost_usd" => 0.01,
+            "subtype" => "success"
+          }
+        })
+
+      Push.flush()
+      refute_receive {:push, _endpoint, _payload, _opts}, 300
+    end
+
     # A ticket that cannot be read leaves what is seen as it was, so the next change looks again,
     # rather than the watch crashing and starting over with everything taken as seen.
     test "leaves what is seen alone when a ticket cannot be read" do

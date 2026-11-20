@@ -378,9 +378,9 @@ draws — the queue count, the usage lines, the waiting accounts a node admin's 
 keeps them current: it hears queue changes on a topic tagged with the project, matches the
 project against the viewer's own before reading anything (CLAUDE.md § Rules), and recounts at
 most once a second. A change is announced there only when it can change somebody's queue: a
-ticket's, a conversation's state or a person's message, and of a reply streaming in, only the
-block that makes the conversation wait on its person — not every block after it, which would have
-every open page rebuild its queue for each sentence a chat says. The root template, which is
+ticket's, a conversation's state or a person's message, and of a reply streaming in, only the end of
+its turn, when it starts waiting on its person — no block before it, which would have every open
+page rebuild its queue for each sentence a chat says. The root template, which is
 rendered once per HTTP request and never patched, draws none of it. Sign-in screens are drawn in
 a frame of their own with no usage lines and no
 queue (§ Signing in).
@@ -1047,7 +1047,12 @@ in words if sent. At the end of the pass, the first item to arrive is drawn.
   way merges, the item shows what an approval of a change shows — the changeset's size and files
   and the commit message the merge will write — and its way on is **Read the presentation ›**, or
   **Review the changeset ›** when there is none.
-- **A conversation waiting on its reader** shows its whole last reply, clamped to four lines on a
+- **A conversation waiting on its reader** is one whose agent's turn has ended with the person not
+  having spoken since (`Forge.Conversations.waiting?/1`): words the agent says mid-turn, before the
+  command it runs next, are the conversation working and make no item, count nothing and mark no
+  ticket as waiting — it becomes one when the turn ends, which is when it starts waiting, so its age
+  runs from there. The ticket's page, the project's Tickets list and the conversation's own page
+  ask the same rule. It shows its whole last reply, clamped to four lines on a
   phone with *more* as the agent's passage is — or, when the reply asked questions, the question
   card in its place, since those questions are what the item asks and the reply drawn beside them
   would say them twice; *Open the chat ›* leads to the whole of it. When the conversation is a ticket's step, each document the step
@@ -1104,7 +1109,7 @@ at every width and an option is a 34px row (`2d`).
 
 **The pass ends somewhere definite** (`13d`): what was decided in it, what was left for later with
 a way back to it — each a row as the *All* sheet draws it, which leads back to the item — and then
-the two quiet groups, **Open tickets** and **Not waiting on you**, which count towards nothing. When
+the three quiet groups, **Open tickets**, **Not waiting on you** and **On hold**, which count towards nothing. When
 nothing is left, an eyebrow in `--success`, *End of queue*, and a sentence phrased as completion —
 *Nothing needs you. Work continues without you.* — head it; the same block, alone, is the empty
 queue. **When items were left for later it does not say done**: the eyebrow is neutral, *End of
@@ -1112,16 +1117,24 @@ the pass*, and the sentence counts them, *4 left for later.* Every other empty s
 would fill it rather than announcing absence. **Open tickets** is one list, with no halves and no
 sentence per half: every open ticket of the viewer's projects that is not on hold and has nothing
 waiting on a person, newest change first, each drawn as the project's Tickets list draws an open
-ticket (§ A job waiting for a machine). **Where the two groups are drawn depends on the width**:
+ticket (§ A job waiting for a machine). **On hold** is last, after the other two — the person parked
+these, so they come after running tickets and assumptions — and holds every open ticket of the
+viewer's projects that is on hold **and has at least one decision waiting** (§ What the queue
+counts): a held ticket with nothing waiting, a parked idea, is in no group of the queue. One row per
+ticket, newest change first, with no cap, each the Tickets list's row as *Open tickets* draws it,
+except that its latest line names everything that waits, in the words of the *All* sheet's kicker
+(*approval*, *2 blocking questions*, *review ready*, *stuck*, *conversation*) joined by ` · `. Never
+amber, with no count and no mark; the row leads to the ticket's page, where the decision is made.
+It is `Forge.Queue.held/1`, absent rather than empty. **Where the three groups are drawn depends on the width**:
 below 1440px, on a phone and a portrait desktop (by width alone: a landscape window narrower than 1440px draws these too), they are drawn once, after the end of the pass,
 under its sentence in the item's column, and only when no item is on screen; from 1440px
 (landscape) they stay in the left column under the decisions. The *All* sheet links to each —
-*Open tickets · N*, *Not waiting on you · N*.
+*Open tickets · N*, *Not waiting on you · N* and *On hold · N*, in that order, leaving out one whose N is 0.
 
 **All N**, the top bar's right end on a phone (where another page links to its parent, which the
 queue has none of), opens the whole queue as a sheet (`13e`), so the end is in reach at a glance: every item
 in the pass's order, each with its kind, age, title, ticket and step, decided ones dimmed with `✓`,
-then a link to each of the two quiet groups. Tapping a row jumps the pass to it. **A row's kicker is the kind
+then a link to each of the three quiet groups. Tapping a row jumps the pass to it. **A row's kicker is the kind
 alone** — *2 blocking questions*, *approval* — with its age right-aligned and never wrapped; where
 the item is, the document and its version or the transition, is the row's latest line, said once.
 
@@ -1150,15 +1163,24 @@ and writes nothing. A dead render carries none, nor does another page, so a new 
 ### What the queue counts
 
 **A ticket on hold never appears in the queue for being on hold, and no push is sent for holding
-one.** It is never in the Open tickets group or the project summaries' count of running work (the Tickets list's *Running* shows it only while a run it started is finishing, § Tickets). A decision waiting on a
-ticket that has started — a blocking question, a pending approval, a stuck ticket — reaches the
-queue and the push as on any ticket; a ticket admitted on hold and never started has none
-(`Forge.Queue.for_ticket/1`).
+one.** It is never in the Open tickets group or the project summaries' count of running work (the Tickets list's *Running* shows it only while a run it started is finishing, § Tickets). **Nor
+are its decisions items.** A blocking question, a pending approval, a stuck flag, a rest in a human
+state and its step's conversation (a reply waiting or a lost one) are what the ticket would
+wait on were it not held, and the person parked it: none is in the pass, in any count — the queue
+button, the subline, the projects page, the JSON API, the CLI, the digest — or in a push, **neither
+while the ticket is held nor when it is released**, so a decision that arose while it was held is
+never pushed (the person releasing it knows; one that starts waiting after the release pushes as
+usual). They are listed instead in **On hold**, below the pass, and drawn on the ticket's own page as
+ever, where they can still be made without releasing it. Released, they are items again at once. Two
+things stay as they were: an ordinary conversation a person opened about the ticket is not the
+ticket's decision and is an item, and a non-blocking question stays in *Not waiting on you*. A
+ticket admitted on hold and never started has no decision to list (`Forge.Queue.for_ticket/1`);
+`Forge.Queue.held/1` is what lists the others.
 
 **The queue button's count is the number of items the queue page draws** for the viewer: questions
 grouped per document version, approvals, stuck tickets, conversations waiting on their reader,
 schedules that failed or switched themselves off — and
-not assumptions, not an open ticket drawn in **Open tickets**. **For a node admin it also counts accounts waiting
+not assumptions, not an open ticket drawn in **Open tickets**, not a ticket drawn in **On hold**. **For a node admin it also counts accounts waiting
 for approval** (`12i`): an account waiting on an admin is a decision, and without it in the count
 nobody would know to look. **The queue lists them where the count says they are**: one item,
 *2 accounts wait to be approved.*, whose way on is *Review the accounts ›* to Accounts, where each
@@ -1198,7 +1220,10 @@ Anything that starts waiting on a human pushes to the phones of the people in it
 blocking question, an approval, a stuck ticket, a ticket ready for review, a conversation's reply,
 a schedule that failed or switched itself off —
 and links to the object: a ticket's URL, which opens on the view holding what waits (§ The ticket),
-a conversation's Talk, and a schedule's row on the Workflow view. An assumption, which waits on nobody, is digested. The rule is
+a conversation's Talk, and a schedule's row on the Workflow view. An assumption, which waits on nobody, is digested. **A ticket on hold pushes nothing, and neither
+does its release**: what waits on it is taken as seen while it is held and at the release, so a
+decision that arose while it was held is never pushed, and one that starts waiting after the release
+pushes as usual (`Forge.Push.Watch`). The rule is
 `Queue.waiting?/1`, not a list kept beside it, so a queue kind added later pushes or does not for
 the same reason.
 
@@ -1235,7 +1260,8 @@ always shown** when there is one, where the phone's project row shows it only pa
 allowance. It is one list, newest change first, every ticket listed with no cap and no *N more*,
 and absent rather than empty when there is nothing to show. A stuck ticket, a question, an approval,
 a ticket resting in a human state and a conversation waiting on its reader are items above, not
-here, and a ticket on hold is in neither unless something on it waits on a person. It is
+here, and a ticket on hold is never in either: one with a decision waiting is in **On hold** (§ The end
+of the pass, and *All*). It is
 `Forge.Queue.open_tickets/2`, read by the page alone; `Forge.Queue.items/1` is what the JSON API,
 the CLI and the push digest are built on, and none of them has a kind for it.
 
@@ -1879,9 +1905,9 @@ the composer, the now line, the plan band, and any open question's card.
   when and by whom it was ended and what became of its branch — deleted, or kept, with *Merge*
   where it was kept — and no composer, no answer rows and no Reopen. A message sent to it anyway is
   refused in words and records nothing.
-- **A reply lost with its machine** is one quiet line (`#chat-lost`) after the person's last
-  message — *The reply was lost with its machine; send again to carry on.* — and the composer
-  stays.
+- **A reply lost with its machine** is one quiet line (`#chat-lost`) after the last thing said —
+  the person's message, or an agent's reply no turn had ended — *The reply was lost with its
+  machine; send again to carry on.* — and the composer stays.
 
 ## The Accept area
 
@@ -1966,9 +1992,12 @@ when open. The switch above is **All · Waiting · Running · On hold** with cou
 means a job running now — not a ticket queued to merge or waiting for a machine, which the map
 draws with the running ones; a ticket on hold is in it only while a run it started before the hold
 is still finishing. **A ticket on hold is drawn below the rest, quietly** (*on hold*, in the muted
-ink with a dashed mark, never amber), unless something on it waits on a person — a blocking
-question, a pending approval, a stuck ticket — and then it is in the first list, where the decision
-is, as any ticket's is. It is in *Waiting* only for that. A row names the ticket's milestone where
+ink with a dashed mark, never amber and without the waiting edge), **whatever waits on it**: a held
+ticket's decisions are not queue items (§ What the queue counts), so one with a blocking question,
+a pending approval or a stuck flag is no more under *Waiting* than one with nothing, and a held
+stuck ticket reads *on hold* and not *stuck*. Its latest line says what waits, in the queue's
+kicker words (*approval · 2 blocking questions*). It is in *Waiting* only for an ordinary
+conversation about it, which is an item. A row names the ticket's milestone where
 it has one. The table's usage is a right-aligned figure.
 
 ### Milestones

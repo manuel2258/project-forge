@@ -177,15 +177,15 @@ defmodule Forge.Push do
 
   @doc """
   Pushes a step conversation whose reply was lost with its machine, when it is now waiting on a
-  person (`docs/design/conversations.md` § Lifetime): the person's message was the last word and
-  its machine went before a reply came, so the ticket is a queue item and the project is told,
-  as for anything that starts waiting on a person.
+  person (`docs/design/conversations.md` § Lifetime): the person's message was the last word, or
+  the agent's reply was cut off before its turn ended, and its machine went before a reply came, so
+  the ticket is a queue item and the project is told, as for anything that starts waiting on a person.
 
   **Only the lost item pushes.** A machine lost after the agent had already replied leaves the
   item the reply made, which pushed when it was made and has not changed; an ordinary
   conversation is in no queue, so there is nothing to push. A machine released by the idle
   timeout or the spend cap pushes nothing at all — it does not come through here
-  (`Forge.Conversations.ended/4`).
+  (`Forge.Conversations.ended/4`). Nor does a held ticket's: `Queue.for_chat/1` has no item for it.
   """
   @spec lost_reply(Job.t()) :: :ok
   def lost_reply(%Job{kind: :chat} = chat) do

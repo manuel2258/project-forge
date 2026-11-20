@@ -143,6 +143,8 @@ defmodule ForgeWeb.ProjectLive do
         Map.merge(Doing.facts(open, places: places), %{
           items:
             Enum.filter(Queue.items(socket.assigns.current_scope.user), &(&1.project.id == id)),
+          # What waits on the tickets on hold: no item, but named in their latest line.
+          held: Queue.held_items(open),
           now: now
         })
       )
@@ -1586,7 +1588,9 @@ defmodule ForgeWeb.ProjectLive do
               now={@now}
             />
             <%!-- On hold and with nothing waiting on anyone: drawn quietly, below the rest. A held
-                  ticket with a decision waiting is in the first list, where the decision is. --%>
+                  ticket's decisions are no item and not waiting on you, so it is here whatever
+                  waits on it, its latest line saying what; only an ordinary conversation about
+                  it puts it in the first list. --%>
             <.eyebrow :if={Enum.any?(@shown, &(&1.held and not &1.waiting))}>On hold</.eyebrow>
             <ProjectTickets.list
               id="tickets-held"

@@ -722,6 +722,55 @@ defmodule Forge.ChatStepTest do
       refute_receive {:push, _endpoint, _payload, _opts}, 300
     end
 
+    # Criterion 8, 10: words said in the middle of a turn are the conversation working. The agent
+    # said a sentence and went on to run a command; no `chat.turn` has closed it.
+    test "an agent still mid-turn is not waiting on you, and its ticket is an open ticket", %{
+      user: user,
+      chat: chat,
+      ticket: ticket
+    } do
+      chat = running!(chat)
+
+      :ok =
+        Jobs.record_harness_event(chat.id, %{
+          type: "job.harness.text",
+          payload: %{text: "Let me look at the repository.", parent_tool_use_id: nil}
+        })
+
+      assert Queue.items(user) == []
+      assert Queue.count(user) == 0
+      assert Queue.for_chat(Repo.get!(Job, chat.id)) == []
+      assert Queue.for_ticket(Tickets.get!(ticket.id)) == []
+      assert ticket.id in Enum.map(Queue.open_tickets(user, Queue.items(user)), & &1.id)
+
+      # The turn ending is when it starts waiting, and it is an item from that moment.
+      {:ok, _} = Conversations.record_turn(Repo.get!(Job, chat.id), turn(1))
+      assert [%{kind: :chat, detail: %{lost: false}}] = Queue.items(user)
+      refute ticket.id in Enum.map(Queue.open_tickets(user, Queue.items(user)), & &1.id)
+    end
+
+    # Criterion 10: the machine went after the agent had said something and before its turn ended.
+    # It reads as waiting on you today; by the turn rule it would otherwise be neither.
+    test "a reply cut off by a lost machine is the lost reply, and the page says so", %{
+      user: user,
+      chat: chat
+    } do
+      chat = running!(chat)
+
+      :ok =
+        Jobs.record_harness_event(chat.id, %{
+          type: "job.harness.text",
+          payload: %{text: "Let me look at the", parent_tool_use_id: nil}
+        })
+
+      {:ok, lost} = Jobs.requeue(chat.id, :worker_lost)
+      assert lost.status == :hibernated
+
+      assert [%{kind: :chat, detail: %{lost: true, text: text}}] = Queue.items(user)
+      assert text =~ "lost with its machine"
+      assert Conversations.lost?(lost, Conversations.messages(chat.id))
+    end
+
     test "an ordinary conversation that lost its reply is in no queue and pushes nothing", %{
       project: project,
       user: user

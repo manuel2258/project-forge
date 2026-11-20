@@ -474,6 +474,34 @@ defmodule ForgeWeb.ProjectLiveTest do
       %{stuck: stuck, older: older, newer: newer}
     end
 
+    # Ticket 63: a held ticket's decisions are no queue item, so the page never marks waiting what
+    # the queue does not count: it is drawn with the held tickets, quietly, and says what waits.
+    test "a held ticket with a decision waiting is quiet, on hold, and not waiting", %{
+      conn: conn,
+      project: project
+    } do
+      held_stuck =
+        Forge.ProjectFixtures.ticket_in!(project, 4, "refining", status: :stuck, ago: 30)
+
+      job = Forge.ForgeFixtures.job_fixture(%{ticket: held_stuck})
+      Forge.Repo.update!(Ecto.Changeset.change(job, started_at: DateTime.utc_now(:second)))
+      Forge.Repo.update!(Ecto.Changeset.change(held_stuck, held_at: DateTime.utc_now(:second)))
+
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}")
+
+      assert has_element?(view, "#tickets-held-4", "on hold")
+      refute has_element?(view, "#tickets-held-4", "stuck 1")
+      assert has_element?(view, "#tickets-held-4 .ui-row-latest", "stuck")
+      refute has_element?(view, "#tickets-held-4.ui-row--accent")
+      refute has_element?(view, "#tickets-waiting-4")
+      refute has_element?(view, "#tickets-table-4.tickets-table-row--waiting")
+      refute has_element?(view, "#tickets-held-4 .ticket-latest--decision")
+
+      # Only the one that is not held waits: the filter's count and the page's subline agree.
+      assert view |> element(~s(#ticket-filter button[value="waiting"])) |> render() =~ "1"
+      assert view |> element(~s(#ticket-filter button[value="on_hold"])) |> render() =~ "1"
+    end
+
     test "what waits on you comes first, then the rest by last change", %{
       conn: conn,
       project: project

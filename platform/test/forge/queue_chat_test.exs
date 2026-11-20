@@ -58,6 +58,35 @@ defmodule Forge.QueueChatTest do
     assert item.project.id == chat.project_id
   end
 
+  # Criterion 8: words said in the middle of a turn are the conversation working. It becomes an item
+  # when the turn ends, and its age runs from there — not from its first words.
+  test "a reply is not waiting until its turn ends, and then it waits since the turn's end", %{
+    chat: chat
+  } do
+    # Said an hour ago, and still going: working, so no item and nothing for a push to say. Events
+    # are append-only, so the hour is chosen by inserting one with it.
+    Repo.insert!(%Forge.Events.Event{
+      actor: %{"kind" => "job", "id" => nil},
+      type: "job.harness.text",
+      payload: %{"text" => "Let me look at the code."},
+      job_id: chat.id,
+      project_id: chat.project_id,
+      inserted_at: DateTime.add(DateTime.utc_now(:second), -3600, :second)
+    })
+
+    refute :chat in kinds()
+    assert Queue.for_chat(Jobs.get!(chat.id)) == []
+
+    {:ok, _chat} =
+      Conversations.record_turn(chat, %{
+        "turn" => 1,
+        "harness" => %{"turns" => 1, "usage" => 2_000, "cost_usd" => 0.01, "subtype" => "success"}
+      })
+
+    assert [%{kind: :chat, since: since}] = Enum.filter(Queue.items(), &(&1.kind == :chat))
+    assert DateTime.diff(DateTime.utc_now(), since) < 60
+  end
+
   # `mix forge.queue` prints every item the queue serves, one line per kind, and had no line for
   # this one: a conversation waiting on anyone took the whole command down with a
   # `FunctionClauseError`, on the one surface a terminal has.

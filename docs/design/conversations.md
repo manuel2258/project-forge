@@ -722,12 +722,16 @@ have moved, which is why a refusal says so rather than the manifest pretending t
   spending the day's allowance on a greeting. A chat goes `:hibernated` instead, which already
   means "stopped without an outcome" and is already excluded from `Workers.promised/1`. Its page
   says nothing of it, as for an idle timeout, and **a reply lost with its machine is said once**:
-  when the person's message is the last word and no reply came, one quiet line — *The reply was
+  when the person's message is the last word and no reply came — or the agent's reply was cut off
+before its turn ended, which anything that kills the process mid-turn does, a token budget too —
+one quiet line — *The reply was
   lost with its machine; send again to carry on.* — and the conversation waits for a person, who
   carries it on by sending. For a step conversation that is a queue item waiting on the person,
   and the project is notified as for anything that starts waiting on one (`Push.lost_reply/1`,
   called after `Jobs.requeue/2` and `Jobs.recover/0`). A machine released by the idle timeout or
-  the spend cap sends none: the agent's reply already did. A restart of the platform alone loses nothing: a chat
+  the spend cap sends none: the agent's reply already did. **A reply cut off in the middle of its
+  turn by anything but a lost machine** — a token budget, the spend cap — reads as the same lost
+  reply, an item with no push, because only a lost machine calls `Push.lost_reply/1`. A restart of the platform alone loses nothing: a chat
   whose machine rejoins with it still running carries on where it was, and only one on a machine
   that is gone loses it (`docs/design/worker-channel.md` § A platform restart).
 - **A message to a conversation that holds no machine starts it again.** `Conversations.send/3`
@@ -993,13 +997,24 @@ so closing a conversation is closing the pipe, not killing anything.
 ticket it belongs to. It is literally what the queue is for: something that will not move until a
 person acts.
 
-**A step conversation whose agent spoke last is waiting on you whether or not it holds a machine.**
+**A conversation is waiting on you once the agent's turn has ended, and not before.** Words the
+agent says in the middle of a turn — a sentence, then the command it goes on to run — are the
+conversation working: no item, nothing counted, its ticket not marked as waiting. It becomes an
+item when the turn ends (`chat.turn`), from which moment it has been waiting
+(`Forge.Conversations.waiting?/1`, which the queue and the conversation's own page ask; the lists
+of conversations — the Chats page, a ticket's Talk, a project's Chats — ask the same question of the
+log, a `chat.turn` after the last words, without folding a transcript per row). A turn that ended with nothing said is not waiting either. **A
+step conversation of a ticket on hold is no item and pushes nothing**: it is the ticket's decision,
+and a held ticket's are listed in the queue's *On hold* group (`ui.md` § What the queue counts).
+
+**A step conversation whose agent's turn has ended is waiting on you whether or not it holds a machine.**
 With no stopped state, the idle timeout, the spend cap and a lost machine release the machine and
 change nothing about whose turn it is, so `Forge.Queue.for_chat/1` asks that a *step's*
 conversation be live no longer — only that its step still be the ticket's (`sendable/2`). An
 ordinary conversation still has to be live: one whose machine has gone leaves the queue, as it
-always did, though it no longer reads as stopped. A step whose last word is the person's and which
-holds no machine is the lost reply (§ Lifetime), an item of the same kind that says so.
+always did, though it no longer reads as stopped. A step which holds no machine and whose last word
+is the person's, or an agent's reply no turn had ended, is the lost reply (§ Lifetime), an item of
+the same kind that says so.
 
 **Every completed reply pushes.** Not every token — a turn ending is the event. This is where
 `decisions.md`'s push rule first widened past blocking questions, and it now names a

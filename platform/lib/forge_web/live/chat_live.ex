@@ -430,16 +430,11 @@ defmodule ForgeWeb.ChatLive do
   defp reply(messages), do: messages |> Conversations.said() |> Conversations.reply_ref()
 
   # Waiting on *you*: the agent finished a turn and said something — the queue's reading, from
-  # the same messages (`Conversations.said/1`), so the page and the queue agree. A reply still
-  # being spoken is not waiting on anyone, and neither is a turn that only acted.
+  # the same messages and the same rule (`Conversations.waiting?/1`). A reply still being spoken
+  # is not waiting on anyone, and neither is a turn that only acted.
   # Whether it holds a machine does not matter: one released by the idle timeout is waiting on you
   # the same (`subline/1` leaves out one a person ended).
-  defp waiting?(messages) do
-    case messages |> Conversations.said() |> List.last() do
-      %{role: :assistant, turn: turn} -> turn != nil
-      _other -> false
-    end
-  end
+  defp waiting?(messages), do: messages |> Conversations.said() |> Conversations.waiting?()
 
   # The agent has the ball: either it has not started this turn's reply, or it is still in it —
   # an assistant turn no `chat.turn` has closed.

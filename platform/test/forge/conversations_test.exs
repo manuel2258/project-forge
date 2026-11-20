@@ -2093,10 +2093,10 @@ defmodule Forge.ConversationsTest do
   describe "summaries" do
     # `waiting` is what paints a row with the accent, and `docs/design/ui.md` is explicit that the
     # accent means exactly one thing: a human is being waited on. A live conversation whose last
-    # line is the person's own is waiting on the *machine*, not on them — dropping the
-    # `match?({:agent, _}, last)` half of the test leaves every live conversation accented, and
-    # the product's one colour stops meaning anything.
-    test "waiting is the agent having spoken last, not merely being live", %{project: project} do
+    # line is the person's own is waiting on the *machine*, not on them — dropping the agent-last
+    # half of `turn_ended?/3` leaves every live conversation accented, and the product's one colour
+    # stops meaning anything. The agent has to have spoken last *and* its turn to have ended.
+    test "waiting is the agent's turn having ended, not merely being live", %{project: project} do
       {:ok, chat} = Conversations.open(project, "what is this repository?")
 
       assert [summary] = Conversations.summaries(project_id: project.id)
@@ -2106,9 +2106,51 @@ defmodule Forge.ConversationsTest do
 
       text(chat, "It is a workflow engine.")
 
+      # Said, but its turn has not ended: the agent is still working (`Conversations.waiting?/1`).
+      assert [summary] = Conversations.summaries(project_id: project.id)
+      assert summary.said == {:agent, "It is a workflow engine."}
+      refute summary.waiting
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn(1, 0.01))
+
       assert [summary] = Conversations.summaries(project_id: project.id)
       assert summary.said == {:agent, "It is a workflow engine."}
       assert summary.waiting
+    end
+
+    # The person speaks last, and the turn that follows only acted: the last word is not the
+    # agent's, so a turn after the old words is no reason to draw the conversation as waiting.
+    test "a turn that only acted after the person spoke is not waiting", %{project: project} do
+      {:ok, chat} = Conversations.open(project, "first")
+      text(chat, "One.")
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.01))
+      {:ok, _event} = Conversations.send(chat, "second")
+      {:ok, _chat} = Conversations.record_turn(Jobs.get!(chat.id), turn(2, 0.01))
+
+      assert [%{said: {:user, "second"}} = summary] =
+               Conversations.summaries(project_id: project.id)
+
+      refute summary.waiting
+      refute Conversations.waiting?(Conversations.messages(chat.id))
+    end
+
+    # The turn must be the one *after* the words: the reply of a turn the person's message began
+    # is not waiting because an earlier turn ended.
+    test "a turn that ended before the words did not end them", %{project: project} do
+      {:ok, chat} = Conversations.open(project, "first")
+      text(chat, "One.")
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.01))
+      {:ok, _event} = Conversations.send(chat, "second")
+      text(chat, "Two, so far.")
+
+      assert [summary] = Conversations.summaries(project_id: project.id)
+      assert summary.said == {:agent, "Two, so far."}
+      refute summary.waiting
+      refute Conversations.waiting?(Conversations.messages(chat.id))
+
+      {:ok, _chat} = Conversations.record_turn(Jobs.get!(chat.id), turn(2, 0.01))
+      assert [%{waiting: true}] = Conversations.summaries(project_id: project.id)
+      assert Conversations.waiting?(Conversations.messages(chat.id))
     end
 
     # A subagent's text is its report to the agent, not the agent speaking: the list says what

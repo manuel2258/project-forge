@@ -1680,6 +1680,250 @@ defmodule ForgeWeb.QueueLiveTest do
     end
   end
 
+  # Tickets on hold with a decision waiting (ticket 63): listed under the pass, in a quiet group of
+  # their own, last, and counted by nothing. Each case is a guard of its own: the group's read, its
+  # placement, the kicker words of its latest line and its link in the All sheet.
+  describe "on hold" do
+    defp held_row(view, ticket), do: view |> element("#queue-held-rows-#{ticket.id}") |> render()
+
+    # A ticket that has started — a job with a start — and is on hold, so its decisions are read.
+    defp hold!(ticket) do
+      [job | _] = Jobs.for_ticket(ticket.id)
+      Repo.update!(Ecto.Changeset.change(job, started_at: DateTime.utc_now(:second)))
+      Repo.update!(Ecto.Changeset.change(ticket, held_at: DateTime.utc_now(:second)))
+    end
+
+    defp approval!(ticket) do
+      ticket
+      |> Ecto.Changeset.change(
+        pending_transition: %{"from" => ticket.state, "to" => "planning", "approve" => []}
+      )
+      |> Repo.update!()
+    end
+
+    test "is absent with no held ticket, and with one that waits on nothing", %{
+      conn: conn,
+      project: project
+    } do
+      {:ok, view, _html} = live(conn, ~p"/")
+      refute has_element?(view, "#queue-held")
+
+      parked = admit(project, "Parked idea")
+      hold!(parked)
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      refute has_element?(view, "#queue-held")
+      refute has_element?(view, "#queue-open-rows-#{parked.id}")
+      refute view |> element("#queue-all") |> render() =~ "On hold"
+    end
+
+    test "a held ticket's decisions are no item and no count, and are named in its row", %{
+      conn: conn,
+      project: project
+    } do
+      ticket = admit(project, "Parked with questions")
+      ask(ticket, [blocking("backend", "Which backend?"), blocking("format", "Which format?")])
+      ticket |> approval!() |> hold!()
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      assert on_screen(view) == nil
+      assert subline(view) == "nothing waiting"
+      refute has_element?(view, "#desktop-header .frame-queue .ui-count--accent")
+      refute has_element?(view, "#item-questions-#{ticket.id}")
+
+      assert view |> element("#queue-held .ui-eyebrow") |> render() =~ "On hold"
+      row = held_row(view, ticket)
+      assert row =~ "#{project.name}##{ticket.number}"
+      assert row =~ "Parked with questions"
+      assert row =~ "on hold"
+      # Both, in the kicker's words, oldest first (`QueueItems.waits/1`).
+      assert row =~ "approval"
+      assert row =~ "2 blocking questions"
+      assert row =~ "ui-track--compact"
+
+      # Quiet: never amber, no mark, and it leads to the ticket's page, where it is decided.
+      for class <- ["ui-row--accent", "ticket-latest--decision", "ui-track--waiting"] do
+        refute row =~ class
+      end
+
+      assert has_element?(
+               view,
+               ~s(#queue-held-rows-#{ticket.id}[href="/tickets/#{project.name}/#{ticket.number}"])
+             )
+
+      refute has_element?(view, "#queue-held [phx-click]")
+      refute has_element?(view, "#queue-held form")
+      # It is not also an Open tickets row.
+      refute has_element?(view, "#queue-open-rows-#{ticket.id}")
+    end
+
+    test "names a stuck ticket and a ticket resting in a human state in the kicker's words", %{
+      conn: conn,
+      project: project
+    } do
+      stuck = admit(project, "Held and stuck")
+      stuck = hold!(stuck)
+      Repo.update!(Ecto.Changeset.change(stuck, status: :stuck))
+
+      resting = admit(project, "Held and resting")
+      resting = hold!(resting)
+      Repo.update!(Ecto.Changeset.change(resting, state: "review_ready"))
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      assert held_row(view, stuck) =~ "stuck"
+      refute held_row(view, stuck) =~ "ticket-doing--accent"
+      assert held_row(view, resting) =~ "review ready"
+      assert subline(view) == "nothing waiting"
+    end
+
+    # The row's facts are read for the held tickets too: a run it started before the hold is still
+    # finishing, and says so.
+    test "a held row carries the facts of its ticket", %{conn: conn, project: project} do
+      ticket = admit(project, "Parked mid-run")
+      ticket |> approval!() |> hold!() |> on_worker()
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      assert held_row(view, ticket) =~ "on hold"
+      assert held_row(view, ticket) =~ "its run is finishing"
+    end
+
+    test "newest change first, with every row, under the other quiet groups", %{
+      conn: conn,
+      project: project
+    } do
+      older = admit(project, "Older")
+      newer = admit(project, "Newer")
+      for t <- [older, newer], do: t |> approval!() |> hold!()
+
+      Repo.update_all(from(t in Tickets.Ticket, where: t.id == ^older.id),
+        set: [updated_at: DateTime.add(DateTime.utc_now(), -3600, :second)]
+      )
+
+      running = on_worker(admit(project, "Already on a machine"))
+      assumed = ask(admit(project, "Carried on"), [non_blocking("naming", "Which name?")])
+      [question] = Repo.preload(assumed, :questions).questions
+
+      {:ok, _view, html} = live(conn, ~p"/")
+
+      assert index(html, "queue-held-rows-#{newer.id}") <
+               index(html, "queue-held-rows-#{older.id}")
+
+      # Last among the quiet groups: after Open tickets and Not waiting on you.
+      assert index(html, "assumption-#{question.id}") < index(html, "queue-open")
+      assert index(html, "queue-open-rows-#{running.id}") < index(html, "queue-held")
+    end
+
+    test "is drawn after the end of the pass, and not while an item is on screen", %{
+      conn: conn,
+      project: project
+    } do
+      held = admit(project, "Parked")
+      held |> approval!() |> hold!()
+      admit(project, "Still queued for one")
+      ask(admit(project, "Stopped"), [blocking("backend", "Which backend?")])
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      assert on_screen(view)
+      assert has_element?(view, "#queue-held #queue-held-rows-#{held.id}")
+      refute has_element?(view, "#queue-end-held")
+
+      view |> element("#queue-later") |> render_click()
+
+      assert on_screen(view) == nil
+      assert has_element?(view, "#queue-end-held #queue-end-held-rows-#{held.id}")
+      html = render(view)
+      assert index(html, "queue-end") < index(html, "queue-end-held")
+
+      # Last of the quiet groups at the end of the pass too, as in the list column.
+      assert index(html, "queue-end-open") < index(html, "queue-end-held")
+    end
+
+    test "the All sheet links to it last, with its count, and not at zero", %{
+      conn: conn,
+      project: project
+    } do
+      ask(admit(project, "Stopped"), [blocking("backend", "Which backend?")])
+      admit(project, "Open")
+      assumed = ask(admit(project, "Carried on"), [non_blocking("naming", "Which name?")])
+      assert assumed
+      for title <- ["One", "Two", "Three"], do: project |> admit(title) |> approval!() |> hold!()
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      links =
+        view
+        |> element("#queue-all")
+        |> render()
+        |> LazyHTML.from_fragment()
+        |> LazyHTML.query(".queue-sheet-quiet")
+        |> LazyHTML.to_tree()
+        |> Enum.map(fn {_tag, _attrs, children} ->
+          children |> Enum.join(" ") |> String.trim()
+        end)
+
+      assert Enum.map(links, &String.replace(&1, ~r/\s+/, " ")) ==
+               ["Open tickets · 2", "Not waiting on you · 1", "On hold · 3"]
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      assert subline(view) == "1 of 1 · 1 decision"
+    end
+
+    test "a markup title and agent text are drawn escaped", %{conn: conn, project: project} do
+      ticket = admit(project, "<script>alert(1)</script> parked")
+      ticket |> approval!() |> hold!()
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      row = held_row(view, ticket)
+
+      assert row =~ "&lt;script&gt;alert(1)&lt;/script&gt; parked"
+      refute row =~ "<script"
+    end
+
+    test "only the viewer's projects' tickets are listed", %{conn: conn} do
+      {:ok, other} =
+        Projects.register(
+          %{name: "elsewhere-#{System.unique_integer([:positive])}", repo_path: seeded_repo()},
+          Forge.AccountsFixtures.user_fixture()
+        )
+
+      hidden = admit(other, "Not yours to see")
+      hidden |> approval!() |> hold!()
+
+      {:ok, view, html} = live(conn, ~p"/")
+
+      refute has_element?(view, "#queue-held")
+      refute html =~ "Not yours to see"
+    end
+
+    # Holding the ticket of the item on screen: it is gone as one decided elsewhere is — still on
+    # screen, marked gone — and the count drops at once.
+    test "holding the ticket of the item on screen takes it out of the count, and lists it", %{
+      conn: conn,
+      project: project
+    } do
+      ticket = admit(project, "Stopped")
+      ask(ticket, [blocking("backend", "Which backend?")])
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      assert on_screen(view) =~ "questions-"
+      assert subline(view) == "1 of 1 · 1 decision"
+      refute has_element?(view, "#queue-held")
+
+      hold!(ticket)
+      Forge.Events.notify(ticket.id)
+      # The frame counts the first change at once and the rest at the second's end.
+      send(view.pid, :frame_recount)
+
+      assert has_element?(view, "#queue-gone")
+      assert subline(view) == "1 of 1 · 0 decisions"
+      assert has_element?(view, "#queue-held-rows-#{ticket.id}")
+    end
+  end
+
   # The key of the item on screen, or nil at the end of the pass.
   defp on_screen(view) do
     view

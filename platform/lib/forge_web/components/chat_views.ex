@@ -177,7 +177,7 @@ defmodule ForgeWeb.ChatViews do
   @doc """
   The transcript, pinned to the bottom. A conversation whose machine was released is drawn as one
   holding a machine — nothing says it stopped (`15d`, `docs/design/ui.md` § Talk) — and one that
-  lost its reply says so once, quietly, after the person's last message.
+  lost its reply says so once, quietly, after the last thing said.
   """
   def talk(assigns) do
     ~H"""
@@ -198,7 +198,8 @@ defmodule ForgeWeb.ChatViews do
 
       <p :if={@messages == []} class="text-sm text-ink-3">Nothing said yet.</p>
 
-      <%!-- The person's message was the last word and its machine went before a reply came. Quiet:
+      <%!-- The person's message was the last word, or the agent's reply was cut off before its turn
+            ended, and its machine went before a reply came. Quiet:
             the composer is still there, and sending carries it on (`conversations.md` § Lifetime). --%>
       <p :if={@lost} id="chat-lost" class="mt-4 text-sm/[1.55] text-ink-2">
         The reply was lost with its machine; send again to carry on.

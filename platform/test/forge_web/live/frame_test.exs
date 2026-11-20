@@ -423,50 +423,49 @@ defmodule ForgeWeb.FrameTest do
       assert project_id == project.id
     end
 
-    # A reply streams one content block at a time, and every open page hears every
-    # announcement: only the block that makes the conversation wait on its person changes a queue,
-    # so only it is announced. The lists of conversations still hear each one.
-    test "a streaming reply is announced to the queue once, on its first words", %{
+    # A reply streams one content block at a time, and every open page hears every announcement.
+    # Words said mid-turn change nothing a queue draws — a conversation waits once its turn has
+    # ended — so none is announced to it; the turn's end is. The lists of conversations hear each.
+    test "a streaming reply is announced to the queue when its turn ends, not before", %{
       project: project
     } do
       chat = chat_fixture(%{project: project, status: :running})
       Events.subscribe_queue()
       Events.subscribe_chats()
 
-      say = fn text ->
+      say = fn text, parent ->
         Forge.Jobs.record_harness_event(chat.id, %{
           type: "job.harness.text",
-          payload: %{"text" => text}
+          payload: %{"text" => text, "parent_tool_use_id" => parent}
         })
       end
 
-      say.("  ")
+      say.("First words.", nil)
       assert_received {:chat_changed, _, _, _}
       refute_received {:queue_changed, _}
 
-      say.("First words.")
+      say.("More of the same reply.", nil)
+      assert_received {:chat_changed, _, _, _}
+      refute_received {:queue_changed, _}
+
+      # A subagent's words are no part of the reply and announce nothing to anyone.
+      say.("report", "t1")
+      refute_received {:chat_changed, _, _, _}
+      refute_received {:queue_changed, _}
+
+      {:ok, _} =
+        Forge.Conversations.record_turn(chat, %{
+          "turn" => 1,
+          "harness" => %{
+            "turns" => 1,
+            "usage" => 2_000,
+            "cost_usd" => 0.01,
+            "subtype" => "success"
+          }
+        })
+
       assert_received {:queue_changed, project_id}
       assert project_id == project.id
-
-      say.("More of the same reply.")
-      assert_received {:chat_changed, _, _, _}
-      refute_received {:queue_changed, _}
-
-      # A subagent's words are no part of the reply and announce nothing.
-      Forge.Jobs.record_harness_event(chat.id, %{
-        type: "job.harness.text",
-        payload: %{"text" => "report", "parent_tool_use_id" => "t1"}
-      })
-
-      refute_received {:queue_changed, _}
-
-      # The person speaks, and the next reply's first words wait on them again.
-      {:ok, _} = Forge.Conversations.send(chat, "and then?")
-      assert_received {:queue_changed, _}
-      say.("Then this.")
-      assert_received {:queue_changed, _}
-      say.("And this.")
-      refute_received {:queue_changed, _}
     end
   end
 

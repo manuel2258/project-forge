@@ -254,9 +254,10 @@ defmodule Forge.Events do
   #
   # **The queue hears it only when `queue: true`**, the default. A conversation waiting on its
   # reader is a queue item, so a change in whether it waits is the queue's too — but every
-  # signed-in page on the node hears the queue's topic and recounts on it, so a reply streaming
-  # one content block at a time says so only with the block that makes it wait
-  # (`Forge.Jobs.record_harness_event/2`).
+  # signed-in page on the node hears the queue's topic and recounts on it, and a reply streaming
+  # one content block at a time changes nothing the queue draws: a conversation waits once its
+  # turn has ended, and `Forge.Conversations.record_turn/2` says so then
+  # (`Forge.Jobs.record_harness_event/2` passes `queue: false`).
   @spec notify_chat(map(), keyword()) :: :ok
   def notify_chat(job, opts \\ [])
 

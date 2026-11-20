@@ -11,6 +11,12 @@ defmodule Forge.Push.Watch do
   not. The one place a kind is named here is what makes two readings the same wait (`key/1`),
   which differs by kind because what a wait is waiting at does.
 
+  **A ticket on hold pushes nothing, and neither does its release.** What waits on a held ticket is
+  recorded as seen and marked `:held` in its set, so the read that sees it released finds the mark,
+  takes what waits then as seen too and pushes nothing — the person releasing it knows
+  (`docs/design/ui.md` § Push follows the queue). A question or approval that starts waiting
+  after that pushes as usual.
+
   **Pushed once per time it starts waiting.** An item stays seen while it waits and is forgotten
   once it stops, so a ticket that is stuck, moved, and stuck again is pushed twice, and a ticket
   whose cost ticks while it is stuck is pushed once. What was waiting when the node started is
@@ -28,6 +34,8 @@ defmodule Forge.Push.Watch do
   use GenServer
 
   require Logger
+
+  import Ecto.Query, only: [from: 2]
 
   alias Forge.{Events, Push, Queue, Repo}
   alias Forge.Tickets.Ticket
@@ -79,6 +87,21 @@ defmodule Forge.Push.Watch do
       |> Enum.group_by(& &1.ticket.id, &key/1)
       |> Map.new(fn {id, keys} -> {id, MapSet.new(keys)} end)
 
+    # A held ticket's decisions are not in `Queue.items/0` and are seen all the same, marked, so a
+    # restart does not push them when the ticket is released.
+    held =
+      Repo.all(
+        from t in Ticket, where: t.status in ^Ticket.open_statuses() and not is_nil(t.held_at)
+      )
+
+    seen =
+      Enum.reduce(held, seen, fn ticket, seen ->
+        case ticket |> Queue.for_ticket() |> remember(ticket) do
+          nil -> seen
+          keys -> Map.put(seen, ticket.id, keys)
+        end
+      end)
+
     %{state | seen: seen}
   rescue
     error ->
@@ -99,25 +122,48 @@ defmodule Forge.Push.Watch do
   """
   @spec changed(%{String.t() => MapSet.t()}, String.t()) :: %{String.t() => MapSet.t()}
   def changed(seen, id) do
-    items =
+    {ticket, items} =
       case Repo.get(Ticket, id) do
-        nil -> []
-        ticket -> Queue.for_ticket(ticket)
+        nil -> {nil, []}
+        ticket -> {ticket, Queue.for_ticket(ticket)}
       end
 
     before = Map.get(seen, id, MapSet.new())
 
-    for item <- items, not MapSet.member?(before, key(item)), do: Push.waiting(item)
+    # Held now, or held at the last read and released since: either way what is waiting is
+    # taken as seen and not pushed (`@moduledoc`).
+    if not quiet?(ticket, before) do
+      for item <- items, not MapSet.member?(before, key(item)), do: Push.waiting(item)
+    end
 
     # A ticket with nothing waiting is dropped rather than kept with an empty set. Equivalent
     # mutant: `Map.get(seen, id, MapSet.new())` reads the two the same, so keeping it changes
     # nothing but the size of the map a long-running node holds — which is why it is dropped.
-    keys = MapSet.new(items, &key/1)
-    if MapSet.size(keys) == 0, do: Map.delete(seen, id), else: Map.put(seen, id, keys)
+    case remember(items, ticket) do
+      nil -> Map.delete(seen, id)
+      keys -> Map.put(seen, id, keys)
+    end
   rescue
     error ->
       Logger.warning("push watch could not read ticket #{id}: #{Exception.message(error)}")
       seen
+  end
+
+  defp quiet?(nil, _before), do: false
+  defp quiet?(ticket, before), do: Ticket.held?(ticket) or MapSet.member?(before, :held)
+
+  # Held and still open: a ticket closed while held has no wait to release, so marking it would keep
+  # a set the map never drops (`Queue.for_ticket/1` has nothing for it).
+  defp held_open?(%Ticket{status: status} = ticket),
+    do: Ticket.held?(ticket) and status in Ticket.open_statuses()
+
+  # The set to keep for a ticket: the keys of what waits, and `:held` while it is on hold — kept
+  # even when nothing waits, so the release that follows is still the one read that is quiet. Nil
+  # when there is nothing to keep.
+  defp remember(items, ticket) do
+    keys = MapSet.new(items, &key/1)
+    keys = if ticket && held_open?(ticket), do: MapSet.put(keys, :held), else: keys
+    if MapSet.size(keys) == 0, do: nil, else: keys
   end
 
   # What makes two readings the same wait. Not the item's `since`, which for a ticket's own kinds

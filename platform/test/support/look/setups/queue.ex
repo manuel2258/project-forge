@@ -5,8 +5,10 @@ defmodule Forge.Look.Setups.Queue do
   what the agent said (`13b`), a ticket stuck after running out of turns with its error and closing
   words (`13c`), and a chat asking a question; for the end of the pass (`13d`), one assumption and
   **Open tickets** (ticket 53): two waiting for a machine, one running on one with its usage and
-  latest line, and one with a long title and a latest line that is markup. The member last looked at the questions' ticket a day ago, and three
-  things happened since.
+  latest line, and one with a long title and a latest line that is markup; and
+  **On hold** (ticket 63): a held ticket with an approval and two blocking questions waiting, and
+  a held stuck one whose title is markup. The member last looked at the questions' ticket a day
+  ago, and three things happened since.
 
   Users: `member`. Paths: `queue`, `approval`, `questions`, `stuck`, `chat`, `end`.
   Built as `Forge.Look.Setups.Decision` builds — git plumbing and recorded rows, no worker.
@@ -39,6 +41,7 @@ defmodule Forge.Look.Setups.Queue do
 
     running!(project, member)
     hostile!(project, member)
+    held!(project, member)
 
     looked!(member, questions)
 
@@ -208,6 +211,60 @@ defmodule Forge.Look.Setups.Queue do
 
     [job] = Jobs.for_ticket(ticket.id)
     said!(ticket, job, "<b>Plan:</b> <script>alert(1)</script> start with the table.")
+  end
+
+  # On hold with decisions waiting: no item and no count, a row each in **On hold**. Started — a job
+  # with a start — because a held ticket that never ran asks nothing.
+  defp held!(project, member) do
+    {:ok, asking} = Tickets.admit(project, %{title: "Cache the font atlas"}, {:user, member.id})
+    start!(asking)
+
+    {:ok, _} =
+      Artifacts.record_version(asking.id, "brief.md", :document, :system, %{
+        content: """
+        ---
+        outcome: done
+        ---
+        # Brief
+
+        ```question
+        key: size
+        text: How big may it grow?
+        options: [{label: 64 MB, detail: Tight.}, {label: 256 MB, detail: Roomy.}]
+        blocking: true
+        ```
+
+        ```question
+        key: evict
+        text: What goes first when it is full?
+        options: [{label: Oldest, detail: By age.}, {label: Largest, detail: By size.}]
+        blocking: true
+        ```
+        """
+      })
+
+    asking
+    |> Ecto.Changeset.change(
+      pending_transition: %{"from" => asking.state, "to" => "planning", "approve" => []},
+      held_at: DateTime.utc_now(:second)
+    )
+    |> Repo.update!()
+
+    {:ok, stuck} =
+      Tickets.admit(
+        project,
+        %{title: "<i>Rotate</i> the signing keys & <script>alert(1)</script>"},
+        {:user, member.id}
+      )
+
+    start!(stuck)
+    {:ok, stuck} = Forge.Engine.stick(stuck, "it ran out of turns")
+    stuck |> Ecto.Changeset.change(held_at: DateTime.utc_now(:second)) |> Repo.update!()
+  end
+
+  defp start!(ticket) do
+    [job] = Jobs.for_ticket(ticket.id)
+    job |> Ecto.Changeset.change(started_at: DateTime.utc_now(:second)) |> Repo.update!()
   end
 
   defp assumption!(project, member) do

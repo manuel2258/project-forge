@@ -24,13 +24,16 @@ defmodule ForgeWeb.QueueLive do
   the pass on in place, without a navigation (`ForgeWeb.QueuePass` holds the pass's rules).
 
   The whole queue is the **All** sheet on a phone and the list column from 768px — every item in
-  the pass's order, decided ones dimmed with `✓` — and beneath the items, two groups that wait
+  the pass's order, decided ones dimmed with `✓` — and beneath the items, three groups that wait
   on nobody and count towards nothing: **Not waiting on you**, the questions agents did not stop
-  for (`docs/design/ui.md` § Not waiting on you), and **Open tickets**, every open ticket that is
+  for (`docs/design/ui.md` § Not waiting on you), **Open tickets**, every open ticket that is
   not on hold and has nothing waiting on a person, each drawn as the project's Tickets list draws
   it (`ForgeWeb.ProjectTickets`, § A job waiting for a machine), read from `Queue.open_tickets/2`
-  rather than `Queue.items/1`. A ticket the spend cap holds is in it, `paused · spend`: never an
-  item, never counted, never pushed (`docs/design/capacity.md`). **Where they are drawn depends on
+  rather than `Queue.items/1`, and **On hold**, last, the tickets on hold that have a decision
+  waiting, drawn the same way with the latest line naming what waits and read from `Queue.held/1`
+  (a held ticket's decisions are not items: they are decided on its own page). A ticket the spend
+  cap holds is in *Open tickets*, `paused · spend`: never an item, never counted, never pushed
+  (`docs/design/capacity.md`). **Where they are drawn depends on
   the width**: from 1440px in the list column under the decisions, below it once, after the end of
   the pass, and only when no item is on screen (`queue.css`). An assumption asked in the same document as a blocking question is in that
   document's card instead, optional (§ The question card).
@@ -39,6 +42,7 @@ defmodule ForgeWeb.QueueLive do
   use ForgeWeb, :live_view
 
   import ForgeWeb.Operator.QuestionForm, only: [question_form: 1, split_pane: 1]
+  import ForgeWeb.QueueItems, only: [noun: 2]
 
   alias Forge.{Artifacts, Engine, Events, Jobs, Projects, Queue, Tickets}
   alias Forge.Tickets.{Doing, Past, Views}
@@ -51,6 +55,7 @@ defmodule ForgeWeb.QueueLive do
     Format,
     ProjectTickets,
     PushEvents,
+    QueueItems,
     QueuePass,
     QueuePast,
     TicketViews,
@@ -115,7 +120,10 @@ defmodule ForgeWeb.QueueLive do
       |> Enum.filter(&(&1.kind == :question))
       |> QuestionForm.join_assumed(assumed, & &1.question.artifact_version_id)
 
-    items = (waiting ++ joined ++ accounts_item(accounts)) |> group() |> Enum.map(&decorate/1)
+    items =
+      (waiting ++ joined ++ accounts_item(accounts))
+      |> QueueItems.group()
+      |> Enum.map(&decorate/1)
 
     pass =
       case socket.assigns.pass do
@@ -123,11 +131,14 @@ defmodule ForgeWeb.QueueLive do
         pass -> QueuePass.merge(pass, items, & &1.key)
       end
 
+    {open, held} = quiet_rows(user, queue)
+
     socket
     |> assign(
       pass: pass,
       digest: digest,
-      open: open_rows(user, queue),
+      open: open,
+      held: held,
       projects: named,
       # The queue button's count, computed by the same function over the same reads
       # (`Forge.Queue.count/2`): an item decided in this pass is no longer waiting once it is read
@@ -138,16 +149,30 @@ defmodule ForgeWeb.QueueLive do
     |> detail()
   end
 
-  # Open tickets, drawn as the project's Tickets list draws them: the same rows, from the same reads
-  # (`Forge.Tickets.Doing.facts/2`), over every project the viewer is in. `items` is the queue just
-  # read, so a ticket is never both an item and a row.
-  defp open_rows(user, items) do
+  # Open tickets and On hold, drawn as the project's Tickets list draws them: the same rows, from the
+  # same reads (`Forge.Tickets.Doing.facts/2`, once over both lists), over every project the viewer
+  # is in. `items` is the queue just read, so a ticket is never both an item and a row; a held
+  # ticket is never one at all, and its row's latest line names what waits on it.
+  defp quiet_rows(user, items) do
     tickets = Queue.open_tickets(user, items)
+    held = Queue.held(user)
+    held_tickets = Enum.map(held, &elem(&1, 0))
+    facts = Doing.facts(tickets ++ held_tickets)
+    now = DateTime.utc_now()
 
-    ProjectTickets.rows(
-      tickets,
-      Map.merge(Doing.facts(tickets), %{items: items, now: DateTime.utc_now()})
-    )
+    open = ProjectTickets.rows(tickets, Map.merge(facts, %{items: items, now: now}))
+
+    held_rows =
+      ProjectTickets.rows(
+        held_tickets,
+        Map.merge(facts, %{
+          items: [],
+          held: Map.new(held, fn {t, held} -> {t.id, held} end),
+          now: now
+        })
+      )
+
+    {open, held_rows}
   end
 
   # The accounts waiting on a node admin, as one item (UX pass, A23): they are counted as decisions
@@ -173,37 +198,6 @@ defmodule ForgeWeb.QueueLive do
   # Every list this page draws takes the project as its name; the item on screen reads the
   # project's struct again where it needs one.
   defp named_projects(items), do: Enum.map(items, &Map.put(&1, :project, &1.project.name))
-
-  # One job, stopped, against one artifact version, carrying N questions. Everything else is
-  # already one interruption on its own. `load/1` only passes an assumption here when a blocking
-  # question shares its version, so every group holds at least one of those.
-  defp group(items) do
-    {questions, rest} = Enum.split_with(items, &(&1.kind in [:question, :assumption]))
-
-    questions
-    |> Enum.group_by(& &1.question.artifact_version_id)
-    |> Enum.map(fn {_version_id, group} ->
-      first = hd(group)
-
-      %{
-        kind: :questions,
-        ticket: first.ticket,
-        project: first.project,
-        # When it started waiting, which the blocking questions say. Taking the assumptions too is
-        # an equivalent mutant as documents are recorded: a version's questions share one insert.
-        since:
-          group
-          |> Enum.filter(&(&1.kind == :question))
-          |> Enum.map(& &1.since)
-          |> Enum.min(DateTime),
-        questions: Enum.map(group, & &1.question),
-        version: first.question.artifact_version,
-        detail: %{}
-      }
-    end)
-    |> Enum.concat(rest)
-    |> Enum.sort_by(& &1.since, DateTime)
-  end
 
   @changeset Workflow.changeset_artifact()
 
@@ -674,6 +668,7 @@ defmodule ForgeWeb.QueueLive do
           </div>
           <.digest id="queue-digest" prefix="" digest={@digest} now={@now} />
           <.open_tickets id="queue-open" open={@open} projects={@projects} now={@now} />
+          <.held_tickets id="queue-held" held={@held} projects={@projects} now={@now} />
         </div>
       </:list>
 
@@ -705,7 +700,7 @@ defmodule ForgeWeb.QueueLive do
           at={~w(retry extend transition)}
         />
         <.ending :if={!@item} pass={@pass} left={@left} now={@now} />
-        <%!-- Below 1440px the two quiet groups are drawn here, after the end of the pass, and not in
+        <%!-- Below 1440px the three quiet groups are drawn here, after the end of the pass, and not in
               the list column; from 1440px the column's are drawn and these are not (`queue.css`).
               Never while an item is on screen. --%>
         <.digest :if={!@item} id="queue-end-digest" prefix="end-" digest={@digest} now={@now} />
@@ -713,6 +708,13 @@ defmodule ForgeWeb.QueueLive do
           :if={!@item}
           id="queue-end-open"
           open={@open}
+          projects={@projects}
+          now={@now}
+        />
+        <.held_tickets
+          :if={!@item}
+          id="queue-end-held"
+          held={@held}
           projects={@projects}
           now={@now}
         />
@@ -732,6 +734,9 @@ defmodule ForgeWeb.QueueLive do
           </.link>
           <.link :if={@digest != []} patch={~p"/?item=end"} class="queue-sheet-quiet">
             Not waiting on you · {length(@digest)}
+          </.link>
+          <.link :if={@held != []} patch={~p"/?item=end"} class="queue-sheet-quiet">
+            On hold · {length(@held)}
           </.link>
         </div>
       </.sheet>
@@ -773,7 +778,7 @@ defmodule ForgeWeb.QueueLive do
       id={@id}
       patch={~p"/?item=#{@item.key}"}
       title={row_title(@item)}
-      kicker={kind(@item)}
+      kicker={QueueItems.kind(@item)}
       age={Format.ago(@item.since, @now)}
       latest={row_latest(@item)}
       latest_tone={if @item.kind == :stuck, do: "accent"}
@@ -1560,7 +1565,7 @@ defmodule ForgeWeb.QueueLive do
   attr :now, :any, required: true
 
   # 13d: the pass ends somewhere definite — what was decided, what is left with a way back to it —
-  # and then the two quiet groups, which are the list column's and follow this on a phone. **Green
+  # and then the three quiet groups, which are the list column's and follow this on a phone. **Green
   # and *End of queue* only when nothing is left**: over items left for later they said done when
   # nothing was (UX pass, A9). What is left is drawn as the *All* sheet draws it, each row the way
   # back to its item.
@@ -1633,40 +1638,49 @@ defmodule ForgeWeb.QueueLive do
     """
   end
 
-  defp destination(%{kind: :chat} = item), do: ~p"/chats/#{item.detail.chat_id}"
-  defp destination(item), do: ~p"/tickets/#{item.project}/#{item.ticket.number}"
+  attr :id, :string, required: true
+  attr :held, :list, required: true
+  attr :projects, :map, required: true
+  attr :now, :any, required: true
 
-  # The item's kind alone, which a row's kicker carries: where it is — the document and its
-  # version, the transition — is the row's latest line, said once (UX pass, A24). Counted as
-  # blocking: an assumption in the same card is optional and waits on nobody.
-  defp kind(%{kind: :questions, questions: questions}) do
-    blocking = Enum.count(questions, & &1.blocking)
-    "#{blocking} blocking #{noun(blocking, "question")}"
+  # The tickets on hold with a decision waiting, as the Tickets list draws a held ticket: quiet,
+  # never amber, its latest line naming what waits (`ProjectTickets.rows/2`, `held:`). The decision
+  # is made on the ticket's page, which each row leads to; nothing here is an item or is counted.
+  defp held_tickets(assigns) do
+    ~H"""
+    <section :if={@held != []} id={@id} class="queue-quiet-group">
+      <.eyebrow>On hold</.eyebrow>
+      <ProjectTickets.list
+        id={"#{@id}-rows"}
+        rows={@held}
+        named={@projects}
+        usage_always
+        now={@now}
+      />
+    </section>
+    """
   end
 
-  defp kind(%{kind: :chat}), do: "conversation"
-  defp kind(%{kind: :approval}), do: "approval"
-  defp kind(%{kind: :stuck}), do: "stuck"
-  defp kind(%{kind: :review}), do: "review ready"
-  defp kind(%{kind: :accounts}), do: "accounts"
-
-  defp kind(%{kind: :schedule, detail: %{problem_kind: :switched_off}}),
-    do: "schedule switched off"
-
-  defp kind(%{kind: :schedule}), do: "schedule failed"
+  defp destination(%{kind: :chat} = item), do: ~p"/chats/#{item.detail.chat_id}"
+  defp destination(item), do: ~p"/tickets/#{item.project}/#{item.ticket.number}"
 
   # The item's eyebrow: its kind and where it is. An assumption in the same card is named apart
   # rather than added to what is waiting.
   defp kind_label(%{kind: :questions, questions: questions, version: version} = item) do
     optional = Enum.count(questions, &(not &1.blocking))
-    label = if optional == 0, do: kind(item), else: "#{kind(item)} · #{optional} optional"
+
+    label =
+      if optional == 0,
+        do: QueueItems.kind(item),
+        else: "#{QueueItems.kind(item)} · #{optional} optional"
+
     "#{label} · #{version.artifact.name} v#{version.version}"
   end
 
   defp kind_label(%{kind: :approval} = item),
     do: "approval · #{item.ticket.state} → #{item.detail["to"]}"
 
-  defp kind_label(item), do: kind(item)
+  defp kind_label(item), do: QueueItems.kind(item)
 
   defp sentence(%{kind: :questions, questions: [question]}), do: question.text
 
@@ -1722,9 +1736,6 @@ defmodule ForgeWeb.QueueLive do
 
   defp closing([]), do: "Nothing needs you. Work continues without you."
   defp closing(left), do: "#{length(left)} left for later."
-
-  defp noun(1, word), do: word
-  defp noun(_count, word), do: word <> "s"
 
   defp push(event, params, socket), do: {:noreply, PushEvents.handle(event, params, socket)}
 end

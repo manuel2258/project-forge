@@ -515,6 +515,14 @@ defmodule ForgeWeb.Changes do
     """
   end
 
+  defp file_body(%{whole: {:lfs, size}} = assigns) do
+    assigns = assign(assigns, label: Blob.lfs_label(size))
+
+    ~H"""
+    <p class="changes-empty">{@path} is stored with Git LFS ({@label}); it is not shown here.</p>
+    """
+  end
+
   defp file_body(%{whole: :binary} = assigns) do
     ~H"""
     <p class="changes-empty">{@path} is not text this page can draw.</p>

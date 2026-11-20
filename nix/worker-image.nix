@@ -144,8 +144,13 @@ let
   # a PATH only the binary it wrapped could see, and dropping the package would have taken them
   # off the machine along with it. They are what Claude Code's own sandbox reaches for, and this
   # change is about where Claude Code comes from rather than about what it can do.
+  #
+  # git-lfs is here for the same reason as git, and because `servicePath` is every job's PATH: a
+  # checkout holds the real files of an LFS repository, and the agent's own `git push` uploads them
+  # (`docs/design/git-hosting.md` § The job's own git).
   servicePath = [
     pkgs.git
+    pkgs.git-lfs
     pkgs.bash
     pkgs.coreutils
     pkgs.gnutar

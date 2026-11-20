@@ -16,6 +16,7 @@ defmodule ForgeWeb.RepoLiveTest do
 
   import Forge.AccountsFixtures
   import Forge.GitFixtures
+  import Forge.LfsFixtures
   import Phoenix.LiveViewTest
 
   alias Forge.{Git, Projects}
@@ -696,6 +697,61 @@ defmodule ForgeWeb.RepoLiveTest do
       {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files")
 
       assert paths(html) == [".forge", "zzz", "README.md", "aaa.txt"]
+    end
+  end
+
+  describe "a Git LFS file" do
+    setup %{repo: repo} do
+      commit_sized_pointers_to(repo, "main", %{
+        "audio/boom.bin" => {"BOOM", 2_411_724},
+        "small.bin" => {"SMALL", 812}
+      })
+
+      # What only looks like a pointer is the ordinary file it is.
+      commit_to(repo, "main", %{
+        "fake.txt" => pointer("x") |> String.replace("sha256:", "sha256:Q")
+      })
+
+      :ok
+    end
+
+    test "is listed with its size in the tree and never as its pointer", %{
+      conn: conn,
+      project: project
+    } do
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files")
+
+      assert has_element?(view, ~s|li[data-path="small.bin"] [data-lfs]|, "LFS · 812 B")
+      refute has_element?(view, ~s|li[data-path="fake.txt"] [data-lfs]|)
+      refute has_element?(view, ~s|li[data-path="README.md"] [data-lfs]|)
+
+      view |> element(~s|li[data-path="audio"] summary|) |> render_click()
+      assert has_element?(view, ~s|li[data-path="audio/boom.bin"] [data-lfs]|, "LFS · 2.3 MB")
+    end
+
+    test "opens as a note with the size of the object, and its pointer text is never drawn", %{
+      conn: conn,
+      project: project
+    } do
+      {:ok, view, _html} =
+        live(conn, ~p"/projects/#{project.name}/repo?tab=files&file=audio/boom.bin")
+
+      assert has_element?(view, "#file-size", "LFS · 2.3 MB")
+      assert has_element?(view, "#file-lfs", "stored with Git LFS")
+      html = render(view)
+      refute html =~ "git-lfs.github.com"
+      refute html =~ "oid sha256"
+      refute has_element?(view, "#file-code")
+    end
+
+    test "a file that only looks like a pointer is shown as the text it is", %{
+      conn: conn,
+      project: project
+    } do
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files&file=fake.txt")
+
+      refute has_element?(view, "#file-lfs")
+      assert has_element?(view, "#file-code", "oid sha256:Q")
     end
   end
 

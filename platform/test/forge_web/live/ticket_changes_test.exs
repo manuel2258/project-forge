@@ -9,6 +9,7 @@ defmodule ForgeWeb.TicketChangesTest do
 
   import Ecto.Query, only: [from: 2]
   import Forge.GitFixtures
+  import Forge.LfsFixtures
   import Forge.MergeFixtures
   import ForgeWeb.Operator.Components, only: [commit_message_id: 1]
   import Phoenix.LiveViewTest
@@ -611,6 +612,58 @@ defmodule ForgeWeb.TicketChangesTest do
     assert [first, second] = pres(view)
     assert first == "alpha"
     assert second == "beta"
+  end
+
+  describe "a Git LFS file" do
+    test "is a row with its sizes and no patch, and the totals leave it out", context do
+      %{conn: conn, ticket: ticket, bare: bare} = context
+      commit_sized_pointers_to(bare, ticket.branch, %{"mix.bin" => {"M1", 1_048_576}})
+      set_base!(ticket, elem(Git.resolve(bare, "refs/heads/" <> ticket.branch), 1))
+
+      commit_sized_pointers_to(bare, ticket.branch, %{
+        "mix.bin" => {"M2", 2_097_152},
+        "new.bin" => {"N1", 5_000}
+      })
+
+      commit_on_branch(context, "plain.txt", "ordinary")
+      changeset!(ticket, elem(Git.resolve(bare, "refs/heads/" <> ticket.branch), 1))
+
+      {:ok, view, _html} = live(conn, files(context))
+      html = render(view)
+
+      assert has_element?(
+               view,
+               ~s(#changes-files li[data-path="mix.bin"] [data-lfs]),
+               "LFS · 1 MB → 2 MB"
+             )
+
+      assert has_element?(
+               view,
+               ~s(#changes-files li[data-path="new.bin"] [data-lfs]),
+               "LFS · 4.9 KB"
+             )
+
+      refute has_element?(view, ~s(#changes-files li[data-path="mix.bin"] details))
+      refute has_element?(view, ~s(#changes-files li[data-path="mix.bin"] .ui-diffstat))
+      assert has_element?(view, ~s(#changes-files li[data-path="plain.txt"] .ui-diffstat))
+      refute html =~ "oid sha256"
+      refute has_element?(view, "#changes-files .diff-line--add", "git-lfs")
+    end
+
+    test "opened whole, says where it is stored and draws no pointer; quoted, it is not text",
+         context do
+      %{conn: conn, ticket: ticket, bare: bare} = context
+      sha = commit_sized_pointers_to(bare, ticket.branch, %{"mix.bin" => {"M2", 2_097_152}})
+      changeset!(ticket, sha)
+      present!(ticket, "The sound is `mix.bin:1`.\n")
+
+      {:ok, view, _html} = live(conn, whole(context, "mix.bin"))
+      assert render(view) =~ "mix.bin is stored with Git LFS (LFS · 2 MB)"
+      refute render(view) =~ "oid sha256"
+
+      {:ok, view, _html} = live(conn, changes(context))
+      assert render(view) =~ "mix.bin:1 is not text; read it in Files"
+    end
   end
 
   # **The page is rendered into JSON for every connected viewer.** `Jason` raises on invalid

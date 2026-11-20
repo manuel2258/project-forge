@@ -18,12 +18,47 @@ defmodule ForgeWorker.Checkout do
   command that runs as the worker itself is the clone into an empty directory, which nothing of
   a job has touched (`docs/design/worker-tier.md` § The job slice).
 
+  **Git LFS is on for every call here** (`docs/design/git-hosting.md` § The job's own git): the
+  filters are `required`, so a download that fails fails the clone, the reset or the checkout rather
+  than leaving pointer stubs in the tree; a `.lfsconfig` the repository carries cannot say otherwise,
+  because the settings are on git's own command line and `lfs.url` and `lfs.pushurl` — both, because
+  `.lfsconfig`'s `pushurl` beats a local `url` for uploads — are pinned to the platform's endpoint
+  whenever the call knows the platform's URL; and `GIT_LFS_SKIP_SMUDGE` in the worker's environment
+  is not passed on. The credential helper answers one host, the platform's, so an LFS endpoint an
+  agent configures itself is handed no token.
+
   See `docs/design/git-hosting.md`.
   """
 
   require Logger
 
-  @helper ~S|!f() { printf 'username=forge\npassword=%s\n' "$FORGE_GIT_TOKEN"; }; f|
+  # The filters are the ones `git lfs install` writes, on the command line so that a checkout whose
+  # own config says something else — a template from before, a seed — is held to these. Nothing here
+  # tells git-lfs to skip a download or to forgive one.
+  @lfs [
+    "-c",
+    "filter.lfs.process=git-lfs filter-process",
+    "-c",
+    "filter.lfs.clean=git-lfs clean -- %f",
+    "-c",
+    "filter.lfs.smudge=git-lfs smudge -- %f",
+    "-c",
+    "filter.lfs.required=true",
+    "-c",
+    "lfs.skipdownloaderrors=false",
+    "-c",
+    "lfs.fetchinclude=",
+    "-c",
+    "lfs.fetchexclude=",
+    "-c",
+    "lfs.locksverify=false"
+  ]
+
+  # What the platform's host is allowed to look like where it is written into a shell: a name or an
+  # address — letters, digits, `.`, `-` and `_` (a Docker service name has one), or a bracketed IPv6
+  # literal — and an optional port, and nothing a shell reads as anything else. The script writes it
+  # inside double quotes, which a bracket needs: unquoted, `[fd00::1]` is a pattern.
+  @hostport ~r{\A(https?)://(?:[^/@]*@)?((?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+)(?::[0-9]+)?)(?:/|\z)}
 
   @type opts :: [
           dir: String.t(),
@@ -371,13 +406,20 @@ defmodule ForgeWorker.Checkout do
     end
   end
 
-  @doc "Pushes the checkout's current commit onto its branch. Force, because a job may squash."
+  @doc """
+  Pushes the checkout's current commit onto its branch. Force, because a job may squash.
+
+  **The LFS objects go first**, by `git lfs push origin HEAD` — not by the `pre-push` hook, which an
+  agent may have removed — so the platform's guard finds every object a commit names
+  (`docs/design/git-hosting.md` § `pre-receive`).
+  """
   @spec push(opts()) :: :ok | {:error, term()}
   def push(opts) do
     dir = Keyword.fetch!(opts, :dir)
     branch = Keyword.fetch!(opts, :branch)
 
-    with {:ok, _out} <-
+    with {:ok, _out} <- git(dir, ["lfs", "push", "origin", "HEAD"], opts),
+         {:ok, _out} <-
            git(dir, ["push", "--force", "origin", "HEAD:refs/heads/" <> branch], opts) do
       :ok
     end
@@ -387,13 +429,14 @@ defmodule ForgeWorker.Checkout do
   Puts the checkout on `sha`, detached, with the working tree reset to it and the untracked files
   kept — what a command runs against (`docs/design/commands.md` § The ensured commit). The commit
   is on the branch `ensure/1` fetched, because the job that invoked it pushed it there before it
-  parked; a sha the fetch did not bring is refused rather than looked for elsewhere.
+  parked; a sha the fetch did not bring is refused rather than looked for elsewhere. `opts` takes
+  `:as`, and `:token` and `:url` for the LFS objects the checkout downloads.
   """
-  @spec detach(String.t(), String.t(), ForgeWorker.Slice.as()) :: :ok | {:error, term()}
-  def detach(dir, sha, as) do
+  @spec detach(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def detach(dir, sha, opts) do
     if Regex.match?(~r/\A[0-9a-f]{40}\z/, sha) do
-      with {:ok, _out} <- git(dir, ["checkout", "--quiet", "--detach", sha], as: as),
-           {:ok, _out} <- git(dir, ["reset", "--quiet", "--hard", sha], as: as) do
+      with {:ok, _out} <- git(dir, ["checkout", "--quiet", "--detach", sha], opts),
+           {:ok, _out} <- git(dir, ["reset", "--quiet", "--hard", sha], opts) do
         :ok
       end
     else
@@ -425,7 +468,8 @@ defmodule ForgeWorker.Checkout do
     args = ["clone", "--quiet", "--branch", branch, "--single-branch", url, dir]
 
     with {:ok, _out} <- git(Path.dirname(dir), args, opts),
-         :ok <- identity(dir, opts) do
+         :ok <- identity(dir, opts),
+         :ok <- configure(dir, opts) do
       fetch_default(dir, opts)
     end
   end
@@ -435,6 +479,7 @@ defmodule ForgeWorker.Checkout do
 
     with {:ok, _out} <- git(dir, ["fetch", "--quiet", "origin", branch], opts),
          :ok <- identity(dir, opts),
+         :ok <- configure(dir, opts),
          :ok <- reset_unless_resuming(dir, branch, opts) do
       # Last, because it writes FETCH_HEAD too, and the reset is to the branch's.
       fetch_default(dir, opts)
@@ -444,15 +489,18 @@ defmodule ForgeWorker.Checkout do
   defp reset_unless_resuming(dir, branch, opts) do
     if Keyword.get(opts, :resume, false),
       do: :ok,
-      else: reset(dir, branch, Keyword.get(opts, :clean, true), opts[:as])
+      else: reset(dir, branch, Keyword.get(opts, :clean, true), opts)
   end
 
   # `-B` rather than a bare reset: a snapshot of a seed is on whatever commit the seed was
   # built at, and often not on this branch at all.
-  defp reset(dir, branch, clean?, as) do
-    with {:ok, _out} <- git(dir, ["checkout", "--quiet", "-B", branch, "FETCH_HEAD"], as: as),
-         {:ok, _out} <- git(dir, ["reset", "--quiet", "--hard", "FETCH_HEAD"], as: as),
-         {:ok, _out} <- maybe_clean(dir, clean?, as) do
+  #
+  # **These two download LFS objects** — the smudge runs on every path whose attributes say `lfs` —
+  # so they carry the token and the endpoint, as a fetch does.
+  defp reset(dir, branch, clean?, opts) do
+    with {:ok, _out} <- git(dir, ["checkout", "--quiet", "-B", branch, "FETCH_HEAD"], opts),
+         {:ok, _out} <- git(dir, ["reset", "--quiet", "--hard", "FETCH_HEAD"], opts),
+         {:ok, _out} <- maybe_clean(dir, clean?, opts) do
       :ok
     end
   end
@@ -479,8 +527,8 @@ defmodule ForgeWorker.Checkout do
   defp branch_name?(name),
     do: Regex.match?(~r{^[A-Za-z0-9][A-Za-z0-9._/-]*$}, name) and not String.contains?(name, "..")
 
-  defp maybe_clean(_dir, false, _as), do: {:ok, ""}
-  defp maybe_clean(dir, true, as), do: git(dir, ["clean", "--quiet", "-fd"], as: as)
+  defp maybe_clean(_dir, false, _opts), do: {:ok, ""}
+  defp maybe_clean(dir, true, opts), do: git(dir, ["clean", "--quiet", "-fd"], opts)
 
   # The worker's own copy of `Forge.Git.identity/0`: it cannot depend on platform code
   # (`CLAUDE.md` § Layout), so the two are kept equal by hand.
@@ -496,16 +544,121 @@ defmodule ForgeWorker.Checkout do
     end
   end
 
+  # **What the agent's own git needs, written into the checkout**: the filters and the `pre-push`
+  # hook (`git lfs install --local`), so an agent that commits an LFS file and pushes uploads it; the
+  # same pins as every call here carries, so a `.lfsconfig` it commits cannot move the endpoint; and
+  # the credential helper, which answers the platform's host and no other. Run on every clone and
+  # every refresh — a template or a seed from before is put right on its next use — and as `as`: the
+  # worker's own into an empty directory, the job's user's afterwards.
+  defp configure(dir, opts) do
+    url = Keyword.get(opts, :url)
+
+    settings =
+      [
+        {"lfs.skipdownloaderrors", "false"},
+        {"lfs.fetchinclude", ""},
+        {"lfs.fetchexclude", ""},
+        {"lfs.locksverify", "false"}
+      ] ++ pins(url)
+
+    with {:ok, _out} <- git(dir, ["lfs", "install", "--local", "--force"], opts),
+         :ok <- config_all(dir, settings, opts) do
+      credential_helper(dir, url, opts)
+    end
+  end
+
+  defp config_all(dir, settings, opts) do
+    Enum.reduce_while(settings, :ok, fn {key, value}, :ok ->
+      case git(dir, ["config", "--local", key, value], opts) do
+        {:ok, _out} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  # An empty entry first, which resets the list, so nothing configured earlier answers for it.
+  defp credential_helper(dir, url, opts) do
+    case helper(url) do
+      nil ->
+        :ok
+
+      helper ->
+        with {:ok, _out} <-
+               git(dir, ["config", "--local", "--replace-all", "credential.helper", ""], opts),
+             {:ok, _out} <-
+               git(dir, ["config", "--local", "--add", "credential.helper", helper], opts) do
+          :ok
+        end
+    end
+  end
+
+  @doc """
+  The LFS endpoint git-lfs derives from a remote: `<url>/info/lfs` for an http(s) URL ending in
+  `.git` and `<url>.git/info/lfs` for one that does not, and `file://<path>` for a local path, which
+  git-lfs serves from the repository's own `lfs/objects` with no HTTP. `nil` for anything else.
+  """
+  @spec endpoint(String.t() | nil) :: String.t() | nil
+  def endpoint("http" <> _rest = url) do
+    if Regex.match?(@hostport, url) do
+      trimmed = String.trim_trailing(url, "/")
+
+      if String.ends_with?(trimmed, ".git"),
+        do: trimmed <> "/info/lfs",
+        else: trimmed <> ".git/info/lfs"
+    end
+  end
+
+  def endpoint("/" <> _rest = path), do: "file://" <> path
+  def endpoint(_other), do: nil
+
+  defp pins(url) do
+    case endpoint(url) do
+      nil -> []
+      endpoint -> [{"lfs.url", endpoint}, {"lfs.pushurl", endpoint}]
+    end
+  end
+
+  @doc """
+  A credential helper that prints `$FORGE_GIT_TOKEN` for `get` and for the platform's own protocol
+  and host (and port) only, or `nil` when `url` names none a shell may be given. Any other request —
+  another host, another protocol, `store`, `erase` — is answered with nothing, so git has no
+  credential to send there. The host is matched against a name, an address or a bracketed IPv6 literal, and a port, before it is written
+  into the script, so what is in the script is a name and nothing else.
+  """
+  @spec helper(String.t() | nil) :: String.t() | nil
+  def helper(url) when is_binary(url) do
+    case Regex.run(@hostport, url) do
+      [_all, protocol, host] ->
+        ~s/!f() { [ "$1" = get ] || exit 0; p=; h=; / <>
+          ~s/while IFS== read -r k v; do case $k in protocol) p=$v;; host) h=$v;; esac; done; / <>
+          ~s/[ "$p" = #{protocol} ] && [ "$h" = "#{host}" ] || exit 0; / <>
+          ~S|printf 'username=forge\npassword=%s\n' "$FORGE_GIT_TOKEN"; }; f|
+
+      _none ->
+        nil
+    end
+  end
+
+  def helper(_url), do: nil
+
   # `as` is required rather than defaulted: a call that forgot it would be git run as root in a
   # job's tree, which is the one thing this module is careful never to do.
   defp git(dir, args, opts) do
     as = Keyword.fetch!(opts, :as)
 
     {executable, args} =
-      as.("git", ["-c", "credential.helper=", "-c", "credential.helper=" <> @helper] ++ args)
+      as.("git", prefix(Keyword.get(opts, :url)) ++ args)
 
     env =
-      [{"GIT_TERMINAL_PROMPT", "0"}] ++
+      [
+        {"GIT_TERMINAL_PROMPT", "0"},
+        # Nothing the worker was started with may tell git-lfs to leave pointers where files go.
+        {"GIT_LFS_SKIP_SMUDGE", nil},
+        # **An equivalent mutant**: with it set in the worker's environment `git lfs push` run by
+        # hand uploads all the same (watched), and the `pre-push` hook it does skip is not what
+        # uploads here (`push/1` runs `git lfs push` first), so nothing a test can see changes.
+        {"GIT_LFS_SKIP_PUSH", nil}
+      ] ++
         case Keyword.get(opts, :token) do
           nil -> []
           token when is_function(token, 0) -> [{"FORGE_GIT_TOKEN", token.()}]
@@ -516,6 +669,19 @@ defmodule ForgeWorker.Checkout do
       {out, 0} -> {:ok, out}
       {out, code} -> {:error, {code, redact(out)}}
     end
+  end
+
+  # The settings that go in front of every call. The helper's list is reset first, as it was.
+  defp prefix(url) do
+    helper =
+      case helper(url) do
+        nil -> []
+        helper -> ["-c", "credential.helper=" <> helper]
+      end
+
+    pins = Enum.flat_map(pins(url), fn {key, value} -> ["-c", key <> "=" <> value] end)
+
+    ["-c", "credential.helper="] ++ helper ++ @lfs ++ pins
   end
 
   # git echoes the remote URL in its errors, and a caller may have put the token in one. The

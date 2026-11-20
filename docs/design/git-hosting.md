@@ -15,7 +15,7 @@ HTTP Basic with a per-job token, not the operator session and not the API bearer
 router pipeline fits it; and the request body is a packfile that has to reach `git http-backend`
 unread, which is not what a pipeline ending in `Plug.Parsers` is for.
 
-Exactly three paths answer. Everything else is `404`:
+Exactly four requests answer to git itself, and four more answer for Git LFS. Everything else is `404`:
 
 | Request | Service | Needs |
 |---|---|---|
@@ -23,6 +23,13 @@ Exactly three paths answer. Everything else is `404`:
 | `GET /git/<p>.git/info/refs?service=git-receive-pack` | advertise for push | write |
 | `POST /git/<p>.git/git-upload-pack` | fetch | read |
 | `POST /git/<p>.git/git-receive-pack` | push | write |
+| `POST /git/<p>.git/info/lfs/objects/batch` | LFS batch (`download`, or `upload`) | read; write for an upload |
+| `GET /git/<p>.git/info/lfs/objects/<oid>` | LFS download | read |
+| `PUT /git/<p>.git/info/lfs/objects/<oid>?size=<n>` | LFS upload | write |
+| `* /git/<p>.git/info/lfs/locks…` | LFS locking | read, then `501` |
+
+Anything else under `info/lfs` is `404` — a `GET` or `PUT` of `objects/batch` included, which is not an oid. The LFS paths name a capability like the four above and
+are checked in the same place with the same token (§ Git LFS).
 
 **The dumb protocol is not served.** No `/objects/...`, no `/HEAD`, no `/objects/info/packs`.
 Those paths let a reader walk loose objects without ever naming a service, which is a bypass of
@@ -211,6 +218,11 @@ write to `ticket/<n>`) and the CGI strips from every
 - A push with an empty `FORGE_ALLOWED_REFS` and no `FORGE_INTERNAL` writes nothing.
 - A developer's or admin's credential (`FORGE_NO_REWRITE=1`) is fast-forward only on every branch it may write, ticket branches included — a job may be working on one, and a rewrite would drop its commits. Only the platform's own `FORGE_INTERNAL` pushes are exempt, and none sets both.
 
+- **A branch a push leaves behind must not point at an LFS object forge does not hold** (§ Git
+  LFS, *Verification*). It is checked last, after every ref has passed the rules above, and for
+  every pushed `refs/heads/*` tip — the platform's own pushes (a merge, an update step) included,
+  because it does not look at `FORGE_INTERNAL`.
+
 ### Non-fast-forward on a ticket branch: allowed, recorded, and pinned
 
 `decisions.md` says a job commits freely and history is squashed. The squash happens on the
@@ -351,6 +363,11 @@ glob. A project may have several; they are independent.
   set to `refs/heads/main` gets no tags. The mirror exists so one machine is never the only copy
   of the project. Publishing every ticket branch's scratch history
   to the project's external home is a different thing, and not one anybody asked for.
+- **A mirror receives the LFS objects before the refs.** When the repository holds any LFS object,
+  the hook runs `git lfs push <url> <refs>` first, and pushes the refs whatever came of it. The mirror
+  is then current on code even when its LFS store refused something; its `lastStatus` is `failed`
+  and its `lastError` starts `LFS objects failed:`, so it reads as failing until a later push
+  succeeds. Nothing is fetched back and nothing is retried (§ Not built).
 - **A dead mirror costs seconds, not minutes.** `http.lowSpeedLimit` and `http.lowSpeedTime` bound
   it. Without them every push waits on git's own timeout, once per configured mirror, inside the
   push the person is watching.
@@ -386,6 +403,13 @@ operation it guards, and a config file is editable by anything that can reach th
 time git is told the same thing a third way: `--end-of-options` before the URL, `protocol.allow =
 never` with `https` and `http` set to `always`, and `http.followRedirects = false` so a mirror
 host cannot bounce the push somewhere else.
+
+**The LFS endpoint is the mirror's own.** `git lfs push` is run with `lfs.url` and `lfs.pushurl`
+set on the command line to the mirror URL's own `…/info/lfs` (`.git` added when the URL does not
+end in it, as git-lfs derives it), so a `.lfsconfig` committed to the repository cannot send the
+objects or the credential anywhere else. The credential store is keyed by host, as for the refs, so
+only the mirror's host is handed it; bytes may go to a storage host the mirror's LFS server names
+in its own response (GitHub's does), without the credential.
 
 **A push takes nothing.** It receives the remote's ref advertisement and its status report,
 which is inherent and unavoidable, and beyond that fetches no objects, recurses no submodules and
@@ -466,6 +490,116 @@ reviewers. Today a mirror's outcome reaches the pushing client's terminal and th
 own `git config` (§ above) — never the event log. Closing that gap needs `report/3` to parse the
 pkt-line/side-band-64k response body instead of the CGI's stderr capture, which is a change to
 `Forge.Git.Http` that this note does not yet describe.
+
+## Git LFS
+
+A project whose repository keeps large files in Git LFS is hosted whole: the platform answers the
+LFS batch API beside the smart-HTTP requests, with the same token.
+
+**Storage.** An object lives in the bare repository's own LFS directory,
+`<repo>/lfs/objects/<aa>/<bb>/<oid>` — the layout `git lfs` itself uses in a bare repository, so the
+hooks and the mirror run stock `git lfs` on it. **It is never in `Forge.Storage`**
+(`storage.md` § LFS objects are not in the store): an LFS object is source, the store is the most
+replaceable thing the host holds, and the mirror runs from a hook that can push what is in the
+repository's own directory with no help from the platform. LFS objects share the host's disk with
+the repositories. A repository whose project uses no LFS has no `lfs/` directory, and nothing here
+creates one.
+
+**Who may do what.** Download: any token that reads the project's git. Upload: any that may push
+some branch, which is every one but *reader*. The batch request's `ref` is **not used** to decide
+anything: it is a field the client fills in, so a check on it would be decorative. An object is
+filed under its own hash and verified, so an upload changes what no branch points at; what limits a
+job's writes is `pre-receive`, which takes only its own branch. A token with git access `none`, an
+API bearer, a session and another project's token get `401`, as for the four git requests.
+
+**Hrefs.** The batch answer's actions carry the object's URL and `header: {"Authorization": <the
+request's own>}`. **No token is in any URL.** The base is `Forge.Git.Url.for_worker/1` for a token a
+job holds and `Forge.Git.Url.for/1` otherwise — the address that holder was handed. An upload's href
+carries the size the batch declared (`?size=<n>`), which the `PUT` checks against its
+`Content-Length` and against the bytes that arrive.
+
+**The batch.** At most 1,000 objects and 1 MiB of body per request (`413` beyond; `422` for bad
+JSON). The operation is `download` or `upload`, the hash algorithm `sha256` (`409` otherwise), the
+transfer `basic` (`422` for a client that offers others and not it). Per object: `422` for an oid that is not 64 lowercase hex characters or a size that
+is not a non-negative integer; `422` for an upload over the limit, with a message giving the limit
+and the object's size, before a byte is sent; `404` for a download of an object this repository does
+not hold. An upload of an object already held gets no actions and its file's mtime is touched.
+
+**The size limit** is 2 GiB, which GitHub's LFS accepts on its standard plans, so what forge takes a
+mirror there can take. `FORGE_LFS_MAX_OBJECT_BYTES` sets another.
+
+**An upload is verified.** The body is streamed in megabyte chunks into `lfs/forge/incoming/<random>`
+on the repository's own filesystem, hashed and counted as it arrives, never held whole. It is
+renamed into place only when its length equals the declared size and its sha256 equals the oid;
+every other ending removes it. Two uploads of one object at once rename identical bytes over one
+another and leave one correct copy.
+
+**An oid is a path.** `Forge.Git.Lfs.path/2` refuses anything but 64 lowercase hex characters, and
+the directory is built from the resolved project's repository, never from the request.
+
+**Verification at a push.** `pre-receive`, after every ref has passed, looks at each pushed
+`refs/heads/*` tip. A tip whose tree has no `.gitattributes` line naming `filter=lfs`
+(`git grep -F filter=lfs -- ':(glob)**/.gitattributes'`) cannot have an LFS path, since forge sets no
+attributes of its own, so it is skipped, and a project that uses no LFS never touches `lfs/`. The
+skip changes no outcome — with no such line `check-attr` finds no LFS path either — and is there for
+the cost: no `ls-tree` of a large tree on every push of a project that has no LFS.
+Otherwise the tree is read as the smudge reads it, and **without running `git lfs` at all**:
+`git ls-tree -r -z -l` lists the regular files of 100 to 1023 bytes, `git check-attr -z --source <tip>
+filter` keeps those at a path whose filter is `lfs`, and a `git cat-file blob` for each blob (once per distinct blob) reads it as bytes and takes the oid
+out of it if it is a pointer. **One process to a blob, not one `--batch` stream**: reading that
+stream with `read -N` counts characters and drops NULs, so one ordinary binary file ahead of a
+pointer threw the reader out of step and the pointer was never looked up (found in review, and
+tested under `C` and `C.utf8`). A valid pointer at a path that is not an LFS path, a test
+fixture, is never refused. It does not use `git lfs ls-files`, which prints a path on a line of its
+own and so cannot say which path is which when a name holds a newline; `-z` is what keeps a path
+whole, and `ls-tree --format` is not used because, on git 2.55, it quotes the path again when the format has
+anything beside `%(path)`, whatever `-z` says. The
+pointer is recognised by its `version` line (one of the three URLs git-lfs knows) and an
+`oid sha256:` line, which is looser than git-lfs's decoder in one direction only: a file the decoder
+would not treat as a pointer, but which looks like one, is held to the rule. Under a shared lock
+(`flock -s lfs/forge/lock`) it tests `lfs/objects/…` for each oid and touches the ones present.
+Any missing: the push is refused, writing nothing, printing at most 30 paths (ASCII control characters
+stripped, cut at 120 characters) each with a 10-character oid, "and N more", and
+`git lfs push --all <remote>`. **Only the tip is checked**, not the history behind it, so an import
+whose old commits name an object GitHub itself lost can still be pushed; a checkout gets the tip,
+and that is what has to be whole.
+
+**Importing a repository** is the push that exists, with an admin token: `git lfs push --all <url>`
+before `git push`, since the guard refuses the other order.
+
+**Locking** answers `501` after a read authorisation, which `git lfs` reads as unsupported. A stock
+git-lfs (3.7.1, the client the suite drives) pushes and clones against it, as the round-trip test
+does; whether that client prints a locking warning was not captured.
+
+**Deleting an object nothing uses.** An object is *in use* while any commit reachable from any ref
+names it, anywhere in its history: branches, tags, and every `refs/forge/*`. It is computed from
+`git lfs ls-files --all --long`, which lists every pointer of every version of every path; that is a
+superset of what the hook checks, which is the safe direction. An object is deleted **30 days after
+it stopped being in use**, not after it was last written. Two clocks:
+
+- **A** is the object file's mtime: its upload, an upload batch naming it (including one answered
+  "already held"; a download batch touches nothing) and a push check.
+- **B** is a record in `lfs/forge/sweep`, written only by the sweep, by rename: a header with the
+  time of the last run, then one line per object, `in-use` or `unused <t>`. It lives beside the
+  objects, so there is no migration.
+
+`Forge.Git.Lfs.Sweeper` ticks hourly and sweeps a repository whose state file says the last run was
+a day or more ago, so each project is swept once a day with nobody to start it. A run computes
+what is in use — **deleting nothing if that fails** — then writes `in-use` for a used object,
+`unused <now>` for one that was recorded `in-use` and no longer is, and keeps `t` for one already
+`unused t`; an object not listed is new and counted from A. With **no state file at all** every
+unused object is recorded `unused now` and nothing is deleted: the safe reading of a lost record. An
+object is due when it is not in use and `now − max(B, A) ≥ 30 days`. The due ones are re-stat'd and
+unlinked inside an exclusive lock on the same file the hook's shared lock holds, so a push accepted
+while a run is in progress is never left pointing at an object that run deletes. Incoming temporary
+files older than a day are removed. A run that deletes anything records one `git.lfs.deleted` event
+for the project with the number of objects and the bytes; nothing per object, and nothing from a run
+that deletes nothing. **A mirror is never touched** and the repository's own git objects are not
+cleaned here.
+
+**Not verified here:** GitHub's LFS endpoint with a real mirror, 2 GiB through a proxy, whether
+git-lfs honours `http.followRedirects=false`, and a worker against a real platform's endpoint over
+HTTP (the worker suite uses a bare repository's `lfs/objects` as its LFS server over `file://`).
 
 ## The merge
 
@@ -673,6 +807,17 @@ in this one module, which is what keeps the credential's handling in one place.
 - `user.name` and `user.email` are set on the clone. The harness runs with a private `HOME`, so
   there is no global identity and without this the agent's commits fail.
 - The push is `--force`, because a job may rewrite its own branch. `pre-receive` is the guard.
+- **LFS.** Every `git` the worker runs carries the LFS filters (`required=true`, so a download that
+  fails fails the clone, reset or checkout), `lfs.skipdownloaderrors=false`, empty fetch include and
+  exclude, and `lfs.locksverify=false`; it runs with `GIT_LFS_SKIP_SMUDGE` and `GIT_LFS_SKIP_PUSH` removed from its
+  environment. When the call knows the platform's URL it also pins `lfs.url` and `lfs.pushurl` to
+  that endpoint — both, because a committed `.lfsconfig`'s `lfs.pushurl` wins over a local `lfs.url`
+  for uploads. The checkout is left configured the same way (`git lfs install --local`, the pins,
+  and the credential helper) so the agent's own `git push` uploads its objects through the pre-push
+  hook; the worker's own push runs `git lfs push origin HEAD` first and does not rely on that hook.
+- **The helper answers one host.** The credential helper prints `$FORGE_GIT_TOKEN` only when the
+  request's `protocol` and `host` are the platform's, so an LFS endpoint the agent configured itself
+  is asked for a credential and handed none.
 
 ## Not built, and named so the absence is a decision
 
@@ -692,6 +837,11 @@ in this one module, which is what keeps the credential's handling in one place.
   `openssh` is gone from the image and from the NixOS module's service path. A deployment that
   mirrored over `git@host:` stops mirroring on upgrade and says so in the mirror's own status,
   which is the point of that status existing.
+- **LFS file locking** (`501`), **LFS over SSH** and **transfer adapters other than `basic`**
+  (resumable or multipart uploads). **Reconciling a mirror's LFS store**: an object a mirror lacks
+  is not sent again until a later push names it. **A pointer scan of a worker's checkout** before a
+  run: forge installs and uses LFS and a failed download fails the checkout, and a project that
+  wants more writes it into its own commands.
 - **Sideband progress on a clone** — see the CGI limit above.
 - **`Forge.Operator.retry_merge/2`.** Cut, where it was pending. The automatic retry against a
   moved head is built; a verb that repeats the merge by hand is not, because what the retry

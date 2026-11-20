@@ -586,6 +586,14 @@ defmodule Forge.Events do
     bounded("withdrew #{p["name"]} #{versions}" <> note(p["reason"], bound), 200, bound)
   end
 
+  # A day's deletion of LFS objects nothing uses (`docs/design/git-hosting.md` § Git LFS): how many
+  # and how many bytes, never which.
+  defp describe(
+         %Event{type: "git.lfs.deleted", payload: %{"objects" => n, "bytes" => bytes}},
+         _bound
+       ),
+       do: "deleted #{n} LFS object(s) nothing used, #{bytes} bytes"
+
   # An update step's visit, and what came with it (`docs/design/workflow-grammar-v1.md` § Bringing
   # the branch up to date): what it did, then what became of the pin. Never the payload's keys.
   defp describe(%Event{type: "ticket.branch_updated", payload: p}, _bound),

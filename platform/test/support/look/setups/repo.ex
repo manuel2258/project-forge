@@ -6,8 +6,11 @@ defmodule Forge.Look.Setups.Repo do
   one in a job step and one in a person's, and one branch is nobody's.
 
   Users: `member`. Paths: `commits` (`10a`), `files` (`10c`), `file` (`10d`, `10f`), `large`,
-  `binary`, `commit` (`10e`, the newest commit on the default branch), `ticket` (a ticket's
-  branch). The branch sheet (`10b`) is opened from any of them.
+  `binary`, `lfs` (a Git LFS file, opened), `commit` (`10e`, the newest commit on the default
+  branch), `soundtrack` (a commit that adds and changes LFS files), `ticket` (a ticket's branch).
+  The branch sheet (`10b`) is opened from any of them. An LFS file is a pointer at a path
+  `.gitattributes` sends through the filter, built here at runtime; none is ever committed to forge's
+  own tree, because forge is hosted on forge.
 
   Commits are written with git's plumbing, each with its own author and date, for the reason
   `Forge.Look.Setups.Decision` gives: a look has no test for `Forge.GitFixtures` to clean up
@@ -80,6 +83,17 @@ defmodule Forge.Look.Setups.Repo do
        "config/config.exs" => "import Config\n\nconfig :game, assets: \"priv/static\"\n",
        "assets/atlas.bin" => {:large, 600 * 1024}
      }},
+    {"Add the sound effects", "jo", 21,
+     %{
+       ".gitattributes" => Forge.LfsFixtures.attributes("*.ogg"),
+       "assets/audio/boom.ogg" => {:lfs, 2_411_724},
+       "assets/audio/click.ogg" => {:lfs, 48_211}
+     }},
+    {"Rework the soundtrack", "ana", 21,
+     %{
+       "assets/audio/boom.ogg" => {:lfs, 3_145_728},
+       "assets/audio/theme.ogg" => {:lfs, 14_680_064}
+     }},
     {"Controller rebinding", "you", 20,
      %{"lib/game/hud.ex" => "defmodule Game.Hud do\n  def bindings, do: %{}\nend\n"}},
     {"Particle pooling", "you", 14,
@@ -103,10 +117,12 @@ defmodule Forge.Look.Setups.Repo do
     project = Decision.project!("game", File.read!(@workflow), member)
     repo = Projects.repo_path(project)
 
-    head =
-      Enum.reduce(@history, nil, fn {subject, author, days, files}, _head ->
-        commit!(repo, "main", files, subject, author, days)
+    shas =
+      Map.new(@history, fn {subject, author, days, files} ->
+        {subject, commit!(repo, "main", files, subject, author, days)}
       end)
+
+    head = shas["Show the score on the end screen"]
 
     persist =
       ticket!(project, member, "Persist the high score table", "implementing", [
@@ -137,6 +153,8 @@ defmodule Forge.Look.Setups.Repo do
         "file" => base <> "?tab=files&file=lib/game/scores.ex",
         "large" => base <> "?tab=files&file=assets/atlas.bin",
         "binary" => base <> "?tab=files&file=assets/fonts/score.png",
+        "lfs" => base <> "?tab=files&file=assets/audio/theme.ogg",
+        "soundtrack" => base <> "/commits/" <> shas["Rework the soundtrack"],
         "commit" => base <> "/commits/" <> head,
         "ticket" => base <> "?branch=" <> URI.encode_www_form(persist.branch)
       }
@@ -165,6 +183,10 @@ defmodule Forge.Look.Setups.Repo do
   end
 
   defp bytes({:file, path}), do: File.read!(path)
+  # A pointer for an object that is not here: the page reads the pointer and never the object.
+  defp bytes({:lfs, size}),
+    do: Forge.LfsFixtures.pointer_text(Forge.LfsFixtures.oid("look #{size}"), size)
+
   defp bytes({:large, size}), do: String.duplicate("forge atlas ", div(size, 12) + 1)
   defp bytes(text), do: text
 end

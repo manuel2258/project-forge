@@ -358,7 +358,10 @@ defmodule ForgeWorker.Job.Workspace do
   defp maybe_push(_git, _dir, false, _as), do: :ok
 
   defp maybe_push(git, dir, true, as) do
-    push = fn -> Checkout.push(dir: dir, branch: git["branch"], token: git["token"], as: as) end
+    push = fn ->
+      Checkout.push(dir: dir, branch: git["branch"], url: git["url"], token: git["token"], as: as)
+    end
+
     patiently(push, Application.get_env(:forge_worker, :push_patience_ms, @push_patience_ms))
   end
 

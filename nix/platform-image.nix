@@ -44,7 +44,10 @@ let
   # milestone 3 and `nix develop` happens on the worker; Claude Code, because the platform
   # hands each job a sealed credential and never invokes a harness (`docs/design/credentials.md`);
   # `qemu`, because a container cannot boot a VM and § In a container explains what that costs.
-  runtimeInputs = [ pkgs.git pkgs.bash pkgs.coreutils ];
+  #
+  # `git-lfs` and `util-linux` (for `flock`): the `pre-receive` and `post-receive` hooks run `git lfs`
+  # and take a lock shared with the daily deletion (`docs/design/git-hosting.md` § Git LFS).
+  runtimeInputs = [ pkgs.git pkgs.git-lfs pkgs.util-linux pkgs.bash pkgs.coreutils ];
 
   entrypoint = pkgs.writeShellApplication {
     name = "forge-entrypoint";

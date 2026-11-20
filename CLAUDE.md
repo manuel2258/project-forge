@@ -135,6 +135,17 @@ operator attaches, and `docs/design/worker-channel.md` § Protocol 13 for the wi
 the bind mount on a real machine, whether Claude Code or Codex can read an image from the folder (Codex
 has never run against OpenAI here), drop and paste on a phone, and a 500 MiB body through a proxy.
 
+`docs/design/git-hosting.md` § Git LFS is the standard for large files in a hosted repository: the LFS
+batch API, download and upload beside the smart-HTTP requests with the same token, objects kept in
+each bare repository's own `lfs/objects` (never in `Forge.Storage`), a `pre-receive` rule that a
+pushed branch must not name an object forge does not hold, an LFS push to each mirror before its
+refs, a daily deletion of objects nothing has used for 30 days, and **a worker that checks out, resets
+and pushes with Git LFS** (protocol 14: no machine below it takes any job). **It is built** (ticket
+65). **Not verified here:** GitHub's LFS endpoint with a real mirror, 2 GiB through a proxy, whether
+git-lfs honours `http.followRedirects=false`, and a worker against a real platform's endpoint over
+HTTP (`docs/design/git-hosting.md` § Git LFS). **Never commit** a `.gitattributes` naming `filter=lfs`,
+or a valid pointer at such a path, to forge's own tree: forge is hosted on forge.
+
 `docs/design/look.md` is the standard for looking at the platform: `bin/look` opens a page in
 headless Chromium as a fixture user over a setup built from the suite's fixtures, runs steps and
 takes screenshots, in a network namespace of its own with a database of its own. Every change to
@@ -201,6 +212,9 @@ directory is removed (`ForgeWorker.Fixtures.reap/1`), and no test writes the arc
 application environment, which concurrent tests share: `test_helper.exs` sets the routing mount
 once, and it answers each test for the root that test registers
 (`ForgeWorker.RecordingMount.watch/2`).
+
+The platform suite runs `git lfs` and `flock`, which the devshell provides (`git-lfs`, `util-linux`):
+the LFS tests fail rather than skip without them, so re-enter `nix develop` after the flake changes.
 
 It installs Hex and starts a throwaway postgres first, when the machine has neither — a command
 pool's machine has the devshell and nothing else, and without both the gate died before compiling

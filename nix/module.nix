@@ -14,7 +14,10 @@ let
   # (`docs/design/git-hosting.md` § What a mirror URL may be) — an `ssh://` or `git@host:` mirror
   # URL is refused before it is ever stored, so nothing on this path would run `ssh` anyway.
   # `nix/platform-image.nix` drops the same package for the same reason.
-  servicePath = [ pkgs.git pkgs.nix pkgs.bash pkgs.coreutils cfg.claudePackage ];
+  #
+  # `git-lfs` and `util-linux` (for `flock`) are the LFS hooks' and the mirror's tools
+  # (`docs/design/git-hosting.md` § Git LFS).
+  servicePath = [ pkgs.git pkgs.git-lfs pkgs.util-linux pkgs.nix pkgs.bash pkgs.coreutils cfg.claudePackage ];
 
   # The service's environment. `forge-admin` runs one-off commands with the same one.
   serviceEnv = {

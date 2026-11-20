@@ -13,6 +13,7 @@ defmodule ForgeWeb.RepoCommitLiveTest do
 
   import Forge.AccountsFixtures
   import Forge.GitFixtures
+  import Forge.LfsFixtures
   import Phoenix.LiveViewTest
 
   alias Forge.{Git, Projects}
@@ -229,5 +230,47 @@ defmodule ForgeWeb.RepoCommitLiveTest do
     {:ok, plain, _html} = live(conn, ~p"/projects/#{project.name}/repo/commits/#{head}")
     top = ~p"/projects/#{project.name}/repo?#{[tab: "commits"]}"
     assert has_element?(plain, ~s|a[href="#{top}"]|)
+  end
+
+  test "a commit lists an LFS file as LFS with its sizes, added, modified and removed", %{
+    conn: conn,
+    project: project,
+    repo: repo
+  } do
+    commit_sized_pointers_to(repo, "main", %{
+      "kept.bin" => {"K1", 1_048_576},
+      "gone.bin" => {"G1", 3_145_728}
+    })
+
+    commit_sized_pointers_to(
+      repo,
+      "main",
+      %{"kept.bin" => {"K2", 1_468_006}, "new.bin" => {"N1", 2048}}
+    )
+
+    head = commit_to(repo, "main", %{"gone.bin" => nil}, "drop it")
+
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo/commits/#{head}")
+    assert has_element?(view, ~s|li[data-path="gone.bin"] [data-lfs]|, "LFS · 3 MB")
+    refute has_element?(view, ~s|li[data-path="gone.bin"] [data-lfs]|, "→")
+
+    {:ok, view, _html} =
+      live(conn, ~p"/projects/#{project.name}/repo/commits/#{previous(repo, head)}")
+
+    assert has_element?(view, ~s|li[data-path="kept.bin"] [data-lfs]|, "LFS · 1 MB → 1.4 MB")
+    assert has_element?(view, ~s|li[data-path="new.bin"] [data-lfs]|, "LFS · 2 KB")
+    refute has_element?(view, ~s|li[data-path="new.bin"] [data-lfs]|, "→")
+
+    # No patch of a pointer, no counts for it, and none of its pointers' lines in the commit's own
+    # totals: a pointer's text is not what the commit did.
+    assert has_element?(view, "#commit-size .ui-diffstat", "+0")
+    refute render(view) =~ "oid sha256"
+    refute has_element?(view, ~s|li[data-path="new.bin"] details|)
+    refute has_element?(view, ~s|li[data-path="new.bin"] .ui-diffstat|)
+  end
+
+  defp previous(repo, head) do
+    {:ok, sha} = Git.run(repo, ["rev-parse", head <> "~1"])
+    String.trim(sha)
   end
 end

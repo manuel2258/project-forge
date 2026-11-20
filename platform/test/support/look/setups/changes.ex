@@ -172,9 +172,13 @@ defmodule Forge.Look.Setups.Changes do
     project = Decision.project!("look-changes", File.read!(@workflow), member)
     repo = Projects.repo_path(project)
 
+    # A Git LFS file the change will rework: a pointer at a path `.gitattributes` sends through the
+    # filter, built here and never held by forge's own tree.
     commit_files!(repo, "main", %{
       "lib/game/settings.ex" => @settings_before,
-      "lib/game/audio.ex" => @audio_before
+      "lib/game/audio.ex" => @audio_before,
+      ".gitattributes" => Forge.LfsFixtures.attributes("*.ogg"),
+      "assets/audio/boom.ogg" => pointer(2_411_724)
     })
 
     review = review!(project, member)
@@ -202,6 +206,9 @@ defmodule Forge.Look.Setups.Changes do
     }
   end
 
+  defp pointer(size),
+    do: Forge.LfsFixtures.pointer_text(Forge.LfsFixtures.oid("look #{size}"), size)
+
   defp review!(project, member) do
     {:ok, ticket} =
       Tickets.admit(project, %{title: "Sound toggle in settings"}, {:user, member.id})
@@ -212,7 +219,9 @@ defmodule Forge.Look.Setups.Changes do
     sha =
       commit_files!(repo, ticket.branch, %{
         "lib/game/audio.ex" => @audio_after,
-        "test/game/settings_test.exs" => @test
+        "test/game/settings_test.exs" => @test,
+        "assets/audio/boom.ogg" => pointer(3_145_728),
+        "assets/audio/theme.ogg" => pointer(14_680_064)
       })
 
     {:ok, refinement} =

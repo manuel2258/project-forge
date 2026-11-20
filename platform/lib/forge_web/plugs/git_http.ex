@@ -8,7 +8,9 @@ defmodule ForgeWeb.Plugs.GitHttp do
   Mounted above `Plug.Parsers`, `Plug.MethodOverride`, `Plug.Head` and `Plug.Session`, so the git
   scope gets no cookie, no CSRF and no method override: all meaningless to git, and all surface.
 
-  Exactly four requests answer. Everything else is 404, the dumb protocol included: walking loose
+  Exactly four requests answer to git, and the Git LFS paths under `info/lfs` beside them — the
+  batch, an object's download and upload, and locking's 501 — each naming a capability here and
+  authorised in the one place. Everything else is 404, the dumb protocol included: walking loose
   objects under `/objects/` names no service, and so bypasses the one place capability is checked.
   See `docs/design/git-hosting.md`.
   """
@@ -16,6 +18,7 @@ defmodule ForgeWeb.Plugs.GitHttp do
   import Plug.Conn
 
   alias Forge.Git.{Http, Tokens}
+  alias Forge.Git.Lfs.Http, as: LfsHttp
   alias Forge.Projects
 
   @behaviour Plug
@@ -57,14 +60,34 @@ defmodule ForgeWeb.Plugs.GitHttp do
 
   defp service(%Plug.Conn{method: "POST"}, ["git-upload-pack"]), do: {:ok, :read}
   defp service(%Plug.Conn{method: "POST"}, ["git-receive-pack"]), do: {:ok, :write}
+  defp service(conn, ["info", "lfs" | rest]), do: lfs_service(conn, rest)
   defp service(_conn, _tail), do: :error
+
+  # A batch is authorised for reading and asks again for writing once it knows its operation; an
+  # object's `GET` reads and its `PUT` writes. Anything else under `info/lfs` names no capability.
+  defp lfs_service(%Plug.Conn{method: "POST"}, ["objects", "batch"]), do: {:ok, :read}
+
+  defp lfs_service(%Plug.Conn{method: "GET"}, ["objects", _oid]), do: {:ok, :read}
+  defp lfs_service(%Plug.Conn{method: "PUT"}, ["objects", _oid]), do: {:ok, :write}
+
+  defp lfs_service(_conn, ["locks" | _rest]), do: {:ok, :read}
+  defp lfs_service(_conn, _tail), do: :error
 
   defp authorise(conn, project, tail, service) do
     case Tokens.authorise(secret(conn), project, service) do
-      {:ok, token} -> halt(Http.serve(conn, project, tail, token))
+      {:ok, token} -> serve(conn, project, tail, token)
       :error -> unauthorised(conn)
     end
   end
+
+  defp serve(conn, project, ["info", "lfs" | _rest] = tail, token) do
+    case LfsHttp.serve(conn, project, tail, token) do
+      :unauthorised -> unauthorised(conn)
+      sent -> halt(sent)
+    end
+  end
+
+  defp serve(conn, project, tail, token), do: halt(Http.serve(conn, project, tail, token))
 
   # The username is ignored, so `http://forge:TOKEN@host/git/x.git` works with no credential
   # helper. A valid but under-powered token fails exactly as an unknown one does: a caller learns

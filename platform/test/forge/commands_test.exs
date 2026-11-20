@@ -807,6 +807,16 @@ defmodule Forge.CommandsTest do
       assert Jobs.get!(job.id).status == :pending
     end
 
+    test "the scheduler hands a protocol 13 release no job of any kind: it has no Git LFS",
+         context do
+      [job] = pending(context.ticket)
+      _old = FakeWorker.connect(protocol: 13, project: context.project)
+      start_supervised!(Forge.Jobs.Scheduler)
+
+      assert Forge.Jobs.Scheduler.tick() == 0
+      assert Jobs.get!(job.id).status == :pending
+    end
+
     # Protocol 11 counts usage during the run, which every kind of job needs: a worker below it is
     # given a command no more than an agent (`docs/design/worker-channel.md` § Protocol 11).
     test "a worker of protocol 2 is given neither an agent nor a command", context do
@@ -817,23 +827,30 @@ defmodule Forge.CommandsTest do
       # reads from.
       for each <- [job, %Job{kind: :command}, %Job{kind: :chat}] do
         assert Jobs.protocol_needs(each)[:usage] == 11
-        # An agent job and a conversation also need 13, which hands them the files people attached
-        # (`docs/design/worker-channel.md` § Protocol 13); a command is given none.
-        assert Jobs.protocol(each) == if(each.kind == :command, do: 11, else: 13)
+
+        # Every job needs 14, for Git LFS (`docs/design/worker-channel.md` § Protocol 14); an agent
+        # job and a conversation also need 13, for the files people attached, which it exceeds.
+        assert Jobs.protocol_needs(each)[:lfs] == 14
+        assert Jobs.protocol(each) == 14
       end
 
       old = Workers.get!(FakeWorker.connect(protocol: 2, project: context.project).id)
-      new = Workers.get!(FakeWorker.connect(protocol: 13, project: context.project).id)
+      new = Workers.get!(FakeWorker.connect(protocol: 14, project: context.project).id)
+      before_lfs = Workers.get!(FakeWorker.connect(protocol: 13, project: context.project).id)
       before_files = Workers.get!(FakeWorker.connect(protocol: 12, project: context.project).id)
       agent = %{kind: :workflow, memory: 1, cores: 1, project_id: context.project.id}
       agent = Map.put(agent, :protocol, Jobs.protocol(job))
 
+      command = %{agent | kind: :command, protocol: Jobs.protocol(%Job{kind: :command})}
+
       refute Workers.fits?(old, agent)
       refute Workers.fits?(before_files, agent)
+      # A worker of 13 takes an agent job and a command of every earlier release, and none now.
+      refute Workers.fits?(before_lfs, agent)
+      refute Workers.fits?(before_lfs, command)
       assert Workers.fits?(new, agent)
-      assert Workers.fits?(before_files, %{agent | kind: :command, protocol: 11})
-      refute Workers.fits?(old, %{agent | kind: :command, protocol: 11})
-      assert Workers.fits?(new, %{agent | kind: :command, protocol: 11})
+      refute Workers.fits?(old, command)
+      assert Workers.fits?(new, command)
     end
 
     # The scheduler's own demand, not one built by hand: an older release serving the project is

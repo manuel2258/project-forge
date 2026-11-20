@@ -184,6 +184,10 @@
                 pkgs.esbuild
                 pkgs.tailwindcss_4
                 pkgs.git
+                # The suites run `git lfs` (the hooks, the mirror, the worker's checkout) and the
+                # hooks take a `flock`; they fail rather than skip without them.
+                pkgs.git-lfs
+                pkgs.util-linux
                 # `bin/check` lints the measurement harness; the harness itself needs the
                 # measure shell below.
                 pkgs.shellcheck

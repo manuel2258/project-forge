@@ -623,6 +623,7 @@ defmodule ForgeWeb.RepoLive do
         >
           <span aria-hidden="true" class="repo-tree-mark repo-tree-mark--file">▸</span>
           <span class="repo-tree-name">{entry.name}</span>
+          <span :if={entry.lfs} class="repo-tree-lfs" data-lfs>{Blob.lfs_label(entry.lfs)}</span>
         </.link>
       </li>
     </ul>
@@ -664,6 +665,10 @@ defmodule ForgeWeb.RepoLive do
       <%= case @file do %>
         <% {:text, lines, _bytes} -> %>
           <Highlight.code lines={lines} class="repo-code" id="file-code" />
+        <% {:lfs, _size} -> %>
+          <p class="repo-empty" id="file-lfs">
+            This file is stored with Git LFS. Its content is not shown here.
+          </p>
         <% :binary -> %>
           <p class="repo-empty">This file is binary. Its content is not shown.</p>
         <% {:too_large, bytes} -> %>
@@ -676,6 +681,7 @@ defmodule ForgeWeb.RepoLive do
   defp size({:text, {_kind, lines}, bytes}),
     do: "#{bytes(bytes)} · #{count(length(lines), "line", "lines")}"
 
+  defp size({:lfs, size}), do: Blob.lfs_label(size)
   defp size({:too_large, bytes}), do: bytes(bytes)
   defp size(:binary), do: nil
 

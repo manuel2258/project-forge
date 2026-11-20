@@ -32,8 +32,12 @@ deny() {
   exit 1
 }
 
+# The branch tips this push writes, for the LFS check after the rules below have passed.
+tips=()
+
 while read -r old new ref; do
   [ "$new" = "$zero" ] && deny "refs are never deleted here ($ref)"
+  case "$ref" in refs/heads/*) tips+=("$new") ;; esac
 
   # A tag is the platform's alone: a release's, made when it concludes. Created and never moved,
   # and only on a commit that is already in the default branch's history, so it names something
@@ -104,3 +108,126 @@ while read -r old new ref; do
     echo "forge: note: $ref was rewritten (non-fast-forward)" >&2
   fi
 done
+
+# --- Git LFS: a branch a push leaves behind must not name an object forge does not hold ----------
+# docs/design/git-hosting.md § Git LFS, "Verification at a push". Only the tip's tree is checked,
+# not the history behind it, and only when the platform's rules above have admitted the push.
+#
+# **Nothing here runs git-lfs.** The tree is read with `ls-tree -z`, the attributes with
+# `check-attr -z --source`, and the pointer out of the blob, because `git lfs ls-files` prints a path
+# on a line of its own and a path may hold a newline: the one place a guard has to be able to say
+# which path is which. A tip with no `.gitattributes` line naming `filter=lfs` cannot have an LFS
+# path (forge sets no attributes file of its own), so it is skipped before anything is read, and a
+# project that uses no LFS never touches `lfs/`.
+lfs_pointer_oid() {
+  # $1 is the content of a blob under 1024 bytes. The oid of the pointer it is, or nothing: the
+  # `version` line first with one of the three URLs git-lfs knows, and an `oid sha256:` line.
+  local c=${1//$'\r'/} v='^[[:space:]]*version (https://git-lfs\.github\.com/spec/v1|https://hawser\.github\.com/spec/v1|http://git-media\.io/v/2)'$'\n'
+  local o=$'\n''oid sha256:([0-9a-f]{64})'$'\n'
+  [[ $c =~ $v ]] || return 1
+  [[ "$c"$'\n' =~ $o ]] || return 1
+  printf '%s' "${BASH_REMATCH[1]}"
+}
+
+lfs_named=() # "path<TAB>oid" for each object a tip names at an LFS path
+declare -A lfs_seen=()
+
+lfs_scan() {
+  local tip=$1 mode size sha path rec i kind
+  local -a cand_sha=() cand_path=() sel_sha=() sel_path=()
+
+  # **Dropping this line is an equivalent mutant**: with no `filter=lfs` line in any `.gitattributes`
+  # `check-attr` finds no LFS path either, so what it skips would find nothing. It is the cost guard,
+  # and what it spares a project with no LFS is a `git ls-tree` of the whole tree on every push.
+  git grep -q -F filter=lfs "$tip" -- ':(glob)**/.gitattributes' 2> /dev/null || return 0
+
+  # Blobs that could be a pointer: a regular file of 100 to 1023 bytes. `-z` is what leaves a path
+  # unquoted (`--format` quotes it again on git 2.55 when it has anything beside `%(path)`, whatever
+  # `-z` says): a record is `<mode> <type> <sha> <size><TAB><path>` and ends in a NUL.
+  while IFS= read -r -d '' rec; do
+    path=${rec#*$'\t'}
+    read -r mode _ sha size <<< "${rec%%$'\t'*}"
+    case "$mode" in 100644 | 100755) : ;; *) continue ;; esac
+    [[ $size =~ ^[0-9]+$ ]] && [ "$size" -ge 100 ] && [ "$size" -lt 1024 ] || continue
+    cand_sha+=("$sha")
+    cand_path+=("$path")
+  done < <(git ls-tree -r -z -l "$tip")
+  [ ${#cand_sha[@]} -gt 0 ] || return 0
+
+  # `check-attr` answers in the order it was asked, three NUL-terminated fields to a path.
+  i=0
+  while IFS= read -r -d '' _ && IFS= read -r -d '' kind && IFS= read -r -d '' rec; do
+    if [ "$kind" = filter ] && [ "$rec" = lfs ]; then
+      sel_sha+=("${cand_sha[$i]}")
+      sel_path+=("${cand_path[$i]}")
+    fi
+    i=$((i + 1))
+  done < <(printf '%s\0' "${cand_path[@]}" | git check-attr -z --stdin --source "$tip" filter)
+  [ ${#sel_sha[@]} -gt 0 ] || return 0
+
+  # The content of each blob, once, **one `cat-file blob` to a blob and read as bytes**. A single
+  # `cat-file --batch` read with `read -N` is not exact: `-N` counts characters, which a multibyte
+  # locale makes differ from bytes, and it drops a NUL, so one ordinary binary file ahead of a
+  # pointer threw the reader out of step and the pointer was never looked up. Command substitution
+  # keeps every byte but a NUL, which it drops (silenced below, bash warns of it on stderr), and
+  # trailing newlines, which `lfs_pointer_oid` puts back. A blob that is a pointer only because its
+  # NULs were dropped is held to the rule, which is the strict direction.
+  local -A oid_of=()
+  local content oid
+  for sha in "${sel_sha[@]}"; do
+    [ -z "${oid_of[$sha]+set}" ] || continue
+    oid_of[$sha]=
+    { content=$(LC_ALL=C git cat-file blob "$sha" 2> /dev/null); } 2> /dev/null || continue
+    if oid=$(lfs_pointer_oid "$content"); then oid_of[$sha]=$oid; fi
+  done
+
+  for i in "${!sel_sha[@]}"; do
+    oid=${oid_of[${sel_sha[$i]}]:-}
+    [ -n "$oid" ] || continue
+    [ -z "${lfs_seen[$oid]:-}" ] || continue
+    lfs_seen[$oid]=1
+    lfs_named+=("${sel_path[$i]}"$'\t'"$oid")
+  done
+}
+
+for tip in "${tips[@]}"; do
+  lfs_scan "$tip"
+done
+
+if [ ${#lfs_named[@]} -gt 0 ]; then
+  repo=$(git rev-parse --absolute-git-dir)
+  mkdir -p "$repo/lfs/forge"
+  # Shared with every other push check and excluded by the daily deletion run, which unlinks under
+  # an exclusive lock: an object this finds is touched here, inside the lock, and so is not one the
+  # run deletes afterwards.
+  exec 9>> "$repo/lfs/forge/lock"
+  # Shared with the deletion run's exclusive lock: `GitLfsHookTest` holds that lock from Elixir and
+  # shows a push waits for it.
+  flock -s 9
+  absent=()
+  for entry in "${lfs_named[@]}"; do
+    oid=${entry##*$'\t'}
+    file="$repo/lfs/objects/${oid:0:2}/${oid:2:2}/$oid"
+    if [ -f "$file" ]; then
+      touch -c "$file"
+    else
+      absent+=("$entry")
+    fi
+  done
+  flock -u 9
+  exec 9>&-
+
+  if [ ${#absent[@]} -gt 0 ]; then
+    echo "forge: this push names ${#absent[@]} LFS object(s) forge does not hold:" >&2
+    shown=0
+    for entry in "${absent[@]}"; do
+      [ "$shown" -lt 30 ] || break
+      p=$(printf '%s' "${entry%$'\t'*}" | LC_ALL=C tr -d '[:cntrl:]')
+      oid=${entry##*$'\t'}
+      echo "forge:   ${p:0:120} (${oid:0:10})" >&2
+      shown=$((shown + 1))
+    done
+    [ ${#absent[@]} -le 30 ] || echo "forge:   ...and $((${#absent[@]} - 30)) more" >&2
+    deny "upload them first with: git lfs push --all <remote>"
+  fi
+fi

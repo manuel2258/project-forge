@@ -156,6 +156,16 @@ is the `:dir` of `config :forge, Forge.Storage`: `FORGE_STORE_DIR` when it is se
 - No fsync. This is a PoC on the operator's machine; a power cut loses the last transcript and
   the ticket's documents are in Postgres.
 
+## LFS objects are not in the store
+
+Git LFS objects (`git-hosting.md` § Git LFS) live in each repository's own `lfs/objects`, not here,
+and nothing should move them here on the reading that "content-addressed blobs" invites. An LFS
+object is source, and the store is the most replaceable thing the host holds; the mirror's
+`post-receive` hook pushes what is in the repository's own directory with no help from the platform;
+and the store's § Open (*deletion has no policy*) stays true of the store, where LFS objects have a
+policy of their own. `§ What would move this to S3` therefore never covers them: they share the
+host's disk with the repositories.
+
 ## What would move this to S3
 
 **Durability is not it, and that is the change of mind.** This note and the plan both said the

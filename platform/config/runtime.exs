@@ -145,6 +145,9 @@ if config_env() != :test do
            # Set this where something in front of the platform rewrites the host, so a job's
            # clone URL is the one a client outside the node would use.
            git_base_url: System.get_env("FORGE_GIT_BASE_URL"),
+           # The most bytes one Git LFS object may be (`docs/design/git-hosting.md` § Git LFS);
+           # unset leaves the 2 GiB default.
+           lfs_max_object_bytes: integer_env.("FORGE_LFS_MAX_OBJECT_BYTES"),
            harness_opts: harness_opts
          )
 

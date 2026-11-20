@@ -72,6 +72,9 @@ defmodule Forge.Jobs do
   # before drops without a word, and a pool can change after a job is scheduled
   # (`docs/design/worker-channel.md` § Protocol 13).
   @attachments_protocol 13
+  # Every job of every kind: the worker clones, resets and pushes with Git LFS, and one from before
+  # would check out pointer stubs without a word (`docs/design/worker-channel.md` § Protocol 14).
+  @lfs_protocol 14
 
   # How many of the merges that landed on the default branch since a ticket's base an integrating
   # job is told about by name; the rest are counted (`docs/design/job-prompt.md` § Integrating the
@@ -929,6 +932,9 @@ defmodule Forge.Jobs do
     document is required, because the note that says otherwise is new with this, so it nags for
     an optional one the agent skipped and ends the job `error` on a state with no `error` edge
     (`docs/design/worker-channel.md` § Versions). A state that declares neither asks nothing more.
+  - **Every job needs protocol 14**, commands included: the worker clones, resets and pushes with Git
+    LFS, and one from before checks out pointer stubs and says nothing
+    (`docs/design/worker-channel.md` § Protocol 14).
   - **A job a person extended needs protocol 12**: the extension is what the reopened run's prompt
     opens with, and a release from before it resumes the session with no word of the note or of why
     there is more room (`docs/design/worker-channel.md` § Protocol 12). Every other job asks nothing
@@ -971,6 +977,7 @@ defmodule Forge.Jobs do
       outputs: outputs_protocol(job),
       archive: archive_protocol(job),
       attachments: attachments_protocol(job),
+      lfs: @lfs_protocol,
       jump: jump_protocol(job),
       extension: extension_protocol(job),
       usage: @usage_protocol

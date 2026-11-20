@@ -32,7 +32,7 @@ defmodule Forge.RuntimeConfigTest do
   # suite decide what this reads, and two of them are exactly what is under test. `SSL_CERT_FILE`
   # is in the list because the mailer reads it for its trust anchors and a devshell sets it.
   @cleared ~w(FORGE_HTTP_IP PORT PHX_HOST FORGE_VAPID_PUBLIC_KEY SSL_CERT_FILE
-              FORGE_MAX_WORKERS FORGE_MAIL_FROM FORGE_MAIL_FROM_NAME
+              FORGE_MAX_WORKERS FORGE_LFS_MAX_OBJECT_BYTES FORGE_MAIL_FROM FORGE_MAIL_FROM_NAME
               ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN
               FORGE_CLAUDE_EXECUTABLE FORGE_CLAUDE_MODEL FORGE_CLAUDE_EFFORT
               FORGE_SMTP_HOST FORGE_SMTP_PORT FORGE_SMTP_TLS FORGE_SMTP_CACERTFILE
@@ -168,6 +168,15 @@ defmodule Forge.RuntimeConfigTest do
     System.put_env("FORGE_MAX_WORKERS", "7")
 
     refute Keyword.has_key?(get_in(release(), [:forge, Forge.Workers]) || [], :max_workers)
+  end
+
+  # The per-object limit of Git LFS (`docs/design/git-hosting.md` § Git LFS): unset leaves the 2 GiB
+  # in `Forge.Git.Lfs`, and a number replaces it.
+  test "FORGE_LFS_MAX_OBJECT_BYTES sets the LFS object limit and unset sets nothing" do
+    refute Keyword.has_key?(get_in(release(), [:forge, Forge.Jobs]) || [], :lfs_max_object_bytes)
+
+    System.put_env("FORGE_LFS_MAX_OBJECT_BYTES", "4096")
+    assert get_in(release(), [:forge, Forge.Jobs])[:lfs_max_object_bytes] == 4096
   end
 
   describe "mail" do

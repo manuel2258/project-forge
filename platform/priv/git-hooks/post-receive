@@ -99,31 +99,73 @@ while read -r key url; do
     continue
   fi
 
-  # lowSpeedLimit/lowSpeedTime below: a stalled connection is aborted rather than held open
+  # The same options for both pushes: the credential helper is keyed by host so only the mirror's
+  # host is handed it, no protocol but http(s), no redirect, and a stalled connection is aborted.
+  #
+  # lowSpeedLimit/lowSpeedTime: a stalled connection is aborted rather than held open
   # indefinitely. No test can fail this — proving the timeout fires needs a host that accepts a
   # connection and then stalls for 10s, which is a test harness of its own for one config line.
   # Per CLAUDE.md § Testing this is left as a comment, not an assertion that the flags are merely
   # present, which would pass against a build where they do nothing.
-  if out=$(GIT_TERMINAL_PROMPT=0 git \
-    -c "credential.helper=store --file=$credentials_dir/$repo/$name.credentials" \
-    -c protocol.allow=never \
-    -c protocol.https.allow=always \
-    -c protocol.http.allow=always \
-    -c http.followRedirects=false \
-    -c http.lowSpeedLimit=1000 \
-    -c http.lowSpeedTime=10 \
+  common=(
+    -c "credential.helper=store --file=$credentials_dir/$repo/$name.credentials"
+    -c protocol.allow=never
+    -c protocol.https.allow=always
+    -c protocol.http.allow=always
+    -c http.followRedirects=false
+    -c http.lowSpeedLimit=1000
+    -c http.lowSpeedTime=10
+  )
+
+  # The LFS objects go first, to the mirror's own LFS endpoint, derived from its URL as git-lfs
+  # derives it and set on the command line so a `.lfsconfig` in the repository cannot name another
+  # (docs/design/git-hosting.md § What a mirror URL may be). Whatever happens here, the refs are
+  # pushed next: the mirror stays current on code and says it is failing.
+  lfs_error=""
+  if [ -n "$(find "$PWD/lfs/objects" -type f -print -quit 2> /dev/null)" ]; then
+    lfs_url=${url%/}
+    case "$lfs_url" in *.git) : ;; *) lfs_url="$lfs_url.git" ;; esac
+    lfs_url="$lfs_url/info/lfs"
+    # `lfs.url` is an equivalent mutant: a push is addressed by `lfs.pushurl` when there is one, and
+    # there is, so the first of the two pins is for any operation that is not a push, of which there
+    # is none here. It is kept so that nothing in this call is addressed by the repository.
+    if ! lfs_out=$(GIT_TERMINAL_PROMPT=0 git "${common[@]}" \
+      -c "lfs.url=$lfs_url" -c "lfs.pushurl=$lfs_url" \
+      -c lfs.locksverify=false -c lfs.allowincompletepush=true \
+      lfs push "$url" "${refs[@]}" 2>&1); then
+      # `redact` here is an equivalent mutant against git-lfs 3.7.1 *with these flags*: its batch error
+      # prints the userinfo as `***@`, and the locking warning that prints it raw is what
+      # `lfs.locksverify=false` switches off (checked by hand with a URL carrying a token; the mirror
+      # test holds that nothing of it reaches `lastError`). It is kept as the refs' own line below is: a
+      # version that echoed the URL would put a migrated mirror's token into `lastError`.
+      lfs_error=$(printf '%s' "$lfs_out" | redact | tr '\n' ' ' | cut -c1-240)
+      [ -n "$lfs_error" ] || lfs_error="git lfs push failed"
+    fi
+  fi
+
+  if out=$(GIT_TERMINAL_PROMPT=0 git "${common[@]}" \
     push --quiet --end-of-options "$url" "${refs[@]}" 2>&1); then
-    git config --local "forge.mirror.$name.lastStatus" ok
-    git config --local "forge.mirror.$name.lastAt" "$(now)"
-    git config --local "forge.mirror.$name.lastOkAt" "$(now)"
-    git config --local --unset "forge.mirror.$name.lastError" || true
-    # stderr, not stdout: the pushing client sees it through the sideband either way. It does
-    # *not* yet become a `git.hook.said` event for this or any push — `Forge.Git.Http.report/3`
-    # reads a file that a push never writes to, whatever fd this line uses. See
-    # `ForgeWeb.GitHttpTest` "a CGI-mediated push still relays the hook's report to the client".
-    echo "forge: mirrored ${refs[*]} to $name" >&2
+    if [ -n "$lfs_error" ]; then
+      fail "$name" "LFS objects failed: $lfs_error"
+      echo "forge: mirror $name received ${refs[*]} but its LFS objects FAILED; the push itself stands" >&2
+    else
+      git config --local "forge.mirror.$name.lastStatus" ok
+      git config --local "forge.mirror.$name.lastAt" "$(now)"
+      git config --local "forge.mirror.$name.lastOkAt" "$(now)"
+      git config --local --unset "forge.mirror.$name.lastError" || true
+      # stderr, not stdout: the pushing client sees it through the sideband either way. It does
+      # *not* yet become a `git.hook.said` event for this or any push — `Forge.Git.Http.report/3`
+      # reads a file that a push never writes to, whatever fd this line uses. See
+      # `ForgeWeb.GitHttpTest` "a CGI-mediated push still relays the hook's report to the client".
+      echo "forge: mirrored ${refs[*]} to $name" >&2
+    fi
   else
-    fail "$name" "$(printf '%s' "$out" | redact | tr '\n' ' ' | cut -c1-500)"
+    refs_error=$(printf '%s' "$out" | redact | tr '\n' ' ' | cut -c1-500)
+    if [ -n "$lfs_error" ]; then
+      fail "$name" "LFS objects failed: $lfs_error; refs failed: $(printf '%s' "$refs_error" | cut -c1-200)"
+    else
+      fail "$name" "$refs_error"
+    fi
     echo "forge: mirror to $name FAILED; the push itself stands" >&2
   fi
 done < <(git config --local --get-regexp '^forge\.mirror\.[a-z0-9-]+\.url$' || true)

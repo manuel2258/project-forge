@@ -155,6 +155,7 @@
   .diff-path { min-width: 0; flex: 1; overflow-wrap: anywhere; }
   .diff-dir { color: var(--ink-3); }
   .diff-binary { color: var(--ink-3); font-size: 12px; }
+  .diff-lfs { color: var(--ink-3); font-size: 12px; white-space: nowrap; }
   .diff-chevron { color: var(--ink-3); }
   /* An open patch keeps its file's name above it while it is read (UX pass, B3), and *Ask* is the
      hunk's alone then: two of them 30px apart asked the same thing (B25). */

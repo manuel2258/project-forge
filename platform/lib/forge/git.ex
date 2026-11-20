@@ -447,7 +447,8 @@ defmodule Forge.Git do
   @doc """
   What is directly in `dir` at `sha`: each entry's name, its path from the repository's root and
   its kind — `:blob`, `:link` (a symbolic link, which git stores as a blob of its own mode),
-  `:tree`, or `:commit` for a submodule. None when `dir` is not there.
+  `:tree`, or `:commit` for a submodule — and `lfs`, the size of the object a Git LFS pointer
+  stands for, or nil for any entry that is not one. None when `dir` is not there.
 
   NUL-separated, so a name git would quote arrives as it was written.
   """
@@ -457,19 +458,24 @@ defmodule Forge.Git do
     # matches nothing, not "everything at the top", so a root asked for with one came back empty.
     pathspec = if dir == "", do: [], else: ["--", {:data, dir <> "/"}]
 
-    with {:ok, out} <- run(repo, ["ls-tree", "-z", {:data, sha}] ++ pathspec, stderr: :separate) do
-      {:ok, out |> String.split(<<0>>, trim: true) |> Enum.map(&tree_entry/1)}
+    with {:ok, out} <-
+           run(repo, ["ls-tree", "-z", "-l", {:data, sha}] ++ pathspec, stderr: :separate) do
+      entries = out |> String.split(<<0>>, trim: true) |> Enum.map(&tree_entry/1)
+      {:ok, mark_lfs(repo, entries)}
     end
   end
 
+  # `-l` pads the size, so the meta is split on whitespace; a tree and a submodule have `-`.
   defp tree_entry(line) do
     [meta, path] = String.split(line, "\t", parts: 2)
-    [mode, type, _object] = String.split(meta, " ")
+    [mode, type, object, size] = String.split(meta)
 
     %{
       name: path |> Path.basename() |> printable_path(),
       path: printable_path(path),
-      kind: tree_kind(mode, type)
+      kind: tree_kind(mode, type),
+      object: object,
+      bytes: parse_size(size)
     }
   end
 
@@ -477,6 +483,167 @@ defmodule Forge.Git do
   defp tree_kind(_mode, "tree"), do: :tree
   defp tree_kind(_mode, "commit"), do: :commit
   defp tree_kind(_mode, _blob), do: :blob
+
+  defp parse_size(size) do
+    case Integer.parse(size) do
+      {bytes, ""} -> bytes
+      _none -> nil
+    end
+  end
+
+  # A blob that could be a Git LFS pointer — a regular file of 100 to 1023 bytes, a window that is
+  # **a cost guard and an equivalent mutant at both ends**: `Pointer.parse/1` decides, and refuses
+  # anything of 1024 bytes or more, or too short to hold a version, an oid and a size — is read, all of
+  # them in one `cat-file --batch`, and an entry whose content is a valid pointer says so: `lfs` is
+  # the size of the object it stands for, else nil. The rule that decides is
+  # `Forge.Git.Lfs.Pointer`'s, and what a tree draws is the same as what its file screen draws.
+  defp mark_lfs(repo, entries) do
+    candidates =
+      for %{kind: :blob, bytes: bytes, object: object} <- entries,
+          is_integer(bytes) and bytes >= 100 and bytes < 1024,
+          uniq: true,
+          do: object
+
+    sizes = pointer_sizes(repo, candidates)
+
+    Enum.map(entries, fn entry ->
+      entry |> Map.put(:lfs, Map.get(sizes, entry.object)) |> Map.delete(:object)
+    end)
+  end
+
+  # `%{blob sha => size of the object it points at}` for the blobs among `shas` that are pointers.
+  defp pointer_sizes(_repo, []), do: %{}
+
+  defp pointer_sizes(repo, shas) do
+    case cat_blobs(repo, shas) do
+      {:ok, blobs} ->
+        for {sha, content} <- blobs,
+            {:ok, %{size: size}} <- [Forge.Git.Lfs.Pointer.parse(content)],
+            into: %{},
+            do: {sha, size}
+
+      {:error, _reason} ->
+        %{}
+    end
+  end
+
+  # `git cat-file --batch` over `shas`, which `run/3` has no way to feed: the names go in a scratch
+  # file the command reads as its standard input. `{:ok, [{sha, content}]}` for the ones that exist.
+  defp cat_blobs(repo, shas) do
+    with_scratch_file("cat-file", Enum.map_join(shas, "", &(&1 <> "\n")), fn input ->
+      case System.cmd("sh", ["-c", ~s(exec git cat-file --batch < "$0"), input],
+             cd: repo,
+             env: [{"GIT_TERMINAL_PROMPT", "0"}]
+           ) do
+        {out, 0} -> {:ok, batch_entries(out, [])}
+        {_out, code} -> {:error, {code, "cat-file"}}
+      end
+    end)
+  end
+
+  # The ones among `shas` that are blobs under 1024 bytes, by `cat-file --batch-check`, which says
+  # sizes and reads none of them.
+  #
+  # **Taking it out of `lfs_changes/3` is an equivalent mutant**: every blob it would then read whole
+  # is refused by `Pointer.parse/1` all the same, so the result is the same and only the memory is
+  # not. `small_blobs/2` is what is tested.
+  @doc false
+  @spec small_blobs(repo(), [sha()]) :: [sha()]
+  def small_blobs(_repo, []), do: []
+
+  def small_blobs(repo, shas) do
+    result =
+      with_scratch_file("cat-file", Enum.map_join(shas, "", &(&1 <> "\n")), fn input ->
+        System.cmd("sh", ["-c", ~s(exec git cat-file --batch-check < "$0"), input],
+          cd: repo,
+          env: [{"GIT_TERMINAL_PROMPT", "0"}]
+        )
+      end)
+
+    case result do
+      {out, 0} -> out |> String.split("\n", trim: true) |> Enum.flat_map(&small_line/1)
+      _failed -> []
+    end
+  end
+
+  # `<sha> blob <size>` for a blob under 1024 bytes; nothing for a tree, a missing object or a big one.
+  defp small_line(line) do
+    case String.split(line, " ") do
+      [sha, "blob", size] -> if String.to_integer(size) < 1024, do: [sha], else: []
+      _other -> []
+    end
+  end
+
+  defp batch_entries("", acc), do: Enum.reverse(acc)
+
+  defp batch_entries(out, acc) do
+    [header, rest] = String.split(out, "\n", parts: 2)
+
+    case String.split(header, " ") do
+      [sha, "blob", size] ->
+        size = String.to_integer(size)
+        <<content::binary-size(size), "\n", rest::binary>> = rest
+        batch_entries(rest, [{sha, content} | acc])
+
+      [_sha, _type, size] ->
+        size = String.to_integer(size)
+        <<_content::binary-size(size), "\n", rest::binary>> = rest
+        batch_entries(rest, acc)
+
+      [_sha, "missing"] ->
+        batch_entries(rest, acc)
+    end
+  end
+
+  @zero String.duplicate("0", 40)
+
+  @doc """
+  The Git LFS files that changed from `base` to `head`: `%{path => {old, new}}`, each the size of
+  the object a pointer on that side stands for, or nil where the file is not a pointer there (it is
+  absent, or an ordinary file). Only paths where at least one side is a pointer are listed.
+
+  Read with `diff --raw -z --no-renames`, so a path is exactly git's and a rename is a removal and
+  an addition, then the blobs on both sides that are under 1024 bytes (`small_blobs/2`) in one
+  `cat-file --batch`. The paths are
+  in `printable_path/1`'s form, which is `diff_stat/3`'s, so a row finds its own entry.
+  """
+  @spec lfs_changes(repo(), sha(), String.t()) ::
+          {:ok, %{String.t() => {integer() | nil, integer() | nil}}} | {:error, term()}
+  def lfs_changes(repo, base, head) do
+    args = ["diff", "--raw", "-z", "--no-renames", "--abbrev=40", {:data, "#{base}..#{head}"}]
+
+    with {:ok, out} <- run(repo, args, stderr: :separate) do
+      changes = raw_changes(String.split(out, <<0>>, trim: true), [])
+
+      shas =
+        for {_path, old, new} <- changes, sha <- [old, new], sha != @zero, uniq: true, do: sha
+
+      # Only the blobs small enough to be a pointer are read: a change may carry a 200 MB file, and
+      # reading it whole to find out it is not a pointer would cost this page that much memory on
+      # every render, in a project that has no LFS at all.
+      sizes = pointer_sizes(repo, small_blobs(repo, shas))
+
+      found =
+        for {path, old, new} <- changes,
+            sides = {Map.get(sizes, old), Map.get(sizes, new)},
+            sides != {nil, nil},
+            into: %{},
+            do: {printable_path(path), sides}
+
+      {:ok, found}
+    end
+  end
+
+  # `:<old mode> <new mode> <old sha> <new sha> <status>` NUL `<path>` NUL, with no rename or copy
+  # to carry a second path.
+  defp raw_changes([], acc), do: Enum.reverse(acc)
+
+  defp raw_changes([":" <> meta, path | rest], acc) do
+    [_old_mode, _new_mode, old, new | _status] = String.split(meta, " ")
+    raw_changes(rest, [{path, old, new} | acc])
+  end
+
+  defp raw_changes([_other | rest], acc), do: raw_changes(rest, acc)
 
   @doc """
   The repository's branches, by their short names, sorted.

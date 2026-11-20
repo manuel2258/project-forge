@@ -449,7 +449,9 @@ sent as a raw body to `/projects/:name/uploads` and as a `files[]` multipart par
 writes, up to ten of them (10 × 500 MiB and a megabyte of fields). A proxy with a body limit —
 Traefik's `buffering` middleware, nginx's `client_max_body_size`, a cloud load balancer's — has to
 allow that on those two routes, or an upload is refused by the proxy before the platform can say which
-limit it was; and a request timeout has to be long enough to send 500 MiB from a phone. Not
+limit it was; and a request timeout has to be long enough to send 500 MiB from a phone. **`/git` carries bodies up to the LFS limit** (2 GiB by default, `FORGE_LFS_MAX_OBJECT_BYTES`): an
+LFS object is a raw `PUT` to `/git/<project>.git/info/lfs/objects/<oid>`, streamed to disk, and a job's
+checkout downloads objects in bursts. The same body limit and timeout advice applies there. Not
 verified here: a body that size through any real proxy.
 
 **Rate limiting is the proxy's job.** Nothing in the platform throttles, and four public routes
@@ -623,6 +625,18 @@ which are best-effort.
 
 What changes for a node that is already running, where the change is in what the platform does
 with rows it already has. Newest first.
+
+- **Every job needs protocol 14, and the platform's path gains `git-lfs` and `util-linux`**
+  (`design/git-hosting.md` § Git LFS, `design/worker-channel.md` § Protocol 14). Nothing is refused:
+  the minimum stays 4 and an older machine stays connected. But **no job of any kind runs until a
+  machine speaks 14**, commands included, which makes it broader than the entry for 9 below. Build a
+  snapshot from this release or `bin/worker-update` each permanent machine before admitting work;
+  until then a ticket sticks or waits for the reasons that entry gives, and a template on the
+  `latest` mark waits with the *Waiting for a newer worker image* sentence. `nix/module.nix` and the container add
+  `git-lfs` (the hooks and the mirror run it) and `util-linux` (`flock`, the lock a push check and
+  the daily deletion share). There is no migration: LFS objects are in each repository's own
+  `lfs/objects`, which a repository with no LFS never gets. `FORGE_LFS_MAX_OBJECT_BYTES` sets the
+  per-object limit (default 2 GiB).
 
 - **Permanent machines update themselves, which is a migration, a protocol bump and a reinstall**
   (`design/worker-tier.md` § Updating a permanent machine, ticket 54). Three things:

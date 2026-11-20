@@ -1616,6 +1616,13 @@ where a proposal is decided (`ticket-proposals.md` § Where it surfaces).
 
 ### Changes
 
+**A changed LFS file is drawn as LFS, not as a diff of its pointer** (ticket 65): its row has no
+patch and no counts, and reads **LFS · 1.1 MB → 1.4 MB** (added: the new size only; removed: the old
+size only), in the index and on a commit's page (`Forge.Git.lfs_changes/3`, `ForgeWeb.Diff`). A
+presentation's quote of such a path degrades to the muted *not text* note. A pure rename of an LFS
+file still reads `+0 −0`: the rows are read with renames off, so it is a removal and an addition of
+one pointer, and the page draws what it reads.
+
 `19d`–`19g`, `18b`, `18f`. **The review page and Changes are one view.** What the branch holds
 against its base, bounded per § Semantics that must not be lost, under a segmented switch:
 **Presentation · Files · Commits**.
@@ -2600,7 +2607,12 @@ content ever is, so a file at or over **512 KB** says so instead and is never pa
 The whole file Changes opens is read by the same function (`ForgeWeb.Blob.read/3`), so the two
 cannot drift apart on either rule. A
 **binary** file is listed by name and its content is never rendered — not garbled, not previewed,
-not offered as a download. Neither limit is a failure the page reports: both are the row saying
+not offered as a download. **A file whose content is a valid Git LFS pointer** — under 1024 bytes and one git-lfs's own decoder
+accepts (`ForgeWeb.Blob.read/3` answers `{:lfs, size}`) — is listed with a muted **LFS · 2.3 MB**
+after its name in the tree and, opened, says it is stored with Git LFS and its content is not shown here, with that size (the repository page: *This file is stored with Git LFS. Its content is not shown here.*; Changes: *<path> is stored with Git LFS (LFS · size); it is not shown here.*);
+its pointer text is never drawn, and the content is not read from the object, rendered or offered as
+a download. **A file that only looks like a pointer is the ordinary file it is.** A commit's page
+lists an LFS file the same way. Neither limit is a failure the page reports: both are the row saying
 what the file is. Lines wrap rather than scrolling sideways, numbers take 28px, ligatures are off.
 A wrapped line's rest **hangs under its own indent and two more** (`Highlight.hang/1`), so it
 never starts back at the code's first column, where it read as a new line of code.

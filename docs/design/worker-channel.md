@@ -896,6 +896,21 @@ chat is not gated**: its `moving` field gains `jumps`, which an older worker dro
 request is made and applied by the platform, so it works unchanged. The scheduler's *Waiting for a
 newer worker image* reason and the workers page say so as they do for the other numbers.
 
+## Protocol 14 (ticket 65)
+
+Protocol 13 → 14, a breaking change: a worker has to clone, fetch, reset and push with Git LFS so a
+checkout holds the real files and a run's LFS files reach the platform (`git-hosting.md` § Git LFS),
+and a worker from before 14 would check out pointer stubs of a hundred-odd bytes without a word.
+`Forge.Jobs.protocol_needs/1` gains `lfs: 14` for **every** kind, commands included — a command's
+checkout needs the files too, and a project not using LFS is not told apart (the platform does not
+track which do). A worker below 14 therefore takes no job of any kind. **Where that shows** is the
+scheduler's placement reasons — *Waiting for a newer worker image* for a template on the `latest`
+mark, a stuck ticket for one naming a snapshot. The workers page draws each machine's protocol
+number but flags only a machine below 11 (`too_old?/1`), so a machine at 13 sits idle there without
+a word; teaching it a second threshold is not part of this. `minimum` stays 4: an older worker
+stays connected and is given no jobs, as with the last four upgrades, and nothing rented is
+destroyed. No message changes shape.
+
 ## Protocol 13 (ticket 60)
 
 Protocol 12 → 13, a breaking change: the platform hands every run the files people attached
@@ -904,8 +919,8 @@ worker that drops the field would run a job that was told to look at a picture w
 `Forge.Jobs.protocol_needs/1` gains `attachments: 13` for every workflow job and chat, **not only
 those whose pool has a file**, because a pool can change after a job is scheduled; a command needs
 no more than before, as it is given no pool. A worker below 13 therefore takes no workflow job or
-chat, and the scheduler's *Waiting for a newer worker image* reason and the workers page say so.
-`minimum` stays.
+chat; the scheduler's placement reasons say so (the workers page flags only a machine below 11, as
+§ Protocol 14 says). `minimum` stays.
 
 The assignment gains `attachments`: per file the `file` name in the folder, the `version_id`, the
 store `key`, a `get` token, the `size` and the `hash`, tokens that outlast the preparation margin

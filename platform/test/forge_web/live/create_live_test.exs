@@ -50,6 +50,9 @@ defmodule ForgeWeb.CreateLiveTest do
       assert html =~ "/chats/new?project=#{name}"
       assert html =~ "Set it up in a chat"
 
+      # A repository with Git LFS pushes its objects first, with the same token.
+      assert html =~ "git lfs push --all"
+
       # The clone URL is still here, for working by hand, with the credential a click away.
       # The URL may break after a `/` (`breakable/1`), so it is read as text.
       assert html |> LazyHTML.from_document() |> LazyHTML.text() =~ "/git/#{name}.git"

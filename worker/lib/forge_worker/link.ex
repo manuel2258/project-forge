@@ -941,7 +941,12 @@ defmodule ForgeWorker.Link do
     spec = ForgeCore.Job.Spec.from_map(assignment["spec"])
 
     with {:ok, worktree} <- Workspace.prepare(assignment, root, user),
-         :ok <- Checkout.detach(worktree, spec.command["at"], Slice.as_user(user)),
+         :ok <-
+           Checkout.detach(worktree, spec.command["at"],
+             url: assignment["git"]["url"],
+             token: assignment["git"]["token"],
+             as: Slice.as_user(user)
+           ),
          {:ok, command} <- start_command(assignment, spec, root, worktree) do
       send(link, {:runner, job_id, command})
       {:ok, result} = Command.await(command)

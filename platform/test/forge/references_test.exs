@@ -118,8 +118,8 @@ defmodule Forge.ReferencesTest do
       event(first, chat, 10)
       event(second, chat, 20)
 
-      assert found(ask(ctx.scope, moment(0, job: chat, turn_seq: 15), "shot.png")) == 1
-      assert found(ask(ctx.scope, moment(0, job: chat, turn_seq: 25), "shot.png")) == 2
+      assert found(ask(ctx.scope, moment(0, job: chat, turn_seq: seq(15)), "shot.png")) == 1
+      assert found(ask(ctx.scope, moment(0, job: chat, turn_seq: seq(25)), "shot.png")) == 2
       # Streaming: nothing is recorded yet, so what exists is seen.
       assert found(ask(ctx.scope, %{at: :now, job: nil, turn_seq: nil}, "shot.png")) == 2
     end
@@ -134,8 +134,10 @@ defmodule Forge.ReferencesTest do
       log(chat, "chat.turn", 200)
       log(chat, "chat.turn", 400)
 
-      assert %{job: ^chat, turn_seq: 200, at: _} = References.moment(v1)
-      assert %{job: ^chat, turn_seq: 400} = References.moment(v2)
+      turn_200 = seq(200)
+      turn_400 = seq(400)
+      assert %{job: ^chat, turn_seq: ^turn_200, at: _} = References.moment(v1)
+      assert %{job: ^chat, turn_seq: ^turn_400} = References.moment(v2)
       assert %{job: nil, turn_seq: nil} = References.moment(%{v1 | author: %{"kind" => "user"}})
     end
   end
@@ -425,9 +427,17 @@ defmodule Forge.ReferencesTest do
     end
   end
 
+  # **Far above anything the sequence hands out.** These events are written with the order they are
+  # about, and a low number such as 100 is also one the sequence reaches in a long run — a row
+  # committed by another test, or this one's own earlier rows, then holds it, and the insert fails
+  # on `events_pkey`. Only the order among a chat's own events is read.
+  @seq_base 4_000_000_000_000
+
+  defp seq(n), do: @seq_base + n
+
   defp event(version, chat, seq) do
     Repo.insert!(%Event{
-      seq: seq,
+      seq: seq(seq),
       actor: %{"kind" => "job", "id" => chat},
       type: "artifact.version_written",
       job_id: chat,
@@ -437,7 +447,7 @@ defmodule Forge.ReferencesTest do
 
   defp log(chat, type, seq) do
     Repo.insert!(%Event{
-      seq: seq,
+      seq: seq(seq),
       actor: %{"kind" => "job", "id" => chat},
       type: type,
       job_id: chat,

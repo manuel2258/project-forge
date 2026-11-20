@@ -167,7 +167,7 @@ defmodule Forge.Git.Tokens do
     with {:ok, token} <- find(secret),
          true <- live?(token),
          true <- token.project_id == project.id,
-         true <- permits?(token.git_access, needs) do
+         true <- permits?(token, needs) do
       touch(token, :git)
       {:ok, token}
     else
@@ -177,9 +177,17 @@ defmodule Forge.Git.Tokens do
 
   def authorise(_secret, _project, _needs), do: :error
 
-  defp permits?(:none, _needs), do: false
-  defp permits?(_access, :read), do: true
-  defp permits?(access, :write), do: access in [:branch, :developer, :admin]
+  @doc """
+  Whether `token` carries `needs`: the one rule `authorise/3` applies, public so the LFS batch can
+  ask it again once it knows the operation (an upload needs `:write`, and the request that carries
+  it is authorised for `:read`).
+  """
+  @spec permits?(Token.t(), capability()) :: boolean()
+  def permits?(%Token{git_access: access}, needs), do: grants?(access, needs)
+
+  defp grants?(:none, _needs), do: false
+  defp grants?(_access, :read), do: true
+  defp grants?(access, :write), do: access in [:branch, :developer, :admin]
 
   @doc """
   Resolves a presented secret to the project token it is, for the JSON API.

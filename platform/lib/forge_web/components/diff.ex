@@ -34,13 +34,15 @@ defmodule ForgeWeb.Diff do
     with {:ok, stat} <- Git.diff_stat(repo, base, head),
          {:ok, patch} <- Git.diff(repo, base, head) do
       text? = ForgeCore.Document.text?(patch)
+      lfs = lfs_changes(repo, base, head)
 
       %{
         head: head,
         base: base,
         files: stat,
-        added: total(stat, 1),
-        removed: total(stat, 2),
+        lfs: lfs,
+        added: total(stat, 1, lfs),
+        removed: total(stat, 2, lfs),
         patch: patch,
         text: text?,
         inline: text? and small?(patch, stat),
@@ -63,8 +65,18 @@ defmodule ForgeWeb.Diff do
     byte_size(patch) <= @max_patch_bytes and length(stat) <= @max_patch_files
   end
 
-  defp total(stat, index) do
+  # Git LFS files read as a size and have no patch or counts: a pointer's three lines are not what
+  # the change did. Unreadable, they are the ordinary files git says they are.
+  defp lfs_changes(repo, base, head) do
+    case Git.lfs_changes(repo, base, head) do
+      {:ok, lfs} -> lfs
+      {:error, _reason} -> %{}
+    end
+  end
+
+  defp total(stat, index, lfs) do
     stat
+    |> Enum.reject(&Map.has_key?(lfs, elem(&1, 0)))
     |> Enum.map(&elem(&1, index))
     |> Enum.reject(&(&1 == :binary))
     |> Enum.sum()
@@ -76,16 +88,20 @@ defmodule ForgeWeb.Diff do
   patch, with each hunk header as `{:hunk, header, line}` — the first line of the new side, which
   is what a reference to the hunk points at — and every other line as `{:line, text}`. It is nil
   when there is no patch to draw: the change is too large to draw inline (the table still names
-  every file — it is the map), or the file is binary. `hunks` is each hunk's header and line.
+  every file — it is the map), or the file is binary, or it is a Git LFS file, whose row says so in
+  `lfs: {old, new}` — the sizes of the objects its pointers stand for, nil on a side that has none —
+  and has no counts. `hunks` is each hunk's header and line.
   """
   @spec files(t() | nil) :: [map()]
   def files(%{files: files} = diff) when is_list(files) do
     patches = if diff[:inline], do: split(diff.patch || ""), else: %{}
+    lfs = diff[:lfs] || %{}
 
     for {path, added, removed} <- files do
-      lines = patch_lines(Map.get(patches, path))
+      lines = if Map.has_key?(lfs, path), do: nil, else: patch_lines(Map.get(patches, path))
       hunks = for {:hunk, header, line} <- lines || [], do: %{header: header, line: line}
-      %{path: path, added: added, removed: removed, lines: lines, hunks: hunks}
+
+      %{path: path, added: added, removed: removed, lines: lines, hunks: hunks, lfs: lfs[path]}
     end
   end
 
@@ -247,7 +263,10 @@ defmodule ForgeWeb.Diff do
 
         <div :if={!row.lines} class="diff-summary">
           <.path_name path={row.path} />
-          <.counts added={row.added} removed={row.removed} />
+          <span :if={row.lfs} class="diff-lfs" data-lfs>
+            {ForgeWeb.Blob.lfs_label(elem(row.lfs, 0), elem(row.lfs, 1))}
+          </span>
+          <.counts :if={!row.lfs} added={row.added} removed={row.removed} />
         </div>
 
         <div :if={@ask} class="diff-ask">

@@ -463,16 +463,36 @@ defmodule Forge.GitTest do
       {:ok, sha} = Git.resolve(repo, "main")
 
       assert {:ok, entries} = Git.ls_dir(repo, sha, "")
-      assert %{name: "README.md", path: "README.md", kind: :blob} in entries
-      assert %{name: ".forge", path: ".forge", kind: :tree} in entries
+      entries = Enum.map(entries, &Map.take(&1, [:name, :path, :kind, :lfs]))
+      assert %{name: "README.md", path: "README.md", kind: :blob, lfs: nil} in entries
+      assert %{name: ".forge", path: ".forge", kind: :tree, lfs: nil} in entries
     end
 
     test "ls_dir/3 still lists a directory under the root", %{repo: repo} do
       {:ok, sha} = Git.resolve(repo, "main")
 
       assert {:ok, entries} = Git.ls_dir(repo, sha, ".forge")
-      assert %{name: "workflow.yml", path: ".forge/workflow.yml", kind: :blob} in entries
-      assert %{name: "agents", path: ".forge/agents", kind: :tree} in entries
+      entries = Enum.map(entries, &Map.take(&1, [:name, :path, :kind, :lfs]))
+
+      assert %{name: "workflow.yml", path: ".forge/workflow.yml", kind: :blob, lfs: nil} in entries
+
+      assert %{name: "agents", path: ".forge/agents", kind: :tree, lfs: nil} in entries
+    end
+  end
+
+  describe "small_blobs/2" do
+    test "names the blobs under 1024 bytes and reads none, and leaves out the rest", %{repo: repo} do
+      {:ok, sha} = Git.resolve(repo, "main")
+
+      small = String.trim(elem(Git.run(repo, ["rev-parse", sha <> ":README.md"]), 1))
+      big_content = String.duplicate("x", 5_000)
+      path = Path.join(Forge.GitFixtures.tmp_dir("big"), "big")
+      File.write!(path, big_content)
+      big = String.trim(elem(Git.run(repo, ["hash-object", "-w", path]), 1))
+      tree = String.trim(elem(Git.run(repo, ["rev-parse", sha <> "^{tree}"]), 1))
+
+      assert Git.small_blobs(repo, [small, big, tree, String.duplicate("0", 40)]) == [small]
+      assert Git.small_blobs(repo, []) == []
     end
   end
 

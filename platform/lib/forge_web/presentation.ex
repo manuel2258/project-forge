@@ -274,7 +274,10 @@ defmodule ForgeWeb.Presentation do
       with {:ok, size} when size <= @max_read_bytes - acc.read <-
              Git.blob_size(repo, head, path),
            {:ok, content} <- Git.show(repo, head, path) do
-        {if(String.valid?(content), do: source_lines(content), else: :not_text), size}
+        {if(String.valid?(content) and Forge.Git.Lfs.Pointer.parse(content) == :error,
+           do: source_lines(content),
+           else: :not_text
+         ), size}
       else
         {:ok, _over_budget} -> {:too_big, 0}
         {:error, _reason} -> {:missing, 0}

@@ -290,7 +290,10 @@ defmodule ForgeWeb.ProjectNewLive do
           Issue one in settings ›
         </.link>
         An admin token also writes <code>{@created.default_branch}</code>, fast-forward only, for
-        importing a repository that already exists.
+        importing a repository that already exists. A repository with Git LFS also runs
+        <code>git lfs push --all</code>
+        with the same token, before pushing: a push naming an object
+        forge does not hold is refused.
       </p>
     </div>
 

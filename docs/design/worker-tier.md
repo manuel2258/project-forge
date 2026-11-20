@@ -199,6 +199,8 @@ A NixOS image, built by the flake, that boots unchanged both locally and — aft
   no `allowUnfreePredicate` where the platform module still does (`docs/deploy.md`).
 - Published by each release as a gzipped raw disk and built into a provider snapshot by the
   platform, per account (§ Updating a worker).
+- `git-lfs`, on the service path and so on every job's `PATH`: a checkout holds the real files of a
+  repository that keeps some in Git LFS (`git-hosting.md` § The job's own git).
 - The `forge_worker` release, started by a systemd unit that reads the worker id, token and
   platform address `forge-worker-config.service` found.
 - No project toolchain. The workload is a parameter: the environment comes from the project's own
@@ -760,6 +762,13 @@ hash and uploads it. The store has no listing and is not getting one (`docs/desi
 The behaviour), so nothing can discover the current seed by looking.
 
 ## Git
+
+**LFS rides along.** A checkout's `.git/lfs/objects` is inside the tree a seed archives and a ticket
+volume snapshots, so both carry the objects a checkout holds and a job snapshotted from either
+downloads only the objects it lacks: the smudge takes a local object before it asks the platform.
+**The checkout also holds a credential helper that answers only the platform's host**
+(`git-hosting.md` § The job's own git), so an LFS endpoint the agent configures itself is handed no
+token. Both are ticket 65; the worker needs protocol 14.
 
 The worker no longer shares a disk with the platform, so it clones and pushes over HTTP.
 

@@ -1284,6 +1284,36 @@ defmodule ForgeWeb.QueueLiveTest do
     assert has_element?(view, "#queue-list #push-error", "permission was not granted")
   end
 
+  # An iPhone in Safari has no push until forge is on the Home Screen: the refusal says so, where
+  # the others are said, and is the one place forge mentions installing (`ui.md` § The installed app).
+  test "an iPhone not on the Home Screen is told to add forge there, beside Notify me", %{
+    conn: conn
+  } do
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    render_hook(view, "push:error", %{"home_screen" => true})
+
+    assert has_element?(
+             view,
+             "#queue-list #push-error",
+             "On an iPhone, notifications need forge on the Home Screen. " <>
+               "Add it from Safari's Share menu, then turn notifications on there."
+           )
+
+    refute has_element?(view, "#push-error", "Notifications unavailable")
+
+    # Any other browser without push keeps its own words.
+    render_hook(view, "push:error", %{"reason" => "this browser has no push support"})
+
+    assert has_element?(
+             view,
+             "#push-error",
+             "Notifications unavailable: this browser has no push"
+           )
+
+    refute has_element?(view, "#push-error", "Home Screen")
+  end
+
   # The context names what happened on the ticket since this person last opened it, and nothing
   # from before that (`docs/design/ui.md` § The end of the pass, and *All*).
   test "the context lists only what happened since you last looked", %{

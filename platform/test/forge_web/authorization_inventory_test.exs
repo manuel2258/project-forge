@@ -75,10 +75,17 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/users/settings" => :self,
     "/users/settings/confirm-email/:token" => :self,
     "/users/update-password" => :self,
+    # What a device is told about its own person's queue: answered only for a signed-in, approved
+    # session, and a 401 with no body for everybody else (`Forge.Push.state/1`).
+    "/push/waiting" => :self,
 
     # No credential by definition.
     # Liveness, answered to anyone: it carries nothing and reads nothing (`ForgeWeb.Plugs.Health`).
     "/health" => :public,
+    # The installed app's service worker and the page it falls back to: rendered with no session
+    # and the same for anybody, which is what lets a device keep the second (`ForgeWeb.DeviceController`).
+    "/sw.js" => :public,
+    "/offline" => :public,
     "/users/log-in" => :public,
     "/users/log-in/:token" => :public,
     "/users/log-out" => :public,

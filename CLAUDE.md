@@ -10,6 +10,11 @@ how consumption is modelled and drawn. Read both before changing anything the op
 `screens/final-design.dc.html`, with the deviations a later UX pass made recorded in the note itself.
 **It is built**, every area of it; its § Not built yet lists what the code does not do yet.
 
+`docs/design/ui.md` § The installed app (ticket 62) is the standard for forge on a phone's Home Screen:
+the manifest and its shortcuts, the status bar, the icon's badge, the tidying of notifications that
+no longer wait, the offline page, what the service worker keeps and the iPhone's message. **It is
+built and headless-checked**; its *Not verified here* is what a first real phone has to confirm.
+
 `docs/design/conversations.md` is the standard for chats — the work that does not fit a workflow
 state.
 

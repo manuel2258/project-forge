@@ -7,6 +7,7 @@ defmodule Forge.PushTest do
 
   alias Forge.Push
   alias Forge.Push.TestSender
+  alias Forge.Queue
 
   setup do
     TestSender.watch()
@@ -215,6 +216,196 @@ defmodule Forge.PushTest do
       Push.flush()
 
       refute_receive {:push, _endpoint, _payload, _opts}
+    end
+  end
+
+  describe "the badge and the tags" do
+    setup %{user: user} do
+      {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/a"))
+      %{ticket: ticket_fixture() |> join_ticket!(user)}
+    end
+
+    # Each recipient's own figure, at the moment of sending (`docs/design/ui.md` § The installed
+    # app): two members of one project, one of whom is also in a second project with a stuck
+    # ticket of its own, are sent different numbers for the same push.
+    test "each recipient gets their own count, not the project's", %{user: user, ticket: ticket} do
+      other = user_fixture()
+      join!(Forge.Projects.get!(ticket.project_id), other)
+      {:ok, _} = Push.subscribe(other, browser_subscription("https://push.example/b"))
+
+      elsewhere = ticket_fixture() |> join_ticket!(user)
+      stuck!(elsewhere)
+      stuck = stuck!(ticket)
+
+      assert Queue.count(user) == 2
+      assert Queue.count(other) == 1
+
+      assert :ok = Push.waiting(item(:stuck, stuck))
+      Push.flush()
+
+      assert_receive {:push, "https://push.example/a", %{"badge" => 2}, _}
+      assert_receive {:push, "https://push.example/b", %{"badge" => 1}, _}
+    end
+
+    test "a node admin's figure includes the accounts waiting", %{ticket: ticket} do
+      admin = node_admin_fixture()
+      join!(Forge.Projects.get!(ticket.project_id), admin)
+      {:ok, _} = Push.subscribe(admin, browser_subscription("https://push.example/admin"))
+      _pending = pending_user_fixture()
+
+      assert :ok = Push.waiting(item(:stuck, stuck!(ticket)))
+      Push.flush()
+
+      assert_receive {:push, "https://push.example/admin", %{"badge" => 2}, _}
+      assert_receive {:push, "https://push.example/a", %{"badge" => 1}, _}
+    end
+
+    test "an item push is marked an item; the digest has a badge and no mark", %{
+      user: user,
+      ticket: ticket
+    } do
+      stuck = stuck!(ticket)
+      assert :ok = Push.waiting(item(:stuck, stuck))
+      Push.flush()
+
+      assert_receive {:push, _, %{"item" => true, "badge" => 1, "tag" => tag}, _}
+      assert tag == Push.tag(item(:stuck, stuck))
+
+      assert :ok = Push.digest()
+      Push.flush()
+
+      assert_receive {:push, _, %{"tag" => "digest"} = digest, _}
+      assert digest["badge"] == Queue.count(user)
+      refute Map.has_key?(digest, "item")
+    end
+
+    test "a count that raises logs nothing and the push still shows, without a badge", %{
+      user: user,
+      ticket: ticket
+    } do
+      other = user_fixture()
+      join!(Forge.Projects.get!(ticket.project_id), other)
+      {:ok, _} = Push.subscribe(other, browser_subscription("https://push.example/b"))
+
+      config = Application.get_env(:forge, Push)
+
+      counter = fn
+        %{id: id} when id == user.id -> raise "no count"
+        person -> Queue.count(person)
+      end
+
+      Application.put_env(:forge, Push, Keyword.put(config, :counter, counter))
+      on_exit(fn -> Application.put_env(:forge, Push, config) end)
+
+      log =
+        capture_log(fn ->
+          assert :ok = Push.waiting(item(:stuck, stuck!(ticket)))
+          Push.flush()
+        end)
+
+      # No log line of its own: the change logs nothing new (criterion 26).
+      refute log =~ "raised"
+      assert_receive {:push, "https://push.example/a", %{"title" => "Stuck:" <> _} = bare, _}
+      refute Map.has_key?(bare, "badge")
+      assert_receive {:push, "https://push.example/b", %{"badge" => 1}, _}
+    end
+  end
+
+  describe "state/1" do
+    setup %{user: user} do
+      %{ticket: ticket_fixture() |> join_ticket!(user)}
+    end
+
+    # A stuck ticket and an approval: the tag in what is pushed is the tag the read lists, because
+    # it is one function that builds both.
+    test "lists the tag each kind of push carries", %{user: user, ticket: ticket} do
+      {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/a"))
+
+      stuck = stuck!(ticket)
+      approving = ticket_fixture(%{project: Forge.Projects.get!(ticket.project_id)})
+
+      {:ok, _} =
+        Repo.update(
+          Ecto.Changeset.change(Forge.Tickets.get!(approving.id),
+            pending_transition: %{
+              "from" => "refining",
+              "to" => "planning",
+              "outcome" => nil,
+              "approve" => ["refinement.md"]
+            }
+          )
+        )
+
+      for item <- Enum.filter(Queue.items(user), &Queue.waiting?/1) do
+        Push.waiting(item)
+        Push.flush()
+
+        assert_receive {:push, _, %{"tag" => tag, "item" => true}, _}
+        assert tag in Push.state(user).tags
+      end
+
+      assert %{count: 2, tags: tags} = Push.state(user)
+      assert Enum.sort(tags) == Enum.sort(["stuck-#{stuck.id}", "approval-#{approving.id}"])
+    end
+
+    test "an answered or cancelled item's tag is gone", %{user: user, ticket: ticket} do
+      stuck!(ticket)
+      assert %{count: 1, tags: ["stuck-" <> _]} = Push.state(user)
+
+      {:ok, _} =
+        Repo.update(Ecto.Changeset.change(Forge.Tickets.get!(ticket.id), status: :active))
+
+      assert Push.state(user) == %{count: 0, tags: []}
+    end
+
+    test "an assumption's tag is never listed", %{user: user, ticket: ticket} do
+      job = job_fixture(%{ticket: ticket})
+
+      {:ok, _version} =
+        Forge.Artifacts.record_version(ticket.id, "refinement.md", :document, {:job, job.id}, %{
+          content:
+            "---\noutcome: done\n---\n\n```question\nkey: naming\ntext: Which?\n" <>
+              "options: [{label: a, detail: About a}, {label: b, detail: About b}]\n" <>
+              "blocking: false\nassumption: a\n```\n"
+        })
+
+      assert Enum.any?(Queue.items(user), &(&1.kind == :assumption))
+      assert Push.state(user) == %{count: 0, tags: []}
+    end
+
+    test "two members of a project with different queues are told different things", %{
+      user: user,
+      ticket: ticket
+    } do
+      other = user_fixture()
+      join!(Forge.Projects.get!(ticket.project_id), other)
+
+      mine = ticket_fixture() |> join_ticket!(user)
+      stuck!(mine)
+
+      assert %{count: 1, tags: [tag]} = Push.state(user)
+      assert tag == "stuck-#{mine.id}"
+      assert Push.state(other) == %{count: 0, tags: []}
+    end
+
+    test "a node admin's count includes the accounts waiting, and no tag for them", %{
+      ticket: ticket
+    } do
+      admin = node_admin_fixture()
+      join!(Forge.Projects.get!(ticket.project_id), admin)
+      _pending = pending_user_fixture()
+      stuck!(ticket)
+
+      assert %{count: 2, tags: [_one]} = Push.state(admin)
+    end
+
+    test "several hundred waiting items are all listed", %{user: user, ticket: ticket} do
+      project = Forge.Projects.get!(ticket.project_id)
+      for _ <- 1..300, do: stuck!(ticket_fixture(%{project: project}))
+
+      assert %{count: 300, tags: tags} = Push.state(user)
+      assert length(tags) == 300
+      assert tags == Enum.uniq(tags)
     end
   end
 

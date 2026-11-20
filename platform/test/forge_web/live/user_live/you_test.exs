@@ -95,6 +95,17 @@ defmodule ForgeWeb.UserLive.YouTest do
                "Notifications unavailable: permission was not granted"
              )
 
+      # An iPhone in Safari is told how to get push, not that it has none.
+      render_hook(view, "push:error", %{"home_screen" => true})
+
+      assert has_element?(
+               view,
+               "#push-error",
+               "On an iPhone, notifications need forge on the Home Screen"
+             )
+
+      refute has_element?(view, "#push-error", "Notifications unavailable")
+
       # Gone once the browser does subscribe.
       render_hook(view, "push:subscribe", %{
         "endpoint" => "https://push.example/you",

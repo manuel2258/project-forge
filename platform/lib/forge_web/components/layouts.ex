@@ -421,6 +421,7 @@ defmodule ForgeWeb.Layouts do
       }
     </script>
 
+    <.device count={@frame.count} tidy />
     <.toasts flash={@flash} />
     """
   end
@@ -520,7 +521,147 @@ defmodule ForgeWeb.Layouts do
         {render_slot(@inner_block)}
       </div>
     </main>
+    <.device count={0} />
     <.toasts flash={@flash} />
+    """
+  end
+
+  # The top bar's ground in each theme, the one place the page writes the two values: the meta's
+  # data attributes, which the theme script picks from. They are `--bg` of `assets/css/tokens.css`,
+  # as hex because a bar outside the page cannot read an `oklch()`; `installed_app_test.exs` checks
+  # both against the top bar's computed colour. The manifest, a static file, holds the dark one
+  # twice more (`background_color`, `theme_color`), and `device_controller_test.exs` holds those
+  # equal to this.
+  @bar_colors %{dark: "#0d0b0f", light: "#fafdff"}
+
+  @doc "The `theme-color` of each theme, as the meta carries them (`ui.md` § The installed app)."
+  @spec bar_colors() :: %{dark: String.t(), light: String.t()}
+  def bar_colors, do: @bar_colors
+
+  @doc """
+  The theme, before first paint: the `theme-color` meta and the script that sets `data-theme` and
+  keeps the meta in step with it. Rendered by the root layout and by the offline page, which is
+  why it is a component and not written twice.
+  """
+  def theme_script(assigns) do
+    assigns = assign(assigns, :colors, @bar_colors)
+
+    ~H"""
+    <meta
+      name="theme-color"
+      content={@colors.dark}
+      data-dark={@colors.dark}
+      data-light={@colors.light}
+    />
+    <script>
+      (() => {
+        const systemTheme = () => matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+
+        // The browser's and the phone's bar take the top bar's ground in the theme being shown
+        // (`docs/design/ui.md` § The installed app); the two values are the meta's own.
+        const paintBar = () => {
+          const meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.setAttribute("content", meta.dataset[document.documentElement.getAttribute("data-theme")] || meta.dataset.dark);
+        };
+
+        const setTheme = (theme) => {
+          if (theme === "system") {
+            localStorage.removeItem("phx:theme");
+            document.documentElement.setAttribute("data-theme", systemTheme());
+            document.documentElement.setAttribute("data-theme-source", "system");
+          } else {
+            localStorage.setItem("phx:theme", theme);
+            document.documentElement.setAttribute("data-theme", theme);
+            document.documentElement.setAttribute("data-theme-source", "user");
+          }
+          paintBar();
+        };
+        if (!document.documentElement.hasAttribute("data-theme")) {
+          setTheme(localStorage.getItem("phx:theme") || "system");
+        }
+        // The width a person dragged a ticket's or a chat's side column to, applied before first
+        // paint so a reload does not jump (`Layouts`' `.AsideResize`). The stylesheet holds it to
+        // its limits, so a value that no longer fits is harmless; one that is not a whole number
+        // is ignored.
+        try {
+          const aside = localStorage.getItem("forge:aside-width");
+          if (/^[1-9][0-9]{0,5}$/.test(aside)) {
+            document.documentElement.style.setProperty("--frame-aside-width", aside + "px");
+          }
+        } catch (_) {}
+        window.addEventListener("storage", (e) => e.key === "phx:theme" && setTheme(e.newValue || "system"));
+        window.addEventListener("phx:set-theme", (e) => setTheme(e.target.dataset.phxTheme));
+
+        matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => {
+          if (document.documentElement.getAttribute("data-theme-source") === "system") {
+            document.documentElement.setAttribute("data-theme", systemTheme());
+            paintBar();
+          }
+        });
+      })();
+    </script>
+    """
+  end
+
+  @doc """
+  The frame's one element for the installed app: the icon's badge and the tidying of notifications
+  (`.Device`, `docs/design/ui.md` § The installed app). `count` is the queue button's figure; the
+  sign-in frame draws `0`, so signing out clears the badge, and asks for no tidying.
+  """
+  attr :count, :integer, required: true
+  attr :tidy, :boolean, default: false
+
+  def device(assigns) do
+    ~H"""
+    <span id="device" phx-hook=".Device" data-count={@count} data-tidy={@tidy && "true"} hidden></span>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".Device">
+      // One request to tidy per full load, and another whenever the page comes back into view or
+      // the count changes: a live navigation mounts this again and asks for nothing. The worker
+      // does the tidying (`sw.js`); this only asks.
+      let asked = false
+      let timer = null
+
+      const setBadge = (value) => {
+        const count = Number(value)
+        // `count < 0` is an equivalent mutant: the server draws a count, which is never negative.
+        if (!Number.isFinite(count) || count < 0) return
+        try {
+          const call = count > 0 ? navigator.setAppBadge?.(count) : navigator.clearAppBadge?.()
+          Promise.resolve(call).catch(() => {})
+        } catch (_) {}
+      }
+
+      const askToTidy = () => {
+        if (!("serviceWorker" in navigator) || document.visibilityState !== "visible") return
+        clearTimeout(timer)
+        timer = setTimeout(() => {
+          navigator.serviceWorker.ready
+            .then((registration) => registration.active?.postMessage({type: "tidy"}))
+            .catch(() => {})
+        }, 300)
+      }
+
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible" && document.getElementById("device")?.dataset.tidy) askToTidy()
+      })
+
+      export default {
+        mounted() {
+          setBadge(this.el.dataset.count)
+          this.count = this.el.dataset.count
+          if (this.el.dataset.tidy && !asked) {
+            asked = true
+            askToTidy()
+          }
+        },
+
+        updated() {
+          setBadge(this.el.dataset.count)
+          if (this.el.dataset.tidy && this.el.dataset.count !== this.count) askToTidy()
+          this.count = this.el.dataset.count
+        }
+      }
+    </script>
     """
   end
 

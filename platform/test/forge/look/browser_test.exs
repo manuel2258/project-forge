@@ -250,19 +250,27 @@ defmodule Forge.Look.BrowserTest do
 
   test "a script error on the login page fails the run and is not could-not-run", %{opts: opts} do
     # The login page is the first to load the app's script, so one that throws is a script error
-    # on every page: the change's, and not the machine's. The built file is put back afterwards.
-    script = Application.app_dir(:forge, "priv/static/assets/js/app.js")
-    original = File.read!(script)
-    on_exit(fn -> File.write!(script, original) end)
-    File.write!(script, ~s|throw new Error("look-test-login-boom");|)
+    # on every page: the change's, and not the machine's. The script is broken on a listener of this
+    # test's own (`Forge.Look.Device.listen/2`) and not in the built file, which the other partitions
+    # of the suite load while this runs.
+    {listener, port, _down} =
+      Forge.Look.Device.listen(0, %{
+        "/assets/js/app.js" => ~s|throw new Error("look-test-login-boom");|
+      })
+
+    opts = Keyword.put(opts, :base_url, "http://localhost:#{port}")
 
     output =
-      capture_io(fn ->
-        assert {:failed, 0, "log in", reason} = run("visit :queue", opts)
-        assert reason =~ "look-test-login-boom"
-        refute reason =~ opts[:login_token]
-        refute reason =~ opts[:token]
-      end)
+      try do
+        capture_io(fn ->
+          assert {:failed, 0, "log in", reason} = run("visit :queue", opts)
+          assert reason =~ "look-test-login-boom"
+          refute reason =~ opts[:login_token]
+          refute reason =~ opts[:token]
+        end)
+      after
+        Forge.Look.Device.stop(listener)
+      end
 
     assert output =~ "FAILED while logging in"
     refute output =~ opts[:login_token]

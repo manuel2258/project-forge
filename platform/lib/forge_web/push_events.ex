@@ -14,6 +14,9 @@ defmodule ForgeWeb.PushEvents do
   alias Forge.Push
   alias ForgeWeb.Toast
 
+  @home_screen "On an iPhone, notifications need forge on the Home Screen. " <>
+                 "Add it from Safari's Share menu, then turn notifications on there."
+
   @doc "What a page that draws the button needs: the key the browser subscribes with, no error."
   @spec init(Phoenix.LiveView.Socket.t()) :: Phoenix.LiveView.Socket.t()
   def init(socket) do
@@ -43,6 +46,11 @@ defmodule ForgeWeb.PushEvents do
     |> assign(:push_error, nil)
     |> Toast.put("Notifications off for this browser.")
   end
+
+  # An iPhone in Safari: push exists only for a web app on the Home Screen, so the one thing to say
+  # is how to get there (`docs/design/ui.md` § The installed app). No other page says to install.
+  def handle("push:error", %{"home_screen" => true}, socket),
+    do: assign(socket, :push_error, @home_screen)
 
   def handle("push:error", %{"reason" => reason}, socket) when is_binary(reason),
     do: assign(socket, :push_error, "Notifications unavailable: #{reason}")

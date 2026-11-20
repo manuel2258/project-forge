@@ -1162,10 +1162,21 @@ defmodule Forge.MergeQueueTest do
       for ticket <- [mine, theirs], do: approve!(ticket, user)
       assert %{status: :merging} = MergeQueue.claim(project.id)
       assert %{status: :merging} = MergeQueue.claim(other.id)
+
+      # The tasks the approvals started have given up on the held names, and a kick that arrived
+      # while one ran has had its second pass (it stopped at once as well). Only then are the names
+      # let go: a pass still to come would find `other`'s free and merge it, which is this test's
+      # one claim that no task but the dead one's is replaced.
+      runner = Process.whereis(Forge.MergeQueue.Runner)
+
+      eventually(fn ->
+        state = :sys.get_state(runner)
+        state.running == %{} and MapSet.size(state.again) == 0
+      end)
+
       Enum.each(owners, &Agent.stop/1)
 
       # The runner is told that a task of this one project died.
-      runner = Process.whereis(Forge.MergeQueue.Runner)
       ref = make_ref()
 
       :sys.replace_state(runner, fn state ->

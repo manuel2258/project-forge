@@ -177,6 +177,10 @@ defmodule ForgeWeb.FrameTest do
         for selector <- ~w(#frame #top-bar #desktop-header #usage-5h #usage-week #title-row) do
           assert has_element?(view, selector), "#{path} draws no #{selector}"
         end
+
+        # The installed app's badge and tidying hang on this element (`docs/design/ui.md`
+        # § The installed app): on every page the frame is drawn on.
+        assert has_element?(view, ~s(#device[phx-hook$=".Device"][data-tidy=true][data-count]))
       end
     end
   end
@@ -201,7 +205,26 @@ defmodule ForgeWeb.FrameTest do
         for selector <- ~w(#frame #top-bar #usage-5h #usage-week #forge-version) do
           refute has_element?(view, selector)
         end
+
+        # Signing out lands here, and its badge is cleared by this: a count of zero, and no
+        # tidying, which would only be refused.
+        assert has_element?(view, ~s(#device[phx-hook$=".Device"][data-count="0"]))
+        refute has_element?(view, "#device[data-tidy]")
       end
+    end
+
+    # The bar's colour in each theme, once, as the meta's attributes; and none of the iPhone's
+    # status-bar settings, which would draw behind the top bar (`ui.md` § The installed app).
+    test "the page names the bar's colour in both themes and no status bar style" do
+      html = build_conn() |> get(~p"/users/log-in") |> html_response(200)
+      colors = ForgeWeb.Layouts.bar_colors()
+
+      assert html =~ ~s(name="theme-color")
+      assert html =~ ~s(data-dark="#{colors.dark}")
+      assert html =~ ~s(data-light="#{colors.light}")
+      assert html =~ ~s(<meta name="apple-mobile-web-app-title" content="forge")
+      refute html =~ "apple-mobile-web-app-status-bar-style"
+      refute html =~ "viewport-fit"
     end
   end
 
@@ -263,6 +286,21 @@ defmodule ForgeWeb.FrameTest do
       _waiting = pending_user_fixture()
       send(view.pid, :capacity_tick)
       assert count(view) == 1
+    end
+
+    # The badge is the queue button's figure: one element, one count, and it follows.
+    test "the badge's count is the queue button's, and follows it", %{
+      conn: conn,
+      project: project
+    } do
+      {:ok, view, _html} = live(conn, ~p"/projects")
+      assert has_element?(view, ~s(#device[data-count="0"]))
+
+      stuck!(ticket_fixture(%{project: project}))
+      send(view.pid, :capacity_tick)
+
+      assert count(view) == 1
+      assert has_element?(view, ~s(#device[data-count="1"]))
     end
 
     # The queue's own top bar draws no queue button — it is the queue — and every other top-level

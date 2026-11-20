@@ -4,6 +4,12 @@ defmodule Forge.Push do
   (`waiting/1`, fed by `Forge.Push.Watch` for tickets and by `chat_reply/1` for a conversation's
   turn); the rest goes into one daily digest. Enabled only when VAPID keys are configured.
 
+  **What a device is told.** Every push carries its recipient's own `badge` (left out only when counting it fails), their queue button's
+  figure when it is sent (`Forge.Queue.count/1`, computed per recipient inside the delivery task); an
+  item's push also carries `item: true`, which marks its notification as one a device may tidy away
+  once the item stops waiting. `tag/1` names a notification and `state/1` is the read a device makes
+  to learn which tags still wait (`docs/design/ui.md` § The installed app).
+
   Delivery runs in a supervised task so a slow or failing push service never blocks the
   caller, and one bad subscription never prevents the others from being served.
   """
@@ -104,9 +110,13 @@ defmodule Forge.Push do
   end
 
   defp deliver_item(%{project: project} = item) do
-    {title, body, url, tag} = describe(item)
+    {title, body, url} = describe(item)
+    tag = tag(item)
 
-    deliver(%{title: title, body: String.slice(body || "", 0, 200), url: url, tag: tag},
+    # `item: true` is what lets a device tidy this notification away once the item stops waiting
+    # (`state/1`); the digest is not marked, so nothing tidies it.
+    deliver(
+      %{title: title, body: String.slice(body || "", 0, 200), url: url, tag: tag, item: true},
       ttl: 86_400,
       urgency: :high,
       topic: topic(tag),
@@ -114,14 +124,51 @@ defmodule Forge.Push do
     )
   end
 
+  @doc """
+  The tag a queue item's notification carries: one per thing waiting, so a re-ask or a later reply
+  replaces its notification instead of stacking another.
+
+  **This is the only place a queue item's tag is built** (the digest's is the literal `"digest"`, and is
+  never listed). `waiting/1` pushes with it and `state/1` lists the
+  waiting items by it, and the device closes a notification whose tag is not listed — a second way
+  of building a tag would be a guard on a different model from the thing it guards
+  (`docs/design/ui.md` § The installed app).
+  """
+  @spec tag(Queue.item()) :: String.t()
+  def tag(%{kind: :chat, detail: %{chat_id: chat_id}}), do: "chat-#{chat_id}"
+  def tag(%{kind: :schedule, detail: detail}), do: "schedule-#{detail.id}"
+
+  def tag(%{kind: :question, ticket: ticket, question: question}),
+    do: "question-#{ticket.id}-#{question.key}"
+
+  def tag(%{kind: kind, ticket: ticket}), do: "#{kind}-#{ticket.id}"
+
+  @doc """
+  What a device is told about its person's queue (`GET /push/waiting`): `count`, the queue
+  button's figure (`Queue.count/2`, accounts waiting for a node admin included), and the `tags` of
+  every item that waits on them by `Queue.waiting?/1`, none dropped however many there are.
+
+  Read over the person's own queue and nobody else's: `Queue.items/1` is scoped by membership.
+  """
+  @spec state(User.t()) :: %{count: non_neg_integer(), tags: [String.t()]}
+  def state(%User{} = user) do
+    items = Queue.items(user)
+
+    %{
+      count: Queue.count(items, Queue.waiting_accounts(user)),
+      # `uniq` is an equivalent mutant: no two waiting items share a tag today and a device holds the
+      # list as a set, so a repeat would change nothing it does. It keeps the list honest to read.
+      tags: items |> Enum.filter(&Queue.waiting?/1) |> Enum.map(&tag/1) |> Enum.uniq()
+    }
+  end
+
   defp describe(%{kind: :chat, project: project, detail: %{lost: true} = detail}) do
-    {"Reply lost on #{project.name}", detail.text, "/chats/#{detail.chat_id}?tab=talk",
-     "chat-#{detail.chat_id}"}
+    {"Reply lost on #{project.name}", detail.text, "/chats/#{detail.chat_id}?tab=talk"}
   end
 
   defp describe(%{kind: :chat, project: project, detail: detail}) do
     {"Reply on #{project.name}", detail.text || "It replied.",
-     "/chats/#{detail.chat_id}?tab=talk", "chat-#{detail.chat_id}"}
+     "/chats/#{detail.chat_id}?tab=talk"}
   end
 
   # A schedule has no ticket: it opens on the Workflow view, at the schedule.
@@ -130,7 +177,7 @@ defmodule Forge.Push do
       if detail.problem_kind == :switched_off, do: "switched off", else: "failed"
 
     {"Schedule #{what} on #{project.name}", "#{detail.name} — #{detail.reason}",
-     ForgeWeb.SchedulesView.path(project, detail), "schedule-#{detail.id}"}
+     ForgeWeb.SchedulesView.path(project, detail)}
   end
 
   defp describe(%{kind: kind, project: project, ticket: ticket} = item) do
@@ -141,19 +188,16 @@ defmodule Forge.Push do
 
     case kind do
       :question ->
-        {"Question on #{label}", item.question.text, url,
-         "question-#{ticket.id}-#{item.question.key}"}
+        {"Question on #{label}", item.question.text, url}
 
       :approval ->
-        {"Approval on #{label}", "#{ticket.title} — to #{item.detail["to"]}", url,
-         "approval-#{ticket.id}"}
+        {"Approval on #{label}", "#{ticket.title} — to #{item.detail["to"]}", url}
 
       :stuck ->
-        {"Stuck: #{label}", stuck_body(ticket, item.detail[:reason]), url, "stuck-#{ticket.id}"}
+        {"Stuck: #{label}", stuck_body(ticket, item.detail[:reason]), url}
 
       _review ->
-        {"Waiting on you: #{label}", "#{ticket.title} — in #{ticket.state}", url,
-         "#{kind}-#{ticket.id}"}
+        {"Waiting on you: #{label}", "#{ticket.title} — in #{ticket.state}", url}
     end
   end
 
@@ -290,10 +334,12 @@ defmodule Forge.Push do
 
   # Sends to every subscription in the background, dropping the ones the push service says
   # are gone. A subscription whose delivery raises is logged and skipped, not retried.
+  #
+  # **Each recipient's payload carries their own `badge`**, their queue button's figure at the
+  # moment of sending, computed here per person and not once for a project: two members whose
+  # queues differ are sent different numbers (`docs/design/ui.md` § The installed app).
   defp deliver(payload, opts) do
     if enabled?() do
-      json = Jason.encode!(payload)
-
       # `:to` is a project: only its members' devices. Without it this is a node-wide message —
       # the digest, which is assembled per reader elsewhere, and the flush in the test helper.
       subscriptions =
@@ -305,11 +351,28 @@ defmodule Forge.Push do
 
       {:ok, _pid} =
         Task.Supervisor.start_child(Forge.TaskSupervisor, fn ->
-          Enum.each(subscriptions, &deliver_one(&1, json, opts))
+          subscriptions
+          |> Enum.group_by(& &1.user_id)
+          |> Enum.each(&deliver_to_user(&1, payload, opts))
         end)
     end
 
     :ok
+  end
+
+  defp deliver_to_user({user_id, subscriptions}, payload, opts) do
+    json = payload |> with_badge(user_id) |> Jason.encode!()
+    Enum.each(subscriptions, &deliver_one(&1, json, opts))
+  end
+
+  # A count that cannot be read must not stop the push: it still shows its notification, which is
+  # the part a phone insists on, and the badge is set by the next push or opening instead.
+  # **Nothing is logged here**: the change adds no log line (`docs/design/ui.md` § The installed app),
+  # and a count that cannot be read is no more than a push without a figure.
+  defp with_badge(payload, user_id) do
+    Map.put(payload, :badge, counter().(Forge.Accounts.get_user!(user_id)))
+  rescue
+    _error -> payload
   end
 
   defp deliver_one(subscription, json, opts) do
@@ -339,6 +402,10 @@ defmodule Forge.Push do
   defp topic(tag) do
     :sha256 |> :crypto.hash(tag) |> Base.url_encode64(padding: false) |> binary_part(0, 32)
   end
+
+  # The queue button's figure for a person. A seam, like `sender/0`, so a test can make it raise.
+  defp counter,
+    do: Application.get_env(:forge, __MODULE__, [])[:counter] || (&Queue.count/1)
 
   defp sender,
     do: Application.get_env(:forge, __MODULE__, [])[:sender] || Forge.Push.Sender.WebPush

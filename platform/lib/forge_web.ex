@@ -17,7 +17,7 @@ defmodule ForgeWeb do
   those modules here.
   """
 
-  def static_paths, do: ~w(assets fonts images favicon.ico robots.txt sw.js manifest.webmanifest)
+  def static_paths, do: ~w(assets fonts images favicon.ico robots.txt manifest.webmanifest)
 
   def router do
     quote do

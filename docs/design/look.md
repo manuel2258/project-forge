@@ -214,6 +214,14 @@ steps, an operation `Forge.Look.Steps` never parses, so a list cannot name it. T
 clicks within 500 ms of a move: a machine slow enough to take longer between two WebDriver calls
 would fail it.
 
+**The installed app's** (`ui.md` § The installed app): the service worker's functions loaded into a
+page with fakes (`received`, `tidy`, `opened`, `page`, `install`, `activate`); a real service worker
+that controls the first page and holds exactly its precache list; the offline page, which a look
+reaches by stopping a second listener for the same endpoint and by a test-only plug that answers 502;
+the badge calls, through a recorder installed over `setAppBadge` and `clearAppBadge`; notifications
+tidied on a reload; the `theme-color` meta against the top bar's colour; and the iPhone message under a
+phone's user agent.
+
 ## What a look costs
 
 Measured on 2026-11-08 in this ticket's `implementing` job (2 cores, no cgroup file to read):

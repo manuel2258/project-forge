@@ -215,7 +215,10 @@ open non-blocking question or an open ticket proposal. The last two are counted 
 waiting on anyone. Subscriptions the push service reports gone are deleted. The service worker
 shows the notification and opens its link on tap: the ticket, on the view holding what waits, or
 a conversation's Talk. A ticket's link names no view, so the ticket opens on the one holding what
-waits (`Forge.Push.describe/1`).
+waits (`Forge.Push.describe/1`). Each push carries its recipient's own `badge` — their queue count when
+it is sent — and an item's carries `item: true`; the worker sets the badge, opens a link only on
+forge's own origin, and closes the notifications that no longer wait (`design/ui.md` § The installed
+app).
 
 ## Message state
 

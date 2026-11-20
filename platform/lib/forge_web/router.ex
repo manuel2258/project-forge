@@ -3,27 +3,60 @@ defmodule ForgeWeb.Router do
 
   import ForgeWeb.UserAuth
 
+  # Documents are agent-written: no remote images or scripts, whatever the sanitizer lets
+  # through. Inline script and style are what the generated layout and LiveView need.
+  @csp "default-src 'self'; img-src 'self' data:; script-src 'self' 'unsafe-inline'; " <>
+         "style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; " <>
+         "base-uri 'self'; form-action 'self'"
+
   pipeline :browser do
     plug :accepts, ["html"]
     plug :fetch_session
     plug :fetch_live_flash
     plug :put_root_layout, html: {ForgeWeb.Layouts, :root}
     plug :protect_from_forgery
-    # Documents are agent-written: no remote images or scripts, whatever the sanitizer lets
-    # through. Inline script and style are what the generated layout and LiveView need.
-    plug :put_secure_browser_headers, %{
-      "content-security-policy" =>
-        "default-src 'self'; img-src 'self' data:; script-src 'self' 'unsafe-inline'; " <>
-          "style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; " <>
-          "base-uri 'self'; form-action 'self'"
-    }
+    plug :put_secure_browser_headers, %{"content-security-policy" => @csp}
 
+    plug :fetch_current_scope_for_user
+  end
+
+  # What a phone's installed forge fetches before anybody is known: the service worker's script
+  # and the offline page. **No session, no CSRF token, no user**, so what the device stores of
+  # them holds nothing of the person's (`docs/design/ui.md` § The installed app).
+  pipeline :device do
+    plug :put_secure_browser_headers, %{"content-security-policy" => @csp}
+  end
+
+  # The device's one read about its own person (`GET /push/waiting`): the session, to know who asks,
+  # without the browser pipeline's flash, CSRF token, `accepts` and root layout. **No
+  # `fetch_live_flash`**: a request through it clears a pending flash, and the service worker makes
+  # this one in the background — when a push arrives, or a page it was asked about comes into view —
+  # so it can land between a redirect and the page that is to draw the toast the redirect left
+  # (`Logged out`, `Welcome back`), and take it.
+  pipeline :device_session do
+    plug :fetch_session
+    plug :put_secure_browser_headers, %{"content-security-policy" => @csp}
     plug :fetch_current_scope_for_user
   end
 
   pipeline :api do
     plug :accepts, ["json"]
     plug ForgeWeb.Plugs.ApiAuth
+  end
+
+  scope "/", ForgeWeb do
+    pipe_through :device
+
+    get "/sw.js", DeviceController, :service_worker
+    get "/offline", DeviceController, :offline
+  end
+
+  # The device's one read about its own person. In `:device_session` for the session, and behind no
+  # redirecting plug: a signed-out fetch is answered with a 401 and nothing, not a login page.
+  scope "/", ForgeWeb do
+    pipe_through :device_session
+
+    get "/push/waiting", DeviceController, :waiting
   end
 
   scope "/", ForgeWeb do

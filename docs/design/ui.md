@@ -424,6 +424,103 @@ they draw no strip — but for Machines, whose three views (Machines · Template
 top-level place with a strip of its own (`12f`, `14a`; § The bottom strip). The queue's top bar draws no queue button — it is the queue — and the others keep
 it on the left (`19c`).
 
+### The installed app
+
+forge is a web app that can be put on a phone's Home Screen (ticket 62). Nothing here changes a
+layout, adds a form or invites anybody to install: the one place forge mentions installing is the
+iPhone's refusal below.
+
+**The manifest** (`priv/static/manifest.webmanifest`, static): `id`, `scope` and `start_url` are
+`/`, `display` is `standalone`, the name is `forge`, and `background_color` and `theme_color` are
+the dark theme's ground, `#0d0b0f`, which is what an Android launch screen shows whatever theme
+the person chose (an iPhone has no launch images here and shows its own plain screen). **Shortcuts**
+are three fixed addresses, never built from a request: Queue `/`, Projects `/projects`, Chats
+`/chats`. Android and desktop Chrome offer them on a long press; iOS has no manifest shortcuts, so
+there they do not exist. Signed out, a shortcut or a tapped notification leads through sign-in to
+the page it was for, as any address does.
+
+**The status bar.** `<meta name="theme-color">` holds the top bar's ground in the theme being
+shown — `#0d0b0f` dark, `#fafdff` light, once each in `ForgeWeb.Layouts` as the meta's data
+attributes, and a browser test checks both against the top bar's computed colour — and the theme
+script rewrites it whenever the theme changes. The page declares no
+`apple-mobile-web-app-status-bar-style` (iOS draws its default bar, so its text is always legible
+on either top bar) and no `viewport-fit=cover`, so the top bar starts below the status bar on both
+phones. The page also carries `apple-mobile-web-app-capable` and `apple-mobile-web-app-title`, which
+older iOS reads in place of the manifest.
+
+**The badge.** The app icon's badge is the queue button's figure for that person, `Queue.count/1`
+(account approvals included for a node admin). An element in the frame, hook `.Device`, sets it from
+`data-count` on every mount and update and clears it at zero; the sign-in frame draws `0`, so
+signing out clears it. While forge is closed, each push carries the recipient's own figure as
+`badge`, computed per recipient at the time of sending, and the service worker sets it. The number is
+passed as it is; the phone decides how to draw it. **Platform limits:** Android draws no number on a
+web app's icon (the calls do nothing and Android shows its own dot); an iPhone shows a badge only
+once notifications are allowed.
+
+**Tidying.** A notification about an item is stale once that item no longer waits on the person,
+by the same rule that made it waiting (`Queue.waiting?/1`, over the person's own queue). The device
+removes stale ones **on every push and on every opening of forge** (a full page load and the page
+becoming visible again, and when the count changes while open), and sets the badge to the true figure at
+the same time. It asks `GET /push/waiting`, which answers only the signed-in, approved person about
+themselves — `{"count": n, "tags": [...]}`: the queue button's count and the tag of every waiting
+item, `Forge.Push.tag/1`, which is also the function that names a pushed notification, so the two
+cannot disagree. Anything else — signed out, pending, suspended, a project token — gets a 401 and no
+body, never a redirect, and the answer is `no-store`. It runs with the session but without the browser pipeline's flash, CSRF token and root layout — in particular not the flash, which a read clears — because the service worker asks in the background (when a push arrives, or a page it was told about comes into view), and a request like that landing between a redirect and the page that draws its toast would take the toast. The list is a read and not part of the push
+because a push payload is capped near 4 KB and several hundred tags are not.
+A notification is closed only when its data says `item: true` (every item push does; **the digest
+never does, so nothing tidies it**, and nor does a notification shown by an older service worker,
+which carries no mark), its tag is not in the list, and it was shown before the read began
+(`data.shown`), so a slow read cannot close what a newer push has just shown. Closing is silent: no
+sound, no vibration, no new notification.
+
+**There is no push when an item stops waiting.** An iPhone revokes a subscription after three
+pushes that show no notification, and Chrome shows a notification of its own when a push shows
+none; a replacing push would leave an entry per answer. So a stale notification, and a badge that is
+too high, stay until the next push or the next opening: an accepted limit.
+
+**The offline page.** `GET /offline` is forge's own page, rendered with no session: no CSRF token,
+no cookie, nothing of the person's, in the theme the person chose (the same script as every page),
+laid out for a phone. It says **forge can't be reached** — *This device is offline, or the server isn't
+answering. The page will load as soon as it can.* — and has a *Try again* button that reloads the
+page that was asked for; the `online` event does the same unprompted. Neither submits a form. The
+service worker serves it when a page *load* (a GET navigation) fails, or when the server answers 502,
+503 or 504 — what the proxy in front of the platform sends when it cannot reach it; forge itself sends none of
+the three. A page that is already open and loses its connection behaves as before (§ A reconnect is
+not a reload).
+
+**What the service worker keeps.** Only the offline page and the public static files it needs to draw
+— the stylesheet and the two fonts — each by the exact address the page links, and nothing in answer to
+any other request. It steps in only for a GET page load, and for those exact files, network first;
+form posts, the LiveView connection, the API, downloads and every other request pass through with no
+`respondWith`. After signing out nothing of the person's is on the device, because none ever was.
+The script is `GET /sw.js`, rendered per release (`ForgeWeb.DeviceController`) with that release's
+version and its file list in front of the source, `no-cache`, registered with
+`updateViaCache: "none"`; it calls `skipWaiting` and `clients.claim`, and deletes the
+`forge-offline-*` caches of other versions, so a release's worker takes over with nobody
+reinstalling anything.
+
+**A notification opens forge's own pages.** A tap opens its address only when it is on forge's own
+origin; anything else — another site, `//host`, `javascript:` — opens the queue.
+
+**The iPhone message.** Push on an iPhone exists only for a web app on the Home Screen. Where
+`PushManager` is missing and the device is an iPhone or iPad not running from the Home Screen,
+*Notify me* (the queue's button and You's switch) says, where its errors appear: *On an iPhone,
+notifications need forge on the Home Screen. Add it from Safari's Share menu, then turn
+notifications on there.* Any other browser without push keeps *Notifications unavailable: this
+browser has no push support*.
+
+**Not verified here** — what only a real phone can confirm, which the person checks after merging:
+installing on each phone and signing in from the installed app (password and OIDC; on an iPhone
+Safari and the installed app do not share cookies, so an emailed link signs in Safari and OIDC may
+finish outside the app); a push arriving; the badge on an iPhone; tidying on a phone —
+`getNotifications()` and `close()` on iOS, and that the tidy completes in the time a push allows;
+that iOS paints `theme-color` behind the installed app's status bar; the shortcuts; and the platform
+behaviours this note relies on and has not seen — an iPhone revoking a subscription after three pushes
+that show nothing, Chrome showing a notification of its own for such a push, and Android drawing no
+number on the icon. The manifest is checked by the suite (`device_controller_test.exs`) and not by a browser. What headless
+Chromium checked: the offline page with a real service worker, the badge calls, which
+notifications are closed and which kept, and the iPhone message.
+
 ### Three layouts
 
 | Layout | Width | Arrangement |
@@ -697,7 +794,7 @@ sign-in page's titled refusal, `21n`, is the one other). The operator's shared e
 details for re-pin, integrate, cancel and restore; the ways forward for running again and moving
 on, on the ticket and in the queue; the merge queue for *Take out*; a question card's foot for its
 Send. A page's own refusals sit by their button — an account's row, a machine's row, the push
-switch on the queue and on You, and End in a chat. A refusal that comes back to the sign-in
+switch on the queue and on You (an iPhone not on the Home Screen is told to add forge there), and End in a chat. A refusal that comes back to the sign-in
 page across a redirect — a dead link, a provider that failed, a session that ran out — carries
 the `:sign_in_error` flash, which only that page reads and draws under its field; a provider's own
 registered refusal carries `:oidc_refusal` instead, drawn titled above its button (`21n`). Both
@@ -1226,6 +1323,13 @@ decision that arose while it was held is never pushed, and one that starts waiti
 pushes as usual (`Forge.Push.Watch`). The rule is
 `Queue.waiting?/1`, not a list kept beside it, so a queue kind added later pushes or does not for
 the same reason.
+
+Each push carries the recipient's own `badge` — their `Queue.count/1` when it is sent, not a figure
+for the project — and item pushes carry `item: true` and their tag, so the device can set the badge
+and tidy the notifications that no longer apply (§ The installed app). **Nothing is pushed when an
+item stops waiting**: an iPhone revokes a subscription after three pushes that show no
+notification, Chrome shows one of its own when a push shows none, and a replacing push would leave an
+entry per answer. Stale notifications are closed on the next push and the next opening instead.
 
 ## A job waiting for a machine
 
@@ -2953,7 +3057,8 @@ holds what is about **this browser**, then what is about **the account**:
 
 The push row is drawn only on a node that has push configured, and its switch is the browser's
 own subscription, read by the browser: the server does not know whether this browser is
-subscribed, so it never draws the switch on or off itself.
+subscribed, so it never draws the switch on or off itself. On an iPhone that is not running from the
+Home Screen the switch's refusal says to add forge to the Home Screen first (§ The installed app).
 
 The page is behind sudo mode, which is right for the one place a token is typed.
 

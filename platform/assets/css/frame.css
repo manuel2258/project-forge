@@ -259,6 +259,10 @@
   .sign-in { display: flex; min-height: 100dvh; justify-content: center; padding: 48px var(--gutter-phone); }
   .sign-in-body { width: 100%; max-width: 24rem; }
   .sign-in-wordmark { margin-bottom: 32px; font-size: 18px; font-weight: 600; letter-spacing: -.02em; }
+  /* The offline page (`ForgeWeb.DeviceController`) borrows the sign-in frame: forge's own page,
+     no queue and no usage, nothing of the person's. */
+  .offline-title { font-size: 20px; font-weight: 600; letter-spacing: -.02em; }
+  .offline-text { margin: 8px 0 24px; color: var(--ink-2); }
 
   /* Not found (ui.md § Not found, 20c): in the frame, what was asked for, why, and the two places
      worth going — the first outlined in ink, the way on. Centred in what the frame leaves. */

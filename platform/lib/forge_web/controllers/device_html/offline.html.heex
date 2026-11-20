@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>forge can't be reached · forge</title>
+    <Layouts.theme_script />
+    <link rel="stylesheet" href={~p"/assets/css/app.css"} />
+  </head>
+  <body class="bg-bg text-ink">
+    <%!-- The page a device keeps and shows when a page load fails. It holds no value from the
+          server and no form: the button and the `online` event only reload the address that was
+          asked for (`docs/design/ui.md` § The installed app). --%>
+    <main id="offline" class="sign-in">
+      <div class="sign-in-body">
+        <p class="sign-in-wordmark">forge</p>
+        <h1 class="offline-title">forge can't be reached</h1>
+        <p class="offline-text">
+          This device is offline, or the server isn't answering. The page will load as soon as it can.
+        </p>
+        <.button id="try-again" type="button" variant="secondary">Try again</.button>
+      </div>
+    </main>
+    <script>
+      (() => {
+        const again = () => location.reload();
+        document.getElementById("try-again").addEventListener("click", again);
+        window.addEventListener("online", again);
+      })();
+    </script>
+  </body>
+</html>

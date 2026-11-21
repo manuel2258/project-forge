@@ -1,0 +1,100 @@
+version: 1
+description: Weekly maintenance of forge itself — a plan of meaningful dependency, cleanup and documentation changes, a review of the plan, then the change, checked and reviewed, merging by itself; skipped when nothing is worth doing.
+initial: planning
+import: [common.yml]
+
+# One ticket a week, so one branch, one gate run and one merge. Planning and its review come
+# first and decide whether there is anything to do at all. Off until a project
+# admin switches it on (docs/design/schedules.md); Mondays 06:00 UTC.
+#
+# **It merges without a person's approval.** `reviewing` is what stands in for one: a review
+# that finds issues sends the ticket back, and only a presented change that passed it is merged
+# (`presenting -> merged`, the engine's own edge, as `release.yml`'s `publishing -> merged`). A
+# conflict goes to `rebasing`, and the edge out of that one *does* wait for a person, as it does
+# for every integrating state (`workflow-grammar-v1.md` § Merging).
+schedules:
+  - name: weekly-maintenance
+    cron: "0 6 * * MON"
+    title: Weekly maintenance
+    body: |
+      Follow `.forge/agents/weekly-plan.md`: audit the dependencies, look for cleanup and
+      documentation worth doing, write the advisory report, and plan only changes that are
+      meaningful. A week with nothing meaningful to do ends skipped, which is a good week.
+
+states:
+  planning:
+    prompt: agents/weekly-plan.md
+    env: default
+    model: opus
+    effort: xhigh
+    inputs: [ticket, plan-review.md]
+    produces: [plan.md, advisory.md]
+    outcomes: [done, nothing_to_do]
+    budget: { turns: 240, tokens: 1.5M }
+
+  plan_reviewing:
+    prompt: agents/weekly-plan-review.md
+    env: default
+    model: opus
+    effort: high
+    inputs: [plan.md, advisory.md]
+    produces: [plan-review.md]
+    outcomes: [done, issues_found]
+    budget: { turns: 240, tokens: 1.5M }
+
+  implementing:
+    prompt: agents/weekly.md
+    env: default
+    model: sonnet
+    effort: high
+    may_invoke:
+      check: { max: 10 }
+    inputs: [ticket, plan.md, plan-review.md, report.md]
+    produces: [implementation.md, changeset]
+    outcomes: [done, plan_invalid]
+    budget: { turns: 800, tokens: 12M }
+
+  skipped: {}
+
+  checking:
+    extends: checking
+
+  reviewing:
+    extends: reviewing
+    inputs: [plan.md, plan-review.md, implementation.md, advisory.md, report.md, rebase.md, changeset]
+
+  presenting:
+    extends: presenting
+    inputs: [plan.md, plan-review.md, implementation.md, advisory.md, report.md, rebase.md, changeset]
+
+  merged:
+    extends: merged
+
+  rebasing:
+    extends: rebasing
+    inputs: [plan.md, implementation.md, changeset]
+
+transitions:
+  - { from: planning,       to: plan_reviewing }
+  - { from: planning,       to: skipped,        when: nothing_to_do }
+  - { from: plan_reviewing, to: implementing }
+  - { from: plan_reviewing, to: planning,       when: issues_found,      max: 2 }
+  - { from: implementing,   to: checking }
+  - { from: implementing,   to: planning,       when: plan_invalid,      max: 1 }
+  - { from: checking,       to: reviewing }
+  - { from: checking,       to: implementing,   when: checks_failed,     max: 3 }
+  - { from: reviewing,      to: presenting }
+  - { from: reviewing,      to: implementing,   when: issues_found,      max: 3 }
+  - { from: presenting,     to: merged,         queue: true }
+  - { from: rebasing,       to: merged,         queue: true }
+  - { from: rebasing,       to: checking,       when: needs_review }
+
+  - { from: checking,       to: checking,       when: gate_unavailable,  max: 2 }
+  - { from: planning,       to: planning,       when: did_not_converge,  max: 1 }
+  - { from: plan_reviewing, to: plan_reviewing, when: did_not_converge,  max: 1 }
+  - { from: implementing,   to: implementing,   when: did_not_converge,  max: 1 }
+  - { from: reviewing,      to: reviewing,      when: did_not_converge,  max: 1 }
+  - { from: presenting,     to: presenting,     when: did_not_converge,  max: 1 }
+
+limits:
+  ticket_tokens: 156.9M

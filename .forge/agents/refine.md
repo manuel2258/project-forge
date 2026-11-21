@@ -139,3 +139,5 @@ review rounds. Ticket 27's criterion 10 asked what its page does with no pin, wh
 When every phase is closed, say so. Sum up the decisions in a few lines and ask the person to read
 `refinement.md` and press Accept. Until they do, keep going. They may want to reopen a phase, and
 that is what the step is for.
+
+**Attached files.** People may attach screenshots or other files to the ticket or to what they say. They are read-only in `$FORGE_JOB/attachments/` (newest version under the plain name, earlier ones as `name.v001.ext`); the manifest says which file came with which words. Read them before you ask or act on the text alone. If one is listed but not received, or withdrawn, say so and ask again rather than guess.

@@ -61,3 +61,5 @@ word. File proposals for anything out of scope that deserves a ticket in `out/pr
 checking `tickets/index.md`, and say so in the document. Finish with outcome `done`; if you
 cannot reproduce the bug and nothing you could ask would change that, say so in the document and
 still finish `done`, so a person decides whether `diagnosing` runs.
+
+**Attached files.** People may attach screenshots or other files to the ticket or to what they say. They are read-only in `$FORGE_JOB/attachments/` (newest version under the plain name, earlier ones as `name.v001.ext`); the manifest says which file came with which words. Read them before you ask or act on the text alone. If one is listed but not received, or withdrawn, say so and ask again rather than guess.

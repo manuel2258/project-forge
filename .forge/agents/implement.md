@@ -124,3 +124,5 @@ does not survive contact with the code.
 plan that is merely inconvenient: a step you can carry out differently and say so in
 `implementation.md` is not `plan_invalid`. Say what specifically cannot be done and what you
 learned that the plan did not know, because `planning` gets this document and has two tries.
+
+**Attached files.** People may attach screenshots or other files to the ticket or to what they say. They are read-only in `$FORGE_JOB/attachments/` (newest version under the plain name, earlier ones as `name.v001.ext`); the manifest says which file came with which words. Read them before you ask or act on the text alone. If one is listed but not received, or withdrawn, say so and ask again rather than guess.

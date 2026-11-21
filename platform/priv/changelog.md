@@ -10,6 +10,30 @@ until it changes) or **may adopt** (new and optional). A project records the rel
 brought up to in `.forge/forge-release`; `platform.md` § Upgrading to a newer forge says how an
 upgrade goes.
 
+## 0.25.0
+
+- **may adopt** — a workflow file may declare `schedules:`, a list of tickets of its own type admitted on a clock. Each entry has `name`, `cron` (five fields, read in UTC; no `@weekly`), `title` and `body`, all required. A schedule is off until a project admin switches it on from the project page, and then admits an ordinary ticket in that admin's name; one ticket however many times were missed. It is refused in the release type's file and in a library. Before and after:
+
+  ```
+  # before: nothing
+  # after, in .forge/workflows/dev.yml
+  schedules:
+    - name: weekly-cleanup
+      cron: "0 6 * * MON"
+      title: Weekly cleanup
+      body: Tidy what the last week left behind.
+  ```
+
+  Also over the API: `GET /api/v1/projects/:project/schedules`, and `POST …/schedules/on`, `…/off` (a project admin's) and `…/dismiss`. (`workflow-grammar.md` § Schedules; `platform.md` § Proposing a ticket)
+
+- **must change** — `attachments`, and every name beginning `attachments/`, is now reserved. A workflow that produces, consumes as an input or names as a group an artifact called `attachments` or `attachments/…` is refused when the file is read. Rename it, for example `attachments` to `evidence`. A job does not declare the pool as an input: it is handed anyway. (`workflow-grammar.md` § Semantics, Inputs; `platform.md` § Files people attach)
+
+- **may adopt** — people can attach files (screenshots, recordings, anything) to a ticket, a chat message, an answer or a note. Every run on the ticket, and each turn of a chat, finds them read-only in `$FORGE_JOB/attachments/`, the newest version of a name under the plain name and earlier ones as `shot.v001.png`. The manifest says which file came with which words. A document may show one with `![x](attachments/shot.png)`. A file may be listed as attached but not received, or withdrawn later; say so and ask again rather than guess. Prompts that read a ticket's evidence may now point at the folder. (`platform.md` § Files people attach)
+
+- **may adopt** — hosted repositories now accept Git LFS, with the same tokens as git. Large files can be kept in LFS in a project's repository, and the worker checks out and pushes with it. A pushed branch that names an LFS object forge does not hold is refused, so push the objects with the branch. Nothing in a workflow changes.
+
+- **may adopt** — a held ticket's questions, approvals and stuck flags no longer count in the queue or push to a phone; they sit in a quiet *On hold* group until the ticket is released. Nothing in a workflow changes.
+
 ## 0.24.0
 
 - **may adopt** — a workflow state may declare `on_enter: update`, a step the platform runs itself with no job: it merges the default branch into the ticket's branch (or moves it forward, or leaves it when already current), re-pins the ticket's workflow at the commit it brought the code up to, moves the ticket's base, and takes the state's one edge out. `on_conflict` names the state a conflict goes to, a job or a human state. Before and after:

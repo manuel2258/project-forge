@@ -104,6 +104,16 @@ if cap = System.get_env("FORGE_DAILY_TOKENS") do
   end
 end
 
+if days = System.get_env("FORGE_HARNESS_RETENTION_DAYS") do
+  case Integer.parse(days) do
+    {n, ""} when n >= 1 ->
+      config :forge, Forge.Events.Retention, days: n
+
+    _ ->
+      raise "FORGE_HARNESS_RETENTION_DAYS must be a whole number of days, at least 1, got #{inspect(days)}"
+  end
+end
+
 if hour = System.get_env("FORGE_DIGEST_HOUR_UTC") do
   case Integer.parse(hour) do
     {h, ""} when h in 0..23 -> config :forge, Forge.Push, digest_hour_utc: h

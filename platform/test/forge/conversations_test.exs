@@ -1450,8 +1450,9 @@ defmodule Forge.ConversationsTest do
       text(chat, "One test fails.")
       {:ok, _} = Conversations.record_turn(chat, turn(1, 0.01))
 
+      # The calls are the transcript's: `messages/1` reads the words and not the harness's calls.
       assert [%{role: :user}, %{role: :assistant, text: text, items: items}] =
-               Conversations.messages(chat.id)
+               chat.id |> Conversations.transcript() |> Conversations.said()
 
       assert text == "Reading the parser.\n\nOne test fails."
 
@@ -1486,7 +1487,7 @@ defmodule Forge.ConversationsTest do
       text(chat, "The lexer is in lib/lexer.ex.")
       {:ok, _} = Conversations.record_turn(chat, turn(1, 0.01))
 
-      [_user, reply] = Conversations.messages(chat.id)
+      [_user, reply] = chat.id |> Conversations.transcript() |> Conversations.said()
 
       assert [{:action, task}, {:text, "The lexer is in lib/lexer.ex."}] = reply.items
       assert task.name == "Task"
@@ -1634,7 +1635,7 @@ defmodule Forge.ConversationsTest do
       :ok =
         Jobs.record_harness_event(chat.id, %{
           type: "job.harness.notice",
-          payload: %{subtype: "thinking_tokens"}
+          payload: %{subtype: "plugin_install"}
         })
 
       text(chat, "done")

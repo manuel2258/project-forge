@@ -73,11 +73,11 @@ defmodule ForgeWeb.TicketLive do
        other: false,
        forms: QuestionForm.init(),
        drafts: Drafts.init(),
-       refusal: nil
+       refusal: nil,
+       reach: reach(socket)
      )
      |> Decision.init()
      |> Changes.init()
-     |> JobStream.init()
      |> ForgeWeb.Capacity.project(project)
      |> load()}
   end
@@ -121,7 +121,8 @@ defmodule ForgeWeb.TicketLive do
        changes_params: Changes.params(params)
      )
      |> Changes.choose_again()
-     |> load_changes()}
+     |> load_changes()
+     |> load_activity()}
   end
 
   # What Changes shows is read only while it is the view on screen (`ForgeWeb.Changes`).
@@ -163,7 +164,9 @@ defmodule ForgeWeb.TicketLive do
       docs: docs(project, ticket, artifacts, [], %{}),
       attached_events: %{},
       ticket_files: [],
-      events: ticket.id |> Events.for_ticket() |> Enum.reverse() |> Enum.take(10),
+      events: Events.newest_for_ticket(ticket.id, 10),
+      activity: nil,
+      transcripts: [],
       drift: Tickets.drift(ticket, project),
       paused: false,
       now: DateTime.utc_now()
@@ -238,7 +241,8 @@ defmodule ForgeWeb.TicketLive do
       addresses:
         Forge.Accounts.addresses(for %{actor: %{"kind" => "user", "id" => id}} <- events, do: id),
       queue_events: queue_events(ticket),
-      activity: if(current, do: Events.for_job(current.id), else: []),
+      activity: activity(socket, current),
+      transcripts: transcripts(project, ticket, current),
       transitions: Engine.offered_transitions(ticket, workflow),
       jumps: jumps(ticket, workflow),
       retry: Engine.retryable?(ticket),
@@ -274,6 +278,52 @@ defmodule ForgeWeb.TicketLive do
     |> assign_docs(artifacts, jobs)
     |> load_chats()
     |> load_changes()
+    |> load_activity()
+  end
+
+  # The current job's stream, counted on every load and read only while Activity is on screen, as
+  # Changes is (`docs/design/ui.md` § Activity). The one the page already holds for this job is
+  # reloaded — what arrived above it is read, and the figures counted again — never read afresh;
+  # a new current job starts a new stream.
+  defp activity(_socket, nil), do: nil
+
+  defp activity(%{assigns: assigns}, current) do
+    case Map.get(assigns, :activity) do
+      %JobStream{job_id: id} = held when id == current.id -> JobStream.reload(held)
+      _another -> JobStream.new(current.id)
+    end
+  end
+
+  # What a swept job's line links; read only for a job that was swept.
+  defp transcripts(_project, _ticket, nil), do: []
+
+  defp transcripts(project, ticket, current),
+    do: WorkScreen.transcript_links(current, project, ticket)
+
+  defp load_activity(%{assigns: %{activity: nil}} = socket), do: socket
+
+  defp load_activity(%{assigns: %{activity: stream} = assigns} = socket) do
+    if view(assigns) == "activity" and not JobStream.open?(stream) do
+      position = JobStream.reach(socket.assigns.reach["activity"], stream.job_id)
+
+      assign(socket,
+        activity:
+          if(position, do: JobStream.rejoin(stream, position), else: JobStream.open(stream))
+      )
+    else
+      socket
+    end
+  end
+
+  # Where each stream was read back to before a dropped socket rejoined, if it did
+  # (`docs/design/ui.md` § A reconnect is not a reload).
+  defp reach(socket) do
+    with true <- connected?(socket),
+         %{"reach" => %{} = reach} <- get_connect_params(socket) do
+      reach
+    else
+      _none -> %{}
+    end
   end
 
   # The one decision row the ticket has (`docs/design/ui.md` § The decision row): its pending
@@ -310,7 +360,7 @@ defmodule ForgeWeb.TicketLive do
   # step is accepted now, and Accept's panel says so. Read only when there is a row to say it in.
   defp step_questions(step) do
     if ForgeWeb.Components.StepAccept.row?(step) do
-      step.chat.id |> Conversations.messages() |> List.last() |> Conversations.questions()
+      step.chat.id |> Conversations.last_said() |> Conversations.questions()
     else
       []
     end
@@ -327,15 +377,7 @@ defmodule ForgeWeb.TicketLive do
   # What the merge queue did to the ticket, oldest first, and the merge it ended in — and nothing
   # for a ticket the queue never held: a merge on a workflow that queues nothing is no part of
   # this section's story.
-  defp queue_events(ticket) do
-    events = Events.for_ticket(ticket.id)
-
-    if Enum.any?(events, &queue_event?/1),
-      do: Enum.filter(events, &(queue_event?(&1) or &1.type == "ticket.merged")),
-      else: []
-  end
-
-  defp queue_event?(%{type: type}), do: String.starts_with?(type, "merge_queue.")
+  defp queue_events(ticket), do: Events.merge_queue_for_ticket(ticket.id)
 
   # The ticket's own events that say something its jobs do not — a decision and its note, a
   # transition, why it stuck — newest first, for Activity (`ui.md` § Activity).
@@ -343,9 +385,8 @@ defmodule ForgeWeb.TicketLive do
   # answer **that came with files**, which is listed so that the names are under it
   # (`docs/design/ui.md` § Attaching files) — an answer without files is in the document it answers.
   defp ticket_events(ticket) do
-    all = Events.for_ticket(ticket.id)
-    said = Enum.filter(all, &(&1.type in TicketViews.said_types() and listed_admission?(&1)))
-    answered = Enum.filter(all, &(&1.type == "question.answered"))
+    said = Events.said_for_ticket(ticket.id, TicketViews.said_types(), 12)
+    answered = Events.answered_with_files(ticket.id)
 
     files = Forge.Attachments.entries_for_events(Enum.map(said ++ answered, & &1.seq))
     answered = Enum.filter(answered, &Map.has_key?(files, &1.seq))
@@ -353,14 +394,6 @@ defmodule ForgeWeb.TicketLive do
     events = (said ++ answered) |> Enum.sort_by(& &1.seq, :desc) |> Enum.take(12)
     {events, Map.take(files, Enum.map(events, & &1.seq))}
   end
-
-  # An admission is on the ticket's Activity only when a schedule made it: a person's own is the
-  # ticket's first line already, and `docs/design/ui.md` § Activity names which schedule and whose
-  # name for the other.
-  defp listed_admission?(%{type: "ticket.admitted", payload: payload}),
-    do: is_map(payload["schedule"])
-
-  defp listed_admission?(_event), do: true
 
   # The Accept area's model while the ticket rests in a chat step that has a conversation.
   defp step_view(%Forge.Tickets.Ticket{status: status} = ticket)
@@ -379,8 +412,7 @@ defmodule ForgeWeb.TicketLive do
   # outcome, as a job's row has one. Who pressed it is the event's actor.
   defp accepted_steps(ticket) do
     ticket.id
-    |> Events.for_ticket()
-    |> Enum.filter(&(&1.type == "step.accepted"))
+    |> Events.of_type_for_ticket("step.accepted")
     |> Map.new(&{&1.job_id, &1.payload})
   end
 
@@ -732,7 +764,10 @@ defmodule ForgeWeb.TicketLive do
   # every query of `load/1`, per event, for as long as a job streams. (On the conversation's page
   # it is not equivalent, and a test says so.)
   @impl true
-  def handle_info({:job_event, id, event}, %{assigns: %{following: id}} = socket) do
+  def handle_info(
+        {:job_event, id, event},
+        %{assigns: %{following: id, activity: %JobStream{}}} = socket
+      ) do
     if JobStream.streamed?(event) do
       case JobStream.add(socket.assigns.activity, event) do
         :seen ->
@@ -817,14 +852,21 @@ defmodule ForgeWeb.TicketLive do
     {:noreply, push_navigate(socket, to: to)}
   end
 
-  def handle_event("more", params, socket), do: JobStream.handle_event("more", params, socket)
+  def handle_event("more", _params, %{assigns: %{activity: %JobStream{} = stream}} = socket),
+    do: {:noreply, assign(socket, activity: JobStream.older(stream))}
+
+  def handle_event("more", _params, socket), do: {:noreply, socket}
 
   def handle_event("attachments:withdraw", params, socket),
     do:
       {:noreply, ForgeWeb.Attaching.withdraw(socket, {:ticket, socket.assigns.ticket.id}, params)}
 
-  def handle_event("notices", params, socket),
-    do: JobStream.handle_event("notices", params, socket)
+  def handle_event("notices", _params, %{assigns: %{activity: %JobStream{} = stream}} = socket) do
+    drawn = stream |> JobStream.held() |> WorkScreen.entries(stream.notices) |> length()
+    {:noreply, assign(socket, activity: JobStream.toggle_notices(stream, drawn))}
+  end
+
+  def handle_event("notices", _params, socket), do: {:noreply, socket}
 
   # The person's own decision moves the ticket on, and the page with it: the default view is chosen
   # again when their press changed what waits (`docs/design/ui.md` § The ticket). A refused press
@@ -953,7 +995,7 @@ defmodule ForgeWeb.TicketLive do
       %{
         changes: Diff.file_count(assigns.diff),
         docs: length(assigns.docs),
-        activity: WorkScreen.activity_count(assigns.activity)
+        activity: if(assigns.activity, do: assigns.activity.count, else: 0)
       },
       TicketViews.talk(assigns.step, assigns.chats),
       :patch

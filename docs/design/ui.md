@@ -894,8 +894,15 @@ every `system` message into a `notice` event, and `thinking_tokens` alone can ou
 everything else a job produced: the page becomes a telemetry feed with the work buried in it,
 which is the activity feed this section exists to refuse. Those events are recorded — the event
 log is the record and nothing may quietly drop what a job did — and hidden behind a control that
-says how many there are. Recorded and not drawn is the rule; dropping them would be a different
-and worse decision.
+says how many there are. Recorded and not drawn is the rule.
+
+**The exception is harness telemetry nothing reads: it is not recorded.** `thinking_tokens` is a
+running counter the harness ticks, not something the job did, and it was 38% of every row the
+platform kept (ticket 64). The worker does not send it, the platform refuses it from any worker,
+and no figure is kept in its place. The transcript file still holds every one. **A finished job's
+stream is whole for the retention period only**: thirty days after the job ended its tool calls
+and notices are swept, and its stream says so (§ The job page); what a job said and what it
+reported stay (`storage.md` § Retention).
 
 **Why this used to be forbidden, and why it is not.** The rule was "no live transcript, no
 streaming log, no activity feed — nothing that invites watching agents work", from `vision.md`'s
@@ -1001,6 +1008,13 @@ conversation, which is where the person who reported this said they lost work. T
 boxes, and each new one joins this list or the inventory says why not: a reject note in its panel,
 the composers that start a conversation in place, project settings' one form for model and effort,
 the stepper forms, a bulk decline's shared reason.
+
+**A stream redraws as far back as it was read.** A job's stream, its raw log, a ticket's or a
+conversation's Activity and Talk are read a page at a time, so a rejoin would otherwise start them
+again from the newest page. The page draws, beside the look a ticket's page sends (`look`), the job and the
+oldest position each held (`#stream-reach`), the client sends it as `reach`, and mount reads that
+range again in one query bounded by it. A position is taken only when its job is the page's own and
+it is a whole number; anything else reads the newest page.
 
 **An attached file survives a reconnect when it finished.** The attach box (§ Attaching files)
 holds the files that finished uploading and were not yet sent in hidden fields inside the form, so
@@ -1790,6 +1804,20 @@ its own between the visits either side of it, which a jump breaks into two steps
 returns to the same state. **That row is a sentence, not a visit**: set in the body face, since it
 carries the comment a person wrote (mono is never for that, § Type), and with no chevron, because
 it opens nothing.
+**Read a page at a time** (`ForgeWeb.JobStream`, `Forge.Events.Stream`): the newest 50 entries when the
+view is opened, and the next 50 when the reader reaches the old end — the bottom here — which loads
+on its own, without a press, under a quiet *Loading earlier…* line until it has arrived. *Load 50
+more* stays under the stream as the fallback for when reaching the end does not load, and loads the
+same page; at the start of the stream neither is drawn. A call and its result are one line
+whichever pages they fall on. The Activity tab's count and the harness notices' count are counted
+by the database, not taken from the rows held. The ticket's Activity holds its stream in a bounded
+box of its own, so that loading more does not push *On the ticket* and the earlier jobs away for
+good. **A job swept after its retention period** (`storage.md` § Retention) shows one line, where the sweep stands among what was kept (the newest end, for a job not
+reopened) — *Tool calls and harness notices were removed 30 days after this job ended* — with
+a link to each of its transcript files, or *No transcript of it was recorded*. It is drawn only
+once the sweep has recorded that the rows are gone, never while it has not (a job reopened after its
+sweep draws it beside its new rows). The conversation's Activity tab is this stream.
+
 Activity also says what the platform's own events mean beside their type: the statuses a command
 batch decided and its outcome, why the ticket stuck, which edge it took, and what each merge-queue
 event means.
@@ -1810,8 +1838,14 @@ the person reads one that failed.
 - **Stream · Manifest · Wrote**, a segmented switch, because the strip's tabs belong to the ticket.
   It is the page's one switch. The stream is the harness's events drawn as the transcript draws
   them, newest at the bottom, a bounded pane tailed while the job runs; its head says how far it got,
-  and holds a quiet `raw log` toggle and — only while a failure is on screen — a mono link in
-  danger ink, `✗ 2 failed · first ↑`, that jumps to the first. **On a phone the time is said once a
+  and holds a quiet `raw log` toggle and — while the job has a failure — a mono button in
+  danger ink, `✗ 2 failed · first ↑`, that loads back to the first (when it is older than what is
+  held) and scrolls to it. **The stream is read a page at a time**: the newest 50 entries on
+  opening, and the next older 50 when the person scrolls to the top (the old end of a stream that
+  reads newest at the bottom), with *▸ N earlier* beside it as the fallback (*Load 50 more* on Activity); the raw log is paged
+  the same way. Everything the page says about the whole job — its plan, the memory warning, the
+  secrets it held, the failure count — is a query of its own and not taken from the page held.
+  A swept job draws its one line (§ Activity) at the newest end, after what was kept. **On a phone the time is said once a
   minute**, as a small divider over the row that opens it, rather than on every row, where the
   same `21:50:56` nine times took a fifth of the width. The manifest is the pinned input manifest,
   led by **the prompt the job was given**, folded: it is an input like the rest. Wrote is what the
@@ -1953,6 +1987,12 @@ as wide as the person has dragged it (§ Three layouts).
 `15a`. The transcript, pinned to the bottom per § Motion and structure, then from the bottom up:
 the composer, the now line, the plan band, and any open question's card.
 
+- **Talk is read ten turns at a time.** It opens on the latest ten, pinned to the bottom, and loads
+  the next ten older when the person scrolls to the top, under a quiet *Loading earlier…* line,
+  with a button as the fallback; the first turn shows neither. A turn is never split across pages
+  and the open turn is always whole. What Talk draws from outside the turns it holds — the plan
+  band, the now line, an open question's card, the heading — is a query of its own. A swept
+  conversation's line (§ Activity) stands after the last thing said.
 - **The transcript is the turn in the order it happened**, not one message per speaker. A turn
   is its text blocks with the agent's actions between them, read from the event log in sequence.
   Each text block is its own bubble — the person's and the agent's told apart by side and ground,
@@ -3528,6 +3568,10 @@ line below is something this note says that the code does not do yet; a change t
 removes its line. Until then, where the two disagree, the code is the previous design and the
 previous note describes it.
 
+- **Loading on a touch scroll has not run on a real phone.** The pages that read a page at a time
+  (§ Activity, § The job page, § Talk) load the next one when the reader reaches the old end, by an
+  `IntersectionObserver` that the suite cannot drive and a headless Chromium at a phone width only
+  scrolls; the fallback button is what the suite does exercise.
 - **Attaching files** (`attachments.md`): no inventory test checks that every place draws the box (only the chat's forms and the document editor are checked); the box's uploading, refused
   and *not sent* states and drop and paste have not run in a browser, because `bin/look` has no
   step that chooses a file, so only the server's half and the box's markup are under test.

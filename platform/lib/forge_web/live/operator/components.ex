@@ -218,15 +218,32 @@ defmodule ForgeWeb.Operator.Components do
           this.toBottom()
         },
 
+        // The first row you can see, and how far down the pane it is: the one thing a page of
+        // older rows loaded above must not move (`docs/design/ui.md` § Activity), found by id
+        // after the patch rather than trusted to CSS scroll anchoring.
+        anchor() {
+          const list = this.el.querySelector("[data-scroll-items]")
+          if (!list) return null
+          const item = [...list.children].find(
+            (child) => child.id && child.offsetTop + child.offsetHeight > this.el.scrollTop
+          )
+          return item ? {id: item.id, offset: item.offsetTop - this.el.scrollTop} : null
+        },
+
         // Whether you were at the bottom *before* the update is the only moment that can be
         // asked: afterwards the content is taller and the answer is always no.
         beforeUpdate() {
           this.pinned = this.atBottom()
+          this.held = this.pinned ? null : this.anchor()
         },
 
         updated() {
           if (this.pinned) this.toBottom()
-          else this.report()
+          else {
+            const item = this.held && document.getElementById(this.held.id)
+            if (item) this.el.scrollTop = item.offsetTop - this.held.offset
+            this.report()
+          }
         }
       }
     </script>

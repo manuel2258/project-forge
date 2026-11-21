@@ -104,6 +104,7 @@ Each stdout line is JSON with a top-level `type`. The types the driver knows and
 |---|---|---|
 | `system` | `init` | Record `session_id`, `model`, `tools`, `claude_code_version`. Emit `harness.started`. |
 | `system` | `api_retry` | Emit `harness.retry` with `attempt`, `max_retries`, `error`. |
+| `system` | `thinking_tokens` | **Dropped**: a running counter, 38% of every row recorded, drawn only behind the notice count and read by nothing else. The platform refuses one from a worker that still sends it. |
 | `system` | other | Emit `harness.notice` with the subtype and the raw message. |
 | `rate_limit_event` | | Emit `harness.rate_limit` with `status`, `resets_at`, `rate_limit_type`, `utilization`, `is_using_overage`, and `windows` when the release sends `unifiedWindows`. Undocumented; see below. |
 | `assistant` | | For each content block: `text` -> `harness.text`, `tool_use` -> `harness.tool_use` (`id`, `name`, input). Any other block, `thinking` included, is dropped. |
@@ -141,6 +142,10 @@ All are `job.harness.*` in the event log, with `job_id`, `ticket_id`, `actor = {
 (status, resets_at, rate_limit_type, utilization, is_using_overage, windows), `unknown` (type),
 `malformed` (reason), `finished` (subtype, is_error, num_turns, duration_ms, total_cost_usd,
 usage, result, session_id).
+
+**What is kept of them, and for how long, is `storage.md` § Retention**: `text`, `delivered`,
+`started`, `finished`, `rate_limit` and `memory` for good, every other type thirty days after the
+job ended.
 
 `text`, `tool_use`, `tool_result` and `delivered` also carry `parent_tool_use_id`. A conversation
 forwards `delivered` with the platform's `message_id` added, and does not forward the echo of its

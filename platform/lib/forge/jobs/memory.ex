@@ -32,7 +32,13 @@ defmodule Forge.Jobs.Memory do
   trouble when a memory event says so, or when a run or a turn ended having counted an OOM kill no
   event reported.
   """
-  @spec trouble([map()]) :: trouble() | nil
+  @spec trouble([map()] | String.t()) :: trouble() | nil
+  def trouble(job_id) when is_binary(job_id) do
+    job_id
+    |> Forge.Events.for_job_types(["job.harness.memory", "job.finished", "chat.turn"])
+    |> trouble()
+  end
+
   def trouble(events) do
     readings = Enum.flat_map(events, &readings/1)
     kills = readings |> Enum.map(fn {_what, figures} -> count(figures["oom_kills"]) end)

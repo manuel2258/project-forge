@@ -423,6 +423,11 @@ defmodule ForgeWeb.JobLiveTest do
       refute has_element?(view, "#state-prompt")
       assert has_element?(view, ~s(#job-raw-toggle[aria-pressed="false"]))
 
+      # A browser sends a clicked button's own `value` over `phx-value-value` (`ForgeWeb.UI.Forms.
+      # segmented/1` says so), so the toggle carries both: without `value` it sent `""` and did
+      # nothing, which no `render_click` reproduces.
+      assert has_element?(view, ~s(#job-raw-toggle[value="raw"][phx-value-value="raw"]))
+
       view |> element("#job-raw-toggle") |> render_click()
       assert text(view, "#job-raw") =~ "job.harness.started fake-model · session sess-42"
       refute has_element?(view, "#job-events")
@@ -486,12 +491,18 @@ defmodule ForgeWeb.JobLiveTest do
         |> Enum.filter(&(&1.type == "job.harness.tool_use" and &1.payload["id"] != "a"))
 
       {:ok, view, _html} = live(conn, page(project, ticket, job))
-      # A link in the stream's head, saying how many failed (UX pass, B15).
+
+      # A button in the stream's head, saying how many failed (UX pass, B15) and, pressed, scrolling
+      # to the first: the failures are counted by the database, wherever they are.
       assert has_element?(
                view,
-               ~s(.job-stream-head #job-first-error[href="#job-events-#{first.seq}"]),
+               ~s(.job-stream-head button#job-first-error),
                "✗ 2 failed · first ↑"
              )
+
+      view |> element("#job-first-error") |> render_click()
+      assert_push_event(view, "scroll-to", %{id: id})
+      assert id == "job-events-#{first.seq}"
     end
 
     # On a phone the time is said once a minute (UX pass, B5): a row opens its minute only when
@@ -545,7 +556,7 @@ defmodule ForgeWeb.JobLiveTest do
       assert text(view, "#job-stream-end") =~ ~r/^finished · budget_exhausted · \d\d:\d\d:\d\d$/
     end
 
-    # Claude Code turns every `system` message into a `notice`, and `thinking_tokens` alone
+    # Claude Code turns every `system` message into a `notice`, and the counter alone
     # outnumbered everything else in the stream on the dev node. Recorded, and behind their count.
     test "hides the harness's own telemetry until asked", %{
       conn: conn,
@@ -555,19 +566,19 @@ defmodule ForgeWeb.JobLiveTest do
       job = run_pending(ticket, "success", "refinement.md")
 
       harness!(job, "job.harness.notice", %{
-        "subtype" => "thinking_tokens",
+        "subtype" => "plugin_install",
         "raw" => %{"tokens" => 128}
       })
 
       {:ok, view, html} = live(conn, page(project, ticket, job))
 
-      refute html =~ "thinking_tokens"
+      refute html =~ "plugin_install"
       assert html =~ "Show 1 harness notices"
       assert html =~ "Reading the plan."
 
       shown = render_click(view, "notices")
 
-      assert shown =~ "thinking_tokens"
+      assert shown =~ "plugin_install"
       assert shown =~ "Hide 1 harness notices"
     end
   end

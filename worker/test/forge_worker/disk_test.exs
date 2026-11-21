@@ -183,6 +183,16 @@ defmodule ForgeWorker.DiskTest do
       refute File.exists?(context.path)
     end
 
+    # `LinkTest` joins a link whose socket answers only what the test tells it to, and a report
+    # pushed to it by the application's own disk process is a call nobody answers: it times out
+    # and takes the link with it. So the one the application starts must not report within a suite.
+    test "the application's own disk process measures nothing within the length of a suite" do
+      state = :sys.get_state(Disk)
+
+      for key <- [:first_ms, :every_ms, :after_cleanup_ms],
+          do: assert(Map.fetch!(state, key) >= :timer.hours(1))
+    end
+
     test "says nothing when it is not running", _context do
       assert Disk.cleaned("jobs", 1, :no_such_disk_process) == :ok
       assert Disk.joined(:no_such_disk_process) == :ok

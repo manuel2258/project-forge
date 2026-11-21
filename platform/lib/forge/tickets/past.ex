@@ -155,9 +155,7 @@ defmodule Forge.Tickets.Past do
   @spec last_reply(Job.t()) :: String.t() | nil
   def last_reply(%Job{id: id}) do
     id
-    |> Conversations.messages()
-    |> Enum.filter(&(&1.role == :assistant))
-    |> List.last()
+    |> Conversations.last_said(:assistant)
     |> case do
       %{text: text} -> text
       nil -> nil

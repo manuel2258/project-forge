@@ -85,6 +85,7 @@ defmodule Forge.Application do
         Forge.MergeQueue.Runner,
         Forge.ImageBuilds.Runner,
         Forge.Attachments.Sweeper,
+        Forge.Events.Retention.Sweeper,
         Forge.Git.Lfs.Sweeper,
         Forge.Schedules.Runner
       ],

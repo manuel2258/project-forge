@@ -23,7 +23,7 @@ defmodule ForgeWeb.TicketViews do
 
   import ForgeWeb.Operator.QuestionForm, only: [question_form: 1]
 
-  alias Forge.{Artifacts, Conversations, Events, Git, Jobs, Projects}
+  alias Forge.{Artifacts, Conversations, Git, Jobs, Projects}
   alias ForgeCore.Workflow
   alias ForgeWeb.Components.{MoreRoom, StepAccept}
   alias ForgeWeb.{Diff, FileType, Format, WorkScreen}
@@ -125,16 +125,18 @@ defmodule ForgeWeb.TicketViews do
   conversation — with every count read as the ticket's page reads it: Changes what the branch holds
   against its base, Docs as Docs counts them, Activity the stream of the job running now
   (`current`, the ticket's newest job) as the Activity tab counts it, and Talk while the ticket has
-  a conversation to talk in. Each view navigates back to the ticket's page. `held` is the events
-  the page already holds for one job, `{job_id, events}`, so that job's stream is not read again.
+  a conversation to talk in. Each view navigates back to the ticket's page. `held` is the figure the
+  page already holds for one job, `{job_id, count}` (`ForgeWeb.JobStream`), so that job's stream is
+  not counted again; any other is counted by the database (`Forge.Events.Stream.count/1`), never
+  by reading the stream.
   """
-  @spec strip_of(map(), map(), map() | nil, {String.t(), [map()]} | nil) :: [map()]
+  @spec strip_of(map(), map(), map() | nil, {String.t(), non_neg_integer()} | nil) :: [map()]
   def strip_of(project, ticket, current, held \\ nil) do
     activity =
       case {current, held} do
-        {nil, _held} -> []
-        {%{id: id}, {id, events}} -> events
-        {current, _held} -> Events.for_job(current.id)
+        {nil, _held} -> 0
+        {%{id: id}, {id, count}} -> count
+        {current, _held} -> Forge.Events.Stream.count(current.id)
       end
 
     docs =
@@ -148,7 +150,7 @@ defmodule ForgeWeb.TicketViews do
       %{
         changes: Diff.file_count(branch_diff(project, ticket)),
         docs: docs,
-        activity: WorkScreen.activity_count(activity)
+        activity: activity
       },
       talk(step(ticket), Conversations.summaries(ticket_id: ticket.id)),
       :navigate
@@ -1199,14 +1201,23 @@ defmodule ForgeWeb.TicketViews do
       >
         {@current.state} #{@current.attempt} ›
       </.link>
-      <WorkScreen.activity
-        events={@activity}
-        shown={@shown}
-        notices={@notices}
-        since={@since}
-        heading={WorkScreen.stream_heading(@current, @activity)}
-        hrefs={WorkScreen.version_hrefs(@docs)}
-      />
+      <%!-- The stream in a bounded box of its own, so that reaching its end loads the next page
+            there and does not push *On the ticket* and the earlier jobs away for good
+            (`docs/design/ui.md` § Activity). --%>
+      <div
+        id="activity-pane"
+        data-load-root
+        class="max-h-[70vh] overflow-y-auto overscroll-contain"
+      >
+        <WorkScreen.activity
+          stream={@activity}
+          since={@since}
+          heading={WorkScreen.stream_heading(@current, @activity.count)}
+          hrefs={WorkScreen.version_hrefs(@docs)}
+          transcripts={@transcripts}
+        />
+      </div>
+      <span id="stream-reach" hidden data-activity={ForgeWeb.JobStream.reach_of(@activity)}></span>
     </div>
 
     <section :if={@events != []} id="ticket-events" class="ticket-section">

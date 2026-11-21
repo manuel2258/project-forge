@@ -28,6 +28,7 @@ defmodule ForgeWeb.JobLive do
   import ForgeWeb.UI.Forms, only: [segmented: 1]
 
   alias Forge.{Archive, Artifacts, Events, Jobs, Tickets}
+  alias Forge.Events.Stream
   alias Forge.Jobs.{Memory, Runs}
   alias ForgeWeb.{Actions, Diff, FileType, Format, JobStream, Markdown, TicketViews, WorkScreen}
 
@@ -63,15 +64,14 @@ defmodule ForgeWeb.JobLive do
        pane: "stream",
        show: "transcript"
      )
-     |> JobStream.init()
      |> ForgeWeb.Capacity.project(project)
      |> load()
+     |> open_streams()
      |> load_ticket()}
   end
 
   defp load(%{assigns: %{job_id: job_id, ticket: ticket, project: project}} = socket) do
     job = Jobs.get!(job_id)
-    events = Events.for_job(job.id)
     written = Artifacts.written_by(job.id)
 
     assign(socket,
@@ -84,10 +84,53 @@ defmodule ForgeWeb.JobLive do
       archive_reads: Archive.reads(job.id),
       runs: Runs.for_job(job.id),
       extensions: extensions(job),
+      # What the page says of the whole job, each read by a query of its own and not taken from the
+      # page of the stream it holds (`docs/design/ui.md` § The job page).
+      plan: plan(job.id),
+      memory: Memory.trouble(job.id),
+      held: held(job.id),
+      failures: Stream.failures(job.id),
+      transcripts: WorkScreen.transcript_links(job, project, ticket),
       now: DateTime.utc_now()
     )
-    |> assign(events: events, memory: Memory.trouble(events), held: held(events))
   end
+
+  # The streams, opened on mount: the transcript's newest page now, the raw log when it is first
+  # shown. A rejoining page reads each back as far as it was held, in one query bounded by that
+  # (`docs/design/ui.md` § A reconnect is not a reload).
+  defp open_streams(%{assigns: %{job_id: job_id}} = socket) do
+    reach = reach(socket)
+    stream = JobStream.new(job_id)
+
+    stream =
+      case JobStream.reach(reach["activity"], job_id) do
+        nil -> JobStream.open(stream)
+        position -> JobStream.rejoin(stream, position)
+      end
+
+    raw = JobStream.new(job_id, :raw)
+
+    raw =
+      case JobStream.reach(reach["raw"], job_id) do
+        nil -> raw
+        position -> JobStream.rejoin(raw, position)
+      end
+
+    assign(socket, stream: stream, raw: raw)
+  end
+
+  defp reach(socket) do
+    with true <- connected?(socket),
+         %{"reach" => %{} = reach} <- get_connect_params(socket) do
+      reach
+    else
+      _none -> %{}
+    end
+  end
+
+  # A reload reads what arrived above what each stream holds; one not yet opened is only counted.
+  defp reload_streams(%{assigns: %{stream: stream, raw: raw}} = socket),
+    do: assign(socket, stream: JobStream.reload(stream), raw: JobStream.reload(raw))
 
   # What a person gave this job, oldest first, with who (an address, or the token's name) and the
   # cap raise that came with each: none for a job nobody extended, which the page then does not
@@ -125,7 +168,8 @@ defmodule ForgeWeb.JobLive do
 
     assign(socket,
       ticket: ticket,
-      strip: TicketViews.strip_of(project, ticket, current, {job.id, socket.assigns.events}),
+      strip:
+        TicketViews.strip_of(project, ticket, current, {job.id, socket.assigns.stream.count}),
       live: live(current, job),
       attempts: attempts(jobs, job)
     )
@@ -157,7 +201,8 @@ defmodule ForgeWeb.JobLive do
 
   # What each run held, by name and version, from its `job.secrets` record — never a value, which
   # nothing on the platform side keeps in a form this page could show (`secrets.md` § Surfaces).
-  defp held(events), do: for(%{type: "job.secrets", payload: payload} <- events, do: payload)
+  defp held(job_id),
+    do: for(%{payload: payload} <- Events.for_job_types(job_id, ["job.secrets"]), do: payload)
 
   # Only a workflow job's and a command's: a conversation is not opened here, and only a
   # conversation runs without a secret it named, so a run on this page has nothing gone to show.
@@ -172,30 +217,74 @@ defmodule ForgeWeb.JobLive do
   @impl true
   def handle_info({:job_event, id, event}, %{assigns: %{job_id: id}} = socket) do
     if JobStream.streamed?(event) do
-      case JobStream.add(socket.assigns.events, event) do
-        :seen ->
-          {:noreply, socket}
-
-        {:ok, events} ->
-          {:noreply, assign(socket, events: events, memory: Memory.trouble(events))}
-      end
+      {:noreply, socket |> add(:stream, event) |> add(:raw, event) |> touch(event)}
     else
-      {:noreply, load(socket)}
+      {:noreply, socket |> load() |> reload_streams() |> load_ticket()}
     end
   end
 
   def handle_info({:job_event, _id, _event}, socket), do: {:noreply, socket}
 
   def handle_info({:ticket_changed, id}, %{assigns: %{ticket: %{id: id}}} = socket),
-    do: {:noreply, socket |> load() |> load_ticket()}
+    do: {:noreply, socket |> load() |> reload_streams() |> load_ticket()}
 
   def handle_info({:ticket_changed, _}, socket), do: {:noreply, socket}
 
-  @impl true
-  def handle_event("more", params, socket), do: JobStream.handle_event("more", params, socket)
+  # What a streamed event changes beyond the stream: the plan, the memory warning and the failure
+  # link are queries of their own (`load/1`), read again only for the event that can move them.
+  defp touch(socket, %{type: "job.harness.memory"}),
+    do: assign(socket, memory: Memory.trouble(socket.assigns.job_id))
 
-  def handle_event("notices", params, socket),
-    do: JobStream.handle_event("notices", params, socket)
+  defp touch(socket, %{type: "job.harness.tool_use", payload: %{"name" => "TodoWrite"}}),
+    do: assign(socket, plan: plan(socket.assigns.job_id))
+
+  defp touch(socket, %{type: "job.harness.tool_result", payload: %{"is_error" => true}}),
+    do: assign(socket, failures: Stream.failures(socket.assigns.job_id))
+
+  defp touch(socket, %{type: type}) do
+    if String.ends_with?(type, "error"),
+      do: assign(socket, failures: Stream.failures(socket.assigns.job_id)),
+      else: socket
+  end
+
+  defp add(socket, key, event) do
+    case JobStream.add(Map.fetch!(socket.assigns, key), event) do
+      :seen -> socket
+      {:ok, stream} -> assign(socket, key, stream)
+    end
+  end
+
+  @impl true
+  def handle_event("more", _params, %{assigns: %{show: "raw"}} = socket),
+    do: {:noreply, assign(socket, raw: JobStream.older(socket.assigns.raw))}
+
+  def handle_event("more", _params, socket),
+    do: {:noreply, assign(socket, stream: JobStream.older(socket.assigns.stream))}
+
+  def handle_event("notices", _params, %{assigns: %{stream: stream}} = socket) do
+    drawn = stream |> JobStream.held() |> WorkScreen.entries(stream.notices) |> length()
+    {:noreply, assign(socket, stream: JobStream.toggle_notices(stream, drawn))}
+  end
+
+  # The first failure, which may be on a page not read: read back to it, then scroll to it. The job's
+  # failures are counted by the database, and where the first one is, not by what is held.
+  def handle_event("first-failure", _params, %{assigns: %{failures: {_n, nil}}} = socket),
+    do: {:noreply, socket}
+
+  def handle_event("first-failure", _params, %{assigns: %{failures: {_n, first}}} = socket) do
+    stream = socket.assigns.stream
+
+    stream =
+      case JobStream.held(stream) do
+        [%{seq: oldest} | _rest] when oldest <= first -> stream
+        _older_than_held -> JobStream.rejoin(stream, first)
+      end
+
+    {:noreply,
+     socket
+     |> assign(stream: stream, show: "transcript")
+     |> push_event("scroll-to", %{id: "job-events-#{first}"})}
+  end
 
   # Which of Stream · Manifest · Wrote is on screen, and which of the stream's three readings: the
   # page's own, read by nothing else. A value the switch does not draw changes nothing.
@@ -204,8 +293,14 @@ defmodule ForgeWeb.JobLive do
 
   def handle_event("pane", _params, socket), do: {:noreply, socket}
 
-  def handle_event("show", %{"value" => show}, socket) when show in @shows,
-    do: {:noreply, assign(socket, show: show)}
+  def handle_event("show", %{"value" => show}, socket) when show in @shows do
+    raw = socket.assigns.raw
+
+    raw =
+      if show == "raw" and not JobStream.open?(raw), do: JobStream.open(raw), else: raw
+
+    {:noreply, assign(socket, show: show, raw: raw)}
+  end
 
   def handle_event("show", _params, socket), do: {:noreply, socket}
 
@@ -237,16 +332,13 @@ defmodule ForgeWeb.JobLive do
 
   # -- the stream ---------------------------------------------------------------------------
 
-  # The stream in reading order: the newest page of what `WorkScreen.entries/2` draws, oldest at
-  # the top, and how many earlier entries wait behind the control above it.
-  defp transcript(events, shown, notices) do
-    entries = WorkScreen.entries(events, notices)
-    {entries |> Enum.take(shown) |> Enum.reverse(), max(length(entries) - shown, 0)}
+  # The stream in reading order: what `WorkScreen.entries/2` draws of the page held, oldest at the
+  # top, and how many earlier entries wait behind the control above it.
+  defp transcript(%JobStream{} = stream) do
+    entries = stream |> JobStream.held() |> WorkScreen.entries(stream.notices)
+    total = stream.count + if(stream.notices, do: stream.notice_count, else: 0)
+    {Enum.reverse(entries), max(total - length(entries), 0)}
   end
-
-  # The entries on screen that failed: the first is where the stream head's link jumps, and how
-  # many there are is what it says.
-  defp failures(entries), do: Enum.filter(entries, &failed?/1)
 
   # Each row's minute where it differs from the row above's, in reading order: on a phone the time
   # is said once a minute as a divider rather than on every row, where `21:50:56` nine times took a
@@ -260,9 +352,6 @@ defmodule ForgeWeb.JobLive do
     |> elem(0)
   end
 
-  defp failed?({:action, _event, action}), do: Actions.errors([action]) != []
-  defp failed?({:event, event}), do: String.ends_with?(event.type, "error")
-
   defp seq({:action, event, _action}), do: event.seq
   defp seq({:event, event}), do: event.seq
 
@@ -274,17 +363,13 @@ defmodule ForgeWeb.JobLive do
 
   # -- where it stands -----------------------------------------------------------------------
 
-  # The agent's own plan: its latest `TodoWrite`, read as the transcript reads one.
-  defp plan(events) do
-    events
-    |> Enum.reverse()
-    |> Enum.find_value([], fn
-      %{type: "job.harness.tool_use", payload: %{"name" => "TodoWrite"} = payload} = event ->
-        payload |> Forge.Conversations.action(event.inserted_at) |> Actions.todos()
-
-      _other ->
-        nil
-    end)
+  # The agent's own plan: its latest `TodoWrite`, read as the transcript reads one, from a query of
+  # its own (`Forge.Events.Stream.latest_todo/2`) and not from the page of the stream held.
+  defp plan(job_id) do
+    case Stream.latest_todo(job_id, false) do
+      nil -> []
+      event -> event.payload |> Forge.Conversations.action(event.inserted_at) |> Actions.todos()
+    end
   end
 
   # What its runs used between them, in weighted tokens: the run ledger, which every figure of
@@ -360,10 +445,18 @@ defmodule ForgeWeb.JobLive do
   end
 
   defp job_page(assigns) do
-    assigns = assign(assigns, plan: plan(assigns.events), spent: spent(assigns.runs))
+    assigns = assign(assigns, spent: spent(assigns.runs))
 
     ~H"""
     <div id="job-page" class="job-page">
+      <%!-- How far back each stream was read, for a socket that drops and rejoins to read it back
+            as far (`docs/design/ui.md` § A reconnect is not a reload). --%>
+      <span
+        id="stream-reach"
+        hidden
+        data-activity={JobStream.reach_of(@stream)}
+        data-raw={JobStream.reach_of(@raw)}
+      ></span>
       <header class="job-head">
         <.back_row project={@project} ticket={@ticket} job={@job} spec={@spec} runs={@runs} />
 
@@ -540,7 +633,7 @@ defmodule ForgeWeb.JobLive do
           on_select="pane"
           value={@pane}
           options={[
-            {"Stream #{WorkScreen.activity_count(@events)}", "stream"},
+            {"Stream #{@stream.count}", "stream"},
             {"Manifest", "manifest"},
             {"Wrote #{length(@written)}", "wrote"}
           ]}
@@ -550,9 +643,10 @@ defmodule ForgeWeb.JobLive do
           :if={@pane == "stream"}
           job={@job}
           spec={@spec}
-          events={@events}
-          shown={@shown}
-          notices={@notices}
+          stream={@stream}
+          raw={@raw}
+          failures={@failures}
+          transcripts={@transcripts}
           show={@show}
         />
         <.manifest
@@ -590,43 +684,44 @@ defmodule ForgeWeb.JobLive do
 
   attr :job, :map, required: true
   attr :spec, :map, required: true
-  attr :events, :list, required: true
-  attr :shown, :integer, required: true
-  attr :notices, :boolean, required: true
+  attr :stream, :any, required: true
+  attr :raw, :any, required: true
+  attr :failures, :any, required: true
+  attr :transcripts, :list, required: true
   attr :show, :string, required: true
 
   defp stream(assigns) do
-    {entries, earlier} = transcript(assigns.events, assigns.shown, assigns.notices)
-
-    failures = failures(entries)
+    {entries, earlier} = transcript(assigns.stream)
 
     assigns =
       assign(assigns,
         entries: Enum.zip(entries, minutes(Enum.map(entries, &at/1))),
-        earlier: earlier,
-        failures: failures,
-        notice_count: WorkScreen.notice_count(assigns.events)
+        earlier: earlier
       )
 
     ~H"""
     <%!-- One switch on the page, the panes'; what the stream shows is a quiet toggle in its head,
           and the prompt is an input, so it is the Manifest's (UX pass, B14). --%>
     <div class="job-stream-head">
-      <span class="job-dim">{WorkScreen.stream_heading(@job, @events)}</span>
-      <%!-- A link in the head's own mono, in danger ink, only while a failure is on screen: it was
-            a full-width outline button that read as the page's primary act (UX pass, B15). --%>
-      <a
-        :if={@show == "transcript" and @failures != []}
+      <span class="job-dim">{WorkScreen.stream_heading(@job, @stream.count)}</span>
+      <%!-- In the head's own mono, in danger ink, while the job has a failure — counted by the
+            database and not by what is held: pressed, it reads back to the first one when it is
+            older than the page, and scrolls to it. It was a full-width outline button that read as
+            the page's primary act (UX pass, B15). --%>
+      <button
+        :if={@show == "transcript" and elem(@failures, 0) > 0}
+        type="button"
         id="job-first-error"
-        href={"#job-events-#{seq(hd(@failures))}"}
+        phx-click="first-failure"
         class="job-first-error"
       >
-        ✗ {length(@failures)} failed · first ↑
-      </a>
+        ✗ {elem(@failures, 0)} failed · first ↑
+      </button>
       <button
         type="button"
         id="job-raw-toggle"
         phx-click="show"
+        value={if @show == "raw", do: "transcript", else: "raw"}
         phx-value-value={if @show == "raw", do: "transcript", else: "raw"}
         aria-pressed={to_string(@show == "raw")}
         class="job-raw-toggle"
@@ -636,9 +731,9 @@ defmodule ForgeWeb.JobLive do
     </div>
 
     <.scroll_pane :if={@show == "transcript"} id="job-stream" height={nil} class="job-pane">
-      <button :if={@earlier > 0} type="button" phx-click="more" class="job-earlier">
-        ▸ {@earlier} earlier
-      </button>
+      <WorkScreen.load_older :if={@stream.more} id="job-earlier" event="more" class="job-earlier">
+        ▸ {if @earlier > 0, do: "#{@earlier} earlier", else: "earlier"}
+      </WorkScreen.load_older>
       <ol id="job-events" class="job-entries" data-scroll-items>
         <li
           :for={{entry, minute} <- @entries}
@@ -658,6 +753,8 @@ defmodule ForgeWeb.JobLive do
                 <div class="job-said" data-said="agent">
                   <div class="doc msg">{Markdown.to_html(event.payload["text"], %{})}</div>
                 </div>
+              <% {:event, %{type: "job.swept"} = event} -> %>
+                <WorkScreen.swept_line days={event.payload["days"]} transcripts={@transcripts} />
               <% {:event, event} -> %>
                 <%!-- A memory row's type in `warning`: not waiting on a person, and not an error
                       either (`docs/design/capacity.md` § Memory). --%>
@@ -681,39 +778,38 @@ defmodule ForgeWeb.JobLive do
     <div :if={@show == "transcript"} class="job-stream-foot">
       <%!-- Only when there is something behind it. --%>
       <button
-        :if={@notice_count > 0}
+        :if={@stream.notice_count > 0}
         type="button"
         phx-click="notices"
         id="job-notices"
         class="ui-btn ui-btn--secondary ui-btn--md"
       >
-        {if @notices, do: "Hide", else: "Show"} {@notice_count} harness notices
+        {if @stream.notices, do: "Hide", else: "Show"} {@stream.notice_count} harness notices
       </button>
     </div>
 
-    <.raw_log :if={@show == "raw"} events={@events} shown={@shown} />
+    <.raw_log :if={@show == "raw"} raw={@raw} />
     """
   end
 
-  attr :events, :list, required: true
-  attr :shown, :integer, required: true
+  attr :raw, :any, required: true
 
   # Every event as it was recorded, oldest first, nothing paired and nothing hidden: the record the
   # transcript is drawn from. Paged from the end, as the transcript is.
   defp raw_log(assigns) do
-    events = Enum.take(assigns.events, -assigns.shown)
+    events = JobStream.held(assigns.raw)
 
     assigns =
       assign(assigns,
         events: Enum.zip(events, minutes(Enum.map(events, & &1.inserted_at))),
-        earlier: max(length(assigns.events) - assigns.shown, 0)
+        earlier: max(assigns.raw.count - length(events), 0)
       )
 
     ~H"""
     <.scroll_pane id="job-raw-pane" height={nil} class="job-pane">
-      <button :if={@earlier > 0} type="button" phx-click="more" class="job-earlier">
-        ▸ {@earlier} earlier
-      </button>
+      <WorkScreen.load_older :if={@raw.more} id="job-raw-earlier" event="more" class="job-earlier">
+        ▸ {if @earlier > 0, do: "#{@earlier} earlier", else: "earlier"}
+      </WorkScreen.load_older>
       <ol id="job-raw" class="job-entries" data-scroll-items>
         <li
           :for={{event, minute} <- @events}

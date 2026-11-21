@@ -1,6 +1,7 @@
 defmodule Forge.Events.Event do
   @moduledoc """
-  One entry in the append-only event log. `seq` is the global order. `actor` is
+  One entry in the event log, which is append-only but for the harness's swept stream
+  (`docs/design/storage.md` § Retention). `seq` is the global order. `actor` is
   `%{"kind" => "system" | "user" | "job" | "api", "id" => id | nil}` (an `api` actor, a project token, also carries `"name"`). `type` is dotted, e.g.
   `ticket.admitted`, `job.harness.tool_use`, `transition.taken`.
 

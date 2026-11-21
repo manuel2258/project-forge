@@ -199,6 +199,7 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"chat_live.ex", "rebase:ask"} => :local,
     {"chat_live.ex", "more"} => :local,
     {"chat_live.ex", "notices"} => :local,
+    {"chat_live.ex", "talk:more"} => :local,
     {"chat_new_live.ex", "open"} => :member,
     {"chat_new_live.ex", "validate"} => :local,
     # The id is the client's, so the chat is read and then authorised: being able to see the
@@ -209,6 +210,7 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"chats_live.ex", "start:change"} => :local,
     {"job_live.ex", "more"} => :local,
     {"job_live.ex", "notices"} => :local,
+    {"job_live.ex", "first-failure"} => :local,
     {"job_live.ex", "pane"} => :local,
     {"job_live.ex", "show"} => :local,
     {"ticket_live.ex", "attachments:withdraw"} => :member,

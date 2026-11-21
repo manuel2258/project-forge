@@ -84,10 +84,12 @@ guard against, and the guard belongs at the one place jobs complete, not scatter
 **Messages are a projection of the event log, not a table.** An earlier draft of this note gave
 them one — `conversation_messages(job_id, seq, role, body, …)` — and it was wrong: every message
 already arrives as an event, `events.seq` already orders them, and the log is already append-only
-by trigger. A table beside it would be a second copy of the same facts, kept in step by hand, and
+by trigger (but for the harness's swept stream, which keeps the words). A table beside it would be a second copy of the same facts, kept in step by hand, and
 the first time the two disagreed there would be no way to say which was the conversation.
 
-So `Conversations.messages/1` folds `Events.for_job/1`:
+So `Conversations.messages/1` folds the job's events **of the types below, and `job.started` which dates a reply, and no others** — never
+`Events.for_job/1`, which would read every tool call of a long conversation to throw it away — and
+the transcript's `transcript/1` adds the tool calls and their results the transcript draws:
 
 | Event | Becomes |
 |---|---|
@@ -98,8 +100,13 @@ So `Conversations.messages/1` folds `Events.for_job/1`:
 
 `chat.turn` is written by the platform when it records the turn (§ Spend). `job.harness.finished`
 also arrives once a turn and is not the boundary. Tool calls and the rest of the harness stream
-stay in the log beside them, unprojected — a conversation is what a person said and what they
-were told, and the rest is available without being in the way.
+stay in the log beside them, unprojected, **for the retention period** (`storage.md` § Retention):
+thirty days after the conversation went idle its tool calls and notices are swept, and what is left
+is what a person said and what they were told — `chat.message`, `text`, `delivered` and `chat.turn`
+are kept for good — with a line where the rest was. A conversation's transcript file is recorded as
+a version (`transcript-chat.jsonl`) each time its process ends, which is what that line links.
+A reply is told apart from the next by the `seq` of its first `text`, not by how many messages
+precede it, so a page of the fold and the whole of it agree on it.
 
 ## What it asks for
 
@@ -807,10 +814,13 @@ one quiet line — *The reply was
   the agent has replied and the next word is yours, and one that has not started has said
   nothing — which leaves the three template answers, where a person *is* being waited on,
   reachable only by opening the page.
-- **Kept for ever. The branch is deleted, the conversation is not.** An earlier draft said
+- **Kept for ever, its words. The branch is deleted, the conversation is not.** An earlier draft said
   deleted after 30 days; that was reconsidered, and it was also not possible — `events` carries a
   `BEFORE UPDATE OR DELETE` trigger (`20260911201847_create_events.exs`) and `events.job_id` is
-  `on_delete: :restrict`, so deleting a conversation means deleting from an append-only log. What
+  `on_delete: :restrict`, so deleting a conversation means deleting from an append-only log. The
+  one thing the trigger now lets go is the harness's stream — the tool calls and notices between
+  the words — which the sweep removes 30 days after the conversation ends (§ Messages are a
+  projection, `storage.md` § Retention); the messages, the turns and every lifecycle event stay. What
   is reclaimed is what is actually large and actually dead: `chat/<id>` is deleted once its work
   is merged, by `Merge.perform_chat/2` after the pin exists (§ Commits), or abandoned (below). A
   conversation is text, and text is not what fills a disk.

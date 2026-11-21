@@ -44,6 +44,10 @@ defmodule ForgeWeb.Transcript do
     default: nil,
     doc: "a file entry's address (`ForgeWeb.UI.Attach.names/1`)"
 
+  attr :transcripts, :list,
+    default: [],
+    doc: "`ForgeWeb.WorkScreen.transcript_links/3`: what the swept line links"
+
   def transcript(assigns) do
     assigns = assign(assigns, entries: entries(assigns.messages))
 
@@ -54,7 +58,7 @@ defmodule ForgeWeb.Transcript do
       id={"said-#{index}"}
     >
       <div
-        :if={labelled? and message.role != :notice}
+        :if={labelled? and message.role not in [:notice, :swept]}
         class="flex items-baseline gap-2 font-mono text-[11px] tracking-[.14em] uppercase opacity-50"
       >
         <%= if message.role == :user do %>
@@ -93,6 +97,14 @@ defmodule ForgeWeb.Transcript do
       <p :if={message.role == :notice} class="chat-uncommitted text-sm/[1.55] text-warning">
         {message.text}
       </p>
+
+      <%!-- Where the sweep stands among what was kept, once it took the tool calls (`docs/design/storage.md`
+            § Retention): neither side's words. --%>
+      <ForgeWeb.WorkScreen.swept_line
+        :if={message.role == :swept}
+        days={message.days}
+        transcripts={@transcripts}
+      />
     </li>
     """
   end

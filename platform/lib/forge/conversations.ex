@@ -9,7 +9,8 @@ defmodule Forge.Conversations do
   still running.
 
   **The messages are the event log.** There is no message table: every message arrives as an
-  event, `events.seq` already orders them, and the log is already append-only by trigger. A table
+  event, `events.seq` already orders them, and the log is already append-only by trigger (but for the swept harness stream, which keeps the
+  words: `storage.md` § Retention). A table
   beside it would be a second copy of the same facts and the first disagreement would have no
   arbiter. `messages/1` folds the log into what a person said and what they were told.
   """
@@ -1086,10 +1087,10 @@ defmodule Forge.Conversations do
     :ok
   end
 
-  # The request is echoed into an append-only log that § Lifetime keeps for ever, and it arrived
-  # as a file the agent wrote: `read_text/2` caps it at a mebibyte, which is a mebibyte per
-  # refused turn. Only the keys the platform reads are kept, each cut to a length that still
-  # shows a person what was asked for.
+  # The request is echoed into an event log whose conversation § Lifetime keeps for ever (its
+  # words, past the sweep), and it arrived as a file the agent wrote: `read_text/2` caps it at a
+  # mebibyte, which is a mebibyte per refused turn. Only the keys the platform reads are kept, each
+  # cut to a length that still shows a person what was asked for.
   defp bounded_request(request) when is_map(request) do
     for {key, value} <- request, key in ["to", "decision", "comment"], into: %{} do
       {key, cut(value)}
@@ -1442,6 +1443,7 @@ defmodule Forge.Conversations do
       get_in(opts[:result] || %{}, ["harness", "credential_return"])
     )
     |> Runs.close(chat.id, DateTime.utc_now(:second))
+    |> record_transcript(chat, opts[:result])
     |> Events.log(:ended, "chat.ended", actor(opts), %{
       ticket_id: chat.ticket_id,
       job_id: chat.id,
@@ -1465,6 +1467,22 @@ defmodule Forge.Conversations do
         {:error, {step, reason}}
     end
   end
+
+  # The process's transcript as a version of the conversation, one a process
+  # (`docs/design/storage.md` § Retention): what a swept conversation links, since the tool calls
+  # between its replies are gone from the log by then. Served by the conversation's artifact route.
+  defp record_transcript(multi, chat, %{} = result),
+    do:
+      Jobs.put_transcript(
+        multi,
+        {:job, chat.id},
+        "transcript-chat.jsonl",
+        chat,
+        # Only the key is read, so a report with nothing else in it still records its transcript.
+        %Result{status: :finished, transcript: result["transcript"]}
+      )
+
+  defp record_transcript(multi, _chat, nil), do: multi
 
   defp refused?(chat, %{} = result), do: Jobs.resume_refused?(chat, Result.from_map(result))
   defp refused?(_chat, nil), do: false
@@ -1596,9 +1614,11 @@ defmodule Forge.Conversations do
               items: [item()],
               at: DateTime.t(),
               turn: pos_integer() | nil,
-              recorded: %{at: DateTime.t(), seq: pos_integer()} | nil
+              recorded: %{at: DateTime.t(), seq: pos_integer()} | nil,
+              ref: pos_integer() | nil
             }
           | %{role: :notice, text: String.t(), at: DateTime.t(), turn: pos_integer() | nil}
+          | %{role: :swept, text: String.t(), at: DateTime.t(), days: pos_integer() | nil}
 
   @typedoc """
   One thing in a turn: a block of what the agent said, or something it did.
@@ -1620,6 +1640,19 @@ defmodule Forge.Conversations do
           children: [action()]
         }
 
+  # What the fold reads and nothing more: a conversation's tool calls are most of its rows and the
+  # page that draws a conversation folds only its turns (`docs/design/conversations.md` § Messages
+  # are a projection). `job.swept` is the line a swept conversation draws where its calls were.
+  @fold_types ~w(chat.message job.harness.delivered job.harness.text job.harness.tool_use
+                 job.harness.tool_result chat.turn job.started job.swept)
+
+  # What `messages/1` reads: the words, and where the turns end. A reply that opened with a call is
+  # dated by its first words, and nothing else changes (`said/1` drops a turn that only acted).
+  @said_types ~w(chat.message job.harness.delivered job.harness.text chat.turn job.started)
+
+  # The turn in progress, as the now line reads it: the fold's events and the harness's reports.
+  @open_types @fold_types ++ ~w(job.harness.retry job.harness.rate_limit job.harness.memory)
+
   @doc """
   The conversation as a person reads it: what each side *said*.
 
@@ -1629,7 +1662,12 @@ defmodule Forge.Conversations do
   asking what was said, and a turn that said nothing said nothing.
   """
   @spec messages(String.t()) :: [message()]
-  def messages(job_id), do: job_id |> transcript() |> said()
+  def messages(job_id) do
+    job_id
+    |> Events.for_job_types(@said_types)
+    |> transcript()
+    |> said()
+  end
 
   @doc """
   A transcript without the turns that said nothing and without the platform's own lines: what
@@ -1641,6 +1679,7 @@ defmodule Forge.Conversations do
 
   defp silent?(%{role: :assistant, text: ""}), do: true
   defp silent?(%{role: :notice}), do: true
+  defp silent?(%{role: :swept}), do: true
   defp silent?(_message), do: false
 
   @doc """
@@ -1661,7 +1700,8 @@ defmodule Forge.Conversations do
   it has read and appends to it as events arrive, rather than reading it again for each one.
   """
   @spec transcript(String.t() | [Event.t()]) :: [message()]
-  def transcript(job_id) when is_binary(job_id), do: job_id |> Events.for_job() |> transcript()
+  def transcript(job_id) when is_binary(job_id),
+    do: job_id |> Events.for_job_types(@fold_types) |> transcript()
 
   def transcript(events) when is_list(events) do
     %{done: done, open: open} = Enum.reduce(events, %{done: [], open: nil, round: 0}, &fold/2)
@@ -1673,6 +1713,136 @@ defmodule Forge.Conversations do
     |> flush(open)
     |> Enum.reverse()
     |> Enum.map(&finish_message/1)
+  end
+
+  @talk_turns 10
+
+  @doc "The types a conversation's fold reads: what a page of its turns holds."
+  @spec fold_types() :: [String.t()]
+  def fold_types, do: @fold_types
+
+  @doc "The types of the turn in progress: the fold's, and what the now line reads besides."
+  @spec open_types() :: [String.t()]
+  def open_types, do: @open_types
+
+  @typedoc "A page of a conversation: its events, the turn it starts after (0: the start), and whether older turns wait."
+  @type talk :: %{events: [Event.t()], from: non_neg_integer(), more: boolean()}
+
+  @doc """
+  A page of a conversation, **by turns** (`docs/design/ui.md` § Talk): `:latest` is the newest
+  ten turns and the open one; `{:older, from}` the ten before the page that starts after `from`;
+  `{:since, position}` everything from the turn that holds the event at `position` up — a socket
+  rejoining reads back as far as it had. A turn is never split: `from` is always a `chat.turn`'s
+  `seq` (0 is the start), and a `from` or a position a client sent is snapped to one, so the page of
+  another conversation's numbers reads this one's own events or nothing.
+
+  The events are the fold's types (`transcript/1`), or `types` when a caller needs fewer. The open
+  turn — whatever follows the newest `chat.turn` — is always in the newest page, whole.
+  """
+  @spec talk(String.t(), :latest | {:older, integer()} | {:since, integer()}, [String.t()]) ::
+          talk()
+  def talk(job_id, request, types \\ @fold_types)
+
+  def talk(job_id, :latest, types) do
+    from =
+      Repo.one(
+        from e in turn_ends(job_id),
+          order_by: [desc: e.seq],
+          offset: ^@talk_turns,
+          limit: 1,
+          select: e.seq
+      ) || 0
+
+    talk_page(job_id, from, nil, types)
+  end
+
+  def talk(job_id, {:older, from}, types) do
+    upto = turn_boundary(job_id, from, :le)
+
+    from =
+      Repo.one(
+        from e in turn_ends(job_id),
+          where: e.seq < ^upto,
+          order_by: [desc: e.seq],
+          offset: ^(@talk_turns - 1),
+          limit: 1,
+          select: e.seq
+      ) || 0
+
+    talk_page(job_id, from, upto, types)
+  end
+
+  def talk(job_id, {:since, position}, types),
+    do: talk_page(job_id, turn_boundary(job_id, position, :lt), nil, types)
+
+  @doc "The fold's events above `seq`: what a page reads again when it reloads, after the newest it holds."
+  @spec talk_after(String.t(), non_neg_integer()) :: [Event.t()]
+  def talk_after(job_id, seq) do
+    Repo.all(
+      from e in Event,
+        where: e.job_id == ^job_id and e.type in ^@fold_types and e.seq > ^seq,
+        order_by: e.seq
+    )
+  end
+
+  defp turn_ends(job_id),
+    do: from(e in Event, where: e.job_id == ^job_id and e.type == "chat.turn")
+
+  # The newest turn's end at or below `seq` (`:le`) or strictly below it (`:lt`), else the start.
+  defp turn_boundary(job_id, seq, :le),
+    do: Repo.one(from e in turn_ends(job_id), where: e.seq <= ^seq, select: max(e.seq)) || 0
+
+  defp turn_boundary(job_id, seq, :lt),
+    do: Repo.one(from e in turn_ends(job_id), where: e.seq < ^seq, select: max(e.seq)) || 0
+
+  defp talk_page(job_id, from, upto, types) do
+    query =
+      from e in Event,
+        where: e.job_id == ^job_id and e.type in ^types and e.seq > ^from,
+        order_by: e.seq
+
+    query = if upto, do: from(e in query, where: e.seq <= ^upto), else: query
+    %{events: Repo.all(query), from: from, more: from > 0}
+  end
+
+  @doc """
+  The events of the turn in progress: the fold's, and what the now line reads besides (a retry, a
+  limit, memory), from the newest turn's end — or the newest process's start — up. Empty when no
+  turn is open.
+  """
+  @spec open_turn(String.t()) :: [Event.t()]
+  def open_turn(job_id) do
+    since =
+      Repo.one(
+        from e in Event,
+          where: e.job_id == ^job_id and e.type in ["chat.turn", "job.started"],
+          select: max(e.seq)
+      ) || 0
+
+    Events.for_job_types(job_id, @open_types, since)
+  end
+
+  @doc """
+  The newest message said — in `said/1`'s sense — of `role` (`:any` for either side), or nil:
+  what the queue, a ticket's questions and the page's card ask of a conversation. It reads ten
+  turns at a time back from the newest and stops at the first that holds one; a conversation with
+  none reads back to its start.
+  """
+  @spec last_said(String.t(), :any | :user | :assistant) :: message() | nil
+  def last_said(job_id, role \\ :any),
+    do: find_said(job_id, talk(job_id, :latest, @said_types), role)
+
+  defp find_said(job_id, %{events: events, from: from, more: more}, role) do
+    found =
+      events
+      |> transcript()
+      |> said()
+      |> Enum.filter(&(role == :any or &1.role == role))
+      |> List.last()
+
+    if is_nil(found) and more,
+      do: find_said(job_id, talk(job_id, {:older, from}, @said_types), role),
+      else: found
   end
 
   # The fold's state: the messages finished so far, newest first; the agent's reply being
@@ -1753,6 +1923,13 @@ defmodule Forge.Conversations do
   # the new one says is its own.
   defp fold(%Event{type: "job.started"}, state),
     do: %{state | done: flush(state.done, state.open), open: nil, round: state.round + 1}
+
+  # The line a swept conversation draws where the sweep stands among what was kept: neither side's words, and not
+  # in `said/1` (`docs/design/storage.md` § Retention).
+  defp fold(%Event{type: "job.swept"} = event, state) do
+    swept = %{role: :swept, text: "", at: event.inserted_at, days: event.payload["days"]}
+    %{state | done: [swept | flush(state.done, state.open)], open: nil}
+  end
 
   defp fold(%Event{}, state), do: state
 
@@ -1860,12 +2037,19 @@ defmodule Forge.Conversations do
           at: event.inserted_at,
           turn: nil,
           recorded: nil,
+          ref: ref(item, event),
           round: state.round
         }
     }
 
-  defp add_item(%{open: open} = state, item, _event),
-    do: %{state | open: %{open | items: [item | open.items]}}
+  defp add_item(%{open: open} = state, item, event),
+    do: %{state | open: %{open | items: [item | open.items], ref: open.ref || ref(item, event)}}
+
+  # Where a reply began being *said*: the `seq` of its first text block, which neither the calls
+  # before it nor a later block moves, and which a page of the fold holding fewer events than
+  # another agrees on (`reply_ref/1`).
+  defp ref({:text, _text}, event), do: event.seq
+  defp ref(_item, _event), do: nil
 
   # The call `id`, wherever it is: the reply being spoken, a half of it that a message sent
   # mid-turn closed, or an earlier turn a late result or a subagent still reporting belongs to.
@@ -2072,13 +2256,18 @@ defmodule Forge.Conversations do
   def in_flight?(%Job{id: id}) do
     case Repo.one(from j in Job, where: j.id == ^id, select: j.status) do
       status when status in [:pending, :running] ->
-        id
-        |> Events.for_job()
-        |> Enum.reverse()
-        |> Enum.take_while(&(&1.type != "chat.turn"))
-        |> Enum.any?(
-          &(&1.type in ~w(chat.opened chat.message job.harness.text job.harness.tool_use
-                          job.harness.tool_result))
+        # One look above the newest turn's end for anything that is a turn begun: `EXISTS`, which
+        # stops at the first, and not the job's log reversed to find where the last turn ended.
+        newest =
+          Repo.one(
+            from e in Event, where: e.job_id == ^id and e.type == "chat.turn", select: max(e.seq)
+          )
+
+        Repo.exists?(
+          from e in Event,
+            where: e.job_id == ^id and e.seq > ^(newest || 0),
+            where: e.type in ~w(chat.opened chat.message job.harness.text job.harness.tool_use
+                           job.harness.tool_result)
         )
 
       _dormant ->
@@ -2232,15 +2421,16 @@ defmodule Forge.Conversations do
   and answering it with the earlier form's choices would answer a question nobody saw. Nil when
   the last thing said is not a reply.
 
-  Its place in what was said, and its time. A later reply comes after the person's message, so
-  its place differs; neither moves while the reply is still arriving — a name taken from its text
-  would change with every block, and the form's draft with it. The time is to the second only, so
-  it is not enough alone.
+  The `seq` of the reply's first words. A later reply starts later, so its name differs; it does
+  not move while the reply is still arriving — a name taken from its text would change with every
+  block, and the form's draft with it — and it **does not depend on how many messages were read**,
+  which a page of a conversation's turns, the queue and the operator's answer each read a different
+  number of: counting them was what this used to do.
   """
   @spec reply_ref([message()]) :: String.t() | nil
   def reply_ref(messages) do
     case List.last(messages) do
-      %{role: :assistant, at: at} -> "#{length(messages)}-#{DateTime.to_unix(at)}"
+      %{role: :assistant, ref: ref} when is_integer(ref) -> Integer.to_string(ref)
       _other -> nil
     end
   end
@@ -2357,7 +2547,7 @@ defmodule Forge.Conversations do
     # is the one place an N+1 is not merely slow but grows with the product's own history.
     projects = by_id(Projects.Project, Enum.map(chats, & &1.project_id))
     tickets = by_id(Tickets.Ticket, Enum.reject(Enum.map(chats, & &1.ticket_id), &is_nil/1))
-    said = last_said(Enum.map(chats, & &1.id))
+    said = last_said_by(Enum.map(chats, & &1.id))
     turns = last_turn(Enum.map(chats, & &1.id))
     first = first_said(Enum.map(chats, & &1.id))
     ended = ended_ids(Enum.map(chats, & &1.id))
@@ -2413,7 +2603,7 @@ defmodule Forge.Conversations do
 
   # The last thing said in each conversation, in one query. `distinct` on the job with the order
   # descending by seq is Postgres's DISTINCT ON: the newest row per job and nothing else.
-  defp last_said(job_ids) do
+  defp last_said_by(job_ids) do
     Repo.all(
       from e in Event,
         where: e.job_id in ^job_ids and e.type in ["chat.message", "job.harness.text"],
@@ -2442,7 +2632,7 @@ defmodule Forge.Conversations do
   end
 
   # The first thing a person said in each conversation, in one query: the same DISTINCT ON as
-  # `last_said/1`, ascending.
+  # `last_said_by/1`, ascending.
   defp first_said(job_ids) do
     Repo.all(
       from e in Event,

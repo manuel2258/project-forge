@@ -135,6 +135,15 @@ operator attaches, and `docs/design/worker-channel.md` § Protocol 13 for the wi
 the bind mount on a real machine, whether Claude Code or Codex can read an image from the folder (Codex
 has never run against OpenAI here), drop and paste on a phone, and a 500 MiB body through a proxy.
 
+`docs/design/storage.md` § Retention is the standard for what the event log keeps: every lifecycle
+event for good, and of a job's harness stream only `text`, `delivered`, `started`, `finished`,
+`rate_limit` and `memory`, the rest swept 30 days after the job ended (`FORGE_HARNESS_RETENTION_DAYS`)
+by a daily sweep and a trigger that shares its one list (`forge_event_swept/1`); `thinking_tokens` is
+never recorded. **It is built** (ticket 64), with a job's stream, a ticket's and a conversation's
+Activity, the raw log and Talk read a page at a time from the database and read back as far after a
+dropped socket, and `limit` and `before` on the API's two event endpoints. **Not verified here:**
+loading on a touch scroll on a real phone, and `VACUUM FULL` of a real node's `events` during a deploy.
+
 `docs/design/git-hosting.md` § Git LFS is the standard for large files in a hosted repository: the LFS
 batch API, download and upload beside the smart-HTTP requests with the same token, objects kept in
 each bare repository's own `lfs/objects` (never in `Forge.Storage`), a `pre-receive` rule that a

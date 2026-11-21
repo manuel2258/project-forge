@@ -182,6 +182,17 @@ defmodule ForgeWeb.ChatViews do
   def talk(assigns) do
     ~H"""
     <.scroll_pane id="messages-pane" height={nil} class="py-4">
+      <%!-- Ten turns are read at a time: reaching the top loads the ten before them on its own, under
+            a quiet *Loading earlier…*, and this is the same press for when that does not
+            (`docs/design/ui.md` § Talk). Nothing at the first turn. --%>
+      <ForgeWeb.WorkScreen.load_older
+        :if={@talk.more}
+        id="talk-earlier"
+        event="talk:more"
+        class="ui-btn ui-btn--quiet ui-btn--md mb-3"
+      >
+        ▸ Earlier turns
+      </ForgeWeb.WorkScreen.load_older>
       <ol
         class="chat-messages"
         id="messages"
@@ -195,6 +206,7 @@ defmodule ForgeWeb.ChatViews do
           banded={@responding && @plan != []}
           attached={@attached}
           attach_path={@attach_path}
+          transcripts={@transcripts}
         />
       </ol>
 

@@ -40,6 +40,15 @@ environment variables, same first-run commands.
 }
 ```
 
+## Retention of the event log
+
+`FORGE_HARNESS_RETENTION_DAYS=30` (a whole number of at least 1; the default is 30) is how long after
+a job ends its tool calls, harness notices and the rest of its harness stream stay in the database
+(but for the few types kept for good). A daily sweep deletes them;
+what is kept for good, and why, is `docs/design/storage.md` § Retention. The release that introduced
+the sweep also compacts `events` while it migrates, which holds the table for the time it takes (not measured on a real
+database of that size) and so belongs in a deploy that is not yet serving.
+
 ## Secrets file
 
 Not in the store; readable by root only. Lines of `KEY=VALUE`:

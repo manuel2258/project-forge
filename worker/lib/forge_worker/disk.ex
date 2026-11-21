@@ -7,7 +7,8 @@ defmodule ForgeWorker.Disk do
 
   **Measured at intervals and after a cleanup, never with the five-second `stats`**: sizing the
   store walks a very large tree. One minute after the first join, then every 30 minutes
-  (`:disk_report_ms`), and one minute after a cleanup that freed something.
+  (`:disk_report_ms`), and one minute after a cleanup that freed something
+  (`:disk_after_cleanup_ms`).
 
   **A directory is sized without following a link and without leaving its filesystem** —
   `du -s -x -P -B1`. A job owns its own directory and could plant a link to somewhere large or
@@ -146,7 +147,8 @@ defmodule ForgeWorker.Disk do
       root: Keyword.get(opts, :root, Config.root()),
       every_ms: Keyword.get(opts, :every_ms, setting(:disk_report_ms, @every_ms)),
       first_ms: Keyword.get(opts, :first_ms, setting(:disk_first_ms, @first_ms)),
-      after_cleanup_ms: Keyword.get(opts, :after_cleanup_ms, @after_cleanup_ms)
+      after_cleanup_ms:
+        Keyword.get(opts, :after_cleanup_ms, setting(:disk_after_cleanup_ms, @after_cleanup_ms))
     }
 
     {:ok, state}

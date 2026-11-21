@@ -437,29 +437,31 @@ defmodule ForgeWeb.WorkScreen do
   end
 
   # What the harness says about itself rather than about the work: Claude Code turns every
-  # `system` message into one of these, and `thinking_tokens` alone can outnumber everything else
-  # in a job. Recorded, and hidden behind their count (`docs/design/ui.md` § Motion and structure).
+  # `system` message into one of these. Recorded, hidden behind their count, and **swept like the
+  # rest of a finished job's stream** (`docs/design/ui.md` § Motion and structure,
+  # `docs/design/storage.md` § Retention). `thinking_tokens`, which alone could outnumber everything
+  # else in a job, is not recorded at all.
   @telemetry ["job.harness.notice"]
-
-  @doc "How many of `events` are the harness's notices about itself."
-  @spec notice_count([map()]) :: non_neg_integer()
-  def notice_count(events), do: Enum.count(events, &(&1.type in @telemetry))
 
   @doc """
   The stream as it is drawn, newest first: each `tool_use` as an action paired with its result,
-  whose own row is then not drawn again; every other event as itself; notices only when asked.
+  whose own row is then not drawn again; every other event as itself; notices only when asked. A
+  result with no call id is never paired, as `Forge.Events.Stream` reads it: SQL `=` does not
+  match NULL, and the two must agree.
   """
   @spec entries([map()], boolean()) :: [{:action, map(), map()} | {:event, map()}]
   def entries(events, notices) do
     results =
-      for %{type: "job.harness.tool_result", payload: payload} <- events,
+      for %{type: "job.harness.tool_result", payload: %{"tool_use_id" => id} = payload} <- events,
+          is_binary(id),
           into: %{},
-          do: {payload["tool_use_id"], payload}
+          do: {id, payload}
 
     calls =
-      for %{type: "job.harness.tool_use", payload: payload} <- events,
+      for %{type: "job.harness.tool_use", payload: %{"id" => id}} <- events,
+          is_binary(id),
           into: MapSet.new(),
-          do: payload["id"]
+          do: id
 
     events
     |> Enum.reject(&(hidden?(&1, notices) or paired?(&1, calls)))
@@ -473,8 +475,9 @@ defmodule ForgeWeb.WorkScreen do
   defp hidden?(event, notices), do: not notices and event.type in @telemetry
 
   # A result is drawn on its call's line, so its own row would say it twice.
-  defp paired?(%{type: "job.harness.tool_result", payload: payload}, calls),
-    do: MapSet.member?(calls, payload["tool_use_id"])
+  defp paired?(%{type: "job.harness.tool_result", payload: %{"tool_use_id" => id}}, calls)
+       when is_binary(id),
+       do: MapSet.member?(calls, id)
 
   defp paired?(_event, _calls), do: false
 
@@ -490,19 +493,19 @@ defmodule ForgeWeb.WorkScreen do
   end
 
   @doc """
-  A job's event stream (`docs/design/ui.md` § Activity): newest first, a page at a time
-  (`ForgeWeb.JobStream.page/0`), notices behind their count. Tool calls are action lines, the
-  same component the transcript draws them with; every other event keeps the job page's row,
-  wrapped, its whole text past 200 characters behind a control (`ForgeWeb.Actions.clip/1`).
+  A job's event stream (`docs/design/ui.md` § Activity): newest first, **what its `JobStream` holds**
+  — a page, and more as the reader reaches the bottom — with notices behind their count. Tool
+  calls are action lines, the same component the transcript draws them with; every other event
+  keeps the job page's row, wrapped, its whole text past 200 characters behind a control
+  (`ForgeWeb.Actions.clip/1`).
 
   Newest first needs no pinning: what arrives appears at the top, where the reader already is.
-  The page owning it starts with `ForgeWeb.JobStream.init/1` and hands `more` and `notices` to
-  `ForgeWeb.JobStream.handle_event/3`.
+  The page owning it holds a `ForgeWeb.JobStream` and answers `more` with `JobStream.older/1` and
+  `notices` with `JobStream.toggle_notices/2`. The end of what is held is where `.LoadOlder` loads
+  the next page on its own; *Load 50 more* is the same press for when that does not.
   """
   attr :id, :string, default: "job-events"
-  attr :events, :list, required: true
-  attr :shown, :integer, required: true
-  attr :notices, :boolean, required: true
+  attr :stream, :any, required: true, doc: "the `ForgeWeb.JobStream` of the job, opened"
   attr :heading, :string, required: true
   attr :since, :any, default: nil, doc: "the person's previous look: what is newer is marked"
 
@@ -514,14 +517,14 @@ defmodule ForgeWeb.WorkScreen do
     default: %{},
     doc: "`version_hrefs/1` of the page's docs: where a version an event names is read"
 
-  def activity(assigns) do
-    entries = entries(assigns.events, assigns.notices)
+  attr :transcripts, :list,
+    default: [],
+    doc: "`transcript_links/3` of the job: what the swept line links"
 
+  def activity(assigns) do
     assigns =
       assign(assigns,
-        entries: Enum.take(entries, assigns.shown),
-        more: length(entries) > assigns.shown,
-        notice_count: notice_count(assigns.events)
+        entries: entries(ForgeWeb.JobStream.held(assigns.stream), assigns.stream.notices)
       )
 
     ~H"""
@@ -560,6 +563,10 @@ defmodule ForgeWeb.WorkScreen do
               <span class="work-act-who">{ForgeWeb.Format.author(event.actor) || "you"}:</span>
               <span class="work-act-words"><.clip text={Forge.Events.detail(event)} /></span>
             </div>
+          <% {:event, %{type: "job.swept"} = event} -> %>
+            <div class="work-act-main" data-activity="swept">
+              <.swept_line days={event.payload["days"]} transcripts={@transcripts} />
+            </div>
           <% {:event, %{type: "artifact.version_written", payload: %{"artifact" => name, "version" => v}}} -> %>
             <div class="work-act-main work-act-said" data-activity="wrote">
               <span class="work-act-who">wrote</span>
@@ -593,26 +600,124 @@ defmodule ForgeWeb.WorkScreen do
     </ol>
 
     <div class="mt-3 flex flex-wrap items-center gap-2">
-      <button
-        :if={@more}
-        type="button"
-        phx-click="more"
-        class="ui-btn ui-btn--secondary ui-btn--md"
-      >
+      <.load_older :if={@stream.more} id={@id <> "-more"} event="more">
         Load {ForgeWeb.JobStream.page()} more
-      </button>
+      </.load_older>
 
       <%!-- Only when there is something behind it. --%>
       <button
-        :if={@notice_count > 0}
+        :if={@stream.notice_count > 0}
         type="button"
         phx-click="notices"
         id="job-notices"
         class="ui-btn ui-btn--quiet ui-btn--md"
       >
-        {if @notices, do: "Hide", else: "Show"} {@notice_count} harness notices
+        {if @stream.notices, do: "Hide", else: "Show"} {@stream.notice_count} harness notices
       </button>
     </div>
+    """
+  end
+
+  @doc """
+  The control that loads the next older page, **and loads it on its own** when the reader reaches
+  it (`.LoadOlder`): the same press as clicking it, once, until the page has arrived, under a quiet
+  *Loading earlier…*. Drawn only while there is more to read, so the start of a stream shows nothing
+  and loads nothing (`docs/design/ui.md` § Activity).
+  """
+  attr :id, :string, required: true
+  attr :event, :string, required: true
+  attr :class, :any, default: "ui-btn ui-btn--secondary ui-btn--md"
+  slot :inner_block, required: true
+
+  def load_older(assigns) do
+    ~H"""
+    <button type="button" id={@id} phx-click={@event} phx-hook=".LoadOlder" class={@class}>
+      {render_slot(@inner_block)}
+    </button>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".LoadOlder">
+      // Reaching the old end of what is shown loads the next page without a press
+      // (`docs/design/ui.md` § Activity). An observer rooted at the nearest `[data-load-root]` or
+      // element whose id ends `-pane`, or the viewport when there is none; it presses the control once, says so quietly, and watches
+      // again when the page has arrived and the control is still there (the page did not fill the
+      // pane), which stops when `more` is false and the control is gone.
+      export default {
+        mounted() {
+          this.label = this.el.textContent
+          this.pressed = false
+          this.root = this.el.closest("[data-load-root]") || this.el.closest("[id$='-pane']") || null
+          this.observer = new IntersectionObserver((entries) => {
+            if (this.pressed || !entries.some((entry) => entry.isIntersecting)) return
+            this.pressed = true
+            this.el.textContent = "Loading earlier…"
+            this.el.click()
+          }, {root: this.root, rootMargin: "120px"})
+          this.observer.observe(this.el)
+        },
+        updated() {
+          // The page arrived, and there is still more behind it: ready for the next one.
+          this.pressed = false
+          this.el.textContent = this.label
+          this.observer.unobserve(this.el)
+          this.observer.observe(this.el)
+        },
+        destroyed() { this.observer && this.observer.disconnect() }
+      }
+    </script>
+    """
+  end
+
+  @doc """
+  The transcript files of a job that was swept, as `{label, href}` for `swept_line/1`: one per run,
+  each at the exact version's address on the route that serves it — the ticket's for a workflow
+  job, the conversation's own for a conversation (`docs/design/storage.md` § Retention). `[]` for a
+  job nobody swept, which draws no line, and for a swept one that has no transcript, which says
+  so. Reads nothing for a job with no `job.swept` event but that one.
+  """
+  @spec transcript_links(map(), map(), map() | nil) :: [{String.t(), String.t()}]
+  def transcript_links(job, project, ticket) do
+    if Forge.Events.latest_for_job(job.id, "job.swept") do
+      {scope, name, base} =
+        case job do
+          %{kind: :chat} ->
+            {{:job, job.id}, "transcript-chat.jsonl",
+             "/chats/#{job.id}/artifacts/transcript-chat.jsonl"}
+
+          job ->
+            name = "transcript-#{job.state}-#{job.attempt}.jsonl"
+            {ticket.id, name, "/tickets/#{project.name}/#{ticket.number}/artifacts/#{name}"}
+        end
+
+      versions = Forge.Artifacts.versions(scope, name)
+
+      for {version, n} <- Enum.with_index(versions, 1) do
+        {if(length(versions) == 1, do: "transcript", else: "transcript, run #{n}"),
+         "#{base}/#{version.version}"}
+      end
+    else
+      []
+    end
+  end
+
+  @doc """
+  The line a swept job draws at its newest end, after what was kept (`docs/design/storage.md` § Retention): what
+  was removed and when, and a link to each of its transcript files — or that none was recorded.
+  `transcripts` is `transcript_links/3`'s `{label, href}`.
+  """
+  attr :days, :any, required: true, doc: "how many days after the job ended its stream was swept"
+  attr :transcripts, :list, default: []
+
+  def swept_line(assigns) do
+    ~H"""
+    <p class="job-dim" data-swept>
+      Tool calls and harness notices were removed {@days} days after this job ended.
+      <span :if={@transcripts == []}>No transcript of it was recorded.</span>
+      <span :if={@transcripts != []}>
+        Its transcript:
+        <.link :for={{label, href} <- @transcripts} href={href} class="underline" download>
+          {label}
+        </.link>
+      </span>
+    </p>
     """
   end
 
@@ -645,19 +750,13 @@ defmodule ForgeWeb.WorkScreen do
   defp seq({:event, event}), do: event.seq
 
   @doc """
-  A stream's heading: a run that has ended says so, one still going says how far it got. It
-  counts what the stream draws without being asked for the notices — a call and its result are
-  one entry — so it is the same figure the Activity tab carries.
+  A stream's heading: a run that has ended says so, one still going says how far it got. `count` is
+  what the stream draws without being asked for the notices — a call and its result are one
+  entry — so it is the same figure the Activity tab carries (`Forge.Events.Stream.count/1`).
   """
-  @spec stream_heading(map(), [map()]) :: String.t()
-  def stream_heading(%{status: :finished}, events) do
-    count = activity_count(events)
-    "complete · #{count} #{if count == 1, do: "entry", else: "entries"}"
-  end
+  @spec stream_heading(map(), non_neg_integer()) :: String.t()
+  def stream_heading(%{status: :finished}, count),
+    do: "complete · #{count} #{if count == 1, do: "entry", else: "entries"}"
 
-  def stream_heading(job, events), do: "#{job.status} · #{activity_count(events)} so far"
-
-  @doc "The Activity tab's count: what it draws without being asked for the notices."
-  @spec activity_count([map()]) :: non_neg_integer()
-  def activity_count(events), do: events |> entries(false) |> length()
+  def stream_heading(job, count), do: "#{job.status} · #{count} so far"
 end

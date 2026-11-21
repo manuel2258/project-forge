@@ -247,6 +247,13 @@ config :phoenix, :filter_parameters, ["password", "secret", "token"]
 # docs/design/capacity.md.
 config :forge, Forge.Spend, daily_tokens: nil
 
+# How long after a job ended its harness stream is swept, and how often the sweep runs
+# (`docs/design/storage.md` § Retention). `FORGE_HARNESS_RETENTION_DAYS` sets the days.
+config :forge, Forge.Events.Retention,
+  days: 30,
+  every_ms: :timer.hours(24),
+  first_after_ms: :timer.minutes(10)
+
 # One unit of capacity is one percent of a five-hour window. `window_tokens` is the weighted tokens of a
 # whole window: the only bridge from the cost the harness estimates to the unit the operator
 # reads. PLACEHOLDER until dogfooding calibrates it — display only, nothing schedules or caps on

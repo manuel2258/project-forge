@@ -229,6 +229,12 @@ defmodule ForgeWorker.Harness.ClaudeCode do
     ]
   end
 
+  # A running counter the harness ticks, one message per tick: 38% of every event the platform
+  # kept, drawn only behind the notices count, and the transcript file still holds every one. Not
+  # an event (`docs/design/storage.md` § Retention); the platform refuses one from a worker that
+  # still sends it.
+  defp normalise(%{"type" => "system", "subtype" => "thinking_tokens"}), do: []
+
   defp normalise(%{"type" => "system"} = m),
     do: [event("notice", %{subtype: m["subtype"], raw: m})]
 

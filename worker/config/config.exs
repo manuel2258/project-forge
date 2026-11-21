@@ -15,6 +15,14 @@ if config_env() == :test do
     memory_budget: 8 * 1024 * 1024 * 1024,
     stats_ms: :timer.hours(1),
     log_stream: false,
+    # The same for the disk report: the application's own `Disk` measures one minute after the first
+    # join, and `LinkTest` joins, so a report can land on a link whose test is not answering, and its
+    # push is a call that times out after 5 s. (One gate's log showed a disk report with a 7 GB store
+    # in the middle of 39 failing `LinkTest` tests; the cause is inferred from that, not reproduced.)
+    # `disk_test.exs` starts its own `Disk` with its own intervals.
+    disk_first_ms: :timer.hours(1),
+    disk_report_ms: :timer.hours(1),
+    disk_after_cleanup_ms: :timer.hours(1),
     # Nothing the suite starts may write to the machine's own update directory or `/run`: the
     # update and the disk report are started with the application, and each tests its own.
     update_dir: Path.join(System.tmp_dir!(), "forge-worker-test-update"),

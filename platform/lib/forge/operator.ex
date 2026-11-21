@@ -724,7 +724,7 @@ defmodule Forge.Operator do
           {:ok, term()} | {:error, term()}
   def answer_chat(%Job{kind: :chat} = chat, %User{} = user, reply, answers, opts \\ []) do
     with :ok <- allow(chat, user, :use),
-         messages = Conversations.messages(chat.id),
+         messages = List.wrap(Conversations.last_said(chat.id)),
          true <-
            (reply != nil and Conversations.reply_ref(messages) == reply) || {:error, :stale},
          {:ok, text} <-

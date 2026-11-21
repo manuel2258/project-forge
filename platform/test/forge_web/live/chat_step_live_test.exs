@@ -408,7 +408,7 @@ defmodule ForgeWeb.ChatStepLiveTest do
     end
 
     # The page holds every block, and redrew for each.
-    held = :sys.get_state(view.pid).socket.assigns.events
+    held = :sys.get_state(view.pid).socket.assigns.talk.events
     assert Enum.count(held, &(&1.payload["parent_tool_use_id"] == "toolu_1")) == 5
     refute_received {:queried, _source}
   end

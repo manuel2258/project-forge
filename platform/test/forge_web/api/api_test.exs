@@ -684,6 +684,93 @@ defmodule ForgeWeb.ApiTest do
              conn |> get(~p"/api/v1/tickets?project=#{name}") |> json_response(200)
   end
 
+  describe "paging a timeline" do
+    setup %{project: project} do
+      ticket = Forge.ForgeFixtures.ticket_fixture(%{project: project, number: 1})
+      job = Forge.ForgeFixtures.job_fixture(%{ticket: ticket})
+
+      seqs =
+        for n <- 1..12 do
+          {:ok, event} =
+            Forge.Events.append("job.harness.text", {:job, job.id}, %{
+              ticket_id: ticket.id,
+              job_id: job.id,
+              payload: %{"text" => "#{n}"}
+            })
+
+          event.seq
+        end
+
+      %{ticket: ticket, job: job, seqs: seqs, name: project.name}
+    end
+
+    defp seqs_of(conn), do: for(%{"seq" => seq} <- json_response(conn, 200)["events"], do: seq)
+
+    test "the newest `limit` below `before`, oldest first; either alone; neither is the whole", %{
+      conn: conn,
+      name: name,
+      job: job,
+      seqs: seqs
+    } do
+      for path <- [
+            ~p"/api/v1/tickets/#{name}/1/events",
+            ~p"/api/v1/tickets/#{name}/1/jobs/#{job.id}"
+          ] do
+        all = conn |> get(path) |> seqs_of()
+        assert Enum.take(all, -12) == seqs
+        assert conn |> get(path <> "?limit=3") |> seqs_of() == Enum.take(seqs, -3)
+
+        assert conn |> get(path <> "?before=#{Enum.at(seqs, 4)}") |> seqs_of() |> Enum.take(-4) ==
+                 Enum.take(seqs, 4)
+
+        assert conn |> get(path <> "?limit=2&before=#{Enum.at(seqs, 4)}") |> seqs_of() ==
+                 Enum.slice(seqs, 2, 2)
+      end
+    end
+
+    test "a limit or a before that is not a whole number in range is refused by name", %{
+      conn: conn,
+      name: name,
+      job: job
+    } do
+      for path <- [
+            ~p"/api/v1/tickets/#{name}/1/events",
+            ~p"/api/v1/tickets/#{name}/1/jobs/#{job.id}"
+          ] do
+        for bad <- ["0", "1001", "abc", "1.5", "-3", "%2B5", String.duplicate("9", 25), "", "5x"] do
+          assert %{"error" => %{"detail" => detail}} =
+                   conn |> get(path <> "?limit=#{bad}") |> json_response(400)
+
+          assert detail =~ "limit"
+
+          # 1001 is a limit too many and a perfectly good place in the log.
+          if bad != "1001" do
+            assert %{"error" => %{"detail" => detail}} =
+                     conn |> get(path <> "?before=#{bad}") |> json_response(400)
+
+            assert detail =~ "before"
+          end
+        end
+
+        assert conn |> get(path <> "?limit=1000") |> json_response(200)
+        assert conn |> get(path <> "?limit=1") |> json_response(200)
+      end
+    end
+
+    test "a seq of another ticket only bounds this one's events", %{
+      conn: conn,
+      name: name,
+      project: project,
+      seqs: seqs
+    } do
+      other = Forge.ForgeFixtures.ticket_fixture(%{project: project, number: 2})
+      {:ok, foreign} = Forge.Events.append("ticket.noted", :system, %{ticket_id: other.id})
+
+      assert conn |> get(~p"/api/v1/tickets/#{name}/1/events?before=#{foreign.seq}") |> seqs_of() ==
+               seqs
+    end
+  end
+
   describe "ticket proposals" do
     setup %{project: project} do
       ticket = Forge.ForgeFixtures.ticket_fixture(%{project: project, number: 1})

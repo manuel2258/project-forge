@@ -194,9 +194,48 @@ defmodule ForgeWeb.Api.TicketController do
     })
   end
 
-  def events(conn, _params) do
-    json(conn, %{events: Enum.map(Events.for_ticket(conn.assigns.ticket.id), &Render.event/1)})
+  @doc """
+  The ticket's timeline, oldest first. `limit` (a whole number from 1 to 1000) and `before` (an
+  event's `seq`) page it: the newest `limit` events below `before`. A value that is not one is
+  refused naming the parameter — never clamped, never ignored — and `before` only bounds the
+  ticket's own events, whoever's `seq` it is (`docs/design/api-and-ui.md`).
+  """
+  def events(conn, params) do
+    with {:ok, paging} <- paging(params) do
+      json(conn, %{
+        events: Enum.map(Events.for_ticket(conn.assigns.ticket.id, paging), &Render.event/1)
+      })
+    end
   end
+
+  @bigint 9_223_372_036_854_775_807
+
+  defp paging(params) do
+    with {:ok, limit} <-
+           whole(params["limit"], 1, 1000, "limit is a whole number from 1 to 1000"),
+         {:ok, before} <-
+           whole(params["before"], 1, @bigint, "before is the seq of an event, a whole number") do
+      {:ok, Enum.reject([limit: limit, before: before], &is_nil(elem(&1, 1)))}
+    end
+  end
+
+  # Absent is no bound; present is a whole number in range, parsed whole (`Integer.parse/1` leaving
+  # nothing behind), or refused.
+  defp whole(nil, _min, _max, _detail), do: {:ok, nil}
+
+  # Digits only: `Integer.parse/1` alone would take `+5`. With the pattern in front, `{n, ""}` below
+  # cannot fail to match a digit string, so loosening it to `{n, _}` is an equivalent mutant: no test
+  # is written for it.
+  defp whole(value, min, max, detail) when is_binary(value) do
+    with true <- String.match?(value, ~r/\A[0-9]+\z/),
+         {n, ""} when n >= min and n <= max <- Integer.parse(value) do
+      {:ok, n}
+    else
+      _other -> {:error, {:bad_request, detail}}
+    end
+  end
+
+  defp whole(_value, _min, _max, detail), do: {:error, {:bad_request, detail}}
 
   @doc """
   The merge decision as data: the diff, the documents the change was built from, the presentations
@@ -212,18 +251,20 @@ defmodule ForgeWeb.Api.TicketController do
     end
   end
 
-  def job(conn, %{"job_id" => job_id}) do
+  def job(conn, %{"job_id" => job_id} = params) do
     ticket = conn.assigns.ticket
 
-    case Enum.find(Jobs.for_ticket(ticket.id), &(&1.id == job_id)) do
-      nil ->
-        {:error, :not_found}
+    with {:ok, paging} <- paging(params) do
+      case Enum.find(Jobs.for_ticket(ticket.id), &(&1.id == job_id)) do
+        nil ->
+          {:error, :not_found}
 
-      job ->
-        json(conn, %{
-          job: Render.job_with_spec(job),
-          events: Enum.map(Events.for_job(job.id), &Render.event/1)
-        })
+        job ->
+          json(conn, %{
+            job: Render.job_with_spec(job),
+            events: Enum.map(Events.for_job(job.id, paging), &Render.event/1)
+          })
+      end
     end
   end
 

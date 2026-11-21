@@ -505,6 +505,52 @@ defmodule ForgeWeb.ArtifactControllerTest do
       end
     end
 
+    # `docs/design/storage.md` § Retention: the line a swept conversation draws links its
+    # transcripts, and none was recorded until a process's ending did.
+    test "a process's transcript is recorded as a version when it ends, one a process", %{
+      conn: conn,
+      chat: chat
+    } do
+      for text <- ["first\n", "second\n"] do
+        key = "job/#{chat.id}/transcript-#{System.unique_integer([:positive])}.jsonl"
+        {:ok, _info} = Storage.put(key, text)
+
+        {:ok, _chat} =
+          Forge.Conversations.ended(chat, nil, "idle", result: %{"transcript" => key})
+      end
+
+      assert get(conn, ~p"/chats/#{chat.id}/artifacts/transcript-chat.jsonl/1") |> response(200) ==
+               "first\n"
+
+      assert get(conn, ~p"/chats/#{chat.id}/artifacts/transcript-chat.jsonl/2") |> response(200) ==
+               "second\n"
+    end
+
+    test "a transcript key that is not the conversation's own is not recorded", %{
+      conn: conn,
+      chat: chat
+    } do
+      key = "job/#{Ecto.UUID.generate()}/transcript-1.jsonl"
+      {:ok, _info} = Storage.put(key, "somebody else's\n")
+      {:ok, _chat} = Forge.Conversations.ended(chat, nil, "idle", result: %{"transcript" => key})
+
+      assert get(conn, ~p"/chats/#{chat.id}/artifacts/transcript-chat.jsonl/1").status == 404
+    end
+
+    test "a transcript is not served to a stranger", %{chat: chat} do
+      key = "job/#{chat.id}/transcript-9.jsonl"
+      {:ok, _info} = Storage.put(key, "mine\n")
+      {:ok, _chat} = Forge.Conversations.ended(chat, nil, "idle", result: %{"transcript" => key})
+
+      stranger = Forge.AccountsFixtures.user_fixture()
+
+      assert_error_sent 404, fn ->
+        build_conn()
+        |> log_in_user(stranger)
+        |> get(~p"/chats/#{chat.id}/artifacts/transcript-chat.jsonl/1")
+      end
+    end
+
     test "requires a logged-in operator", %{chat: chat} do
       conn = get(build_conn(), ~p"/chats/#{chat.id}/artifacts/notes.md/1")
 

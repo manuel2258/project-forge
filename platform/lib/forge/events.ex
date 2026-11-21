@@ -1,7 +1,8 @@
 defmodule Forge.Events do
   @moduledoc """
-  The append-only event log. Every mutation in the platform writes an event in the same
-  transaction; contexts build an `Ecto.Multi` and call `log/4` on it.
+  The event log, append-only by trigger but for the harness's own stream, which the sweep deletes
+  once a job is old (`docs/design/storage.md` § Retention). Every mutation in the platform writes
+  an event in the same transaction; contexts build an `Ecto.Multi` and call `log/4` on it.
   """
 
   import Ecto.Query, only: [from: 2]
@@ -85,19 +86,125 @@ defmodule Forge.Events do
     )
   end
 
-  @spec for_ticket(String.t()) :: [Event.t()]
-  def for_ticket(ticket_id) do
+  @doc """
+  The newest `limit` listed events of a ticket, newest first: a page that shows the last few asks
+  for them, and not for the log to take them from (`docs/design/storage.md` § Retention).
+  """
+  @spec newest_for_ticket(String.t(), pos_integer()) :: [Event.t()]
+  def newest_for_ticket(ticket_id, limit) do
     Repo.all(
       from e in Event,
         where: e.ticket_id == ^ticket_id and e.type not in ^@unlisted,
+        order_by: [desc: e.seq],
+        limit: ^limit
+    )
+  end
+
+  @doc "Every event of one type of a ticket, oldest first."
+  @spec of_type_for_ticket(String.t(), String.t()) :: [Event.t()]
+  def of_type_for_ticket(ticket_id, type) do
+    Repo.all(
+      from e in Event, where: e.ticket_id == ^ticket_id and e.type == ^type, order_by: e.seq
+    )
+  end
+
+  @doc """
+  What the merge queue did to a ticket, oldest first, and the merge it ended in — and nothing for a
+  ticket the queue never held, so a merge on a workflow that queues nothing has no story here.
+  `starts_with`, not `LIKE`: `_` is a wildcard there.
+  """
+  @spec merge_queue_for_ticket(String.t()) :: [Event.t()]
+  def merge_queue_for_ticket(ticket_id) do
+    events =
+      Repo.all(
+        from e in Event,
+          where: e.ticket_id == ^ticket_id,
+          where: fragment("starts_with(?, 'merge_queue.')", e.type) or e.type == "ticket.merged",
+          order_by: e.seq
+      )
+
+    if Enum.any?(events, &String.starts_with?(&1.type, "merge_queue.")), do: events, else: []
+  end
+
+  @doc """
+  The newest `limit` of a ticket's events of `types`, newest first, where a `ticket.admitted` counts
+  only when a schedule made it (its payload names one): a person's own admission is the ticket's
+  first line.
+  """
+  @spec said_for_ticket(String.t(), [String.t()], pos_integer()) :: [Event.t()]
+  def said_for_ticket(ticket_id, types, limit) do
+    Repo.all(
+      from e in Event,
+        where: e.ticket_id == ^ticket_id and e.type in ^types,
+        where:
+          e.type != "ticket.admitted" or
+            fragment("jsonb_typeof(?->'schedule') = 'object'", e.payload),
+        order_by: [desc: e.seq],
+        limit: ^limit
+    )
+  end
+
+  @doc "A ticket's answers that have an attachment row, oldest first."
+  @spec answered_with_files(String.t()) :: [Event.t()]
+  def answered_with_files(ticket_id) do
+    Repo.all(
+      from e in Event,
+        where: e.ticket_id == ^ticket_id and e.type == "question.answered",
+        where:
+          fragment(
+            "EXISTS (SELECT 1 FROM attachments a WHERE a.to_event_seq = ?)",
+            e.seq
+          ),
         order_by: e.seq
     )
   end
 
-  @spec for_job(String.t()) :: [Event.t()]
-  def for_job(job_id) do
+  @typedoc "Paging for a whole-log read: the newest `limit` events with `seq` below `before`, either alone applying alone."
+  @type paging :: [limit: pos_integer(), before: pos_integer()]
+
+  @doc """
+  A ticket's listed events, oldest first. `paging` (`limit:`, `before:`) reads only the newest
+  `limit` below `before` — the API's `limit` and `before` (`docs/design/api-and-ui.md`); with
+  neither it is the whole log, which the CLI's printout still wants.
+  """
+  @spec for_ticket(String.t(), paging()) :: [Event.t()]
+  def for_ticket(ticket_id, paging \\ []) do
+    from(e in Event, where: e.ticket_id == ^ticket_id and e.type not in ^@unlisted)
+    |> paged(paging)
+  end
+
+  @doc "A job's listed events, oldest first, paged as `for_ticket/2` is."
+  @spec for_job(String.t(), paging()) :: [Event.t()]
+  def for_job(job_id, paging \\ []) do
+    from(e in Event, where: e.job_id == ^job_id and e.type not in ^@unlisted)
+    |> paged(paging)
+  end
+
+  defp paged(query, []), do: Repo.all(from e in query, order_by: e.seq)
+
+  defp paged(query, paging) do
+    query = if before = paging[:before], do: from(e in query, where: e.seq < ^before), else: query
+
+    query =
+      if limit = paging[:limit],
+        do: from(e in query, order_by: [desc: e.seq], limit: ^limit),
+        else: from(e in query, order_by: e.seq)
+
+    query |> Repo.all() |> Enum.sort_by(& &1.seq)
+  end
+
+  @doc """
+  The events of one job of exactly these `types`, oldest first. A reader that folds a job's log for
+  some of its types asks for those and no others: the job's whole stream is most of its rows
+  (`docs/design/storage.md` § Retention). Never the unlisted types.
+  """
+  @spec for_job_types(String.t(), [String.t()], non_neg_integer()) :: [Event.t()]
+  def for_job_types(job_id, types, after_seq \\ 0) do
     Repo.all(
-      from e in Event, where: e.job_id == ^job_id and e.type not in ^@unlisted, order_by: e.seq
+      from e in Event,
+        where: e.job_id == ^job_id and e.type in ^types and e.type not in ^@unlisted,
+        where: e.seq > ^after_seq,
+        order_by: e.seq
     )
   end
 
@@ -153,6 +260,17 @@ defmodule Forge.Events do
     )
     |> Repo.all()
     |> Map.new()
+  end
+
+  @doc "The newest node-wide event of `type` (one with no ticket and no job), or nil."
+  @spec latest_for_node(String.t()) :: Event.t() | nil
+  def latest_for_node(type) do
+    Repo.one(
+      from e in Event,
+        where: e.type == ^type and is_nil(e.ticket_id) and is_nil(e.job_id),
+        order_by: [desc: e.seq],
+        limit: 1
+    )
   end
 
   @doc "The newest event of `type` for a ticket, or nil."
@@ -412,6 +530,17 @@ defmodule Forge.Events do
     do: bounded(text, 200, bound)
 
   defp describe(%Event{type: "chat.turn", payload: %{"turn" => turn}}, _bound), do: "turn #{turn}"
+
+  # The retention sweep's own record (`docs/design/storage.md` § Retention): counts and days, which
+  # is all either carries.
+  defp describe(%Event{type: "job.swept", payload: %{"removed" => n, "days" => days}}, _bound),
+    do: "#{n} harness events removed #{days} days after the job ended"
+
+  defp describe(
+         %Event{type: "events.swept", payload: %{"removed" => n, "jobs" => jobs, "days" => days}},
+         _bound
+       ),
+       do: "#{n} harness events of #{jobs} jobs removed (older than #{days} days)"
 
   # A version written, by its name and number: the id beside them is for a machine to follow, and
   # read as a 36-character string wrapped over a phone's width (UX pass, B10).

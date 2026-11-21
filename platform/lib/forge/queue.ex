@@ -395,7 +395,8 @@ defmodule Forge.Queue do
   defp visible_chat(project_ids), do: dynamic([j], j.project_id in ^project_ids)
 
   defp chat_item(%Job{} = chat) do
-    messages = Conversations.messages(chat.id)
+    # Only its last word is asked of it (`waiting?/1`, `lost?/2`, `reply_ref/1` all read the last).
+    messages = List.wrap(Conversations.last_said(chat.id))
 
     cond do
       Conversations.waiting?(messages) -> [waiting_chat(chat, messages)]

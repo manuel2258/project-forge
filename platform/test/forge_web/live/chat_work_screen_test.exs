@@ -1000,7 +1000,7 @@ defmodule ForgeWeb.ChatWorkScreenTest do
     end
 
     test "keeps notices behind their count", %{conn: conn, chat: chat} do
-      harness(chat, "job.harness.notice", %{subtype: "thinking_tokens"})
+      harness(chat, "job.harness.notice", %{subtype: "plugin_install"})
 
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=activity")
       refute view |> element("#job-events") |> render() =~ "notice"

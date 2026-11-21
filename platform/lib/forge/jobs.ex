@@ -2015,22 +2015,15 @@ defmodule Forge.Jobs do
           }
       ) || %{id: job_id, kind: nil, project_id: nil, ticket_id: nil, credential_id: nil}
 
-    case Events.append(type, {:job, job_id}, %{
-           ticket_id: job.ticket_id,
-           job_id: job_id,
-           payload: payload |> json_safe() |> stamp(type, job.credential_id)
-         }) do
-      {:ok, event} ->
-        Events.notify_job(job_id, event)
-        # The lists of conversations hear each block of a reply; the queue does not: words said
-        # mid-turn change nothing it draws, and the turn's end — `chat.turn`, recorded by
-        # `Conversations.record_turn/2` — is what starts a conversation waiting and says so.
-        if said?(event), do: Events.notify_chat(job, queue: false)
-        :ok
+    payload = json_safe(payload)
 
-      {:error, changeset} ->
-        Logger.warning("dropped harness event #{type}: #{inspect(changeset.errors)}")
-    end
+    # **A running counter, not recorded** (`docs/design/storage.md` § Retention): refused here, so
+    # a worker of any release that still sends one cannot write them back into the log.
+    if thinking_tokens?(type, payload),
+      do: Logger.debug("refused a thinking_tokens notice for job #{job_id}"),
+      else: append_harness(job, type, payload)
+
+    :ok
   end
 
   # **Only the harness's own namespace.** The rest of the log is the platform's record of what
@@ -2039,6 +2032,24 @@ defmodule Forge.Jobs do
   # command state has been decided. A worker holding a job could write any of them for it.
   def record_harness_event(job_id, %{type: type}) do
     Logger.warning("dropped an event of type #{inspect(type)} for job #{job_id}: not a harness's")
+  end
+
+  defp append_harness(job, type, payload) do
+    case Events.append(type, {:job, job.id}, %{
+           ticket_id: job.ticket_id,
+           job_id: job.id,
+           payload: stamp(payload, type, job.credential_id)
+         }) do
+      {:ok, event} ->
+        Events.notify_job(job.id, event)
+        # The lists of conversations hear each block of a reply; the queue does not: words said
+        # mid-turn change nothing it draws, and the turn's end — `chat.turn`, recorded by
+        # `Conversations.record_turn/2` — is what starts a conversation waiting and says so.
+        if said?(event), do: Events.notify_chat(job, queue: false)
+
+      {:error, changeset} ->
+        Logger.warning("dropped harness event #{type}: #{inspect(changeset.errors)}")
+    end
   end
 
   # Whether an event is the agent speaking, by the rule `Conversations.summaries/1` reads: a
@@ -2050,6 +2061,9 @@ defmodule Forge.Jobs do
   defp said?(%Event{}), do: false
 
   defp json_safe(term), do: term |> Jason.encode!() |> Jason.decode!()
+
+  defp thinking_tokens?("job.harness.notice", %{"subtype" => "thinking_tokens"}), do: true
+  defp thinking_tokens?(_type, _payload), do: false
 
   # **A limit is an account's**, so a `rate_limit` event is stamped with the credential the job ran
   # on when it arrived — which is what `Forge.Credentials.limited/2` reads to know whose window it
@@ -2667,9 +2681,31 @@ defmodule Forge.Jobs do
   # Only one of this job's own keys (`Storage.Key.job?/2`): the worker names the key, and one it
   # names from somewhere else — another project's transcript, a seed — would be recorded on this
   # ticket as this job's, readable by everyone who can read the ticket.
-  defp put_transcript(multi, ticket, job, %Result{transcript: key}) when is_binary(key) do
-    name = "transcript-#{job.state}-#{job.attempt}.jsonl"
+  defp put_transcript(multi, ticket, job, result),
+    do:
+      put_transcript(
+        multi,
+        ticket.id,
+        "transcript-#{job.state}-#{job.attempt}.jsonl",
+        job,
+        result
+      )
 
+  @doc """
+  Records a run's transcript as a version of `name` in `scope` — a ticket's id, or `{:job, id}` for
+  a conversation, which has no ticket of its own to hold it — when the result names one that is the
+  job's own key. One version a run: a conversation's transcript is a version each time its process
+  ends (`docs/design/storage.md` § Retention, which links them from the line a swept job draws).
+  """
+  @spec put_transcript(
+          Multi.t(),
+          String.t() | {:job, String.t()},
+          String.t(),
+          Job.t(),
+          Result.t()
+        ) ::
+          Multi.t()
+  def put_transcript(multi, scope, name, job, %Result{transcript: key}) when is_binary(key) do
     case Storage.Key.job?(key, job.id) && Storage.stat(key) do
       false ->
         Logger.warning("job #{job.id} reported transcript #{key}, which is not one of its keys")
@@ -2677,7 +2713,7 @@ defmodule Forge.Jobs do
 
       {:ok, %{hash: hash}} ->
         attrs = %{blob_uri: Storage.uri(key), content_hash: hash}
-        Artifacts.put_version(multi, :transcript, ticket.id, name, :blob, {:job, job.id}, attrs)
+        Artifacts.put_version(multi, :transcript, scope, name, :blob, {:job, job.id}, attrs)
 
       {:error, reason} ->
         Logger.warning("job #{job.id} reported transcript #{key}: #{inspect(reason)}")
@@ -2685,7 +2721,7 @@ defmodule Forge.Jobs do
     end
   end
 
-  defp put_transcript(multi, _ticket, _job, %Result{}), do: multi
+  def put_transcript(multi, _scope, _name, _job, %Result{}), do: multi
 
   # A finished job that produces the changeset gets the branch head recorded as a version,
   # so an approval of `changeset` attaches to an exact commit.

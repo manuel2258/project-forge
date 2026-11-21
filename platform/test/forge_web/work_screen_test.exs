@@ -11,7 +11,7 @@ defmodule ForgeWeb.WorkScreenTest do
   import Phoenix.LiveViewTest
 
   alias Forge.Events.Event
-  alias ForgeWeb.WorkScreen
+  alias ForgeWeb.{JobStream, WorkScreen}
 
   @at ~U[2026-09-26 12:00:00Z]
 
@@ -38,10 +38,16 @@ defmodule ForgeWeb.WorkScreenTest do
   defp notice(seq), do: event(seq, "job.harness.notice", %{"subtype" => "thinking_tokens"})
 
   defp draw(events, opts \\ []) do
-    render_component(&WorkScreen.activity/1,
+    stream = %JobStream{
+      job_id: "job",
       events: events,
-      shown: Keyword.get(opts, :shown, 50),
+      more: Keyword.get(opts, :more, false),
       notices: Keyword.get(opts, :notices, false),
+      notice_count: Enum.count(events, &(&1.type == "job.harness.notice"))
+    }
+
+    render_component(&WorkScreen.activity/1,
+      stream: stream,
       heading: "Activity",
       since: Keyword.get(opts, :since)
     )
@@ -71,7 +77,9 @@ defmodule ForgeWeb.WorkScreenTest do
     assert Floki.text(row) =~ "tool_result"
   end
 
-  test "counts what it draws: a call with its result once, no notices, a lone result" do
+  # What the Activity tab counts is the database's (`Forge.Events.StreamTest`); what is drawn
+  # of a page held is entries, a call and its result being one.
+  test "draws a call with its result once, no notices, a lone result" do
     events = [
       call(1, "b1", "mix test"),
       result(2, "b1", false, "ok"),
@@ -79,9 +87,18 @@ defmodule ForgeWeb.WorkScreenTest do
       result(4, "lost", false, "ok")
     ]
 
-    assert WorkScreen.activity_count(events) == 2
     assert events |> draw() |> rows() |> length() == 2
     assert events |> draw(notices: true) |> rows() |> length() == 3
+  end
+
+  # A result with no call id has nothing to pair with, as SQL `=` sees it: NULL matches nothing.
+  test "never pairs a result with no call id with a call with none" do
+    events = [
+      event(1, "job.harness.tool_use", %{"name" => "Bash", "input" => %{"command" => "a"}}),
+      event(2, "job.harness.tool_result", %{"is_error" => false, "excerpt" => "x", "bytes" => 1})
+    ]
+
+    assert events |> draw() |> rows() |> length() == 2
   end
 
   # `docs/design/ui.md` § Activity: a row wraps rather than truncating, and past 200 characters
@@ -235,15 +252,17 @@ defmodule ForgeWeb.WorkScreenTest do
   end
 
   describe "a page at a time" do
-    test "offers more once there is more than a page" do
-      events = for seq <- 1..51, do: event(seq, "job.harness.text", %{"text" => "#{seq}"})
+    test "offers more while the stream says there is more, loading it on its own" do
+      events = for seq <- 1..50, do: event(seq, "job.harness.text", %{"text" => "#{seq}"})
 
-      more = events |> draw() |> Floki.find(~s(button[phx-click="more"]))
-      assert [_button] = more
+      assert [button] = events |> draw(more: true) |> Floki.find(~s(button[phx-click="more"]))
+
+      assert Floki.attribute(button, "phx-hook") == [".LoadOlder"] or
+               Floki.attribute(button, "phx-hook") |> hd() =~ "LoadOlder"
+
+      assert Floki.text(button) =~ "Load 50 more"
+      assert events |> draw() |> Floki.find(~s(button[phx-click="more"])) == []
       assert events |> draw() |> rows() |> length() == 50
-
-      assert events |> Enum.take(50) |> draw() |> Floki.find(~s(button[phx-click="more"])) ==
-               []
     end
   end
 

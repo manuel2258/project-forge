@@ -132,7 +132,8 @@ is denormalised so "the events I may read" is one indexed query, and null means 
 only a node admin reads — `design/identity.md` § Read scoping is the half that leaks), `actor`
 (`system`, `{user, id}`, `{job, id}` or `{api, id, name}`), `type` (dotted, e.g. `ticket.admitted`,
 `job.started`, `job.harness.tool_use`, `question.answered`, `transition.taken`),
-`payload` (JSON), `inserted_at`. Append only.
+`payload` (JSON), `inserted_at`. Append only, but for the harness's swept stream
+(§ Invariants below, `storage.md` § Retention).
 
 **user** — from the Phoenix auth generator: `email`, `hashed_password` (null for an account
 that only logs in through an identity provider), plus `node_admin` (account governance only:
@@ -284,7 +285,10 @@ run rebuilds from the branch and the manifest.
   versions exist. The job view flags inputs that have newer versions.
 - Approvals, answers and transitions reference specific versions, never "latest".
 - Every mutation writes an event in the same transaction. `event` and `artifact_version`
-  rows are append-only, enforced by a database trigger.
+  rows are append-only, enforced by a database trigger — **but for** the harness's stream, which
+  the trigger lets a swept type be deleted and nothing else; the retention sweep is what
+  decides when, thirty days after a job ended
+  (`storage.md` § Retention).
 - Recording a job's result never depends on what follows it: the result is one transaction,
   the engine's decision another; a follow-up that fails sticks the ticket with the reason.
 - A job whose ticket moved on while it ran (a person took a transition) is recorded as

@@ -252,6 +252,12 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
       assert [%{type: "notice", payload: %{subtype: "plugin_install"}}] =
                ClaudeCode.parse_line(~s({"type":"system","subtype":"plugin_install"}))
 
+      # A running counter ticked every few tokens, shown nowhere: not an event at all.
+      assert [] =
+               ClaudeCode.parse_line(
+                 ~s({"type":"system","subtype":"thinking_tokens","tokens":120})
+               )
+
       # The sample `docs/design/capacity.md` § What the provider reports records from the dev
       # node. It used to fall through to `unknown`, and the platform's pick needs it by name.
       line =

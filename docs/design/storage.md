@@ -197,9 +197,78 @@ What would break it, and therefore what this note forbids: a `path/1` callback, 
 `File.exists?`es a key, a key with a scheme in it, and any assumption that `put` is atomic across
 two keys.
 
+## Retention
+
+What the platform keeps of a job's events, and for how long. The event log (`events`) is append-only
+and the record of what the platform did (`docs/decisions.md`); the part of it that is the harness's
+stream is also the part that is most of it, and nothing reads a finished job's stream that the
+transcript blob (`transcript-*`, written by the worker when a run ends) does not hold in full.
+
+**Kept forever, on every job:** every event whose type does not start `job.harness.` — `job.*`
+lifecycle, `transition.*`, `approval.*`, `ticket.*`, `merge_queue.*`, `chat.*`, `step.*` and the
+rest, which the engine reads (`Engine.rounds/1`, `rejection_note/1`) — and of the harness's own
+six, each still read once its job is over:
+
+| Kept | Read by |
+|---|---|
+| `job.harness.text` | the queue's and the conversation list's *last said*; a conversation's Talk |
+| `job.harness.delivered` | the fold that tells which message the agent was given (`conversations.md`) |
+| `job.harness.started` | the project's observed model |
+| `job.harness.finished` | the end of a run, as the harness reported it |
+| `job.harness.rate_limit` | each credential's windows (`capacity.md` § Engine support) |
+| `job.harness.memory` | the memory warning on the job page |
+
+**Swept:** every other `job.harness.*` type — `tool_use`, `tool_result`, `notice`, `retry`,
+`starting`, `correction`, `control`, `usage`, `unknown`, `malformed` today, and **any harness type added later**, unless
+it is added to the kept list. Spend is on `job_runs` and reads no event.
+
+**When.** A job has ended when its status is `finished` or `hibernated`; it ages from its
+`finished_at`. Thirty days after that (`FORGE_HARNESS_RETENTION_DAYS`, a whole number of at least
+1) the next sweep deletes the job's swept rows. `pending`, `running`, `waiting` and `parked` jobs
+are never swept, whatever their age. A job that is reopened — extended, or a conversation that is
+spoken to again — runs and records as it did, is not swept while it is live, and ages from its next
+`finished_at`; the rows its earlier end already lost stay lost.
+
+**How.** `Forge.Events.Retention` runs once a day (`every_ms`; the first run ten minutes after
+boot, so a deploy does not sweep before it is serving) under `Forge.Events.Retention.Sweeper`, off
+in the suite. One transaction per job: it locks the job's row with the same status and age
+condition, deletes `WHERE job_id = ? AND forge_event_swept(type)`, and, when rows went, records
+`job.swept` (`removed`, `days`, `ended`) on the job; the page knows a job was swept by that event
+and draws its line (`ui.md` § The job page). Each run then records one node-wide `events.swept`
+with the number of rows and jobs, the cut-off and the days (the migration's adds the `thinking_tokens` rows it deleted) — counts and dates, never a payload —
+even when nothing went, so that a sweep that stopped running is visible as an event that stopped.
+
+**The database holds the line, once.** `forge_event_swept(type)` is an immutable SQL function that
+says which types may go. The `events_append_only` trigger calls it: an `UPDATE` is always refused,
+a `DELETE` is refused unless the row's type is one the function says is swept, and the sweep selects
+by calling the same function — so the trigger and the sweep cannot hold two lists, and a sweep that
+reached a lifecycle event or a kept type would fail at the database, not only in a test. Age is the
+sweep's rule alone, because a trigger cannot read configuration. Changing the kept list is a
+migration that replaces the function.
+
+**`thinking_tokens` is never recorded.** Claude Code ticks a running counter as a `system` message;
+it was 38% of all rows (105k of 280k in prod, 2026-11-20) and it was only ever drawn behind the "Show N harness notices" count, which nothing else reads. The worker does
+not emit it (`claude-code-events.md`) and the platform refuses a `job.harness.notice` whose subtype
+is `thinking_tokens` from a worker of any release.
+
+**The migration** that adds the function deletes every existing `thinking_tokens` notice, runs the
+first sweep at the retention period configured when it runs, adds the indexes the pages read by
+(`(ticket_id, type, seq)`, `(job_id, type, seq)` and two partial ones that pair a call with its
+result), and a second migration compacts `events` (`VACUUM FULL`), so that the space every deleted
+row held goes back to the disk: the table is the size of what it kept. It holds `events` for its
+duration, in a deploy that is not yet serving. **Later sweeps do not compact**; the space they free
+is reused by Postgres.
+
+**A swept job's transcript.** The transcript blob holds every call and its whole result, where an
+event kept the first 4 KB. A workflow job's is a version of `transcript-*` on its ticket; a
+conversation's is recorded as a version when its process ends, `transcript-chat.jsonl`, served by
+the conversation's artifact route to its project's members. A conversation that ended before this
+was recorded has none, and says so.
+
 ## Open
 
-- **Deletion has no policy.** Nothing deletes a transcript or an old seed today. The store grows
+- **Deletion has no policy for the store.** The event log has one (§ Retention); the blobs do not.
+  Nothing deletes a transcript or an old seed today (`proposal-store-retention.md`). The store grows
   monotonically for the PoC, which is fine on the operator's disk and is not fine on the host.
   Retention lands with the closing step, when there is a bill attached. Bytes are now deleted
   by the staging sweep and by taking an upload back (bytes no act ever claimed) and by a person

@@ -365,6 +365,98 @@ defmodule Forge.EventsTest do
     end
   end
 
+  describe "reads that ask Postgres for the part they draw" do
+    defp note(ticket, type, payload \\ %{}) do
+      {:ok, event} = Events.append(type, :system, %{ticket_id: ticket.id, payload: payload})
+      event
+    end
+
+    test "newest_for_ticket is the newest few, newest first, without the unlisted" do
+      ticket = ticket_fixture()
+      events = for n <- 1..15, do: note(ticket, "ticket.noted", %{"n" => n})
+      note(ticket, "job.archive_read")
+
+      assert Enum.map(Events.newest_for_ticket(ticket.id, 10), & &1.seq) ==
+               events |> Enum.map(& &1.seq) |> Enum.reverse() |> Enum.take(10)
+    end
+
+    test "for_ticket and for_job page: the newest `limit` below `before`, oldest first" do
+      ticket = ticket_fixture()
+      events = for n <- 1..10, do: note(ticket, "ticket.noted", %{"n" => n})
+      seqs = Enum.map(events, & &1.seq)
+
+      assert Enum.map(Events.for_ticket(ticket.id), & &1.seq) == seqs
+      assert Enum.map(Events.for_ticket(ticket.id, limit: 3), & &1.seq) == Enum.take(seqs, -3)
+
+      assert Enum.map(Events.for_ticket(ticket.id, before: Enum.at(seqs, 4)), & &1.seq) ==
+               Enum.take(seqs, 4)
+
+      assert Enum.map(
+               Events.for_ticket(ticket.id, limit: 2, before: Enum.at(seqs, 4)),
+               & &1.seq
+             ) == Enum.slice(seqs, 2, 2)
+
+      job = job_fixture(%{ticket: ticket})
+      {:ok, a} = Events.append("job.harness.text", {:job, job.id}, %{job_id: job.id})
+      {:ok, b} = Events.append("job.harness.text", {:job, job.id}, %{job_id: job.id})
+      assert Enum.map(Events.for_job(job.id, limit: 1), & &1.seq) == [b.seq]
+      assert Enum.map(Events.for_job(job.id, before: b.seq), & &1.seq) == [a.seq]
+    end
+
+    test "merge_queue_for_ticket is the queue's story and the merge, and nothing for a ticket it never held" do
+      ticket = ticket_fixture()
+      note(ticket, "ticket.merged")
+      assert Events.merge_queue_for_ticket(ticket.id) == []
+
+      queued = note(ticket, "merge_queue.queued")
+      note(ticket, "ticket.noted")
+      merged = note(ticket, "ticket.merged")
+      # `_` is a wildcard in LIKE: a type that only looks like the queue's is not its.
+      note(ticket, "mergexqueue.queued")
+
+      assert Enum.map(Events.merge_queue_for_ticket(ticket.id), & &1.seq) == [
+               hd(Events.of_type_for_ticket(ticket.id, "ticket.merged")).seq,
+               queued.seq,
+               merged.seq
+             ]
+    end
+
+    test "said_for_ticket counts an admission only when a schedule made it" do
+      ticket = ticket_fixture()
+      note(ticket, "ticket.admitted", %{"state" => "refining"})
+      scheduled = note(ticket, "ticket.admitted", %{"schedule" => %{"name" => "weekly"}})
+      other = note(ticket, "transition.taken")
+      note(ticket, "ticket.admitted", %{"schedule" => "not an object"})
+      note(ticket, "job.created")
+
+      types = ["ticket.admitted", "transition.taken"]
+
+      assert Enum.map(Events.said_for_ticket(ticket.id, types, 10), & &1.seq) ==
+               [other.seq, scheduled.seq]
+
+      assert Enum.map(Events.said_for_ticket(ticket.id, types, 1), & &1.seq) == [other.seq]
+    end
+
+    test "answered_with_files is the answers that have an attachment row, and no other" do
+      ticket = ticket_fixture()
+      plain = note(ticket, "question.answered")
+      with_file = note(ticket, "question.answered")
+
+      # A row for a file whose upload did not arrive has no name, size or version: still a row.
+      Repo.insert!(%Forge.Attachments.Attachment{
+        original_name: "shot.png",
+        to_kind: :answer,
+        to_event_seq: with_file.seq,
+        author: %{"kind" => "user", "id" => nil},
+        user_id: Forge.AccountsFixtures.user_fixture().id,
+        ticket_id: ticket.id
+      })
+
+      assert Enum.map(Events.answered_with_files(ticket.id), & &1.seq) == [with_file.seq]
+      assert plain.seq != with_file.seq
+    end
+  end
+
   test "events can never be updated or deleted" do
     {:ok, event} = Events.append("ticket.noted", :system)
 

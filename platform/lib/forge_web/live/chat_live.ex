@@ -10,9 +10,12 @@ defmodule ForgeWeb.ChatLive do
   **The reply streams, and so does what the agent does.** This is the case `ui.md` § Motion and
   structure allows: the operator is looking at this one piece of work. It is subscribed per job,
   so a page open on one conversation is not woken by every event on the node, and a harness
-  event is appended to the log the page already holds and the transcript folded again from it —
-  rather than every event reading the log, the diff and the documents again, several times a
-  sentence.
+  event is appended to the events the page already holds and the transcript folded again from
+  them — rather than every event reading the log, the diff and the documents again, several times a
+  sentence. **What the page holds is ten turns** and the one in progress, and older turns are read
+  when the reader reaches the top (`Forge.Conversations.talk/3`); what the page draws about the
+  whole conversation — its plan, the open question's card, the now line, the heading — comes from
+  queries of their own and not from the turns held (`docs/design/ui.md` § Talk).
   """
 
   use ForgeWeb, :live_view
@@ -62,9 +65,11 @@ defmodule ForgeWeb.ChatLive do
        forms: ForgeWeb.Operator.QuestionForm.init()
      )
      |> Decision.init()
-     |> JobStream.init()
+     |> assign(activity: JobStream.new(chat.id), reach: reach(socket))
      |> ForgeWeb.Capacity.project(project)
-     |> load()}
+     |> open_talk()
+     |> load()
+     |> load_activity()}
   end
 
   defp title(project, nil), do: "Chat · #{project.name}"
@@ -87,8 +92,46 @@ defmodule ForgeWeb.ChatLive do
     socket =
       if tab != socket.assigns.tab, do: assign(socket, decision_open: false), else: socket
 
-    {:noreply, assign(socket, tab: tab)}
+    {:noreply, socket |> assign(tab: tab) |> load_activity()}
   end
+
+  # Talk is read on mount: its newest ten turns and the open one, or — for a socket rejoining —
+  # back as far as it had been read, in one query bounded by it (`docs/design/ui.md` § A reconnect
+  # is not a reload). A position is the page's own conversation's or nothing.
+  defp open_talk(%{assigns: %{chat_id: id}} = socket) do
+    request =
+      case JobStream.reach(socket.assigns.reach["talk"], id) do
+        nil -> :latest
+        position -> {:since, position}
+      end
+
+    assign(socket, talk: Conversations.talk(id, request))
+  end
+
+  defp reach(socket) do
+    with true <- connected?(socket),
+         %{"reach" => %{} = reach} <- get_connect_params(socket) do
+      reach
+    else
+      _none -> %{}
+    end
+  end
+
+  # What Activity shows is read only while it is the view on screen, as Changes is: the stream is
+  # counted on every load (the tab says how many) and opened — or read back as far as a rejoining
+  # socket had it — when the tab is first shown.
+  defp load_activity(%{assigns: %{activity: stream, tab: "activity"}} = socket) do
+    if JobStream.open?(stream) do
+      socket
+    else
+      case JobStream.reach(socket.assigns.reach["activity"], stream.job_id) do
+        nil -> assign(socket, activity: JobStream.open(stream))
+        position -> assign(socket, activity: JobStream.rejoin(stream, position))
+      end
+    end
+  end
+
+  defp load_activity(socket), do: socket
 
   defp load(%{assigns: %{chat_id: id, project: project, ticket: ticket}} = socket) do
     chat = Conversations.get!(id)
@@ -99,7 +142,6 @@ defmodule ForgeWeb.ChatLive do
     socket
     |> assign(
       chat: chat,
-      events: Events.for_job(id),
       docs: docs(chat, project, ticket) ++ attached_docs(socket, chat, project, ticket),
       # What the box is drawn with (the pool's room), and what came with each message, read again
       # whenever the page loads: a file withdrawn since is *withdrawn* where its link was.
@@ -136,16 +178,65 @@ defmodule ForgeWeb.ChatLive do
       model: Jobs.model_for(chat),
       effort: Jobs.effort_for(chat)
     )
+    |> reload_streams()
     |> assign_strip()
     |> fold()
     |> assign_decision()
+  end
+
+  # A reload reads what arrived above what each stream holds, rather than the stream again: the
+  # turns' events above the newest held, the turn in progress, and the figures counted. A sweep of
+  # the conversation's rows heard in what arrived reads the newest turns afresh, the rows held
+  # being gone.
+  defp reload_streams(%{assigns: %{chat_id: id, talk: talk}} = socket) do
+    newest = talk.events |> List.last() |> then(&((&1 && &1.seq) || talk.from))
+    fresh = Conversations.talk_after(id, newest)
+
+    talk =
+      if Enum.any?(fresh, &(&1.type == "job.swept")),
+        do: Conversations.talk(id, :latest),
+        else: %{talk | events: talk.events ++ fresh}
+
+    assign(socket,
+      talk: talk,
+      open_turn: Conversations.open_turn(id),
+      activity: JobStream.reload(socket.assigns.activity),
+      plan: plan(id),
+      memory: Forge.Jobs.Memory.trouble(id),
+      last_said: Conversations.last_said(id),
+      released_by_update: released_by_update?(id),
+      secrets_gone: secrets_gone(id),
+      # What the page is titled by, from the conversation's first message wherever it is: the turns
+      # held may not reach it.
+      first_said: first_said(id),
+      transcripts: WorkScreen.transcript_links(socket.assigns.chat, socket.assigns.project, nil)
+    )
+  end
+
+  defp first_said(id) do
+    case Events.earliest_for_job(id, "chat.message") do
+      %{payload: %{"text" => text}} -> text
+      _none -> nil
+    end
+  end
+
+  # The agent's plan band: its latest top-level `TodoWrite` in the whole conversation, read by a
+  # query of its own and not taken from the turns held.
+  defp plan(id) do
+    case Forge.Events.Stream.latest_todo(id, true) do
+      nil ->
+        []
+
+      event ->
+        event.payload |> Conversations.action(event.inserted_at) |> ForgeWeb.Actions.todos()
+    end
   end
 
   # The one decision row a conversation has (`docs/design/ui.md` § The decision row): a step's
   # Accept, or else merging its branch, which nobody is waiting on.
   defp assign_decision(%{assigns: assigns} = socket) do
     decision =
-      Decision.step(assigns.step, questions(assigns.messages)) ||
+      Decision.step(assigns.step, Conversations.questions(assigns.last_said)) ||
         Decision.merge(assigns, assigns.chat)
 
     Decision.put(socket, decision)
@@ -175,10 +266,10 @@ defmodule ForgeWeb.ChatLive do
     end
   end
 
-  # The projection, from the log the page holds. The fold is pure; what the transcript's references
+  # The projection, from the turns the page holds. The fold is pure; what the transcript's references
   # mean is not, and costs no query when the messages hold none (`Transcript.resolve/3`) and a
   # few — not one per message — when they do.
-  defp fold(%{assigns: %{events: events}} = socket) do
+  defp fold(%{assigns: %{talk: %{events: events}, open_turn: open_turn}} = socket) do
     messages = Conversations.transcript(events)
     {attached, attached_ids} = attached(socket, messages)
 
@@ -186,12 +277,9 @@ defmodule ForgeWeb.ChatLive do
       messages: messages,
       attached: attached,
       attached_ids: attached_ids,
-      now: Conversations.now(events),
-      memory: Forge.Jobs.Memory.trouble(events),
-      plan: Transcript.plan(messages),
+      now: Conversations.now(open_turn),
       refs:
         Transcript.resolve(messages, transcript_scope(socket.assigns), socket.assigns.chat_id),
-      secrets_gone: secrets_gone(events),
       at: DateTime.utc_now()
     )
   end
@@ -218,11 +306,12 @@ defmodule ForgeWeb.ChatLive do
 
   # What its latest run could not hold because it was deleted since the conversation was opened
   # (`docs/design/secrets.md` § Conversations): said on the page, rather than left for the agent
-  # to find its variable missing halfway through a turn.
-  defp secrets_gone(events) do
-    case List.last(for %{type: "job.secrets", payload: payload} <- events, do: payload) do
+  # to find its variable missing halfway through a turn. The newest `job.secrets` is asked for by
+  # itself: it may be on a turn the page does not hold.
+  defp secrets_gone(id) do
+    case Events.latest_for_job(id, "job.secrets") do
       nil -> []
-      run -> run["gone"]
+      %{payload: run} -> run["gone"]
     end
   end
 
@@ -316,13 +405,7 @@ defmodule ForgeWeb.ChatLive do
   @impl true
   def handle_info({:job_event, id, event}, %{assigns: %{chat_id: id}} = socket) do
     if JobStream.streamed?(event) do
-      case JobStream.add(socket.assigns.events, event) do
-        :seen ->
-          {:noreply, socket}
-
-        {:ok, events} ->
-          {:noreply, socket |> assign(events: events) |> fold() |> JobStream.catch_up(event)}
-      end
+      {:noreply, socket |> add(event) |> fold() |> JobStream.catch_up(event)}
     else
       {:noreply, load(socket)}
     end
@@ -352,6 +435,58 @@ defmodule ForgeWeb.ChatLive do
        catching_up: false
      )}
   end
+
+  # What a streamed event is added to: the turns held (by its place, an event held already skipped),
+  # the turn in progress, and the Activity stream and its figures — and what it changes beyond them,
+  # which is read by the query that reads it.
+  defp add(socket, event) do
+    socket
+    |> add_to(:talk, event, Conversations.fold_types())
+    |> add_to(:open_turn, event, Conversations.open_types())
+    |> add_to_activity(event)
+    |> touch(event)
+  end
+
+  defp add_to(socket, :talk, %{type: type} = event, types) do
+    talk = socket.assigns.talk
+    held? = Enum.any?(talk.events, &(&1.seq == event.seq))
+
+    if type in types and not held?,
+      do: assign(socket, talk: %{talk | events: sorted([event | talk.events])}),
+      else: socket
+  end
+
+  defp add_to(socket, :open_turn, %{type: type} = event, types) do
+    held = socket.assigns.open_turn
+
+    if type in types and not Enum.any?(held, &(&1.seq == event.seq)),
+      do: assign(socket, open_turn: sorted([event | held])),
+      else: socket
+  end
+
+  defp add_to_activity(socket, event) do
+    case JobStream.add(socket.assigns.activity, event) do
+      :seen -> socket
+      {:ok, stream} -> assign(socket, activity: stream)
+    end
+  end
+
+  # The oldest event the turns held start at: a rejoin reads back from the turn that holds it.
+  defp talk_reach(%{events: [oldest | _rest]}, id), do: "#{id}:#{oldest.seq}"
+  defp talk_reach(_talk, _id), do: nil
+
+  defp sorted(events), do: Enum.sort_by(events, & &1.seq)
+
+  defp touch(socket, %{type: "job.harness.memory"}),
+    do: assign(socket, memory: Forge.Jobs.Memory.trouble(socket.assigns.chat_id))
+
+  defp touch(socket, %{type: "job.harness.tool_use", payload: %{"name" => "TodoWrite"} = payload}) do
+    if is_nil(payload["parent_tool_use_id"]),
+      do: assign(socket, plan: plan(socket.assigns.chat_id)),
+      else: socket
+  end
+
+  defp touch(socket, _event), do: socket
 
   @impl true
   def handle_event("draft", %{"text" => text}, socket),
@@ -431,10 +566,25 @@ defmodule ForgeWeb.ChatLive do
     end
   end
 
-  def handle_event("more", params, socket), do: JobStream.handle_event("more", params, socket)
+  # Activity's next older page, and the notices behind their count.
+  def handle_event("more", _params, socket),
+    do: {:noreply, assign(socket, activity: JobStream.older(socket.assigns.activity))}
 
-  def handle_event("notices", params, socket),
-    do: JobStream.handle_event("notices", params, socket)
+  def handle_event("notices", _params, %{assigns: %{activity: stream}} = socket) do
+    drawn = stream |> JobStream.held() |> WorkScreen.entries(stream.notices) |> length()
+    {:noreply, assign(socket, activity: JobStream.toggle_notices(stream, drawn))}
+  end
+
+  # Talk's next ten older turns, read from the turn the page starts after (never a position the
+  # request names), joined to what is held, and the transcript folded again.
+  def handle_event("talk:more", _params, %{assigns: %{talk: %{more: false}}} = socket),
+    do: {:noreply, socket}
+
+  def handle_event("talk:more", _params, %{assigns: %{talk: talk, chat_id: id}} = socket) do
+    older = Conversations.talk(id, {:older, talk.from})
+    talk = %{talk | events: older.events ++ talk.events, from: older.from, more: older.more}
+    {:noreply, socket |> assign(talk: talk) |> fold()}
+  end
 
   defp question_form(event, params, socket) do
     case ForgeWeb.Operator.QuestionForm.handle(event, params, socket) do
@@ -491,20 +641,20 @@ defmodule ForgeWeb.ChatLive do
   # The queue asks the same thing of the same reply, so the asking lives in `Conversations`. What
   # was *said* (`Conversations.said/1`), because that is the reading `Operator.answer_chat/4`
   # checks the form's reply against: a turn that only acted is not the reply being answered.
-  # Reading the whole transcript's last instead is an equivalent mutant as the harness behaves:
-  # a turn starts with a person's message, so a silent turn is never directly after a reply that
-  # asked, and both readings find no form where they differ.
-  defp questions(messages),
-    do: messages |> Conversations.said() |> List.last() |> Conversations.questions()
+  # **From `Conversations.last_said/1`, read on a load** (a message sent and a turn's end both
+  # reload the page) and not from the turns held, which may hold nothing said at all. A streamed
+  # block does not read it, so a reply still being spoken draws its card when the page loads, and its
+  # turn's end reloads the page — which is when the queue offers it.
+  defp questions(last_said), do: Conversations.questions(last_said)
 
-  defp reply(messages), do: messages |> Conversations.said() |> Conversations.reply_ref()
+  defp reply(last_said), do: Conversations.reply_ref(List.wrap(last_said))
 
   # Waiting on *you*: the agent finished a turn and said something — the queue's reading, from
   # the same messages and the same rule (`Conversations.waiting?/1`). A reply still being spoken
   # is not waiting on anyone, and neither is a turn that only acted.
   # Whether it holds a machine does not matter: one released by the idle timeout is waiting on you
   # the same (`subline/1` leaves out one a person ended).
-  defp waiting?(messages), do: messages |> Conversations.said() |> Conversations.waiting?()
+  defp waiting?(last_said), do: last_said |> List.wrap() |> Conversations.waiting?()
 
   # The agent has the ball: either it has not started this turn's reply, or it is still in it —
   # an assistant turn no `chat.turn` has closed.
@@ -525,16 +675,17 @@ defmodule ForgeWeb.ChatLive do
   def render(assigns) do
     messages = assigns.messages
 
+    last_said = assigns.last_said
+
     assigns =
       assign(assigns,
-        questions: questions(messages),
-        reply: reply(messages),
+        questions: questions(last_said),
+        reply: reply(last_said),
         responding: responding?(assigns.chat, messages),
         live: live?(assigns.chat),
         can_end: not Jobs.Job.step?(assigns.chat) and is_nil(assigns.ending),
-        lost:
-          assigns.sendable and Conversations.lost?(assigns.chat, Conversations.said(messages)),
-        title: page_heading(assigns, messages),
+        lost: assigns.sendable and Conversations.lost?(assigns.chat, List.wrap(last_said)),
+        title: page_heading(assigns),
         viewer: assigns.current_scope.user,
         fetch: fetch_command(assigns.project, assigns.chat),
         conflict: conflict(assigns.decision),
@@ -591,6 +742,12 @@ defmodule ForgeWeb.ChatLive do
       </:aside>
 
       <ChatViews.talk :if={@tab == "talk"} {assigns} />
+      <span
+        id="stream-reach"
+        hidden
+        data-talk={talk_reach(@talk, @chat_id)}
+        data-activity={JobStream.reach_of(@activity)}
+      ></span>
 
       <WorkScreen.body :if={@tab == "changes"} id="changes">
         <ChatViews.changes {assigns} />
@@ -602,11 +759,10 @@ defmodule ForgeWeb.ChatLive do
 
       <WorkScreen.body :if={@tab == "activity"} id="activity">
         <WorkScreen.activity
-          events={@events}
-          shown={@shown}
-          notices={@notices}
-          heading={WorkScreen.stream_heading(@chat, @events)}
+          stream={@activity}
+          heading={WorkScreen.stream_heading(@chat, @activity.count)}
           hrefs={WorkScreen.version_hrefs(@docs)}
+          transcripts={@transcripts}
         />
       </WorkScreen.body>
     </Layouts.app>
@@ -615,10 +771,8 @@ defmodule ForgeWeb.ChatLive do
 
   # A step's conversation is its ticket's work, and its page the ticket's frame: titled by the
   # ticket. Any other is called what the person opened it with (`Conversations.title/3`).
-  defp page_heading(%{chat: chat, ticket: ticket, step: step}, messages) do
-    first = Enum.find_value(messages, fn m -> m.role == :user && m.text end)
-    Conversations.title(chat, step && ticket, first)
-  end
+  defp page_heading(%{chat: chat, ticket: ticket, step: step, first_said: first}),
+    do: Conversations.title(chat, step && ticket, first)
 
   # Under the title: a step's ticket, its state and visit, as the ticket's own page says it; a
   # conversation's own state otherwise — responding and on which turn, waiting on you, idle,
@@ -639,14 +793,14 @@ defmodule ForgeWeb.ChatLive do
   # Nothing says a conversation stopped: one whose machine was released is idle, and the only
   # ending a person sees is the one they chose. One an update released says why, though, beside
   # whatever it otherwise is.
-  defp subline(%{chat: chat, responding: responding, messages: messages} = assigns) do
-    released = after_update(assigns.live, assigns[:events] || [])
+  defp subline(%{chat: chat, responding: responding, last_said: last_said} = assigns) do
+    released = after_update(assigns.live, assigns.released_by_update)
 
     "chat · " <>
       cond do
         responding -> "▸ responding · turn #{chat.turns + 1}"
         assigns.ending -> "ended"
-        waiting?(messages) -> "waiting on you" <> released
+        waiting?(last_said) -> "waiting on you" <> released
         chat.status == :pending -> "waiting for a machine"
         true -> "idle" <> released
       end
@@ -657,16 +811,21 @@ defmodule ForgeWeb.ChatLive do
   # Only while the update is the last thing that happened to it: a conversation holding a machine
   # has been started again, a person's message since has started it, and a machine lost since
   # (`job.interrupted`) is a different reason, which the update's old `chat.ended` must not speak
-  # for. The events are in order, so the newest `chat.ended` and what followed it are the split.
-  defp after_update(true, _events), do: ""
+  # for. So the newest `chat.ended` and what followed it decide (`released_by_update?/1`).
+  defp after_update(true, _released), do: ""
+  defp after_update(false, false), do: ""
+  defp after_update(false, true), do: " — its machine stopped to update; a message carries it on"
 
-  defp after_update(false, events) do
-    {since, ended} = events |> Enum.reverse() |> Enum.split_while(&(&1.type != "chat.ended"))
+  # Read by queries of their own on a load, not from the turns held, which may not reach back to
+  # the update: the newest `chat.ended`, and whether a message or a lost machine came after it.
+  defp released_by_update?(id) do
+    case Events.latest_for_job(id, "chat.ended") do
+      %{payload: %{"reason" => "update"}, seq: seq} ->
+        Events.for_job_types(id, ["chat.message", "job.interrupted"], seq) == []
 
-    if match?([%{payload: %{"reason" => "update"}} | _], ended) and
-         not Enum.any?(since, &(&1.type in ["chat.message", "job.interrupted"])),
-       do: " — its machine stopped to update; a message carries it on",
-       else: ""
+      _other ->
+        false
+    end
   end
 
   # A step's conversation carries its ticket's strip, with the ticket's counts
@@ -675,11 +834,11 @@ defmodule ForgeWeb.ChatLive do
   # changes, and never in the template: a step's conversation renders on every streamed block,
   # and the strip reads the ticket's jobs, its documents and a diff of its whole branch.
   defp assign_strip(%{assigns: %{step: %{}} = assigns} = socket) do
-    %{project: project, ticket: ticket, chat: chat, events: events} = assigns
+    %{project: project, ticket: ticket, chat: chat, activity: activity} = assigns
     current = ticket.id |> Jobs.for_ticket() |> List.last()
 
     strip =
-      for view <- TicketViews.strip_of(project, ticket, current, {chat.id, events}) do
+      for view <- TicketViews.strip_of(project, ticket, current, {chat.id, activity.count}) do
         # Talk is this page: patched, so its drafts and its scroll stay.
         if view.key == "talk",
           do: view |> Map.delete(:navigate) |> Map.put(:patch, ~p"/chats/#{chat.id}"),
@@ -700,7 +859,7 @@ defmodule ForgeWeb.ChatLive do
         {"talk", "Talk", nil},
         {"changes", "Changes", Diff.file_count(assigns.diff)},
         {"docs", "Docs", length(assigns.docs)},
-        {"activity", "Activity", WorkScreen.activity_count(assigns.events)}
+        {"activity", "Activity", assigns.activity.count}
       ],
       ~p"/chats/#{assigns.chat_id}"
     )

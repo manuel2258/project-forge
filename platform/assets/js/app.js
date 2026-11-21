@@ -35,12 +35,29 @@ const ticketLook = () => {
   return el ? {look: {ticket: el.dataset.ticket, since: el.dataset.since || ""}} : {}
 }
 
+// How far back each stream a page holds was read (`ForgeWeb.JobStream.reach_of/1`, drawn as
+// `#stream-reach`), so that a rejoin reads it back as far — in one query — and not the newest page
+// alone (`docs/design/ui.md` § A reconnect is not a reload). The server takes a position only when
+// it is a whole number of the page's own job.
+const streamReach = () => {
+  const el = document.getElementById("stream-reach")
+  if (!el) return {}
+  const reach = {}
+  for (const [key, value] of Object.entries(el.dataset)) if (value) reach[key] = value
+  return Object.keys(reach).length ? {reach} : {}
+}
+
+// A page that read back to a row (the job page's failure link) asks for it to be scrolled to.
+window.addEventListener("phx:scroll-to", ({detail}) => {
+  document.getElementById(detail.id)?.scrollIntoView({block: "start"})
+})
+
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   // Asked again at every join. A rejoin of a ticket's page sends back the look the page was
   // opened with, so the rejoin records none (`docs/design/ui.md` § The end of the pass, and
   // *All*).
-  params: () => ({_csrf_token: csrfToken, ...ticketLook()}),
+  params: () => ({_csrf_token: csrfToken, ...ticketLook(), ...streamReach()}),
   hooks: {...colocatedHooks, PushSubscribe, Connection},
   // Given rather than Phoenix's own, so the top bar can count down to the next try.
   reconnectAfterMs,

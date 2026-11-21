@@ -16,43 +16,45 @@ the other side was for before deciding: the manifest names the commits that land
 implementation the resolution touches, so the result still satisfies `refinement.md`'s acceptance
 criteria and not just what merged cleanly.
 
-## `done` merges with nobody looking
+## Merge it: `done` is the default
 
 **`done` puts the ticket straight back into the merge queue, in its old place, and it lands on
-`main` as soon as it checks clean.** Nobody reads what you did first. A person approved this
-changeset once; ending on `done` is you saying the rebased one is still the change they approved.
-So end on `done` only when every one of these holds, and on `needs_review` otherwise:
+`main` as soon as it checks clean.** A person approved this changeset once, and the review loop a
+`needs_review` starts costs hours of waiting and a review's worth of tokens, to read a resolution
+that is almost always smaller than the change they already approved. So **lean toward `done`**:
+end on it whenever you have kept both sides' intent and the gate passes on what you leave. Ask
+whether the person would be surprised by the result, not whether you made a choice. Resolving a
+conflict is making choices; that alone is not a reason to send it back.
 
-1. **The engine sent the ticket here.** The manifest's line on how the ticket arrived says who took
-   the transition. *The engine* is the merge queue finding a conflict in a ticket a person
-   approved. *A person* is someone sending a ticket here by hand, from a notice that it no longer
-   merges or from a stuck rebase, and that may be a ticket nobody has approved at all — so it is
-   `needs_review` whatever else is true.
-2. **Every resolution is mechanical**: both sides kept, with nothing to choose between. Two imports
-   kept, two entries added to one list, the new code calling a function by the name the other side
-   renamed it to. Where keeping both meant deciding what the code should now do — both sides changed
-   the same logic, or one side removed what the other relies on — that is a judgement a reviewer
-   should see.
-3. **The gate passes on the resolved commit.** Commit the merge, invoke `check`, and read its log.
-   You may fix what it finds only where the fix is as mechanical as the resolutions: a call site of
-   something the other side renamed, a test fixture missing a field the other side added. Exit
-   status 2 is the machine saying the gate could not run, which is not a pass. Three invocations at
-   most; a gate still failing after that is `needs_review`.
-4. **Nothing else changed.** What you leave differs from a plain merge of the two sides only by the
-   resolutions and those fixes — no cleanup, no improvement, no reformatting of lines nobody
-   conflicted on.
+End on `needs_review` only when one of these holds:
+
+1. **The engine did not send the ticket here.** The manifest's line on how the ticket arrived says
+   who took the transition. *The engine* is the merge queue finding a conflict in a ticket a person
+   approved. *A person* is someone sending a ticket here by hand, and that may be a ticket nobody
+   has approved at all — so it is `needs_review` whatever else is true.
+2. **The gate does not pass on the resolved commit.** Commit the merge, invoke `check` once, and
+   read its log. You may fix what it finds where the fix follows from the other side's change: a
+   call site of something it renamed, a fixture missing a field it added, a test that asserted what
+   the other side deliberately changed. Exit status 2 is the machine saying the gate could not run,
+   which is not a pass. Three invocations at most; a gate still failing after that is
+   `needs_review`.
+3. **Keeping both sides would lose behaviour that a person approved**, or you could not tell which
+   side's behaviour the result should have — the two sides changed the same logic to do different
+   things, or one side removed what the other relies on and nothing in `refinement.md` says which
+   wins. If you can say in a sentence why your resolution satisfies both, it is not this case.
+4. **You changed something that is not a resolution or a fix the gate demanded** — cleanup,
+   improvement, reformatting of lines nobody conflicted on. Take it back out rather than sending the
+   ticket to review for it.
 
 `needs_review` takes the ticket out of the queue and back through `checking`, `reviewing` and
-`presenting` to a person, who approves it again. The review reads your resolutions and not the
-change the person already approved (`agents/review.md` § After a rebase, review the rebase), so it
-costs little; merging a resolution you were unsure of costs more, and the person has no chance to
-see it first.
+`presenting` to a person, who approves it again. Use it for a real doubt, and say what the doubt is;
+do not use it as insurance.
 
 ## What to write
 
 `rebase.md`, with front matter `outcome: done` or `outcome: needs_review`. Then each conflicted path
 and how it was resolved — what each side was doing and why the resolution keeps both — what the
-gate said, and for `needs_review`, which of the four conditions above did not hold. That last part
+gate said, and for `needs_review`, which of the conditions above applied. That last part
 is what `reviewing` reads first, so make it specific. Then the changeset.
 
 Where both sides changed the same logic and keeping either would lose behaviour, say so in

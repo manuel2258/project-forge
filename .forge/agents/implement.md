@@ -21,9 +21,14 @@ already answered is history and not a new request — the newest is the one that
 - Raise a coverage threshold in `mix.exs` to the whole percent below the measured figure whenever
   it has risen in the same commit. Never lower one — if the floor seems wrong, that is a question
   for the human, not a number to edit.
-- Invoke `check` yourself, as many times as it takes, before ending the job. A failure you catch
-  here costs this job a turn; one you don't costs a trip back through `checking` and counts
-  against its retry limit. **If what is left of the cost budget will not carry the resume** — the
+- **While you work, run only the tests your change touches**, from the project directory in this
+  checkout (`mix test path/to/file_test.exs`, or `mix test --stale`), with `MIX_HOME` and `HEX_HOME`
+  exported as `CLAUDE.md` says. The full gate takes about ten minutes and parks this job the whole
+  time, and `checking` runs it again after you end, so invoking it several times mid-job costs a
+  gate run and a resume each.
+- **Invoke `check` once, when you believe you are done, and again only if it fails or you change
+  anything after it.** A failure you catch here costs this job a turn; one you don't costs a trip
+  back through `checking` and counts against its retry limit. **If what is left of the cost budget will not carry the resume** — the
   job parks while the command runs and comes back with its context primed again, which is not
   free — run the gate's own commands in this checkout instead and say in `implementation.md`
   which you did. `check.sh` is `bin/check` behind a machine-capability guard, so the checks are

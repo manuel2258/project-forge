@@ -39,7 +39,7 @@ reconciled the two sides, and that is the whole of this round:
   and whatever the rebase changed on top, and nothing else. Not `git diff <last reviewed
   commit>..HEAD`, which also holds everything `main` brought in, other tickets' reviewed work
   included, and not the changeset from the start again.
-- **Start from `rebase.md`**: which of its four conditions did not hold is why you are here, and
+- **Start from `rebase.md`**: which of its conditions applied is why you are here, and
   each resolution it describes is a claim to check against that diff.
 - **The question each resolution has to answer** is whether it keeps both sides' intent, or quietly
   drops one side's behaviour. Read what the other side was for, in the commits the rebase named and

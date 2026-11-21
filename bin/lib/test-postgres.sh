@@ -20,11 +20,14 @@
 # FORGE_TEST_PGROOT so `forge_test_postgres_stop` can find it; the caller owns the trap. Returns 1
 # when the server would not start, explicitly, because a caller that tests the function
 # (`forge_test_postgres_start || …`) turns `set -e` off inside it.
+# Durability is off (fsync, synchronous_commit, full_page_writes): the data is a throwaway cluster
+# that goes with the run, so a crash loses nothing anyone wants, and the sandbox's writes no longer
+# wait on the disk.
 forge_test_postgres_start() {
   FORGE_TEST_PGROOT="$(mktemp -d)"
   initdb -U postgres --auth-local=trust -D "$FORGE_TEST_PGROOT/data" > /dev/null || return 1
   pg_ctl -D "$FORGE_TEST_PGROOT/data" -l "$FORGE_TEST_PGROOT/server.log" -w \
-    -o "-c listen_addresses= -c unix_socket_directories=$FORGE_TEST_PGROOT" start > /dev/null || return 1
+    -o "-c listen_addresses= -c unix_socket_directories=$FORGE_TEST_PGROOT -c fsync=off -c synchronous_commit=off -c full_page_writes=off" start > /dev/null || return 1
   FORGE_TEST_DB_SOCKET_DIR="$FORGE_TEST_PGROOT"
   export FORGE_TEST_PGROOT FORGE_TEST_DB_SOCKET_DIR
 }

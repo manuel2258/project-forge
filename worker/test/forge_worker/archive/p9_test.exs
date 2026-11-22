@@ -45,6 +45,23 @@ defmodule ForgeWorker.Archive.P9Test do
     assert {6, {:flush, 4}} = P9.decode(message(108, 6, <<4::16-little>>))
   end
 
+  test "decode keeps the name of an xattrwalk, which is empty for the list of every attribute" do
+    assert {7, {:xattrwalk, 1, 2, ""}} =
+             P9.decode(message(30, 7, <<1::32-little, 2::32-little, 0::16-little>>))
+
+    assert {8, {:xattrwalk, 1, 2, "user.x"}} =
+             P9.decode(message(30, 8, <<1::32-little, 2::32-little, 6::16-little, "user.x">>))
+
+    # A name that is cut short, or a body with more than the name, is not the protocol.
+    assert P9.decode(message(30, 9, <<1::32-little, 2::32-little, 6::16-little, "user">>)) ==
+             :error
+
+    assert P9.decode(message(30, 9, <<1::32-little, 2::32-little, 0::16-little, "extra">>)) ==
+             :error
+
+    assert P9.decode(message(30, 9, <<1::32-little, 2::32-little>>)) == :error
+  end
+
   test "decode refuses a message that is cut short or has more than it says" do
     assert P9.decode(
              message(110, 3, <<1::32-little, 2::32-little, 2::16-little, 1::16-little, "a">>)
@@ -82,6 +99,9 @@ defmodule ForgeWorker.Archive.P9Test do
              <<11::32-little, 7, 9::16-little, 30::32-little>>
 
     assert IO.iodata_to_binary(P9.clunk(3)) == <<7::32-little, 121, 3::16-little>>
+
+    assert IO.iodata_to_binary(P9.xattrwalk(5, 258)) ==
+             <<15::32-little, 31, 5::16-little, 258::64-little>>
 
     read = IO.iodata_to_binary(P9.read(4, "abc"))
     assert read == <<14::32-little, 117, 4::16-little, 3::32-little, "abc">>

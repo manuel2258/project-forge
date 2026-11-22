@@ -375,6 +375,9 @@ defmodule ForgeWorker.Archive.Server do
       {:ok, %{open: {:dir, _}}} ->
         error({:error, :eisdir}, state)
 
+      {:ok, %{xattr: true}} ->
+        {:reply, &P9.read(&1, ""), state}
+
       _unopened ->
         error({:error, :ebadf}, state)
     end
@@ -410,7 +413,24 @@ defmodule ForgeWorker.Archive.Server do
   defp dispatch({:flush, oldtag}, state),
     do: {:reply, &P9.flush/1, %{state | waiting: Map.delete(state.waiting, oldtag)}}
 
-  defp dispatch({:xattrwalk, _fid, _newfid}, state), do: error({:error, :enodata}, state)
+  # An empty name asks for the list of every attribute, and there are none: the new fid holds an
+  # empty list, which a read answers with nothing and a clunk drops. It has no path, so nothing
+  # can walk, open or stat it into the file it came from. A named attribute does not exist.
+  #
+  # Equivalent mutant: adding `path: held.path` beside `xattr: true` changes nothing observable,
+  # because `with_fid/3` refuses every fid marked `xattr` before a handler reads its path. What a
+  # test can see is the `open` it must not inherit (see the test on an already open source).
+  defp dispatch({:xattrwalk, fid, newfid, name}, state) do
+    with_fid(state, fid, fn _held ->
+      if name == "" do
+        fids = Map.put(state.fids, newfid, %{xattr: true, open: nil})
+        {:reply, &P9.xattrwalk(&1, 0), %{state | fids: fids}}
+      else
+        error({:error, :enodata}, state)
+      end
+    end)
+  end
+
   defp dispatch({:readlink}, state), do: error({:error, :einval}, state)
   defp dispatch({:unsupported, _type}, state), do: error({:error, :eopnotsupp}, state)
   defp dispatch({:mutating, _type}, state), do: error({:error, :erofs}, state)
@@ -418,8 +438,10 @@ defmodule ForgeWorker.Archive.Server do
 
   defp error(reply, state), do: {:reply, reply, state}
 
+  # An attribute fid has no path, so every message that goes by path refuses it here.
   defp with_fid(state, fid, fun) do
     case fid(state, fid) do
+      {:ok, %{xattr: true}} -> error({:error, :ebadf}, state)
       {:ok, held} -> fun.(held)
       :error -> error({:error, :ebadf}, state)
     end

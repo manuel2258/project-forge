@@ -109,6 +109,14 @@ socket in it.
 - **Read-only is the server's rule as well as the mount's.** Every message that would change
   anything, and `lopen` with a write, truncate, append or create flag, is `EROFS`. A file is mode
   0444 and a folder 0555, owned by root.
+- **Extended attributes: none.** `Txattrwalk` with an empty name is the client's `listxattr`, and
+  is answered `Rxattrwalk` with size 0: an empty list, from any fid that is not itself an attribute fid. The new fid holds
+  nothing and has no path; a `Tread` of it gives zero bytes at any offset without a `Tlopen`, a
+  `Tclunk` drops it, and a walk, open, `getattr`, `readdir` or further `xattrwalk` on it is `EBADF`, so it
+  never reaches the file or folder it came from. A named attribute is `ENODATA`, which is right
+  for one that does not exist; creating one is `EROFS`; an unknown fid is `EBADF` whatever the
+  name. Answering `ENODATA` to the list made `ls -l`, `cp -a` and `tar --xattrs` print an error
+  per path, and `cp -a` exit 1. The kernel sends no `Tread` for a size of 0, only the clunk.
 - **Listing and reading.** Attaching, `stat` of the root and `statfs` fetch nothing; listing the root, or walking into it,
   fetches the root listing (two small files and the ticket numbers) and no file's bytes. A ticket's
   listing is
@@ -184,14 +192,19 @@ such a process at the worker's start.
 
 ## Not verified here
 
-The kernel mount itself: `nix/worker-health` has an item that mounts for a job, looks at the folder as
-the job's user, sees a write refused and a read of a file fail as `Connection timed out` (its platform
-is a port nothing listens on, so **no successful read through the kernel is checked**), and finds
-the mount gone afterwards. It needs KVM and **has not
-run** in the environment this was built in; the gate covers the 9P server and the door, not the
-kernel's client. The modules are on the image (`9p.ko` and `9pnet_fd.ko` are in the kernel's module
-tree on a running worker, 6.18.50); `trans=unix` is an option of `9pnet_fd` and has not been tried
-with a mount.
+The kernel mount has run since this was written: on 0.18.0 workers a job's `archive/` is such a
+mount (`trans=unix`, kernel 6.18.50), files were read through it, and `ls -l`, `cp -a` and
+`tar --xattrs` were run on it and showed the empty-list defect fixed under § The worker's side
+(ticket 38; seen in a job's own mount, not by a check in this repository). What is not verified:
+
+- That those tools are silent after that fix. It is checked by hand on a worker after the release,
+  with `tar --xattrs -cf`, because plain `tar cf` never asks for the list and passes either way.
+- The `nix/worker-health` item that mounts for a job, looks at the folder as the job's user, sees a
+  write refused and a read of a file fail as `Connection timed out` (its platform is a port nothing
+  listens on, so **no successful read through the kernel is checked**), and finds the mount gone
+  afterwards. It needs KVM and **has not run** in the environment this was built in. Its `ls -ld`
+  passes with or without the xattr defect, since that exits 0.
+- The gate covers the 9P server and the door, not the kernel's client.
 
 ## `jobs.tsv` in usage (ticket 43)
 

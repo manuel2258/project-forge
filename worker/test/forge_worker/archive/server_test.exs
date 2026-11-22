@@ -448,6 +448,101 @@ defmodule ForgeWorker.Archive.ServerTest do
     assert errno(t(socket, 200, 20, <<>>)) == 38
   end
 
+  # -- extended attributes ---------------------------------------------------------------------
+
+  defp xattrwalk(socket, fid, newfid, name, tag \\ 20),
+    do: t(socket, 30, tag, <<fid::32-little, newfid::32-little>> <> str(name))
+
+  test "the list of attributes is empty on a folder and on a file, and a named one is missing",
+       context do
+    {_pid, socket, _path, _cache} = start_server(context)
+    attach(socket)
+    {111, _, _} = walk(socket, 1, 2, ["1"])
+    {111, _, _} = walk(socket, 1, 3, ["index.md"])
+
+    # Rxattrwalk, size 0: the root, a ticket's folder and a file.
+    assert {31, 21, <<0::64-little>>} = xattrwalk(socket, 1, 10, "", 21)
+    assert {31, 22, <<0::64-little>>} = xattrwalk(socket, 2, 11, "", 22)
+    assert {31, 23, <<0::64-little>>} = xattrwalk(socket, 3, 12, "", 23)
+
+    for name <- ["user.x", "system.posix_acl_access"] do
+      assert errno(xattrwalk(socket, 3, 13, name)) == @enodata, name
+      assert errno(xattrwalk(socket, 2, 13, name)) == @enodata, name
+    end
+
+    # A named attribute made no fid.
+    assert errno(t(socket, 116, 4, <<13::32-little, 0::64, 10::32-little>>)) == @ebadf
+  end
+
+  test "the fid of the list reads as nothing, is clunked, and reaches nothing", context do
+    {_pid, socket, _path, _cache} = start_server(context)
+    attach(socket)
+    {111, _, _} = walk(socket, 1, 3, ["index.md"])
+    {31, _, _} = xattrwalk(socket, 3, 10, "")
+    {31, _, _} = xattrwalk(socket, 1, 11, "")
+
+    # A read of it, at any offset, is empty, without an open.
+    assert {117, 4, <<0::32-little>>} = t(socket, 116, 4, <<10::32-little, 0::64, 10::32-little>>)
+    assert {117, 4, <<0::32-little>>} = t(socket, 116, 4, <<10::32-little, 5::64, 10::32-little>>)
+
+    # It names neither the file nor the folder it came from.
+    assert errno(t(socket, 24, 5, <<10::32-little, 0x3FFF::64-little>>)) == @ebadf
+    assert errno(t(socket, 24, 5, <<11::32-little, 0x3FFF::64-little>>)) == @ebadf
+    assert errno(walk(socket, 10, 12, [])) == @ebadf
+    assert errno(walk(socket, 11, 12, ["1"])) == @ebadf
+    assert errno(lopen(socket, 10)) == @ebadf
+    assert errno(lopen(socket, 11)) == @ebadf
+    assert errno(t(socket, 40, 5, <<11::32-little, 0::64, 10::32-little>>)) == @ebadf
+    assert errno(t(socket, 40, 5, <<10::32-little, 0::64, 10::32-little>>)) == @ebadf
+    assert errno(xattrwalk(socket, 10, 12, "")) == @ebadf
+    assert errno(t(socket, 118, 5, <<10::32-little, 0::64, 0::32>>)) == @erofs
+
+    # The server is still up, and the fid it came from is as it was.
+    assert {111, _, _} = walk(socket, 1, 13, ["1"])
+    assert {13, _, _} = lopen(socket, 3)
+
+    # A clunk drops it, like any other.
+    assert {121, 6, <<>>} = t(socket, 120, 6, <<10::32-little>>)
+    assert errno(t(socket, 116, 4, <<10::32-little, 0::64, 10::32-little>>)) == @ebadf
+    assert {117, _, <<0::32-little>>} = t(socket, 116, 4, <<11::32-little, 0::64, 10::32-little>>)
+  end
+
+  test "the fid of the list shares nothing with an open file it came from", context do
+    {_pid, socket, _path, _cache} = start_server(context)
+    attach(socket)
+
+    # `flistxattr` on a file that is already open: an inline file and a fetched one.
+    for {names, bytes, source, attr} <- [
+          {["index.md"], "hello", 3, 10},
+          {["1", "plan.md"], @plan, 4, 11}
+        ] do
+      {13, _, _} = open(socket, source, names)
+      {31, _, _} = xattrwalk(socket, source, attr, "")
+
+      assert {117, _, <<0::32-little>>} =
+               t(socket, 116, 4, <<attr::32-little, 0::64, 100::32-little>>)
+
+      # Clunking the attribute fid does not close what the file is read through.
+      {121, _, _} = t(socket, 120, 6, <<attr::32-little>>)
+      assert read_all(socket, source) == bytes
+    end
+  end
+
+  test "the list of attributes on a fid nobody holds is an error, not an empty list", context do
+    {_pid, socket, _path, _cache} = start_server(context)
+    attach(socket)
+    {111, _, _} = walk(socket, 1, 3, ["index.md"])
+
+    assert errno(xattrwalk(socket, 77, 10, "")) == @ebadf
+    assert errno(xattrwalk(socket, 77, 10, "user.x")) == @ebadf
+
+    {121, _, _} = t(socket, 120, 6, <<3::32-little>>)
+    assert errno(xattrwalk(socket, 3, 10, "")) == @ebadf
+
+    # And no fid was made for the one that failed.
+    assert errno(t(socket, 116, 4, <<10::32-little, 0::64, 10::32-little>>)) == @ebadf
+  end
+
   test "an open that would write is refused, whatever the file", context do
     {_pid, socket, _path, _cache} = start_server(context)
     attach(socket)

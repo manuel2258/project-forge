@@ -161,8 +161,13 @@ defmodule ForgeWorker.Archive.P9 do
   defp body(@tstatfs, <<fid::32-little>>), do: {:statfs, fid}
   defp body(@tflush, <<oldtag::16-little>>), do: {:flush, oldtag}
 
-  defp body(@txattrwalk, <<fid::32-little, newfid::32-little, _name::binary>>),
-    do: {:xattrwalk, fid, newfid}
+  # An empty name asks for the list of every attribute, a name for that one.
+  defp body(@txattrwalk, <<fid::32-little, newfid::32-little, rest::binary>>) do
+    case string(rest) do
+      {:ok, name, ""} -> {:xattrwalk, fid, newfid, name}
+      _other -> :error
+    end
+  end
 
   # A message of a kind this server answers, with a body that is not that kind's: the client is
   # not speaking the protocol, and the connection is closed (`decode/1` returns `:error`).
@@ -224,6 +229,10 @@ defmodule ForgeWorker.Archive.P9 do
 
   @spec clunk(non_neg_integer()) :: iodata()
   def clunk(tag), do: reply(121, tag, "")
+
+  @doc "Rxattrwalk: the attribute (or the list) the new fid reads is `size` bytes long."
+  @spec xattrwalk(non_neg_integer(), non_neg_integer()) :: iodata()
+  def xattrwalk(tag, size), do: reply(31, tag, <<size::64-little>>)
 
   @spec flush(non_neg_integer()) :: iodata()
   def flush(tag), do: reply(109, tag, "")

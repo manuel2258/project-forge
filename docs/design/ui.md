@@ -430,7 +430,10 @@ forge is a web app that can be put on a phone's Home Screen (ticket 62). Nothing
 layout, adds a form or invites anybody to install: the one place forge mentions installing is the
 iPhone's refusal below.
 
-**The manifest** (`priv/static/manifest.webmanifest`, static): `id`, `scope` and `start_url` are
+**The manifest** (`priv/static/manifest.webmanifest`, static; in a release the page links its
+digested copy, `manifest-<md5>.webmanifest?vsn=d`, which the endpoint serves beside the plain
+address, and the plain one stays for a browser that installed with it — § The digested address
+below): `id`, `scope` and `start_url` are
 `/`, `display` is `standalone`, the name is `forge`, and `background_color` and `theme_color` are
 the dark theme's ground, `#0d0b0f`, which is what an Android launch screen shows whatever theme
 the person chose (an iPhone has no launch images here and shows its own plain screen). **Shortcuts**
@@ -517,9 +520,25 @@ finish outside the app); a push arriving; the badge on an iPhone; tidying on a p
 that iOS paints `theme-color` behind the installed app's status bar; the shortcuts; and the platform
 behaviours this note relies on and has not seen — an iPhone revoking a subscription after three pushes
 that show nothing, Chrome showing a notification of its own for such a push, and Android drawing no
-number on the icon. The manifest is checked by the suite (`device_controller_test.exs`) and not by a browser. What headless
-Chromium checked: the offline page with a real service worker, the badge calls, which
-notifications are closed and which kept, and the iPhone message.
+number on the icon. The manifest's contents are checked by the suite (`device_controller_test.exs`), the address a
+release links by `digested_static_test.exs` (the digested copies made by Phoenix's own digester and
+requested through the endpoint), and whether a browser takes it as installable by headless Chromium.
+What headless Chromium checked: the offline page with a real service worker, the badge calls, which
+notifications are closed and which kept, the iPhone message, and `Page.getInstallabilityErrors` on a
+page whose manifest link is a digested address (none). Not Vanadium's own install flow: that is a
+phone's.
+
+**The digested address** (ticket 70). A release runs `mix phx.digest`, so `~p"/manifest.webmanifest"`
+renders `/manifest-<md5>.webmanifest?vsn=d`, and `Plug.Static`'s `:only` compares the first path
+segment exactly: until ticket 70 it served the plain name and answered 404 to the one the page
+linked, so no Chromium browser found a manifest and forge could not be installed (the digested
+`favicon.ico` had the same fault). The endpoint now also sets `only_matching` to
+`ForgeWeb.static_prefixes/0`, a `<rootname>-` prefix for each top-level file in `static_paths/0`
+(`favicon-`, `robots-`, `manifest-`), so a top-level file added to that list is served digested with
+no second edit. Reachable by it: the digested copies of those three files and `robots-<md5>.txt.gz`
+when asked for by name, and nothing else at the top of `priv/static` (`cache_manifest.json` is not).
+No route starts with those prefixes. Nothing was digested in development or test, so this could not
+have been seen there: the test makes the digested files itself.
 
 ### Three layouts
 

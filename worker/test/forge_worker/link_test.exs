@@ -5014,7 +5014,7 @@ defmodule ForgeWorker.LinkTest do
         chat(origin)
         |> Map.put("history", [
           %{"dir" => "../history-evil", "metadata" => "a sibling, not a child"},
-          %{"dir" => "/etc/forge", "metadata" => "somewhere else entirely"}
+          %{"dir" => "/forge-link-test-elsewhere", "metadata" => "somewhere else entirely"}
         ])
 
       job_id = job["job_id"]
@@ -5026,9 +5026,11 @@ defmodule ForgeWorker.LinkTest do
 
       # An absolute name is not refused but neutralised: `Path.join/2` drops the leading slash,
       # so it lands inside the folder rather than at the root of the machine. Written down
-      # because the guard reads as though it refused one, and what it does is this.
-      refute File.exists?("/etc/forge")
-      assert File.exists?(Path.join([job_dir, "history", "etc", "forge", "job.md"]))
+      # because the guard reads as though it refused one, and what it does is this. The name is one
+      # no machine has: it was `/etc/forge`, which a machine running a forge worker does have, so
+      # the assertion below failed there, and on every gate run on one.
+      refute File.exists?("/forge-link-test-elsewhere")
+      assert File.exists?(Path.join([job_dir, "history", "forge-link-test-elsewhere", "job.md"]))
     end
 
     test "going idle closes it without anyone asking", context do

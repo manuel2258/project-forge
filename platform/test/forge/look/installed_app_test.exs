@@ -705,13 +705,7 @@ defmodule Forge.Look.InstalledAppTest do
 
                      # Now nothing is pending and the count does not move: another stale one is
                      # closed by opening forge and by nothing else.
-                     async(session, """
-                     const r = await navigator.serviceWorker.ready;
-                     await r.showNotification('s', {tag: 'approval-gone', data: {item: true, shown: Date.now() - 60000}});
-                     return 1
-                     """)
-
-                     assert "approval-gone" in tags(session)
+                     show_stale!(session, "approval-gone")
                      visit(session, opts, "/")
                      until_tags(session, ["digest", "fresh", "stuck-" <> ticket.id, "unmarked"])
 
@@ -757,6 +751,27 @@ defmodule Forge.Look.InstalledAppTest do
                  opts
                )
     end)
+  end
+
+  # Shows a stale item notification and returns once it is held. The failure that made this: the
+  # assertion that it was held failed once in a gate run, on code that had passed the run before.
+  # The likely cause, not reproduced: the page's last ask to tidy (the load's, or the count moving)
+  # was still in flight, and it closed this notification as well, since it reads the queue before
+  # it closes anything. Such an ask is answered once, so showing it again is not met by it, and what
+  # the test goes on to assert (opening forge closes it) is unchanged. Four showings are a bound: a
+  # notification closed four times running is something closing it, and the test says so.
+  defp show_stale!(session, tag, left \\ 4) do
+    async(session, """
+    const r = await navigator.serviceWorker.ready;
+    await r.showNotification('s', {tag: '#{tag}', data: {item: true, shown: Date.now() - 60000}});
+    return 1
+    """)
+
+    cond do
+      tag in tags(session) -> :ok
+      left > 1 -> show_stale!(session, tag, left - 1)
+      true -> flunk("#{tag} was closed each of four times it was shown")
+    end
   end
 
   defp until_tags(session, want) do
@@ -1036,6 +1051,74 @@ defmodule Forge.Look.InstalledAppTest do
                      until(session, "return !!document.querySelector('#top-bar')", "the page")
                      assert %{"meta" => meta, "theme" => "light"} = bar(session)
                      assert meta == colors.light
+                   end
+                 ],
+                 opts
+               )
+    end)
+  end
+
+  # The page's `<head>` as far as installing goes: the manifest at the address a release links, and
+  # the worker the app registers. What Chromium asks for is the endpoint's own answer, so a
+  # manifest the endpoint 404s fails here with `manifest-parsing-or-network-error`, as it did on
+  # every production node until ticket 70.
+  test "Chromium finds forge installable at the manifest address a release links", %{opts: opts} do
+    # The same JSON with a newline after it, which is another name: `digested_static_test.exs` puts
+    # the file itself, and two modules putting one name remove it from under each other.
+    manifest =
+      File.read!(Path.join(Application.app_dir(:forge, "priv/static"), "manifest.webmanifest"))
+
+    put = Forge.DigestedStatic.put!(%{"manifest.webmanifest" => manifest <> "\n"})
+    on_exit(fn -> Forge.DigestedStatic.remove!(put) end)
+    digested = put.latest["manifest.webmanifest"]
+    assert digested =~ ~r/^manifest-[0-9a-f]{32}\.webmanifest$/
+
+    # `crossorigin="use-credentials"` is for the look's guard, which refuses a request without its
+    # cookie, and a manifest is fetched without cookies unless the link says so; a node has no guard.
+    page =
+      page!("installable.html", """
+      <!DOCTYPE html>
+      <html lang="en"><head><meta charset="utf-8" /><title>installable</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <link rel="manifest" href="/#{digested}?vsn=d" crossorigin="use-credentials" /></head>
+      <body><p id="installable">forge</p>
+      <script>navigator.serviceWorker.register('/sw.js')</script></body></html>
+      """)
+
+    quiet(fn ->
+      assert :ok ==
+               run_with(
+                 "width phone",
+                 [
+                   fn session ->
+                     Wallaby.Browser.visit(session, opts[:base_url] <> page)
+                     until(session, "return !!document.querySelector('#installable')", "the page")
+
+                     assert async(session, "await navigator.serviceWorker.ready; return 'ready'") ==
+                              "ready"
+
+                     cdp(session, "Page.enable")
+
+                     # Chromium re-evaluates after the worker is active; ask until it says nothing
+                     # or the time is up, and then say what it said.
+                     errors = fn ->
+                       cdp(session, "Page.getInstallabilityErrors")["installabilityErrors"]
+                     end
+
+                     final =
+                       Enum.reduce_while(1..40, nil, fn _, _ ->
+                         case errors.() do
+                           [] ->
+                             {:halt, []}
+
+                           found ->
+                             Process.sleep(150)
+                             {:cont, found}
+                         end
+                       end)
+
+                     assert final == [],
+                            "Chromium cannot install #{page} linking #{digested}: #{inspect(final)}"
                    end
                  ],
                  opts

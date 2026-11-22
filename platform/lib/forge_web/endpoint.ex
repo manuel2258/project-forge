@@ -46,6 +46,7 @@ defmodule ForgeWeb.Endpoint do
     from: :forge,
     gzip: not code_reloading?,
     only: ForgeWeb.static_paths(),
+    only_matching: ForgeWeb.static_prefixes(),
     raise_on_missing_only: code_reloading?
 
   # Code reloading can be explicitly enabled under the

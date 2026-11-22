@@ -76,15 +76,35 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
   # filter that matched nothing would leave all three passing while asserting nothing. Pinned by
   # name rather than counted so that a fourth workflow with a `reviewing` state fails here, where
   # the fix is to say what its edges should be, rather than being skipped in silence.
+  #
+  # `weekly.yml` has a `reviewing` state too and is not one of them: it merges with no person's
+  # approval, so a review that finds issues is the only gate (three rounds, asserted in its own test
+  # below), its `implementing` keeps no screenshots, and no person declines a presentation. The
+  # tests here are about the other shape, so it is left out by name, and the next workflow with
+  # a `reviewing` state fails the pin below as before.
+  @self_merging ["weekly.yml"]
+
   defp reviewing_workflows do
     found =
       for path <- workflow_files(),
+          Path.basename(path) not in @self_merging,
           workflow = load!(path),
           Workflow.state(workflow, "reviewing") != nil,
           do: {Path.basename(path), workflow}
 
     assert Enum.map(found, &elem(&1, 0)) == ["bug.yml", "dev.yml"]
     found
+  end
+
+  # What stands in for a person's approval in `weekly.yml` (see its header): a presented change
+  # merges by the engine's own edge, a review that finds issues sends it back, and a conflict is
+  # still a person's to resolve.
+  test "weekly.yml merges what its review passed, and sends back what it did not" do
+    workflow = load!(Path.join(@forge, "workflows/weekly.yml"))
+
+    assert edges(workflow, "reviewing", "issues_found") == [{"implementing", 3}]
+    assert edges(workflow, "reviewing", "done") == [{"presenting", nil}]
+    assert [{"merged", nil}] = edges(workflow, "presenting", "done")
   end
 
   test "every workflow this repository ships parses and validates" do

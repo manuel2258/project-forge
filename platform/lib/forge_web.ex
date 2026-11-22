@@ -19,6 +19,30 @@ defmodule ForgeWeb do
 
   def static_paths, do: ~w(assets fonts images favicon.ico robots.txt manifest.webmanifest)
 
+  @doc """
+  The first-segment prefixes at which a release also serves a top-level file of `static_paths/0`
+  under its digested name.
+
+  `Plug.Static`'s `:only` compares the first segment of a request exactly, and `mix phx.digest`
+  names `manifest.webmanifest` `manifest-<md5>.webmanifest` — which is the address a page links,
+  because `~p` of a static file maps through `cache_manifest.json`. So `only` alone answers the
+  plain address and 404s the one the page renders, for every top-level file and in no other
+  environment (nothing is digested in dev or test). Files under a directory are not affected: their
+  first segment is the directory.
+
+  One prefix per entry with an extension (`favicon-`, `robots-`, `manifest-`), derived from the one
+  list so that a top-level file added to it is served digested with no second edit. The trailing `-`
+  is what Phoenix's digester writes (`"\#{rootname}-\#{md5}\#{ext}"`).
+
+  The `-` also keeps out a file that only starts with the same letters: `manifesto.txt` is not
+  `manifest-<md5>.webmanifest`. Nothing a release builds has such a name, so it is a rule against a
+  file someone adds later, and `digested_static_test.exs` has one.
+  """
+  @spec static_prefixes() :: [String.t()]
+  def static_prefixes do
+    for path <- static_paths(), Path.extname(path) != "", do: Path.rootname(path) <> "-"
+  end
+
   def router do
     quote do
       use Phoenix.Router, helpers: false

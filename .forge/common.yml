@@ -6,7 +6,8 @@ commands:
     run: .forge/commands/check.sh
     env: default
     produces: check.log
-    timeout: 20m
+    # 30m: the gate's p90 is 15.6 min and 12 of 397 runs hit the old 20 (ledger, 2026-11-22).
+    timeout: 30m
     # **Two cores and not four: that is what the machines here have.** `cpu` is a reservation and
     # never a quota — the slice gets `CPUWeight` and nothing sets `CPUQuota` — so the gate is the
     # only thing the number talks to, and `mix check` on an idle machine still uses all of it.
@@ -30,14 +31,14 @@ commands:
     run: .forge/commands/static.sh
     env: default
     produces: static.log
-    timeout: 15m
+    timeout: 20m
     resources: { memory: 4GiB, cpu: 2 }
 
   test:
     run: .forge/commands/test.sh
     env: default
     produces: test.log
-    timeout: 20m
+    timeout: 30m
     resources: { memory: 4GiB, cpu: 2 }
 
 states:

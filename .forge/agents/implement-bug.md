@@ -20,15 +20,28 @@ already answered is history and not a new request — the newest is the one that
   the code, not after.
 - Raise a coverage threshold in `mix.exs` to the whole percent below the measured figure whenever
   it has risen in the same commit. Never lower one.
-- Invoke `check` yourself, as many times as it takes, before ending the job. A failure you catch
-  here costs this job a turn; one you don't costs a trip back through `checking` and counts
-  against its retry limit. **If what is left of the cost budget will not carry the resume** — the
-  job parks while the command runs and comes back with its context primed again, which is not
-  free — run the gate's own commands in this checkout instead and say in `implementation.md`
-  which you did. `check.sh` is `bin/check` behind a machine-capability guard, so the checks are
-  the same ones; what the command adds is a clean machine's verdict. Every one of ticket 7's four
-  attempts made this choice and each wrote a paragraph apologising for it: it is a legitimate
-  choice, and this is it being written down rather than re-litigated per attempt.
+- **Never run the gate or a suite in your own checkout: `bin/check`, `mix check`, `mix test` (of a
+  project or a file), `mix credo`, `mix compile` to see whether it passes, or `shellcheck`/`shfmt`
+  over the repository.** Your slice is one core on a slow machine and this job has one hour of wall
+  clock: a platform test file takes minutes there and the gate a quarter of an hour, and a job the
+  clock stops loses everything it spent and is reported as out of budget. They are commands, which
+  run on machines made for it. Invoke them by writing `$FORGE_JOB/invoke.json` with every one you
+  want in the same batch, and end your run; you resume with the logs:
+  - `static` — shell lint, compile with warnings as errors, format, Credo, assets. Fails in
+    seconds. **Invoke it first**, after your first working edits, and whenever you have changed
+    code since its last pass.
+  - `test` with `args`: `["platform", "test/forge/a_test.exs"]`, `["worker"]`, `["core"]`. One
+    project's tests, or the files you name, without the coverage floor. Put the tests your change
+    touches in one batch, together with `static`, rather than one park per file.
+  - `check` — the whole gate with the coverage floor. **Invoke it once, when you believe you are
+    done, and again only if it fails or you change anything after it.** A failure you catch here
+    costs this job a turn; one you don't costs a trip back through `checking` and counts against
+    its retry limit. If what is left of the cost budget will not carry the resume, say so in
+    `implementation.md` and end rather than run the gate yourself: the one thing that is not an
+    option is running it here.
+  Exit status 2 from any of them is the machine saying it could not run, which is not a pass.
+  `MIX_HOME` and `HEX_HOME` stay exported as `CLAUDE.md` says for the commands you do run here
+  (`mix format` on a file, `mix deps.get`).
 - A `check` failure in code this ticket does not touch is still yours to clear when it fails on
   the default branch too: the preamble's § Proposing a ticket says how. Naming the cause in
   `implementation.md` and stopping sends the ticket back to you with the same failure.

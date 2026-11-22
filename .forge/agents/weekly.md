@@ -16,8 +16,8 @@ to do it, **except their "Finishing" sections**, which this replaces.
 - **Back out rather than push through.** A bump that will not pass without changing what a test
   defends, or a refactor you cannot put under a test that fails when it breaks, is dropped.
   Never lower a coverage floor.
-- Follow `agents/implement.md` for the gate (touched tests while you work, `check` once at the
-  end, `MIX_HOME` and `HEX_HOME` exported) and for checking your own claims with a subagent.
+- Follow `agents/implement.md` for the gate (`static` and `test` as commands while you work, `check` once at the
+  end, never the gate or a suite run in your own checkout) and for checking your own claims with a subagent.
 
 Write `implementation.md`: per item, what changed and why behaviour is preserved (a bump: from
 which version to which and why), the test that covers it and the mutation you watched fail, and

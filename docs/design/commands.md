@@ -465,6 +465,22 @@ The argv is on the event because with freeform arguments it is no longer derivab
 workflow file. That is the cost of dropping the parameter schema, and it is cheap: one field, and
 "what actually ran" stays answerable for ever.
 
+## Forge's own commands, and what an agent must not run itself
+
+`.forge/common.yml` declares `check` (the whole gate, `bin/check` behind a capability guard),
+`static` (shell lint, compile with warnings as errors, format, Credo and the assets: everything
+before a test, so it fails in seconds) and `test` (`args`: a project, then anything `mix test`
+takes: a file, `file:LINE`, `--stale`; no coverage floor, which is the gate's). The last two exist
+because an agent's slice is one core and its job has one wall-clock hour
+(`Forge.Jobs.wall_clock_ms/1`): a platform test file or a compile run by hand there took minutes,
+the gate a quarter of an hour, and a job the clock stops is recorded as out of budget with its
+spend lost. `agents/implement.md`, `implement-bug.md`, `rebase.md` and `deps.md` therefore forbid
+running the gate or a suite in the checkout and send the agent to these three, in one batch where
+it can. `bin/look` is still run in the checkout, because its steps arrive on standard input and a
+command takes only arguments. **Not verified here:** the two scripts have been linted and not run
+on a command machine, and `static`/`test` change what a ticket's agents do only once this merges,
+since a script is read at the ticket's pinned base (`workflow-grammar.md` § Commands).
+
 ## Worker pools
 
 Commands make the fleet heterogeneous for the first time, along a line that matters:

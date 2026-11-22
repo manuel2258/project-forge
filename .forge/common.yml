@@ -16,6 +16,30 @@ commands:
     # six cores and stuck ticket 8 before a machine.
     resources: { memory: 4GiB, cpu: 2 }
 
+  # **The two pieces of the gate an agent used to run by hand, as commands of their own.** An
+  # agent's slice is one core and its job has one hour (`Forge.Jobs.wall_clock_ms/1`); a platform
+  # test file or a compile on it ran for minutes and a full `bin/check` for a quarter of an hour,
+  # and a run the clock stopped threw the job's spend away. Both run on the command pool with
+  # the gate's own resources, and an agent invokes several in one batch and parks once.
+  #
+  # `static` is everything the gate checks before a test (shell lint, compile with warnings as
+  # errors, format, Credo, the assets) and fails in seconds, so it goes first and `check` goes
+  # last. `test <project> [mix test args]` is one project's suite or the named files of it, with
+  # no coverage floor (that is the gate's). Arguments are freeform (`workflow-grammar.md`).
+  static:
+    run: .forge/commands/static.sh
+    env: default
+    produces: static.log
+    timeout: 15m
+    resources: { memory: 4GiB, cpu: 2 }
+
+  test:
+    run: .forge/commands/test.sh
+    env: default
+    produces: test.log
+    timeout: 20m
+    resources: { memory: 4GiB, cpu: 2 }
+
 states:
   # `2` is the gate saying it could not run at all, which is not the gate saying no: the machine
   # is missing the devshell or a database it cannot start (`.forge/commands/check.sh`). It gets
@@ -232,6 +256,7 @@ states:
     model: opus
     effort: high
     may_invoke:
+      static: { max: 3 }
       check: { max: 3 }
     produces: [rebase.md, changeset]
     outcomes: [done, needs_review]

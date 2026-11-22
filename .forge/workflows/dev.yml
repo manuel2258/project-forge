@@ -73,6 +73,8 @@ states:
     model: sonnet
     effort: high
     may_invoke:
+      static: { max: 10 }
+      test: { max: 30 }
       check: { max: 10 }
     inputs: [ticket, refinement.md, plan.md, report.md, feedback.md]
     produces: [implementation.md, changeset, screenshots/*]

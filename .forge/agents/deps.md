@@ -31,7 +31,8 @@ advisory is still open. State what the audit could not check (nixpkgs has no goo
 
 - **One group at a time**, a group being packages that move together (Phoenix with LiveView and its
   JS, Ecto with its adapter, the Credo and formatter tools). One commit per group, each passing
-  `mix test` of the project it touches before the next begins.
+  the `test` command for the project it touches (`["worker"]`, as an `invoke.json` entry's `args`)
+  before the next begins. Do not run `mix test` here.
 - **Read before you raise**: the package's changelog between the two versions, and `deps/<name>`
   for any API you are not certain of. A major version, a removed function, a changed default or a
   new transitive dependency is named in the commit message.

@@ -32,8 +32,8 @@ End on `needs_review` only when one of these holds:
    who took the transition. *The engine* is the merge queue finding a conflict in a ticket a person
    approved. *A person* is someone sending a ticket here by hand, and that may be a ticket nobody
    has approved at all — so it is `needs_review` whatever else is true.
-2. **The gate does not pass on the resolved commit.** Commit the merge, invoke `check` once, and
-   read its log. You may fix what it finds where the fix follows from the other side's change: a
+2. **The gate does not pass on the resolved commit.** Commit the merge, invoke `static` and then
+   `check` (never run either here: your slice is one core and the job has an hour), and read the logs. You may fix what it finds where the fix follows from the other side's change: a
    call site of something it renamed, a fixture missing a field it added, a test that asserted what
    the other side deliberately changed. Exit status 2 is the machine saying the gate could not run,
    which is not a pass. Three invocations at most; a gate still failing after that is

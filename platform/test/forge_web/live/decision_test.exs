@@ -110,6 +110,11 @@ defmodule ForgeWeb.DecisionTest do
     assert has_element?(view, "#decision-panel", "Needed to reject.")
     refute has_element?(view, "#decision-panel label", "optional")
 
+    # Files go with the note, from a paperclip in its corner and not a row under it
+    # (`docs/design/ui.md` § Attaching files).
+    assert has_element?(view, "#decision-panel #decision-attach .ui-field-box .ui-attach-clip")
+    refute has_element?(view, ".ui-attach-button")
+
     view |> form("#decision-form", %{"note" => "  \n "}) |> render_change()
     assert has_element?(view, ~s(#decision-form button[value="rejected"][disabled]))
 

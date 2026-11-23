@@ -34,6 +34,10 @@ defmodule ForgeWeb.Conversations do
   is one field of a form that holds more — a question's own words, an approval's comment — and
   only that form's button sends (`docs/design/ui.md` § The affordance rule). The query becomes
   `all`, which every pointer matches, so it is the same hook reading the same attribute.
+
+  **The `lead` slot is drawn inside the box's bottom-left corner**: the paperclip that attaches
+  files (`ForgeWeb.UI.Attach.clip/1`, `docs/design/ui.md` § Attaching files). The text is given
+  room for it, so it never runs under it, and with the slot empty the box is what it was.
   """
   attr :id, :string, required: true
   attr :name, :string, required: true
@@ -44,24 +48,31 @@ defmodule ForgeWeb.Conversations do
   attr :send, :boolean, default: false, doc: "draw the Send square beside the box"
   attr :enter, :atom, values: [:send, :newline], default: :send
   attr :rest, :global, doc: "for the box itself — an `aria-label` where there is no `label`"
+  slot :lead, doc: "inside the box's corner, left of the text"
 
   def message_box(assigns) do
     ~H"""
     <div>
       <label :if={@label} for={@id} class="text-sm font-medium">{@label}</label>
       <div class={["flex items-end gap-2", @label && "mt-2"]}>
-        <textarea
-          id={@id}
-          name={@name}
-          rows={@rows}
-          phx-hook="ForgeWeb.UI.Forms.Composer"
-          phx-debounce="200"
-          data-newline-on={ForgeWeb.UI.Forms.newline_on(@enter)}
-          data-max-lines="6"
-          placeholder={@placeholder}
-          class="min-h-[46px] w-full min-w-0 resize-none rounded-card border border-border bg-bg px-3 py-[11px] text-sm/[1.6]"
-          {@rest}
-        >{@value}</textarea>
+        <div class="relative min-w-0 flex-1">
+          <textarea
+            id={@id}
+            name={@name}
+            rows={@rows}
+            phx-hook="ForgeWeb.UI.Forms.Composer"
+            phx-debounce="200"
+            data-newline-on={ForgeWeb.UI.Forms.newline_on(@enter)}
+            data-max-lines="6"
+            placeholder={@placeholder}
+            class={[
+              "min-h-[46px] w-full min-w-0 resize-none rounded-card border border-border bg-bg py-[11px] pr-3 text-sm/[1.6]",
+              if(@lead == [], do: "pl-3", else: "pl-[52px]")
+            ]}
+            {@rest}
+          >{@value}</textarea>
+          <div :if={@lead != []} class="absolute bottom-[2px] left-[2px]">{render_slot(@lead)}</div>
+        </div>
         <button
           :if={@send}
           type="submit"

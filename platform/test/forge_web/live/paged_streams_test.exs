@@ -546,7 +546,10 @@ defmodule ForgeWeb.PagedStreamsTest do
     end
 
     defp turn(chat, n, extra \\ 0) do
-      record(chat, "chat.message", %{"text" => "question #{n}"})
+      message = record(chat, "chat.message", %{"text" => "question #{n}"})
+      # Taken, as the worker says when it writes a message (protocol 15): a message nobody has
+      # taken is drawn last, queued.
+      record(chat, "job.harness.delivered", %{"message_id" => to_string(message.seq)})
       say(chat, "answer #{n}")
 
       for k <- 1..extra//1 do

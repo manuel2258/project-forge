@@ -31,6 +31,12 @@ defmodule ForgeWeb.Transcript do
     default: %{},
     doc: "`resolve/3`'s answer: what each text's images and links mean, by `{index, position}`"
 
+  attr :interrupt, :string,
+    default: nil,
+    doc:
+      "the id of the queued message that carries *Interrupt to send now*: the oldest still queued, " <>
+        "and only while a turn is in flight (`Forge.Conversations.oldest_queued/1`)"
+
   attr :banded, :boolean,
     default: false,
     doc: "whether the dock's plan band is drawn: the open turn's checklist is then the band's"
@@ -63,7 +69,7 @@ defmodule ForgeWeb.Transcript do
       >
         <%= if message.role == :user do %>
           <span>you</span>
-          <span :if={not message.delivered} class="opacity-80">· queued</span>
+          <span :if={not message.delivered} class="opacity-80" data-queued>· queued</span>
         <% else %>
           <span>agent</span>
           <span :if={message[:turn]}>· turn {message.turn}</span>
@@ -72,14 +78,31 @@ defmodule ForgeWeb.Transcript do
       </div>
 
       <div :if={message.role == :user} class="rounded-card bg-surface-2 px-4 py-3" data-said="you">
-        <div class="doc msg text-sm/[1.6] break-words">
+        <%!-- A message may be files alone: then its bubble holds only the *Attached* line. --%>
+        <div :if={String.trim(message.text) != ""} class="doc msg text-sm/[1.6] break-words">
           {Markdown.to_html(message.text, Map.get(@refs, {index, :user}, %{}))}
         </div>
         <ForgeWeb.UI.Attach.names
           :if={@attach_path}
           files={Map.get(@attached, String.to_integer(message.id), [])}
           path={@attach_path}
+          class={String.trim(message.text) == "" && "ui-attached--alone"}
         />
+        <%!-- One button, on the oldest queued message only, and only while a turn is in flight:
+              it stops the agent's turn so this message is taken now. It acts on a message still
+              queued and on nothing else (`Forge.Conversations.interrupt/2`). --%>
+        <div :if={@interrupt == message.id} class="chat-interrupt-row">
+          <button
+            type="button"
+            class="chat-interrupt"
+            phx-click="interrupt"
+            phx-value-id={message.id}
+            data-interrupt
+          >
+            Interrupt to send now
+          </button>
+          <span class="chat-interrupt-note">Stops the agent's turn.</span>
+        </div>
       </div>
 
       <.turn
@@ -143,14 +166,20 @@ defmodule ForgeWeb.Transcript do
   defp moment(_streaming, _chat_id), do: %{at: :now, job: nil, turn_seq: nil}
 
   # Each message with its place and whether it starts a speaker's run.
+  #
+  # **Every queued message is labelled**, not only the one that starts a run: *queued* is said of
+  # each bubble that is, or the second of two never says it.
   defp entries(messages) do
     messages
     |> Enum.with_index()
     |> Enum.map_reduce(nil, fn {message, index}, previous ->
-      {{message, index, message.role != previous}, message.role}
+      {{message, index, message.role != previous or queued?(message)}, message.role}
     end)
     |> elem(0)
   end
+
+  defp queued?(%{role: :user, delivered: false}), do: true
+  defp queued?(_message), do: false
 
   attr :message, :map, required: true
   attr :index, :integer, required: true

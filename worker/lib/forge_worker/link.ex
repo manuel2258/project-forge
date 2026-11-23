@@ -9,7 +9,8 @@ defmodule ForgeWorker.Link do
   and means a job that dies takes nothing with it.
 
   Terminal messages — result, hibernated, failed — are kept until the platform acks them and
-  re-sent on every rejoin. Events are not: a lost one costs a line in the timeline, and the
+  re-sent on every rejoin, and so are a chat's `turn` and, since protocol 15, its `delivered`.
+  Events are not: a lost one costs a line in the timeline, and the
   result is the contract.
   """
 
@@ -231,8 +232,14 @@ defmodule ForgeWorker.Link do
     end)
   end
 
-  def handle_message(_topic, "interrupt", %{"job_id" => job_id}, socket) do
-    with_conversation(socket, job_id, "interrupt", &Conversation.interrupt/1)
+  # With a `message_id` only if the conversation still holds that message (protocol 15).
+  def handle_message(_topic, "interrupt", %{"job_id" => job_id} = payload, socket) do
+    with_conversation(
+      socket,
+      job_id,
+      "interrupt",
+      &Conversation.interrupt(&1, payload["message_id"])
+    )
   end
 
   def handle_message(_topic, "close", %{"job_id" => job_id} = payload, socket) do
@@ -450,6 +457,15 @@ defmodule ForgeWorker.Link do
   # one of these per turn rather than one per job.
   def handle_info({:chat_turn, job_id, index, payload}, socket) do
     {:noreply, send_acked(socket, {job_id, "turn", index}, "turn", payload)}
+  end
+
+  # **Delivery is acked**, unlike every other event: since protocol 15 the platform places a queued
+  # message from this and from nothing else but a later `job.started`, so one lost to a restart
+  # (every landing releases) would leave the message drawn last, below the reply that answered it,
+  # for the rest of the process. Keyed by the message, so a resend after a reconnect says each once.
+  def handle_info({:chat_delivered, job_id, message_id}, socket) do
+    payload = %{"job_id" => job_id, "message_id" => message_id}
+    {:noreply, send_acked(socket, {job_id, "delivered", message_id}, "delivered", payload)}
   end
 
   # An abandoned job's ending: its runner was stopped, or its `systemd-run` could not reach PID 1,
@@ -1585,21 +1601,35 @@ defmodule ForgeWorker.Link do
   # sends a `turn` per turn. Keyed by `{job_id, message}` alone, two unacked turns for one chat
   # would collide and one would be dropped for ever — taking its cost with it, which is the one
   # thing the daily cap is computed from.
+  #
+  # **Kept in the order first sent** (`order`, a monotonic number the entry keeps through every
+  # resend), because a map yields its keys in term order and a chat's `{job, "delivered", id}` sorts
+  # before its `{job, "turn", n}`: resent that way the platform would record the delivery before the
+  # turn it followed, and read the chat as idle while the agent answers the message
+  # (`Forge.Conversations.in_flight?/1` looks above the newest `chat.turn`).
   defp send_acked(socket, key, message, payload) do
+    order =
+      case socket.assigns.unacked[key] do
+        {_message, _payload, order} -> order
+        nil -> System.unique_integer([:monotonic])
+      end
+
     case push(socket, socket.assigns.topic, message, payload) do
       {:ok, ref} ->
         socket
-        |> put_in([Access.key!(:assigns), Access.key!(:unacked), key], {message, payload})
+        |> put_in([Access.key!(:assigns), Access.key!(:unacked), key], {message, payload, order})
         |> put_in([Access.key!(:assigns), Access.key!(:acks), ref], key)
 
       # Not connected: the message waits for the next join, which re-sends everything unacked.
       {:error, _reason} ->
-        put_in(socket.assigns.unacked[key], {message, payload})
+        put_in(socket.assigns.unacked[key], {message, payload, order})
     end
   end
 
   defp resend_unacked(socket) do
-    Enum.reduce(socket.assigns.unacked, socket, fn {key, {message, payload}}, socket ->
+    socket.assigns.unacked
+    |> Enum.sort_by(fn {_key, {_message, _payload, order}} -> order end)
+    |> Enum.reduce(socket, fn {key, {message, payload, _order}}, socket ->
       send_acked(socket, key, message, payload)
     end)
   end

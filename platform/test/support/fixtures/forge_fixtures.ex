@@ -157,14 +157,14 @@ defmodule Forge.ForgeFixtures do
 
   @doc """
   What `job` needs of a worker for every reason but counting usage and handing over attached files,
-  which protocols 11 and 13 added and every agent job needs, and for Git LFS (14), which every
-  job needs: the figure the older assertions about
+  which protocols 11 and 13 added and every agent job needs, for Git LFS (14), which every
+  job needs, and for a conversation's own queueing (15): the figure the older assertions about
   *why* a job needs a newer worker were written against (`Forge.Jobs.protocol_needs/1`).
   """
   def protocol_before_usage(job) do
     job
     |> Forge.Jobs.protocol_needs()
-    |> Keyword.drop([:usage, :attachments, :lfs])
+    |> Keyword.drop([:usage, :attachments, :lfs, :chat])
     |> Keyword.values()
     |> Enum.max()
   end
@@ -176,7 +176,7 @@ defmodule Forge.ForgeFixtures do
   def protocol_before_attachments(job) do
     job
     |> Forge.Jobs.protocol_needs()
-    |> Keyword.drop([:attachments, :lfs])
+    |> Keyword.drop([:attachments, :lfs, :chat])
     |> Keyword.values()
     |> Enum.max()
   end
@@ -304,6 +304,23 @@ defmodule Forge.ForgeFixtures do
     |> Forge.Jobs.Job.create_changeset(attrs)
     |> Repo.insert!()
     |> with_status(status)
+  end
+
+  @doc """
+  The process of a conversation having started: the `job.started` a machine's `Jobs.mark_started`
+  logs, which is what takes the messages that were waiting for it (`Forge.Conversations.transcript/1`
+  draws a message nobody has taken last, queued). A test that records a reply without it is
+  recording one no real conversation has.
+  """
+  def chat_started!(%Forge.Jobs.Job{} = chat) do
+    {:ok, _event} =
+      Forge.Events.append("job.started", :system, %{
+        ticket_id: chat.ticket_id,
+        job_id: chat.id,
+        payload: %{"resume" => false}
+      })
+
+    chat
   end
 
   @doc """

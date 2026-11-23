@@ -110,16 +110,9 @@ defmodule ForgeWeb.ChatNewLive do
   def handle_event("open", %{"chat" => params} = sent, socket) do
     socket = assign(socket, form: to_form(params, as: :chat))
 
-    cond do
-      is_nil(socket.assigns.project) ->
-        {:noreply, assign(socket, error: "choose a project")}
-
-      String.trim(params["text"] || "") == "" ->
-        {:noreply, assign(socket, error: "say something to start with")}
-
-      true ->
-        open(socket, params, sent)
-    end
+    if is_nil(socket.assigns.project),
+      do: {:noreply, assign(socket, error: "choose a project")},
+      else: open(socket, params, sent)
   end
 
   defp open(socket, params, sent) do
@@ -127,7 +120,7 @@ defmodule ForgeWeb.ChatNewLive do
 
     with {:ok, memory} <- memory(params["memory"]),
          {:ok, cores} <- cores(params["cores"]) do
-      start(socket, project, ticket, String.trim(params["text"]), memory, cores,
+      start(socket, project, ticket, String.trim(params["text"] || ""), memory, cores,
         model: params["model"],
         effort: params["effort"],
         harness: params["harness"],
@@ -164,6 +157,15 @@ defmodule ForgeWeb.ChatNewLive do
            error: "no secret named #{Enum.join(names, ", ")} in this project any more",
            secret_names: secret_names(project)
          )}
+
+      # Nothing typed and nothing that finished uploading: files alone start a chat, and nothing
+      # does not. The box is told the act is over, so files that all failed are named as *not sent*
+      # under it; with nothing attached it ignores it.
+      {:error, :empty} ->
+        {:noreply,
+         socket
+         |> assign(error: "say something to start with")
+         |> ForgeWeb.Attaching.sent()}
 
       # The ticket is not this project's. **An equivalent mutant: no test can reach this clause**,
       # because the form resolves the ticket from the project it is already on
@@ -386,15 +388,17 @@ defmodule ForgeWeb.ChatNewLive do
         <%!-- Last, directly above *Start the chat*: it is the field a person finishes on, and
               Enter sends from it — first, it sent before the secrets and the machine below it
               were reached (UX pass, B18). --%>
-        <ForgeWeb.Conversations.message_box
-          id="chat_text"
-          name="chat[text]"
-          value={@form[:text].value}
-          rows="5"
-          label="First thing to say"
-        />
-
-        <ForgeWeb.UI.Attach.box :if={@project} id="chat-new-attach" project={@project.name} />
+        <ForgeWeb.UI.Attach.field id="chat-new-attach" project={@project && @project.name}>
+          <ForgeWeb.Conversations.message_box
+            id="chat_text"
+            name="chat[text]"
+            value={@form[:text].value}
+            rows="5"
+            label="First thing to say"
+          >
+            <:lead :if={@project}><ForgeWeb.UI.Attach.clip /></:lead>
+          </ForgeWeb.Conversations.message_box>
+        </ForgeWeb.UI.Attach.field>
 
         <.error_note :if={@error} id="chat-form-error">{@error}</.error_note>
       </.form>

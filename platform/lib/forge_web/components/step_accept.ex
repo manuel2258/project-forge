@@ -48,19 +48,39 @@ defmodule ForgeWeb.Components.StepAccept do
 
   attr :step, :map, required: true, doc: "`Forge.Steps.view/2`"
 
-  @doc "What the step says in place while it has no row: nothing yet, or over."
+  attr :dock, :boolean,
+    default: false,
+    doc:
+      "drawn in a conversation's dock, where a phone's height is the conversation's: " <>
+        "*Nothing to accept yet…* is not drawn below the `md` breakpoint (Steps names the " <>
+        "expected documents), and neither is a section holding nothing else"
+
+  @doc """
+  What the step says in place while it has no row: nothing yet, or over. **In the dock, a phone does
+  not draw the *Nothing to accept yet* sentence** (`docs/design/ui.md` § The Accept area); *the step
+  is over* and *Waiting for the reply to finish* stay at every width.
+  """
   def status(assigns) do
-    assigns = assign(assigns, wrap: "min-w-0 [overflow-wrap:anywhere]")
+    assigns =
+      assign(assigns,
+        wrap: "min-w-0 [overflow-wrap:anywhere]",
+        # The section holds nothing else when the step is not over and no reply is in flight.
+        quiet: assigns.dock and assigns.step.over == nil and not assigns.step.in_flight
+      )
 
     ~H"""
     <section
       :if={not row?(@step)}
       id="step-status"
       aria-label="Accepting this step"
-      class="flex min-w-0 flex-col gap-1 text-sm text-ink-2"
+      class={["flex min-w-0 flex-col gap-1 text-sm text-ink-2", @quiet && "max-md:hidden"]}
     >
       <p :if={@step.over} id="step-over" class={@wrap}>{over_words(@step.over)}</p>
-      <p :if={@step.over == nil} id="step-nothing-yet" class={@wrap}>
+      <p
+        :if={@step.over == nil}
+        id="step-nothing-yet"
+        class={[@wrap, @dock && "max-md:hidden"]}
+      >
         Nothing to accept yet. Expected: {Enum.map_join(own(@step), ", ", & &1.name)}. They appear
         as the agent writes them.
       </p>

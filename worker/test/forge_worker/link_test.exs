@@ -3824,6 +3824,35 @@ defmodule ForgeWorker.LinkTest do
       refute File.exists?(shown)
     end
 
+    # A message may be files alone (`docs/design/ui.md` § Attaching files): what the harness is
+    # written is the line naming them, with none of the blank lines that would have followed words
+    # that are not there.
+    test "a message of files alone is written as the line that names them and nothing else",
+         context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = origin |> chat() |> Map.put("attachments", [])
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      push(client, @topic, "message", %{
+        "job_id" => job_id,
+        "message_id" => "m-2",
+        "text" => "",
+        "files" => [%{"file" => "shot.png", "size" => 6}],
+        "not_received" => [],
+        "attachments" => []
+      })
+
+      {%{"turn" => 2}, _} = take_push("turn")
+
+      last = root |> written(job_id) |> List.last()
+      assert last =~ ~s("text":"[Files attached with this message)
+    end
+
     # `docs/measurements.md` § Session resume: the reopened process's total starts from what the
     # session had spent, and every turn reports its own running total beside the session's.
     test "a reopened conversation's turns report what the process spent, not its session's",
@@ -4063,14 +4092,9 @@ defmodule ForgeWorker.LinkTest do
 
       # The message reached the harness, and the delivery says which message it was. The
       # harness echoes the text and not the id, so this correlation is the worker's own.
-      # Payload keys are atoms here: in test mode the push is not serialised, and over a real
-      # socket the same map arrives with string keys.
       assert Enum.any?(seen, fn
-               {"event", %{"event" => %{"type" => "job.harness.delivered", "payload" => p}}} ->
-                 p[:message_id] == "m-2"
-
-               _other ->
-                 false
+               {"delivered", %{"message_id" => id}} -> id == "m-2"
+               _other -> false
              end)
     end
 
@@ -4205,11 +4229,8 @@ defmodule ForgeWorker.LinkTest do
       # message's delivery. Taken for the prompt's own echo it would be dropped, and the page
       # would say "queued" beside a message that had been answered.
       assert Enum.any?(seen, fn
-               {"event", %{"event" => %{"type" => "job.harness.delivered", "payload" => p}}} ->
-                 p[:message_id] == "m-7"
-
-               _other ->
-                 false
+               {"delivered", %{"message_id" => id}} -> id == "m-7"
+               _other -> false
              end)
     end
 
@@ -4258,8 +4279,61 @@ defmodule ForgeWorker.LinkTest do
       {%{"turn" => 2}, _} = take_push("turn")
 
       # Neither was acked: `assert_push` reads them off the socket without replying.
-      wait_until(fn -> length(Link.unacked(client)) == 2 end)
-      assert Enum.sort(Link.unacked(client)) == [{job_id, "turn", 1}, {job_id, "turn", 2}]
+      # (The second message's delivery is unacked too, under its own key.)
+      wait_until(fn -> {job_id, "turn", 2} in Link.unacked(client) end)
+      unacked = Link.unacked(client)
+      assert {job_id, "turn", 1} in unacked
+      assert {job_id, "turn", 2} in unacked
+    end
+
+    # **Delivery is the one event that is acked** (protocol 15). It is what places a queued message
+    # in the platform's fold, so one lost to a restart would leave the message drawn below the reply
+    # that answered it. Unlike an event, it is kept until the platform answers, and sent again.
+    test "a delivery is kept unacked, and goes again after a reconnect", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      say(context, job_id, "m-2", "hello")
+      {%{"job_id" => ^job_id, "message_id" => "m-2"}, _} = take_push("delivered")
+      assert {job_id, "delivered", "m-2"} in Link.unacked(client)
+
+      disconnect(client, :closed)
+      accept_connect(client)
+      assert_join(@topic, %{}, :ok)
+      {%{"job_id" => ^job_id, "message_id" => "m-2"}, _} = take_push("delivered")
+    end
+
+    # Sent again in the order first sent. A map yields `{job, "delivered", id}` before
+    # `{job, "turn", n}`, so a resend in key order would have the platform record a message's delivery
+    # before the turn it followed, and read the chat as idle while the agent answers it.
+    test "what is unacked goes again in the order it was sent", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+      say(context, job_id, "m-2", "hello")
+      {%{"turn" => 2}, _} = take_push("turn")
+      wait_until(fn -> length(Link.unacked(client)) == 3 end)
+
+      disconnect(client, :closed)
+      accept_connect(client)
+      assert_join(@topic, %{}, :ok)
+
+      {%{"turn" => 1}, first} = take_push("turn")
+      refute Enum.any?(first, &match?({"delivered", _payload}, &1))
+      {%{"turn" => 2}, between} = take_push("turn")
+      delivered = Enum.filter(between, &match?({"delivered", _payload}, &1))
+      assert [{"delivered", %{"message_id" => "m-2"}}] = delivered
     end
 
     # An interrupted turn reports `error_during_execution` with a null result — exactly what a
@@ -4296,6 +4370,118 @@ defmodule ForgeWorker.LinkTest do
       # and nowhere else.
       assert harness["subtype"] == "error_during_execution"
       assert harness["is_error"] == true
+    end
+
+    # **The worker queues** (`docs/design/conversations.md` § Turns, protocol 15). The harness's own
+    # queue folds a message sent while a tool runs into the turn in flight and echoes it late, so
+    # the worker holds what arrives mid-turn and writes it, as one message, when the turn is over.
+    defp deliveries(events) do
+      for {"delivered", %{"message_id" => id}} <- events, do: id
+    end
+
+    defp written(root, job_id),
+      do:
+        root
+        |> Path.join("jobs/#{job_id}/fake-lines.jsonl")
+        |> File.read!()
+        |> String.split("\n", trim: true)
+
+    defp slow_chat(context, seconds \\ "2") do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin, env: [{"FAKE_TURN_SECONDS", seconds}])
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, first} = take_push("turn")
+
+      # The prompt's echo is not anyone's delivery, and no echo is reported as one.
+      assert deliveries(first) == []
+      job["job_id"]
+    end
+
+    defp say(context, job_id, id, text) do
+      push(context.client, @topic, "message", %{
+        "job_id" => job_id,
+        "message_id" => id,
+        "text" => text
+      })
+    end
+
+    test "a message sent in a turn is held, and goes with the others as one message once the turn is over",
+         context do
+      job_id = slow_chat(context)
+
+      say(context, job_id, "m-2", "SLOW first")
+      say(context, job_id, "m-3", "second")
+      say(context, job_id, "m-4", "third")
+
+      # Only the message that found the agent idle was delivered while its turn ran: the others
+      # are not delivered before the turn that held them back is reported.
+      {%{"turn" => 2, "interrupted" => false}, before} = take_push("turn")
+      assert deliveries(before) == ["m-2"]
+
+      {%{"turn" => 3}, after_it} = take_push("turn")
+      assert deliveries(after_it) == ["m-3", "m-4"]
+
+      lines = written(context.root, job_id)
+      assert length(lines) == 3
+      assert List.last(lines) =~ "second\\n\\nthird"
+    end
+
+    test "a message sent in a turn is forced by its id, which interrupts the turn and then goes next",
+         context do
+      job_id = slow_chat(context, "5")
+
+      say(context, job_id, "m-2", "SLOW first")
+      say(context, job_id, "m-3", "second")
+      push(context.client, @topic, "interrupt", %{"job_id" => job_id, "message_id" => "m-3"})
+
+      {%{"turn" => 2, "interrupted" => true}, _} = take_push("turn")
+      {%{"turn" => 3, "interrupted" => false}, after_it} = take_push("turn")
+      assert deliveries(after_it) == ["m-3"]
+    end
+
+    test "a message sent in a turn cannot be forced once it has been written: the tap stops nothing",
+         context do
+      job_id = slow_chat(context)
+
+      # `m-2` found the agent idle and was written, so it is the turn in flight. A tap naming it
+      # is one that arrived after the agent took the message.
+      say(context, job_id, "m-2", "SLOW first")
+      push(context.client, @topic, "interrupt", %{"job_id" => job_id, "message_id" => "m-2"})
+
+      {%{"turn" => 2, "interrupted" => false}, _} = take_push("turn")
+
+      # Nor one the worker never held.
+      say(context, job_id, "m-3", "SLOW again")
+      push(context.client, @topic, "interrupt", %{"job_id" => job_id, "message_id" => "m-99"})
+      {%{"turn" => 3, "interrupted" => false}, _} = take_push("turn")
+    end
+
+    test "a message sent in a turn is not discarded by Stop, which ends the turn and lets it go next",
+         context do
+      job_id = slow_chat(context, "5")
+
+      say(context, job_id, "m-2", "SLOW first")
+      say(context, job_id, "m-3", "second")
+      push(context.client, @topic, "interrupt", %{"job_id" => job_id})
+
+      {%{"turn" => 2, "interrupted" => true}, _} = take_push("turn")
+      {%{"turn" => 3}, after_it} = take_push("turn")
+      assert deliveries(after_it) == ["m-3"]
+    end
+
+    # Written to an idle Claude Code, the interrupt ends no turn and the one after it is
+    # labelled interrupted: no push, and its `transition.json` dropped.
+    test "a Stop that arrives with no turn in flight leaves the next turn alone", context do
+      job_id = slow_chat(context)
+
+      push(context.client, @topic, "interrupt", %{"job_id" => job_id})
+      say(context, job_id, "m-2", "hello")
+
+      {%{"turn" => 2, "interrupted" => false}, seen} = take_push("turn")
+      assert deliveries(seen) == ["m-2"]
     end
 
     # What is left of the day, decided by the platform and passed through to the harness, which
@@ -5041,6 +5227,28 @@ defmodule ForgeWorker.LinkTest do
       job = chat(origin, idle_ms: 300)
       job_id = job["job_id"]
       push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id, "reason" => "idle"}, _} = take_push("hibernated")
+    end
+
+    # The timer is set when a message arrives and a turn may outlast it. Closing in the middle of
+    # the turn would leave the message held behind it unwritten.
+    test "going idle waits for the turn in flight, and the messages held behind it", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin, idle_ms: 500, env: [{"FAKE_TURN_SECONDS", "2"}])
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      say(context, job_id, "m-2", "SLOW first")
+      say(context, job_id, "m-3", "second")
+
+      {%{"turn" => 2, "interrupted" => false}, _} = take_push("turn")
+      {%{"turn" => 3}, after_it} = take_push("turn")
+      assert deliveries(after_it) == ["m-3"]
 
       {%{"job_id" => ^job_id, "reason" => "idle"}, _} = take_push("hibernated")
     end

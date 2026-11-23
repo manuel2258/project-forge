@@ -253,21 +253,17 @@ defmodule Forge.Proposals do
   end
 
   @doc """
-  What each conversation among `job_ids` was opened with — its first message — for naming a
-  batch of proposals by the chat that wrote it (`docs/design/ui.md` § Proposals). One query,
-  Postgres's `DISTINCT ON`; a job with no message is absent.
+  What each conversation among `job_ids` was opened with — its first message's first line, or its
+  first file's name when it was opened with files alone — for naming a batch of proposals by the
+  chat that wrote it (`docs/design/ui.md` § Proposals). A job with no message is absent. The
+  reading is `Forge.Conversations.opening_words/1`, the one query of a chat's first words.
   """
   @spec openings([String.t()]) :: %{String.t() => String.t()}
   def openings([]), do: %{}
 
   def openings(job_ids) do
-    Repo.all(
-      from e in Forge.Events.Event,
-        where: e.job_id in ^job_ids and e.type == "chat.message",
-        distinct: e.job_id,
-        order_by: [asc: e.job_id, asc: e.seq],
-        select: {e.job_id, fragment("? ->> 'text'", e.payload)}
-    )
+    job_ids
+    |> Forge.Conversations.opening_words()
     |> Map.new(fn {id, text} ->
       {id, text |> to_string() |> String.split("\n", trim: true) |> List.first("")}
     end)

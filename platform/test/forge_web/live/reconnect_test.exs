@@ -438,6 +438,7 @@ defmodule ForgeWeb.ReconnectTest do
   describe "a conversation's reply" do
     setup %{project: project} do
       {:ok, chat} = Conversations.open(project, "what is this repository?")
+      Forge.ForgeFixtures.chat_started!(chat)
       %{chat: chat}
     end
 

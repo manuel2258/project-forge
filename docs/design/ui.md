@@ -119,7 +119,7 @@ Enter — a ticket's title, a conversation's limits, and a new conversation's fi
 rule is written for decisions, and has not been carried to them.
 
 Transition actions carry a verb: `Move to planning`, never `→ planning`, and no `›`: they commit where they are. Verbs name the act and,
-for a decision, its result — *Approve v1*, *Accept · shaped → planning*, *Interrupt and send*,
+for a decision, its result — *Approve v1*, *Accept · shaped → planning*, *Interrupt to send now*,
 *Accept anyway* — and never *OK*, *Submit* or *Confirm*.
 
 **A navigation target is the whole region, not the identifier inside it.** A job row in Steps, a
@@ -320,7 +320,7 @@ its contract's attributes and states; the `.prompt.md` beside each says when to 
 | actions | `Button` — `primary`, `decision`, `outline`, `danger`; sizes; `fill`; a trailing `›`; a leading `◆` on a decision |
 | navigation | `TopBar`, `QueueButton`, `UsageLine`, `BottomStrip` |
 | decisions | `DecisionRow`, `DropPanel` |
-| forms | `Field` (label above, hint or error below, `mono`), `Segmented`, `ChoiceRow`, `Stepper`, `Composer` |
+| forms | `Field` (label above, hint or error below, `mono`), `Segmented`, `ChoiceRow`, `Stepper`, `Composer` (a leading slot for the paperclip, § Attaching files) |
 | data | `ContextCard`, `ListRow`, `WorkflowTrack`, `StateLabel`, `DiffStat`, `TypeIcon`, `CountBubble`, `Eyebrow`, `FactList` |
 | feedback | `Notice`, `Toast`, `Sheet` |
 
@@ -1975,7 +1975,11 @@ it.
 state, *responding · turn N*, *waiting on you*, *idle*, *waiting for a machine*, or *ended* — never *stopped*),
 and its project or ticket on the right. **A conversation has no stored title**: it is called by the
 first line of what the person opened it with, a workflow step's by its ticket, and one with nothing
-said yet *Chat* (`Forge.Conversations.title/3`) — on its page and on every list. Tapping the title
+said yet *Chat* (`Forge.Conversations.title/3`) — on its page and on every list. **One opened with
+files alone is called by its first file** (`Screenshot_20261121-222859.png`, not *Chat*): the first
+line of what was said is the first message's text, or, when that is blank, the name of the first
+file that came with it (`Forge.Conversations.opening_words/1`), as text like every name on these
+pages. Tapping the title
 drops **the details** (`15e`): its facts, **the machine it holds** — its provider, memory and
 cores, to every member; linked to the machine's page only for the machine's owner, because the
 machines pages are the owner's (`identity.md` § Workers); none when it holds none — the usage
@@ -2063,18 +2067,38 @@ the composer, the now line, the plan band, and any open question's card.
   resumes 14:00 UTC*, or what memory is doing when that is the latest thing the turn reported —
   *a process was killed for memory (1 OOM kill · peak 2.0 GiB of 2 GiB)*; with no call in flight,
   while the agent is writing, an ellipsis. Static text, nothing pulsing, with **Stop** on the line.
-  With a draft typed, Send becomes **Interrupt and send**, and the form carries a field saying so,
-  drawn with the button from the same state, so what is sent is what the button named. **The plan
+  **Send never changes its name and never interrupts**: a message sent while the agent works waits
+  for the turn's end, whatever it carries, and the form has no `interrupt` field
+  (`conversations.md` § Turns). The redesign's *Interrupt and send* is gone. **The plan
   and the now line are one row** above the composer at every width — `3/5 ▾ running mix
   assets.build … Stop` — the band giving its current item's words to the now line below a wide
   screen, where both drawn in full were two bands for one fact (`15f`).
+- **A queued message says so, and carries the way to interrupt.** A message the agent has not taken
+  yet is drawn at the bottom of the conversation, and its bubble is headed *you · queued* (every queued
+  bubble, not only the first of a run), and **it stays under the agent's reply until the agent takes
+  it**, then stands where it was taken. **The oldest queued message carries one button**, *Interrupt
+  to send now*, while a turn is in flight: it stops the agent's turn, keeps the partial reply, and
+  every queued message is then taken together, in the order they were sent. Its words say what it costs — it
+  stops the agent's turn — and on a phone it is a target of at least 44px. Later queued messages
+  carry none, because the button takes all of them; a message waiting for a machine to start has no
+  turn to interrupt and carries none; and the button is gone once the bubble no longer says
+  *queued*, which is read from the event log (`job.harness.delivered`, or the next `job.started`), so a
+  reconnect or a reload draws it again. A tap acts only on a message still queued: if the agent has
+  taken it by then, it interrupts nothing. **Stop** is as it was and discards nothing that was sent.
+- **A message may be files alone**: a bubble holding only its *Attached* line, the names linked to
+  their versions as under any message (§ Attaching files).
 - **The question card** for the last message's questions docks above the composer while it is open,
   so the answers are under the thumb: every question the reply asked and one Send that posts them
   as a single message (§ The question card). The composer stays for anything the card does not
-  hold.
+  hold. **A chat's card draws no way to attach**: files go in a message from the composer under it
+  (§ Attaching files), where the dock used to draw two.
 - **The composer** is the `Composer` primitive in the 64px dock: a 48px field, fully rounded, that
   grows from one line to six and then scrolls inside itself, with send as a 40px round icon button
-  inside it — never a filled button — labelled for assistive technology. **Enter sends where the
+  inside it — never a filled button — labelled for assistive technology — **and, on the left, a
+  round paperclip of the same size that attaches files** (§ Attaching files), mirroring send, so a
+  thumb reaching for a corner cannot hit the wrong one. With nothing attached it adds no height: the
+  dock is as tall as it was before files, and only the list of files chosen (just above the field,
+  three rows and then scrolling) makes it taller. **Enter sends where the
   primary pointer is fine; on a coarse pointer (`(pointer: coarse)`) Enter is a new line and only
   send sends**, because a phone keyboard has no shift-enter and a composer that cannot take a second
   line cannot take a message. The hint names the gesture that applies and is drawn only for a fine
@@ -2133,8 +2157,8 @@ States, each saying what to do rather than going blank:
 
 | State | The row and panel say |
 |---|---|
-| Nothing produced yet | no row; the Steps line names the documents expected, and that they appear as the agent writes them |
-| A turn in flight | the row, its button disabled, and that it is waiting for the reply to finish |
+| Nothing produced yet | no row; the Steps line names the documents expected, and that they appear as the agent writes them. **In a phone's dock the sentence is not drawn** (*Nothing to accept yet. Expected: … They appear as the agent writes them.*, which took two lines of a screen the conversation needs); above the phone layout it stays |
+| A turn in flight | the row, its button disabled, and that it is waiting for the reply to finish (at every width) |
 | Ready | the documents with versions, the outcome rows, Accept |
 | Refused | why in words, inside the panel (no version of X, the step has moved on, the outcome has no edge or its `max` is spent, a newer version arrived) and what to do |
 | Every way out blocked | no outcome can be taken now, and for each one why: no edge, `max` spent, or an approved document nobody has written; no button |
@@ -3344,17 +3368,45 @@ are for agents**: the pages draw no thumbnail, gallery or preview, and gain no n
 file. What exists stays — a stored file is a download row, and an image a person references with
 `![alt](name)` is drawn by the reference code (§ References).
 
-**Where.** One component, `ForgeWeb.UI.Attach.box/1`, on every place a person writes something an
-agent will read: the new-ticket form and accepting a proposal; a ticket chat's message and a project
-chat's message, and starting either; a question's answer (`questions:send`); a human document's
-editor; the decision row's rejection or approval note; and the *Run again* and *Extend* notes
-(`MoreRoom.fields/1`). A transition's comment has no box on the pages and takes files over the API
-only. `attachments_pages_test.exs` fails when a chat's message form, the forms that start a chat or the
-document editor draw no `[data-attach]`; the other places have no such check yet (§ Not built yet).
+**Where.** One component, `ForgeWeb.UI.Attach` (`field/1` wrapping the field, `clip/1` the paperclip), on every place a person writes
+something an agent will read: the new-ticket form and accepting a proposal; a ticket chat's message and
+a project chat's message, and starting either (the project page's form, `/chats` and `/chats/new`); a
+question's answer in the queue and on a ticket's page (`questions:send`); a human document's editor; the
+decision row's rejection or approval note; and the *Run again* and *Extend* notes (`MoreRoom.fields/1`).
+A transition's comment has no control on the pages and takes files over the API only.
+A test fails when one of them stops drawing its paperclip: `attachments_pages_test.exs` for the chat's
+reply box, the three forms that start a chat, a new ticket's body, a question card and the document
+editor; `project_live_test.exs` for accepting a proposal; `extend_live_test.exs` for the *Extend*
+note; `queue_live_test.exs` for the queue's card; `decision_test.exs` for the decision row's note. A
+ticket page's own question card has no such test.
 
-**Three ways in**: a button opening the file picker (on a phone, the phone's own picker, camera and
-library included), dropping files onto the form, and pasting a copied image into it. A pasted file is
-named `pasted-<local date-time>.<ext>`, so two pastes are two files.
+**It is one compact control, never a row of its own.** It used to be a full-width *Attach files*
+button under every form, and a chat's dock with a question open drew two. It is now a **round
+paperclip button** labelled *Attach files* for assistive technology, which opens the same picker as
+before:
+
+- **Where the form has a text box, it is inside the box's corner**, as in the reply box (§ Talk), and
+  the text does not run under it. Every such field takes it the same way (`Attach.field/1`).
+- **A question card in the queue or on a ticket's page**, which has no reply box under it, keeps a
+  paperclip as a round button beside its *Send N answers* — and so does a chat's card when the queue
+  draws it. **A chat's own card has none**: only the chat's page has the reply box below it.
+- On a phone it is a target of at least 44px. With nothing attached it adds no height.
+
+**The files chosen are listed just above the field, only while there are any**: each with its name,
+size, progress and *Remove*, **three rows at most, then scrolling inside the list**, so ten files
+never push the conversation off a phone's screen. **Waiting is said in words** — *Sending when uploads
+finish* — beside that list, because the control is an icon with no room for them. Refusals and *not
+sent* stay where the person acted: under the field.
+
+**A chat message, and the opening of a chat, may be files alone**; every other place still needs its
+words. With no text, Send sends the message with its files, and a start with files alone starts the
+conversation, named after its first file (§ A chat). Nothing typed and nothing attached sends nothing.
+**A send with no text whose every file failed sends nothing** — the agent is not woken, no chat is
+started — and the files are named as *not sent* under the box.
+
+**Three ways in**: the paperclip opening the file picker (on a phone, the phone's own picker, camera
+and library included), dropping files onto the form, and pasting a copied image into it. A pasted
+file is named `pasted-<local date-time>.<ext>`, so two pastes are two files.
 
 **While it uploads**, each file shows its name, size and progress and can be removed before
 sending; removing deletes the staged upload, which is un-attaching and not a failure, so no agent is
@@ -3591,9 +3643,12 @@ previous note describes it.
   (§ Activity, § The job page, § Talk) load the next one when the reader reaches the old end, by an
   `IntersectionObserver` that the suite cannot drive and a headless Chromium at a phone width only
   scrolls; the fallback button is what the suite does exercise.
-- **Attaching files** (`attachments.md`): no inventory test checks that every place draws the box (only the chat's forms and the document editor are checked); the box's uploading, refused
-  and *not sent* states and drop and paste have not run in a browser, because `bin/look` has no
-  step that chooses a file, so only the server's half and the box's markup are under test.
+- **Attaching files** (`attachments.md`): `bin/look`'s `fill` on the paperclip's file input chooses a
+  file — the input is hidden the way `sr-only` is, not by opacity, which a browser driver would
+  refuse — and ticket 71 watched one and ten files go up and be listed, three rows and then
+  scrolling, in headless Chromium. What has not run in a browser is the refused and *not sent*
+  states, drop and paste, and the picker on a real phone (camera and library), so those are under
+  test only as the server's half and the markup.
 - **Dragging**: `bin/look` has no drag step, so only the drag's server half — the event it pushes
   and the reply that says whether the order stands — is under test, for tickets and for milestones;
   the pointer handling, the restore on that reply and the cancel on a dropped socket have not run

@@ -308,6 +308,11 @@ defmodule ForgeWeb.CreateLiveTest do
       # on its own holds whichever of them fired — and they say different things to do next.
       assert html =~ "there is no .forge/workflow.yml on its default branch"
 
+      # Nothing to attach a file to yet: no field wired to an upload route, and not to one for a
+      # project named `false`.
+      refute has_element?(view, "[data-attach]")
+      refute html =~ "/uploads"
+
       # The attribute, not the string: a class list can say "disabled" however the control
       # behaved.
       assert has_element?(view, "#ticket-form button[type=submit][disabled]")

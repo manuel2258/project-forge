@@ -111,6 +111,12 @@ defmodule ForgeWeb.TicketNewLive do
   defp description({:ok, workflow}), do: workflow.description
   defp description(_none_or_broken), do: nil
 
+  # The project's name for the upload route, or nil — never `false`, which `Attach.field/1` would
+  # take for a name and draw a field wired to `/projects/false/uploads`. A project that cannot take
+  # a ticket yet has nothing to attach a file to.
+  defp attach_to(%{name: name}, workflow), do: if(Admission.ready?(workflow), do: name)
+  defp attach_to(nil, _workflow), do: nil
+
   # Whether the form can take a ticket at all. While it cannot, the boxes are disabled too, so
   # nobody types a ticket they cannot submit.
   defp blocked?(project, workflow), do: project != nil and match?({:error, _reason}, workflow)
@@ -317,14 +323,23 @@ defmodule ForgeWeb.TicketNewLive do
           required
           disabled={blocked?(@project, @workflow)}
         />
-        <.input
-          field={@form[:body]}
-          type="textarea"
-          label="Body"
-          rows="6"
-          placeholder="What is wrong, or what should exist. The first job reads this."
-          disabled={blocked?(@project, @workflow)}
-        />
+        <ForgeWeb.UI.Attach.field
+          id="ticket-attach"
+          project={attach_to(@project, @workflow)}
+        >
+          <.input
+            field={@form[:body]}
+            type="textarea"
+            label="Body"
+            rows="6"
+            placeholder="What is wrong, or what should exist. The first job reads this."
+            disabled={blocked?(@project, @workflow)}
+          >
+            <:lead :if={@project && Admission.ready?(@workflow)}>
+              <ForgeWeb.UI.Attach.clip />
+            </:lead>
+          </.input>
+        </ForgeWeb.UI.Attach.field>
 
         <%!-- Optional: the ticket goes to the bottom of that milestone's order, or of the tickets in
               none. Only an open milestone of this project is offered. --%>
@@ -335,12 +350,6 @@ defmodule ForgeWeb.TicketNewLive do
           label="Milestone"
           prompt="None"
           options={Enum.map(@milestones, &{&1.name, &1.id})}
-        />
-
-        <ForgeWeb.UI.Attach.box
-          :if={@project && Admission.ready?(@workflow)}
-          id="ticket-attach"
-          project={@project.name}
         />
 
         <.error_note :if={@error} id="ticket-new-error">{@error}</.error_note>

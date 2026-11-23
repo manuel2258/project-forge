@@ -44,6 +44,23 @@ through a FIFO and asserts each answer. What it found:
 Three of those change the design rather than confirm it, and each is picked up where it belongs:
 cumulative cost in § Spend, harness-side queueing in § Turns, and the echo in § The wire.
 
+**Measured again on 2026-11-21 (ticket 71), on Claude Code 2.1.330**, with the worker's own flags
+(`-p --input-format stream-json --output-format stream-json --replay-user-messages`) against a local
+mock of the Messages API, so no credential was involved and nothing was kept. The rows above stand
+as what an older version did; these are what this one does, and two of them overturn a row:
+
+| Question | 2.1.330 |
+|---|---|
+| A message queued before an interrupt? | **survives it**: taken right after the interrupted turn's `result`, whether the interrupt landed in text or in a tool |
+| A message sent while a tool runs? | **gets no turn of its own**: put into the running turn at the next tool boundary as a system note telling the model to address it, and echoed *before* that turn's `result`. This contradicts the row *"delivers it as its own turn"* |
+| Several queued messages? | **one turn**: one request and one echo line with a block per message |
+| When is the echo written? | with the turn's first complete assistant block, **not** when the harness takes the message — so "no echo yet" does not mean "still queued" |
+| After an interrupt | a user line `[Request interrupted by user]`, which used to be read as a delivery and took a pending message id that was not its own |
+
+So the harness cannot be left to queue: a message sent during a tool call would be answered inside
+the turn it was meant to wait for, and nothing it reports says reliably when a message was taken.
+**The worker queues** (§ Turns).
+
 That the process outlives a turn is why "stay active" is a property of the process rather than a
 trick with sessions. `ForgeWorker.Harness.ClaudeCode` grows a second invocation shape; the driver's
 `capabilities/0` gains `streaming_input`, so a harness that cannot do it is refused rather than
@@ -647,7 +664,11 @@ have moved, which is why a refusal says so rather than the manifest pretending t
   rule a job parked on a blocking question already follows, and its failure mode is the same and
   worse — a conversation nobody closed stalls the queue until it times out. The idle timeout is
   what bounds it, so the timeout is not a nicety.
-- **Idle is measured from the last human message.** When it fires, the harness process ends and
+- **Idle is measured from the last human message, and a turn in flight is not idle.** A timer that
+  fires while the harness is on a turn starts again (the worker's `busy`, so the next close is a full
+  timeout after the firing and not after the message), so it does not close the
+  conversation in the middle of the turn, which would leave the messages held behind it unwritten
+  (§ Turns). When it fires, between turns, the harness process ends and
   the machine is released, and that is all: nothing on the conversation's page says it stopped,
   its composer stays, and the next message sent starts it again on a machine. Its messages
   persist in the event log.
@@ -709,11 +730,12 @@ have moved, which is why a refusal says so rather than the manifest pretending t
   than when there is a reason to.
 
   What the split cannot see, stated so that it is not discovered: a turn that said nothing
-  leaves the message before it looking unanswered, and it is answered again; and a message
-  queued mid-turn that the process never took reads as answered, because the projection draws
-  the rest of that turn's reply after it. Both need the process to have died at the wrong
-  moment, and in both the person is there to say what was lost — § Lifetime's rule for a lost
-  machine.
+  leaves the message before it looking unanswered, and it is answered again. That needs the process
+  to have died at the wrong moment, and the person is there to say what was lost — § Lifetime's rule
+  for a lost machine. A message queued mid-turn that the process never took used to read as answered,
+  because the projection drew it where it was sent with the rest of the reply after it; it is now
+  drawn queued, at the bottom (§ The page), and a new process's start takes it, because the opening
+  it is given includes it.
 
   Two more, narrower, and at every assignment rather than only a reopen. `Jobs.assign/2` marks
   the row running on its worker, then composes the opening, then pushes the assignment; `send/3`
@@ -933,23 +955,46 @@ its run's (`Forge.Jobs.Runs`), which is what keeps a reopen from erasing the ear
 
 ## Turns
 
-**A message sent while a turn is in flight queues, and can be forced.** Sending normally holds
-the message and delivers it when the turn ends: nothing is lost and nothing is half-answered.
-Beside it, a **force** that interrupts — it stops the turn where it is, keeps the partial reply,
-and sends immediately. And a plain **Stop**, which ends the turn without sending anything.
+**A message sent while a turn is in flight waits for it, and the one that has waited longest can be
+forced.** Sending always holds the message and delivers it when the turn ends: nothing is lost and
+nothing is half-answered. That is every send, whatever it carries (words, files or both): **Send
+has one meaning**, and it is not *Interrupt and send* when a draft is typed. The redesign of
+2026-11-14 (`24076ac`) had made it so on the page alone; the context below the page never did, and
+the page no longer does.
+
+**Force is a button on the queued message** (`ui.md` § Talk), not a different way to send. The oldest
+message still queued carries it while a turn is in flight: it interrupts the turn, keeps the partial
+reply, and what is queued is then taken, together, in the order it was sent. The platform sends `interrupt`
+with the message's id (`Forge.Conversations.interrupt/2`, § The wire), and **the worker interrupts
+only if it still holds that message**, so a tap that arrives after the agent took the message — the
+turn ended, or another device interrupted first — stops nothing, and can never stop the turn that is
+answering the message it was drawn on. And a plain **Stop**, which ends the turn in flight and sends
+nothing: **what was queued is not discarded by it** and goes next.
 
 Three controls rather than one because they are three intentions, and guessing between them from
 one gesture is how a chat client loses a message. Queueing is the default because it is the one
 that cannot cost anything; forcing is deliberate because the tokens already spent on the
-interrupted turn are spent.
+interrupted turn are spent, and it is on the message because it is about that message.
 
-**The harness does the queueing itself**, which the spike established: a message written to stdin
-mid-turn is held and delivered as its own turn once the current one ends, and `--replay-user-messages`
-echoes it *at that moment* rather than on receipt. So the worker does not need a queue — it writes
-the message and watches for the echo. What the platform owes the operator is the *state*: a message
-that has been sent but not yet taken says so, and stops saying so when the echo arrives. That is
-`chat.message` followed by `job.harness.delivered` carrying the message's id (§ The wire), and it
-is two events rather than one row updated because the log cannot be updated.
+**The worker does the queueing** (`ForgeWorker.Job.Conversation`, protocol 15), for the reason the
+harness section gives: Claude Code folds a message sent mid-tool into the running turn and echoes
+late. The worker holds every message that arrives while a turn is in flight, in order, and writes
+to the harness only when it is idle: when a turn has been reported, **everything held goes down
+together as one message**, the texts joined by a blank line, which is what Claude Code itself does
+with a queue. (Codex's driver, left to queue, started one message a turn; it no longer has more than
+one to start.) A message is synced and composed (its files
+brought into the folder) when it arrives, so its tokens are fresh whenever it goes. The harness's
+own queue is left as a defence: the harness is written to only while the worker believes it idle
+(Codex's driver still holds a chat's first message while its app-server initialises).
+
+**What the platform owes the operator is the *state*:** a message that has been sent but not yet
+taken says so, and stops saying so when it is taken. Taken is now what the worker says — a
+`job.harness.delivered` carrying the message's id, sent **when the worker writes it** and after the
+turn's own report (§ The wire) — and not the harness's echo, which is dropped along with the
+interrupt line. For a Codex conversation this is new: its messages used to read *queued* for good,
+as no echo ever named them. The platform also takes a later `job.started` as every message's delivery,
+because the new process's opening included them (`opening/1`). It is two events rather than one row
+updated because the log cannot be updated.
 
 **An interrupted turn is indistinguishable from a failed one**, which is the trap in force and
 Stop. The spike measured it: a turn cut by a `control_request` reports
@@ -973,12 +1018,13 @@ ends the process, and for a conversation the process is the thing being kept.
 
 ## The wire
 
-Four additions to `docs/design/worker-channel.md` § Messages. Nothing that exists changes.
+Four additions to `docs/design/worker-channel.md` § Messages, and `delivered` from protocol 15 (below).
+Nothing that exists changes.
 
 | New | Direction | Acked | Meaning |
 |---|---|---|---|
 | `message` | → worker | — | a user message, written to the harness's stdin |
-| `interrupt` | → worker | — | end this turn, keep the process |
+| `interrupt` | → worker | — | end this turn, keep the process; with a `message_id` (protocol 15), only if the worker still holds that message (§ Turns) |
 | `close` | → worker | — | end the conversation, release the machine |
 | `turn` | → platform | **yes** | a turn ended: its index, its cost, the commit it made, the proposals and documents in `out/` (§ Commits), and any `transition.json` it wrote (§ Taking a transition) |
 
@@ -987,24 +1033,33 @@ the one class of message § Delivery says must not be lost. Its harness summary 
 job's `memory` as it stood when the turn ended (`claude-code-events.md` § Memory), which the
 platform keeps on the turn's `chat.turn` event and nowhere else.
 
-**Delivery is an event, not a sixth message.** An earlier draft added `message_delivered` to the
-wire; it does not need to be there. The harness's echo already reaches the runner as an ordinary
-harness event, and events already flow to the platform per event, unacked — which is exactly the
-delivery guarantee an affordance like this wants. So delivery arrives as `job.harness.delivered`
-with the message's id attached, and the wire grows four messages rather than five.
+**Delivery is the log's event, carried by a message of its own since protocol 15.** An earlier
+draft added `message_delivered` to the wire, and the first form of this ticket sent it as an
+ordinary `event`, unacked: lost with the rest when the platform is down (`docs/deploy.md`). Since the
+platform places a queued message from this event and nothing else but a later `job.started`, a
+lost one left the message drawn last for the rest of the process: below the reply that answered it,
+with *responding* and **Stop** not drawn, and its button refused by the worker. So the worker sends
+**`delivered`** (`job_id`, `message_id`), acked like `turn` and sent again after a reconnect, and
+the platform records it as `job.harness.delivered` once per message (`Forge.Jobs.record_delivery/2`).
 
-The id is attached by the worker because the harness cannot attach it: the echo carries the text
-and nothing else. The conversation process keeps the ids of messages it has written and not yet
-seen taken, oldest first, and the harness takes them in that order. The prompt is the first of
-them, which is why the first echo is not reported as anyone's message being delivered — except
-when a reopen holds it (§ Lifetime): then it rides inside the person's first message, and that
-echo is the message's delivery.
+**Since protocol 15 it is the worker that says it, when it writes** (§ Turns), and not the
+harness's echo, which says nothing reliable about when a message was taken. Each message written to
+an idle harness is reported delivered, in the order sent, after the `turn` that ended the turn it
+waited behind. A message the worker wrote directly — to a conversation that held nothing — is
+reported at once. The harness's echo and its `[Request interrupted by user]` line are dropped and
+never reach the log. The prompt is the first thing written and is nobody's message, except when a
+reopen holds it (§ Lifetime): then it rides inside the person's first message, which is reported
+delivered when it is written.
+
+Before 15 the worker matched the echo, in order, to the ids of the messages it had written. A chat
+on a worker below 15 is not given: `Forge.Jobs.protocol_needs/1` needs 15 of every chat, so a
+protocol 14 machine takes workflow jobs and commands only.
 
 **A conversation breaks the unacked map's key.** `ForgeWorker.Link` keyed unacked messages by
 `{job_id, message}`, which is sound when a job sends exactly one terminal message. A conversation
 sends a `turn` per turn, so two unacked `turn`s for one chat would collide and one would be dropped
 for ever — taking its cost with it. So the key is the caller's: `send_acked/4` takes it,
-`send_terminal/4` passes `{job_id, message}`, and a turn passes `{job_id, "turn", index}`.
+`send_terminal/4` passes `{job_id, message}`, a turn passes `{job_id, "turn", index}`, and a delivery `{job_id, "delivered", message_id}`.
 
 **`message` carries the files** (protocol 13, `worker-channel.md`): `attachments`, the pool as the
 platform lists it now — each file with its folder name, version, size, hash, key and a `get` token —
@@ -1028,7 +1083,12 @@ conversation working: no item, nothing counted, its ticket not marked as waiting
 item when the turn ends (`chat.turn`), from which moment it has been waiting
 (`Forge.Conversations.waiting?/1`, which the queue and the conversation's own page ask; the lists
 of conversations — the Chats page, a ticket's Talk, a project's Chats — ask the same question of the
-log, a `chat.turn` after the last words, without folding a transcript per row). A turn that ended with nothing said is not waiting either. **A
+log, a `chat.turn` after the last words, without folding a transcript per row). A turn that ended with nothing said is not waiting either. **Nor is a conversation working on a
+message it took from the queue**: the turn ended with words, a message sent during it has been taken
+(`delivered`), and the next turn is running tools without having said anything yet. Until that turn
+ends it is not an item, not counted, not shown as waiting and its ticket not marked — in the fold,
+because a message is drawn where it was taken (§ The page), and in the lists' log rule, which asks
+that no `delivered` come after the agent's last words. **A
 step conversation of a ticket on hold is no item and pushes nothing**: it is the ticket's decision,
 and a held ticket's are listed in the queue's *On hold* group (`ui.md` § What the queue counts).
 
@@ -1171,8 +1231,14 @@ Two things the page adds are this note's to state:
   the other harness bookkeeping stay out of the transcript, and in the Activity tab behind their
   count. A subagent's calls fold under the `Task` that made them (`parent_tool_use_id`), and a
   subagent's text is not the agent's reply. A result pairs with its call by id wherever the call
-  is, and a message sent mid-turn — recorded at once, and drawn where it was sent — splits the
-  reply on the page without splitting the turn: the turn's end closes both halves. A new process
+  is. **A message sent mid-turn is recorded at once and drawn at the bottom of the conversation,
+  queued, until the worker takes it** (`job.harness.delivered`, or the next `job.started`); it then
+  stays where it was taken — after the reply it waited for — so the agent's words never push it, and
+  its button, up the screen while the turn it exists to stop is streaming. Placing a message when it
+  is taken also makes a taken message the last thing said, which is what a conversation that is
+  working and not waiting is. The rule that a delivery in the middle of a turn splits the reply
+  without splitting the turn (the turn's end closes both halves) stays, for logs written before
+  protocol 15, in which a worker delivered on the harness's late echo. A new process
   closes a reply the last one was cut off in. The agent wrote every tool input, so a field in the
   wrong type is read as absent rather than trusted.
 

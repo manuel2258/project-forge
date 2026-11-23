@@ -113,6 +113,285 @@ defmodule ForgeWeb.AttachmentsPagesTest do
     end
   end
 
+  describe "the compact control" do
+    # Ticket 71: *Attach files* was a full-width row under every form, and a chat's dock with a
+    # question open drew two. It is a round paperclip inside the field's corner now, drawn once.
+    test "is a paperclip inside a chat's reply field, never a row of its own", %{
+      conn: conn,
+      project: project
+    } do
+      {:ok, chat} = Conversations.open(project, "what is this?")
+      {:ok, view, html} = live(conn, ~p"/chats/#{chat.id}")
+
+      assert has_element?(
+               view,
+               ~s(form#say .ui-composer-field > .ui-attach-clip input[type=file][aria-label="Attach files"])
+             )
+
+      refute html =~ "ui-attach-button"
+      # Nothing attached adds no height: the list is empty, and the waiting words are hidden.
+      assert has_element?(view, "form#say .ui-attach-list:empty")
+
+      assert has_element?(
+               view,
+               "form#say [data-attach-waiting][hidden]",
+               "Sending when uploads finish"
+             )
+    end
+
+    test "is drawn once in a chat's dock: the question card has none", %{
+      conn: conn,
+      project: project
+    } do
+      {:ok, chat} = Conversations.open(project, "which?")
+      Forge.ForgeFixtures.chat_started!(chat)
+
+      :ok =
+        Forge.Jobs.record_harness_event(chat.id, %{
+          type: "job.harness.text",
+          payload: %{text: "```question\nkey: backend\ntext: Which one?\n```\n"}
+        })
+
+      {:ok, _chat} =
+        Conversations.record_turn(chat, %{
+          "turn" => 1,
+          "harness" => %{"turns" => 1, "usage" => 1, "cost_usd" => 0.01, "subtype" => "success"}
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+      assert has_element?(view, "#answer-rows form")
+      refute has_element?(view, "#answer-rows [data-attach]")
+      refute has_element?(view, "#answer-rows .ui-attach-clip")
+
+      doc = view |> render() |> Floki.parse_document!()
+      assert length(Floki.find(doc, "[data-attach]")) == 1
+      assert length(Floki.find(doc, ".ui-attach-clip")) == 1
+    end
+
+    test "is inside the field of every form that starts a chat, and of a new ticket's body", %{
+      conn: conn,
+      project: project
+    } do
+      {:ok, view, _html} = live(conn, ~p"/chats/new?#{[project: project.name]}")
+      assert has_element?(view, "form#chat-form [data-attach] #chat_text ~ div .ui-attach-clip")
+
+      {:ok, view, _html} = live(conn, ~p"/chats")
+
+      assert has_element?(
+               view,
+               "form#chat-start [data-attach] .ui-composer-field .ui-attach-clip"
+             )
+
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}?view=chats")
+
+      assert has_element?(
+               view,
+               "form#chat-start [data-attach] .ui-composer-field .ui-attach-clip"
+             )
+
+      {:ok, view, _html} = live(conn, ~p"/tickets/new?#{[project: project.name]}")
+      assert has_element?(view, "form [data-attach] .ui-field-box .ui-attach-clip")
+      refute has_element?(view, ".ui-attach-button")
+    end
+
+    # The queue's and a ticket's card have no reply box under them, so the clip sits beside Send.
+    test "is beside Send on a question card that is given a project, and absent on one that is not" do
+      questions = [
+        %{
+          key: "naming",
+          text: "Which?",
+          anchor: nil,
+          assumption: nil,
+          blocking: true,
+          line: 1,
+          options: []
+        }
+      ]
+
+      card = fn project ->
+        render_component(&ForgeWeb.Operator.QuestionForm.question_form/1,
+          id: "card",
+          questions: questions,
+          forms: %{},
+          submit: "questions:send",
+          project: project
+        )
+        |> Floki.parse_fragment!()
+      end
+
+      with = card.("p")
+      assert [_] = Floki.find(with, ".qcard-dock > .ui-attach-clip")
+      assert [_] = Floki.find(with, "[data-attach] .qcard-foot")
+      assert Floki.find(card.(nil), "[data-attach], .ui-attach-clip") == []
+    end
+
+    test "the document editor and the notes put it inside the textarea's corner" do
+      html =
+        render_component(&ForgeWeb.Operator.Components.document_editor/1,
+          ticket: %{id: "t"},
+          name: "feedback.md",
+          latest: nil,
+          drafts: %{},
+          project: "p"
+        )
+        |> Floki.parse_fragment!()
+
+      assert [_] = Floki.find(html, "[data-attach] textarea ~ div .ui-attach-clip")
+    end
+  end
+
+  # Files alone (ticket 71): a chat message, and the opening of a chat, may carry nothing else.
+  describe "files alone" do
+    setup %{project: project} do
+      {:ok, chat} = Conversations.open(project, "what is this?")
+      Forge.ForgeFixtures.chat_started!(chat)
+      %{chat: chat}
+    end
+
+    defp said(chat), do: length(Forge.Events.for_job(chat.id))
+
+    test "a reply of files with nothing typed is sent, as a bubble holding only its names", %{
+      conn: conn,
+      project: project,
+      user: user,
+      chat: chat
+    } do
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      id = staged!(project, user, "shot.png")
+
+      html =
+        render_hook(view, "send", %{"text" => "", "attachments" => files([{id, "shot.png"}])})
+
+      assert [%{text: "", role: :user} | _] =
+               Enum.filter(
+                 Conversations.transcript(chat.id),
+                 &(&1.role == :user and &1.text == "")
+               )
+
+      assert has_element?(view, "[data-said=you] [data-attached]", "shot.png")
+      # The bubble is the names alone: no empty paragraph of words above them.
+      refute has_element?(view, "[data-said=you] [data-attached]:first-child ~ .msg")
+      assert html =~ "queued"
+    end
+
+    test "a reply with no text whose every file failed sends nothing, and the box says so", %{
+      conn: conn,
+      chat: chat
+    } do
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      before = said(chat)
+
+      render_hook(view, "send", %{"text" => "", "attachments" => %{"failed" => ["big.mov"]}})
+
+      assert said(chat) == before
+      assert_push_event(view, "attach:sent", %{})
+    end
+
+    test "nothing typed and nothing attached still sends nothing", %{conn: conn, chat: chat} do
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      before = said(chat)
+
+      render_hook(view, "send", %{"text" => "   "})
+
+      assert said(chat) == before
+    end
+
+    # Every form that starts a chat: the same membership check, the same rule. A first file's name
+    # is what it is called by.
+    test "files alone start a chat from each of the three forms", %{
+      conn: conn,
+      project: project,
+      user: user
+    } do
+      attach = fn name -> files([{staged!(project, user, name), name}]) end
+
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}?view=chats")
+      render_hook(view, "chat:start", %{"text" => "", "attachments" => attach.("one.png")})
+      assert {path, _flash} = assert_redirect(view)
+      assert path =~ "/chats/"
+
+      {:ok, view, _html} = live(conn, ~p"/chats")
+
+      render_hook(view, "chat:start", %{
+        "project" => project.name,
+        "text" => "",
+        "attachments" => attach.("two.png")
+      })
+
+      assert_redirect(view)
+
+      {:ok, view, _html} = live(conn, ~p"/chats/new?#{[project: project.name]}")
+
+      render_hook(view, "open", %{
+        "chat" => %{"project" => project.name, "text" => ""},
+        "attachments" => attach.("three.png")
+      })
+
+      assert_redirect(view)
+
+      titles =
+        project.id
+        |> Forge.Jobs.chats_for_project()
+        |> Enum.map(& &1.id)
+        |> Conversations.opening_words()
+        |> Map.values()
+
+      assert "one.png" in titles and "two.png" in titles and "three.png" in titles
+    end
+
+    test "files that all failed start nothing, from any form", %{conn: conn, project: project} do
+      before = length(Forge.Jobs.chats_for_project(project.id))
+      failed = %{"failed" => ["big.mov"]}
+
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}?view=chats")
+      render_hook(view, "chat:start", %{"text" => "", "attachments" => failed})
+      assert_push_event(view, "attach:sent", %{})
+
+      {:ok, view, _html} = live(conn, ~p"/chats")
+
+      render_hook(view, "chat:start", %{
+        "project" => project.name,
+        "text" => "",
+        "attachments" => failed
+      })
+
+      assert_push_event(view, "attach:sent", %{})
+
+      {:ok, view, _html} = live(conn, ~p"/chats/new?#{[project: project.name]}")
+
+      html =
+        render_hook(view, "open", %{
+          "chat" => %{"project" => project.name, "text" => ""},
+          "attachments" => failed
+        })
+
+      assert html =~ "say something to start with"
+      assert_push_event(view, "attach:sent", %{})
+      assert length(Forge.Jobs.chats_for_project(project.id)) == before
+    end
+
+    # A file's name is text, as every name on these pages: markup in it is shown as written.
+    test "a chat named after a file shows markup in the name as text", %{
+      conn: conn,
+      project: project,
+      user: user
+    } do
+      batch = %Forge.Attachments.Batch{
+        uploads: [%{id: staged!(project, user, "<b>x</b>.png"), name: "<b>x</b>.png"}]
+      }
+
+      {:ok, chat} = Conversations.open(project, "", actor: {:user, user.id}, attachments: batch)
+
+      {:ok, view, html} = live(conn, ~p"/chats/#{chat.id}")
+      refute html =~ "<b>x</b>"
+      refute view |> element("#top-bar") |> render() =~ "<b>x</b>"
+
+      {:ok, _view, html} = live(conn, ~p"/chats")
+      refute html =~ "<b>x</b>"
+    end
+  end
+
   describe "a chat message with files" do
     setup %{project: project} do
       {:ok, chat} = Conversations.open(project, "what is this?")

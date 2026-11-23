@@ -153,6 +153,11 @@ defmodule ForgeWeb.CoreComponents do
     include: ~w(accept autocomplete capture cols disabled form list max maxlength min minlength
                 multiple pattern placeholder readonly required rows size step)
 
+  slot :lead,
+    doc:
+      "a textarea's own: drawn inside the box's bottom-left corner, the text given room for it — " <>
+        "the paperclip that attaches files (`ForgeWeb.UI.Attach.clip/1`)"
+
   def input(%{field: %Phoenix.HTML.FormField{} = field} = assigns) do
     errors = if Phoenix.Component.used_input?(field), do: field.errors, else: []
 
@@ -233,14 +238,17 @@ defmodule ForgeWeb.CoreComponents do
     ~H"""
     <div class={field_class(assigns)}>
       <label :if={@label} for={@id} class="ui-field-label">{@label}</label>
-      <textarea
-        id={@id}
-        name={@name}
-        class={["ui-field-input", @class]}
-        aria-invalid={@errors != [] && "true"}
-        aria-describedby={described_by(@id, @errors, @hint)}
-        {@rest}
-      >{Phoenix.HTML.Form.normalize_value("textarea", @value)}</textarea>
+      <div class="ui-field-box">
+        <textarea
+          id={@id}
+          name={@name}
+          class={["ui-field-input", @lead != [] && "ui-field-input--lead", @class]}
+          aria-invalid={@errors != [] && "true"}
+          aria-describedby={described_by(@id, @errors, @hint)}
+          {@rest}
+        >{Phoenix.HTML.Form.normalize_value("textarea", @value)}</textarea>
+        <div :if={@lead != []} class="ui-field-lead">{render_slot(@lead)}</div>
+      </div>
       <.field_errors id={@id} errors={@errors} hint={@hint} />
     </div>
     """

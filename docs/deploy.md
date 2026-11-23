@@ -635,6 +635,13 @@ which are best-effort.
 What changes for a node that is already running, where the change is in what the platform does
 with rows it already has. Newest first.
 
+- **A conversation needs protocol 15** (`design/worker-channel.md` § Protocol 15, ticket 71). Nothing is
+  refused and there is no migration. Workflow jobs and commands still run on a protocol 14 machine,
+  but **no chat is given to one**, so build a snapshot from this release or `bin/worker-update` each
+  permanent machine before people open chats. A chat already running on a protocol 14 machine at the
+  deploy finishes there as it was: its messages queue in the harness, and the button on a queued
+  message can stop a turn that has already taken the message.
+
 - **Every job needs protocol 14, and the platform's path gains `git-lfs` and `util-linux`**
   (`design/git-hosting.md` § Git LFS, `design/worker-channel.md` § Protocol 14). Nothing is refused:
   the minimum stays 4 and an older machine stays connected. But **no job of any kind runs until a

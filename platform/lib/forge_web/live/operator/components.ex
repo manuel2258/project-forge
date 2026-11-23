@@ -366,15 +366,24 @@ defmodule ForgeWeb.Operator.Components do
         <span :if={@latest} class="opacity-60">v{@latest.version}</span>
         <span :if={!@latest} class="opacity-60">not written yet</span>
       </label>
-      <textarea
-        id={"write-#{@name}-content"}
-        name="content"
-        rows="6"
-        required
-        phx-debounce="200"
-        class="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm placeholder:opacity-40 focus:outline-none focus:border-border-strong"
-      >{Drafts.field(@drafts, @draft, "content", @latest && @latest.content)}</textarea>
-      <ForgeWeb.UI.Attach.box :if={@project} id={"write-#{@name}-attach"} project={@project} />
+      <ForgeWeb.UI.Attach.field id={"write-#{@name}-attach"} project={@project}>
+        <div class="relative">
+          <textarea
+            id={"write-#{@name}-content"}
+            name="content"
+            rows="6"
+            required
+            phx-debounce="200"
+            class={[
+              "w-full rounded-md border border-border bg-transparent py-2 pr-3 text-sm placeholder:opacity-40 focus:outline-none focus:border-border-strong",
+              if(@project, do: "pl-[52px]", else: "pl-3")
+            ]}
+          >{Drafts.field(@drafts, @draft, "content", @latest && @latest.content)}</textarea>
+          <div :if={@project} class="absolute bottom-[3px] left-[3px]">
+            <ForgeWeb.UI.Attach.clip />
+          </div>
+        </div>
+      </ForgeWeb.UI.Attach.field>
       <button
         type="submit"
         phx-disable-with="Saving…"

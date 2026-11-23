@@ -54,8 +54,17 @@ defmodule Forge.Conversations do
   conversation whose branch does not exist is one the worker refuses on arrival, minutes later,
   after a machine has been found for it.
   """
-  @spec open(Projects.Project.t(), String.t(), keyword()) :: {:ok, Job.t()} | {:error, term()}
+  @spec open(Projects.Project.t(), String.t(), keyword()) ::
+          {:ok, Job.t()} | {:error, :empty | term()}
   def open(project, text, opts \\ []) do
+    # A chat may be opened with files alone, and with nothing at all it is not opened
+    # (`docs/design/ui.md` § Attaching files). The one rule behind every form that starts one.
+    if empty?(text, opts[:attachments]),
+      do: {:error, :empty},
+      else: do_open(project, text, opts)
+  end
+
+  defp do_open(project, text, opts) do
     # A chat opened here has no state and so no declaration to resolve (a chat step is opened by the
     # engine, from its state's) — the grammar is a workflow's, and
     # this is not one. So the person opening it says, and the platform's defaults are what they
@@ -145,7 +154,7 @@ defmodule Forge.Conversations do
     |> Events.log(:first_message, "chat.message", actor, fn %{chat: chat} ->
       %{ticket_id: chat.ticket_id, job_id: chat.id, payload: %{"text" => text}}
     end)
-    |> claim_files(:files, opts[:attachments], actor, & &1.chat, & &1.first_message)
+    |> claim_files(text, opts[:attachments], actor, & &1.chat, & &1.first_message)
     |> Multi.run(:branch, fn _repo, %{chat: chat} ->
       branch = Jobs.chat_branch(chat)
 
@@ -158,6 +167,9 @@ defmodule Forge.Conversations do
       {:ok, %{chat: chat}} ->
         Events.notify_changed(chat)
         {:ok, chat}
+
+      {:error, :words_or_files, :empty, _changes} ->
+        {:error, :empty}
 
       {:error, step, reason, _changes} ->
         {:error, {step, reason}}
@@ -306,9 +318,14 @@ defmodule Forge.Conversations do
   @doc """
   Sends a message to a conversation, and carries it on when it holds no machine.
 
-  `:force` interrupts the turn in flight first; without it the message waits for the current turn
-  to end. Both are recorded before either reaches the worker, because the log is the conversation
-  and a message nobody can see is a message that was lost.
+  **The message waits for the current turn to end, always**: the worker holds it and writes it
+  when the harness is idle (`docs/design/conversations.md` § Turns). Interrupting is another act, on
+  the queued message (`interrupt/2`). The message is recorded before it reaches the worker, because
+  the log is the conversation and a message nobody can see is a message that was lost.
+
+  **Words or files**: a message with no text and no upload is refused, `{:error, :empty}`, as is
+  one whose files all failed — a batch with names in `not_received` and no `uploads`. One rule
+  stands behind every caller.
 
   **The row is read under `FOR UPDATE`, not taken from the caller's struct.** A page rendered a
   minute ago holds a conversation that may have changed since, and a stale struct saying
@@ -330,8 +347,18 @@ defmodule Forge.Conversations do
   records its message.
   """
   @spec send(Job.t(), String.t(), keyword()) ::
-          {:ok, Event.t()} | {:error, :ended | :step_over} | {:error, term()}
+          {:ok, Event.t()} | {:error, :ended | :step_over | :empty} | {:error, term()}
   def send(%Job{kind: :chat} = chat, text, opts \\ []) do
+    if empty?(text, opts[:attachments]), do: {:error, :empty}, else: do_send(chat, text, opts)
+  end
+
+  # Blank words and no upload that finished: a message of nothing, or of files that none arrived.
+  defp empty?(text, batch) do
+    String.trim(to_string(text)) == "" and
+      not match?(%Attachments.Batch{uploads: [_ | _]}, batch)
+  end
+
+  defp do_send(%Job{} = chat, text, opts) do
     actor = actor(opts)
 
     Multi.new()
@@ -349,11 +376,11 @@ defmodule Forge.Conversations do
       job_id: chat.id,
       payload: %{"text" => text}
     })
-    |> claim_files(:files, opts[:attachments], actor, fn _changes -> chat end, & &1.message)
+    |> claim_files(text, opts[:attachments], actor, fn _changes -> chat end, & &1.message)
     |> Repo.transaction()
     |> case do
       {:ok, %{message: event, path: path} = changes} ->
-        told(path, chat, event, changes, opts)
+        told(path, chat, event, changes)
 
         Events.notify_job(chat.id, event)
         Events.notify_chat(chat)
@@ -361,6 +388,9 @@ defmodule Forge.Conversations do
 
       {:error, :path, reason, _changes} ->
         {:error, reason}
+
+      {:error, :words_or_files, :empty, _changes} ->
+        {:error, :empty}
 
       {:error, step, reason, _changes} ->
         {:error, {step, reason}}
@@ -370,18 +400,32 @@ defmodule Forge.Conversations do
   # The files that came with a message, claimed in the transaction that records it and anchored to
   # its event (`docs/design/attachments.md` § Staging, claiming and the sweep). A message with none
   # adds no step, so a chat that never had a file is exactly what it was.
-  defp claim_files(multi, name, batch, actor, chat_of, event_of) do
+  #
+  # **A message of no words must have a file the claim kept.** The check before the transaction
+  # (`empty?/2`) only sees the client's batch; the claim is what quietly refuses an upload that is
+  # gone, over the pool's limits or past its staging life. Refused here, in the transaction, the
+  # whole act rolls back (`{:error, :empty}`) and the person's files stay staged, rather than an
+  # agent being woken, or a chat started, by *[Attached but not received …]* alone.
+  defp claim_files(multi, text, batch, actor, chat_of, event_of) do
     if Attachments.Batch.empty?(batch) do
       multi
     else
-      Multi.run(multi, name, fn _repo, changes ->
+      multi
+      |> Multi.run(:files, fn _repo, changes ->
         chat = chat_of.(changes)
 
         Attachments.claim(pool(chat), actor, batch, :message, {:event, event_of.(changes).seq},
           job_id: chat.id
         )
       end)
+      |> Multi.run(:words_or_files, fn _repo, %{files: files} -> words_or_files(text, files) end)
     end
+  end
+
+  defp words_or_files(text, files) do
+    if String.trim(to_string(text)) == "" and match?(%{added: []}, files),
+      do: {:error, :empty},
+      else: {:ok, :said}
   end
 
   @doc """
@@ -398,14 +442,12 @@ defmodule Forge.Conversations do
   end
 
   # What a send does once it is committed. A conversation started again has no machine to push to,
-  # and says so to the lists instead; a live one is pushed to, interrupting first when asked.
-  defp told(:restart, _chat, _event, %{job: job}, _opts), do: Events.notify_changed(job)
+  # and says so to the lists instead; a live one is pushed to, and the worker holds the message
+  # until its turn is over.
+  defp told(:restart, _chat, _event, %{job: job}), do: Events.notify_changed(job)
 
-  defp told(:live, chat, event, changes, opts) do
-    if Keyword.get(opts, :force, false), do: push(chat, "interrupt", %{})
-
-    push(chat, "message", message_payload(chat, event, changes))
-  end
+  defp told(:live, chat, event, changes),
+    do: push(chat, "message", message_payload(chat, event, changes))
 
   # What the worker is told of a message: its text, the files that came with it (named, so the
   # agent reads them where they are) and the whole pool as it is now, with a token for each, so
@@ -549,6 +591,38 @@ defmodule Forge.Conversations do
   end
 
   @doc """
+  Whether the agent has the ball: the last thing taken is a person's message or a reply no
+  `chat.turn` has closed. **A message still queued is not taken**, so it is not counted: the page's
+  *responding* and the button on a queued message both ask this (`docs/design/ui.md` § Talk), and a
+  conversation idle behind a message nobody has taken is not responding.
+  """
+  @spec turn_open?([message()]) :: boolean()
+  def turn_open?(messages) do
+    case messages |> Enum.reject(&queued_message?/1) |> List.last() do
+      %{role: :user} -> true
+      %{role: :assistant, turn: nil} -> true
+      _other -> false
+    end
+  end
+
+  defp queued_message?(%{role: :user, delivered: false}), do: true
+  defp queued_message?(_message), do: false
+
+  @doc """
+  The id of the message that carries the *Interrupt to send now* button: the oldest still queued.
+  Forcing it takes every message queued, together and in the order sent, so one button does for all
+  of them and the later ones carry none (`docs/design/ui.md` § Talk). Nil when none is.
+  Whether to draw it is the caller's: only while a turn is in flight on a running conversation.
+  """
+  @spec oldest_queued([message()]) :: String.t() | nil
+  def oldest_queued(messages) do
+    case Enum.find(messages, &queued_message?/1) do
+      %{id: id} -> id
+      nil -> nil
+    end
+  end
+
+  @doc """
   Whether a conversation's reply was lost with its machine: it holds none, and it is not waiting
   on its person (`waiting?/1`) — the person's message, or nothing at all, is the last word of
   `messages` (`messages/1`), or the agent's reply was cut off before its turn ended — so no
@@ -586,9 +660,61 @@ defmodule Forge.Conversations do
   @spec sendable?(Job.t()) :: boolean()
   def sendable?(%Job{} = chat), do: live?(chat) or sendable(Repo, chat) == :ok
 
-  @doc "Ends the turn in flight without sending anything. The conversation stays open."
+  @doc """
+  Ends the turn in flight without sending anything. The conversation stays open, and **what was
+  queued is not discarded**: it is taken next (`docs/design/conversations.md` § Turns).
+  """
   @spec stop(Job.t()) :: :ok
   def stop(%Job{kind: :chat} = chat), do: push(chat, "interrupt", %{"job_id" => chat.id})
+
+  @doc """
+  Interrupts the turn in flight **so that a queued message is taken now**: the button on it. Only a
+  message of this conversation that is still queued (`queued?/2`) on one that is running; anything
+  else is `{:error, :not_queued}` and nothing is sent. The worker checks again, in one process, that
+  it still holds the message (`docs/design/worker-channel.md` § Protocol 15), which is what makes a
+  tap that races the message's taking stop nothing.
+  """
+  @spec interrupt(Job.t(), String.t()) :: :ok | {:error, :not_queued}
+  def interrupt(%Job{kind: :chat, id: id} = chat, message_id) when is_binary(message_id) do
+    if Repo.one(from j in Job, where: j.id == ^id, select: j.status) == :running and
+         queued?(id, message_id),
+       do: push(chat, "interrupt", %{"job_id" => id, "message_id" => message_id}),
+       else: {:error, :not_queued}
+  end
+
+  @max_seq 9_223_372_036_854_775_807
+
+  @doc """
+  Whether a message of this conversation is still queued: a `chat.message` that no
+  `job.harness.delivered` names and no later `job.started` has taken — the fold's own rule
+  (`transcript/1`), asked of the log directly. A message id that is not a sequence number, or is
+  another conversation's or another kind of event, is not queued.
+  """
+  @spec queued?(String.t(), String.t()) :: boolean()
+  def queued?(job_id, message_id) do
+    # Bounded to what `events.seq` holds: a larger number is no event's, and would be refused by the
+    # database with an encoding error that takes the asker's own page down. (No lower bound: a
+    # negative number fits and finds no event, so one would be an equivalent mutant.)
+    # **An id as it was sent**: `"05"` and `"+5"` parse to 5 but are not the id the worker holds.
+    with {seq, ""} when seq <= @max_seq <- Integer.parse(message_id),
+         true <- Integer.to_string(seq) == message_id,
+         %Event{} <-
+           Repo.one(
+             from e in Event,
+               where: e.job_id == ^job_id and e.seq == ^seq and e.type == "chat.message"
+           ) do
+      not Repo.exists?(
+        from e in Event,
+          where: e.job_id == ^job_id,
+          where:
+            (e.type == "job.harness.delivered" and
+               fragment("? ->> 'message_id' = ?", e.payload, ^message_id)) or
+              (e.type == "job.started" and e.seq > ^seq)
+      )
+    else
+      _not_queued -> false
+    end
+  end
 
   @doc """
   A person's *End*: the harness's stdin closes, the last turn finishes, and the machine is
@@ -1704,14 +1830,19 @@ defmodule Forge.Conversations do
     do: job_id |> Events.for_job_types(@fold_types) |> transcript()
 
   def transcript(events) when is_list(events) do
-    %{done: done, open: open} = Enum.reduce(events, %{done: [], open: nil, round: 0}, &fold/2)
+    %{done: done, open: open, queued: queued} =
+      Enum.reduce(events, %{done: [], open: nil, round: 0, queued: []}, &fold/2)
 
     # The reply being spoken right now, which has had no `chat.turn` to close it yet. Dropping it
     # would mean a conversation showed nothing at all until each turn finished — which is the
     # streaming case, and the whole reason the page subscribes per job.
+    #
+    # **A message nobody has taken is drawn last**, after whatever is being said, until it is
+    # taken (`fold/2`), oldest first.
     done
     |> flush(open)
     |> Enum.reverse()
+    |> Kernel.++(Enum.reverse(queued))
     |> Enum.map(&finish_message/1)
   end
 
@@ -1851,23 +1982,34 @@ defmodule Forge.Conversations do
   # split by a message sent in the middle of it is still one turn: `chat.turn` closes both
   # halves, and nothing from an earlier round.
 
+  # **A message is queued until it is taken, and drawn where it was taken** (`docs/design/conversations.md`
+  # § The page). It is kept aside, `delivered: false`, and `transcript/1` puts it last; the reply
+  # being spoken is not split by it, so the agent's words never push it, and the button on it,
+  # up the screen while the turn it exists to stop streams.
   defp fold(%Event{type: "chat.message"} = event, state) do
     message = %{
       role: :user,
       id: to_string(event.seq),
-      text: event.payload["text"],
+      text: event.payload["text"] || "",
       at: event.inserted_at,
       delivered: false
     }
 
-    %{state | done: [message | flush(state.done, state.open)], open: nil}
+    %{state | queued: [message | state.queued]}
   end
 
-  # The harness echoes a message when it takes it, which for one sent mid-turn is after the
-  # current turn's result — so this is delivery, not receipt (§ The wire).
+  # The worker says a message was taken when it writes it (protocol 15), and before that the
+  # harness's echo did, late — so this is delivery, not receipt (§ The wire). It places the
+  # message: after the reply it waited for when that turn has ended, and in the middle of a turn
+  # still open in a log from before 15, where the reply goes on under it as a second half of the
+  # same turn (`chat.turn` closes both, `round`).
   defp fold(%Event{type: "job.harness.delivered"} = event, state) do
     id = event.payload["message_id"]
-    %{state | done: Enum.map(state.done, &mark_delivered(&1, id))}
+
+    case Enum.split_with(state.queued, &(&1.id == id)) do
+      {[], _kept} -> state
+      {[message], kept} -> take(%{state | queued: kept}, [message])
+    end
   end
 
   # A subagent's words are its report to the agent, which the agent then says — or does not —
@@ -1921,8 +2063,14 @@ defmodule Forge.Conversations do
 
   # A new process: whatever reply was still open was cut off with the one before it, and what
   # the new one says is its own.
-  defp fold(%Event{type: "job.started"}, state),
-    do: %{state | done: flush(state.done, state.open), open: nil, round: state.round + 1}
+  #
+  # **A new process takes every message waiting for it**: the opening it was given includes them
+  # (`opening/1`). It is also the only taking a chat's first message ever had, and a Codex
+  # conversation's, which no echo named.
+  defp fold(%Event{type: "job.started"}, state) do
+    state = %{state | round: state.round + 1}
+    take(%{state | queued: []}, Enum.reverse(state.queued))
+  end
 
   # The line a swept conversation draws where the sweep stands among what was kept: neither side's words, and not
   # in `said/1` (`docs/design/storage.md` § Retention).
@@ -2116,8 +2264,12 @@ defmodule Forge.Conversations do
   defp flush(acc, nil), do: acc
   defp flush(acc, open), do: [open | acc]
 
-  defp mark_delivered(%{role: :user, id: id} = message, id), do: %{message | delivered: true}
-  defp mark_delivered(message, _id), do: message
+  # Messages taken, oldest first, stand after whatever was said before: the reply being spoken is
+  # closed first, so the next words are a reply of their own.
+  defp take(state, messages) do
+    taken = Enum.map(messages, &%{&1 | delivered: true})
+    %{state | done: Enum.reduce(taken, flush(state.done, state.open), &[&1 | &2]), open: nil}
+  end
 
   defp finish_message(%{role: :assistant, items: items} = message) do
     items = items |> Enum.reverse() |> Enum.map(&finish_item/1)
@@ -2266,8 +2418,10 @@ defmodule Forge.Conversations do
         Repo.exists?(
           from e in Event,
             where: e.job_id == ^id and e.seq > ^(newest || 0),
-            where: e.type in ~w(chat.opened chat.message job.harness.text job.harness.tool_use
-                           job.harness.tool_result)
+            # A `delivered` is the agent having taken a message it was sent while a turn ran: the
+            # reply to it has not begun, and Accept must not be pressed meanwhile.
+            where: e.type in ~w(chat.opened chat.message job.harness.delivered job.harness.text
+                           job.harness.tool_use job.harness.tool_result)
         )
 
       _dormant ->
@@ -2292,9 +2446,10 @@ defmodule Forge.Conversations do
 
   Messages sent while the conversation waited for a machine are after the last reply too, so
   they are answered rather than pushed to nobody. What the split cannot see: a turn that said
-  nothing leaves the message before it looking unanswered, and it is answered again; and a
-  message queued mid-turn that the process never took reads as answered, because the projection
-  draws the rest of that turn's reply after it.
+  nothing leaves the message before it looking unanswered, and it is answered again. A message
+  queued mid-turn that the process never took is after the last reply too, because the projection
+  draws a message nobody has taken at the bottom (`transcript/1`), so it is answered by the next
+  process rather than read as answered.
   """
   @spec opening(String.t()) :: %{replay: String.t() | nil, prompt: String.t() | nil}
   def opening(job_id) do
@@ -2328,7 +2483,7 @@ defmodule Forge.Conversations do
             {named, failed} =
               Attachments.message_files(pool, Map.get(files, String.to_integer(id), []))
 
-            %{message | text: text <> ForgeCore.Prompt.message_files(named, failed)}
+            %{message | text: ForgeCore.Prompt.with_files(text, named, failed)}
 
           other ->
             other
@@ -2549,7 +2704,8 @@ defmodule Forge.Conversations do
     tickets = by_id(Tickets.Ticket, Enum.reject(Enum.map(chats, & &1.ticket_id), &is_nil/1))
     said = last_said_by(Enum.map(chats, & &1.id))
     turns = last_turn(Enum.map(chats, & &1.id))
-    first = first_said(Enum.map(chats, & &1.id))
+    taken = last_delivery(Enum.map(chats, & &1.id))
+    first = opening_words(Enum.map(chats, & &1.id))
     ended = ended_ids(Enum.map(chats, & &1.id))
 
     chats
@@ -2561,7 +2717,7 @@ defmodule Forge.Conversations do
         project: projects[chat.project_id],
         ticket: tickets[chat.ticket_id],
         live: live?(chat),
-        waiting: live?(chat) and turn_ended?(last, turns[chat.id], seq),
+        waiting: live?(chat) and turn_ended?(last, turns[chat.id], taken[chat.id], seq),
         # Told from the events, not the status (`ended?/1`), in the one query above. A list draws
         # *End* on a live row that is not a step's, and *ended* on one a person ended.
         ended: chat.id in ended,
@@ -2592,9 +2748,13 @@ defmodule Forge.Conversations do
 
   # Waiting on a person is the agent having spoken last and its turn having ended, which is what
   # the queue reads too (`waiting?/1`): a `chat.turn` after the last words, in the log and not in a
-  # folded transcript, because a list folds none.
-  defp turn_ended?({:agent, _text}, turn_seq, last_seq), do: (turn_seq || 0) > last_seq
-  defp turn_ended?(_last, _turn_seq, _last_seq), do: false
+  # folded transcript, because a list folds none. **And no delivery after those words**: a message
+  # sent mid-turn and taken once the turn ended is the agent working again, whatever it has said
+  # of it so far (`docs/design/conversations.md` § In the queue).
+  defp turn_ended?({:agent, _text}, turn_seq, delivery_seq, last_seq),
+    do: (turn_seq || 0) > last_seq and (delivery_seq || 0) < last_seq
+
+  defp turn_ended?(_last, _turn_seq, _delivery_seq, _last_seq), do: false
 
   defp by_id(_schema, []), do: %{}
 
@@ -2631,17 +2791,57 @@ defmodule Forge.Conversations do
     |> Map.new()
   end
 
-  # The first thing a person said in each conversation, in one query: the same DISTINCT ON as
-  # `last_said_by/1`, ascending.
-  defp first_said(job_ids) do
+  # The newest `job.harness.delivered` of each conversation, as its sequence: the same DISTINCT ON.
+  defp last_delivery(job_ids) do
     Repo.all(
       from e in Event,
-        where: e.job_id in ^job_ids and e.type == "chat.message",
+        where: e.job_id in ^job_ids and e.type == "job.harness.delivered",
         distinct: e.job_id,
-        order_by: [asc: e.job_id, asc: e.seq],
-        select: {e.job_id, e.payload}
+        order_by: [asc: e.job_id, desc: e.seq],
+        select: {e.job_id, e.seq}
     )
-    |> Map.new(fn {id, payload} -> {id, payload["text"]} end)
+    |> Map.new()
+  end
+
+  @doc """
+  What each conversation was opened with, by id: the first line of what its first message said —
+  or, when that said nothing and only carried files, **the name of the first file** — for `title/3`
+  to name it by (`docs/design/ui.md` § A chat). One query for the messages and, when some of them
+  have no words, two more for the files of those (`Attachments.entries_for_events/1`), however many
+  conversations are asked of; the page and the lists read it the same way. A conversation with no message yet has no entry.
+
+  The first message is the oldest `chat.message`, the same `DISTINCT ON` as `last_said_by/1`,
+  ascending.
+  """
+  @spec opening_words([String.t()]) :: %{String.t() => String.t()}
+  def opening_words(job_ids) do
+    firsts =
+      Repo.all(
+        from e in Event,
+          where: e.job_id in ^job_ids and e.type == "chat.message",
+          distinct: e.job_id,
+          order_by: [asc: e.job_id, asc: e.seq],
+          select: {e.job_id, e.seq, e.payload}
+      )
+
+    files =
+      for({_id, seq, payload} <- firsts, String.trim(payload["text"] || "") == "", do: seq)
+      |> Attachments.entries_for_events()
+
+    Map.new(firsts, fn {id, seq, payload} ->
+      {id, words(payload["text"], files[seq])}
+    end)
+  end
+
+  defp words(text, files) do
+    if String.trim(text || "") == "" do
+      case files do
+        [file | _] -> file.file || file.original
+        _none -> ""
+      end
+    else
+      text
+    end
   end
 
   @doc """

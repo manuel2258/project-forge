@@ -189,6 +189,7 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"chat_live.ex", "form:open"} => :local,
     {"chat_live.ex", "chat:questions:send"} => :member,
     {"chat_live.ex", "stop"} => :member,
+    {"chat_live.ex", "interrupt"} => :member,
     # Withdrawing a file: `Forge.Attachments.withdraw/5` refuses all but the person who attached it
     # and a project admin, inside the transaction that locks the pool.
     {"chat_live.ex", "attachments:withdraw"} => :member,
@@ -459,6 +460,7 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "event" => :owns_job,
     "result" => :owns_job,
     "turn" => :owns_job,
+    "delivered" => :owns_job,
     "hibernated" => :owns_job,
     "failed" => :owns_job
   }

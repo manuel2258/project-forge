@@ -64,7 +64,9 @@ defmodule ForgeWeb.Operator.QuestionForm do
 
   attr :project, :string,
     default: nil,
-    doc: "the project's name: with it the card draws a box to attach files to the answers"
+    doc:
+      "the project's name: with it the card draws a paperclip beside Send to attach files to the " <>
+        "answers. A chat's own page passes none, because the reply box under its card attaches"
 
   attr :refusal, :map, default: nil, doc: "the page's `:refusal`: a Send refused is drawn here"
 
@@ -143,30 +145,33 @@ defmodule ForgeWeb.Operator.QuestionForm do
         </div>
       </div>
 
-      <ForgeWeb.UI.Attach.box :if={@project} id={"attach-#{@id}"} project={@project} />
-
-      <div class="qcard-foot">
-        <Actions.refused
-          id={"form-#{@id}-refusal"}
-          refusal={@refusal}
-          at={if @any_refusal, do: [:questions], else: [{:form, @id}]}
-        />
-        <p :if={@left > 0} class="qcard-left" id={"form-#{@id}-left"}>
-          {@left} {@kind}{if @left == 1, do: "question", else: "questions"} left
-        </p>
-        <div class="qcard-dock">
-          {render_slot(@dock)}
-          <.button
-            type="submit"
-            variant="primary"
-            fill
-            disabled={@left > 0 or @locked == 0}
-            phx-disable-with="Sending…"
-          >
-            Send {@locked} {if @locked == 1, do: "answer", else: "answers"}
-          </.button>
+      <%!-- The list of files goes above the foot and the paperclip beside Send, so the card is as
+            tall as it was with nothing attached (`docs/design/ui.md` § Attaching files). --%>
+      <ForgeWeb.UI.Attach.field id={"attach-#{@id}"} project={@project}>
+        <div class="qcard-foot">
+          <Actions.refused
+            id={"form-#{@id}-refusal"}
+            refusal={@refusal}
+            at={if @any_refusal, do: [:questions], else: [{:form, @id}]}
+          />
+          <p :if={@left > 0} class="qcard-left" id={"form-#{@id}-left"}>
+            {@left} {@kind}{if @left == 1, do: "question", else: "questions"} left
+          </p>
+          <div class="qcard-dock">
+            {render_slot(@dock)}
+            <ForgeWeb.UI.Attach.clip :if={@project} class="qcard-clip" />
+            <.button
+              type="submit"
+              variant="primary"
+              fill
+              disabled={@left > 0 or @locked == 0}
+              phx-disable-with="Sending…"
+            >
+              Send {@locked} {if @locked == 1, do: "answer", else: "answers"}
+            </.button>
+          </div>
         </div>
-      </div>
+      </ForgeWeb.UI.Attach.field>
     </form>
 
     <script :type={Phoenix.LiveView.ColocatedHook} name=".EnterNeverSends">

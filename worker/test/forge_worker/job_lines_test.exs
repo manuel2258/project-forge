@@ -328,7 +328,7 @@ defmodule ForgeWorker.JobLinesTest do
           end
         end)
 
-      state = %{runner: runner, job_id: context.job_id, pending: []}
+      state = %{runner: runner, job_id: context.job_id, busy: false, held: []}
 
       assert {:noreply, ^state} =
                Conversation.handle_cast({:message, "m-1", "hello"}, state)

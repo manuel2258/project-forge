@@ -325,6 +325,19 @@ defmodule ForgeWorker.Job.RunnerCodexTest do
       close(pid)
     end
 
+    # A message the driver is not ready for yet — Codex, while it initialises — writes nothing now
+    # and is started by the driver itself. It is taken all the same: a Stop in that turn has a turn
+    # to stop, and the runner's guard against interrupting an idle harness must not swallow it.
+    test "a message the driver holds while it starts is a turn open", context do
+      pid = chat(context, "success")
+
+      assert Runner.send_message(pid, "hello") == :ok
+      assert :sys.get_state(pid).turn_open
+      assert_receive {:turn, _job, 1, _event}, 10_000
+      refute :sys.get_state(pid).turn_open
+      close(pid)
+    end
+
     test "an interrupt with no turn in flight writes nothing and labels nothing", context do
       pid = chat(context, "success")
 

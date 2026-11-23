@@ -129,6 +129,15 @@ defmodule ForgeWeb.ChatStepLiveTest do
     assert has_element?(view, "#step-nothing-yet", "refinement.md")
     # Nothing to accept, so no row and nothing amber (`16e`).
     refute has_element?(view, "#decision-row")
+
+    # A phone's dock does not draw the sentence, nor a section holding nothing else: the
+    # conversation needs that height, and the Steps view names the expected documents. The ticket's
+    # own Steps keeps it at every width.
+    assert has_element?(view, "#step-status.max-md\\:hidden")
+    assert has_element?(view, "#step-nothing-yet.max-md\\:hidden")
+    assert has_element?(ticket_page, "#step-nothing-yet", "refinement.md")
+    refute has_element?(ticket_page, "#step-nothing-yet.max-md\\:hidden")
+    refute has_element?(ticket_page, "#step-status.max-md\\:hidden")
   end
 
   # The conversation's page draws the ticket's frame (§ The Accept area): titled by the ticket,

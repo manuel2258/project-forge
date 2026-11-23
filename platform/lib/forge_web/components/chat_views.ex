@@ -204,6 +204,7 @@ defmodule ForgeWeb.ChatViews do
           now={@at}
           refs={@refs}
           banded={@responding && @plan != []}
+          interrupt={if @responding, do: Forge.Conversations.oldest_queued(@messages)}
           attached={@attached}
           attach_path={@attach_path}
           transcripts={@transcripts}
@@ -261,7 +262,6 @@ defmodule ForgeWeb.ChatViews do
             forms={@forms}
             refusal={@refusal}
             submit="chat:questions:send"
-            project={@project.name}
             hidden={[{"chat", @chat_id}, {"reply", @reply}]}
           />
         </.split_pane>
@@ -277,24 +277,24 @@ defmodule ForgeWeb.ChatViews do
         <.button type="button" size="sm" phx-click="stop">Stop</.button>
       </div>
 
-      <StepAccept.status :if={@step} step={@step} />
+      <StepAccept.status :if={@step} step={@step} dock />
 
-      <%!-- While the agent is responding a typed message interrupts it, and the button says so:
-            *Interrupt and send* names what it costs — the turn already spent on is spent
-            (`docs/design/conversations.md` § Turns). With nothing typed it is still Send. --%>
+      <%!-- Send is only ever Send: a message sent while the agent works waits for its turn, and
+            interrupting is a button on the queued message (`docs/design/conversations.md` §
+            Turns). The one way to attach in the dock is the paperclip in this field — the question
+            card above draws none (`docs/design/ui.md` § Attaching files). --%>
       <form :if={@sendable} id="say" phx-change="draft" phx-submit="send" class="chat-say">
-        <%!-- Drawn with the button that says so, from the same assigns, so what is sent is what
-              the button named. --%>
-        <input :if={interrupts?(@responding, @draft)} type="hidden" name="interrupt" value="true" />
-        <.composer
-          id="draft"
-          name="text"
-          value={@draft}
-          placeholder="Reply to the agent"
-          interrupt={interrupts?(@responding, @draft)}
-          phx-debounce="200"
-        />
-        <ForgeWeb.UI.Attach.box id="say-attach" project={@project.name} room={@attach_room} />
+        <ForgeWeb.UI.Attach.field id="say-attach" project={@project.name} room={@attach_room}>
+          <.composer
+            id="draft"
+            name="text"
+            value={@draft}
+            placeholder="Reply to the agent"
+            phx-debounce="200"
+          >
+            <:lead><ForgeWeb.UI.Attach.clip /></:lead>
+          </.composer>
+        </ForgeWeb.UI.Attach.field>
         <%!-- The gesture that sends, named only where it is true: a fine pointer's Enter. On a
               coarse one Enter is a new line and only the button sends (§ Talk), and the query is
               the same one the field's hook reads, written as CSS. --%>
@@ -314,10 +314,6 @@ defmodule ForgeWeb.ChatViews do
     </div>
     """
   end
-
-  @doc "Whether sending now interrupts the agent: it is responding and something is typed."
-  @spec interrupts?(boolean(), String.t() | nil) :: boolean()
-  def interrupts?(responding, draft), do: responding and String.trim(draft || "") != ""
 
   defp who(%{"kind" => "user", "id" => me}, me), do: "you"
   defp who(%{"kind" => "user"}, _me), do: "someone"

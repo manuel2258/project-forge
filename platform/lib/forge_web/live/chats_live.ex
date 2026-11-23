@@ -102,29 +102,32 @@ defmodule ForgeWeb.ChatsLive do
     text = String.trim(start["text"])
     project = Enum.find(socket.assigns.projects, &(&1.name == start["project"]))
 
-    cond do
-      is_nil(project) ->
-        {:noreply, assign(socket, start: start, start_error: "Choose one of your projects.")}
+    if is_nil(project) do
+      {:noreply, assign(socket, start: start, start_error: "Choose one of your projects.")}
+    else
+      case Operator.open_chat(
+             project,
+             socket.assigns.current_scope.user,
+             text,
+             ForgeWeb.Attaching.opts(params)
+           ) do
+        {:ok, chat} ->
+          {:noreply, push_navigate(socket, to: ~p"/chats/#{chat.id}")}
 
-      text == "" ->
-        {:noreply, assign(socket, start: start, start_error: "Say what the chat is about first.")}
+        # Nothing typed and nothing that finished uploading: files alone start a chat. The box
+        # is told the act is over, so files that all failed are named as *not sent* under it.
+        {:error, :empty} ->
+          {:noreply,
+           socket
+           |> assign(start: start, start_error: "Say what the chat is about first.")
+           |> ForgeWeb.Attaching.sent()}
 
-      true ->
-        case Operator.open_chat(
-               project,
-               socket.assigns.current_scope.user,
-               text,
-               ForgeWeb.Attaching.opts(params)
-             ) do
-          {:ok, chat} ->
-            {:noreply, push_navigate(socket, to: ~p"/chats/#{chat.id}")}
-
-          # Only a refusal of membership reaches here, which the lookup above has already made:
-          # an equivalent mutant today, said in a sentence rather than as `inspect/1` all the same.
-          {:error, _reason} ->
-            {:noreply,
-             assign(socket, start: start, start_error: "The chat could not be started there.")}
-        end
+        # Only a refusal of membership reaches here, which the lookup above has already made:
+        # an equivalent mutant today, said in a sentence rather than as `inspect/1` all the same.
+        {:error, _reason} ->
+          {:noreply,
+           assign(socket, start: start, start_error: "The chat could not be started there.")}
+      end
     end
   end
 
@@ -204,31 +207,34 @@ defmodule ForgeWeb.ChatsLive do
           <.error_note :if={@start_error} id="chat-start-error" class="chat-start-error">
             {@start_error}
           </.error_note>
-          <div class="chat-start-row">
-            <label class="chat-start-project">
-              <span class="sr-only">Project</span>
-              <select id="chat-start-project" name="project">
-                <option
-                  :for={project <- @projects}
-                  value={project.name}
-                  selected={project.name == picked(@start, @summaries, @projects)}
-                >
-                  {project.name}
-                </option>
-              </select>
-            </label>
-            <.composer
-              id="chat-start-text"
-              name="text"
-              value={@start["text"]}
-              placeholder="Start a chat"
-              phx-debounce="200"
-            />
-          </div>
-          <ForgeWeb.UI.Attach.box
+          <ForgeWeb.UI.Attach.field
             id="chat-start-attach"
             project={picked(@start, @summaries, @projects)}
-          />
+          >
+            <div class="chat-start-row">
+              <label class="chat-start-project">
+                <span class="sr-only">Project</span>
+                <select id="chat-start-project" name="project">
+                  <option
+                    :for={project <- @projects}
+                    value={project.name}
+                    selected={project.name == picked(@start, @summaries, @projects)}
+                  >
+                    {project.name}
+                  </option>
+                </select>
+              </label>
+              <.composer
+                id="chat-start-text"
+                name="text"
+                value={@start["text"]}
+                placeholder="Start a chat"
+                phx-debounce="200"
+              >
+                <:lead><ForgeWeb.UI.Attach.clip /></:lead>
+              </.composer>
+            </div>
+          </ForgeWeb.UI.Attach.field>
         </.form>
       </:composer>
     </Layouts.app>

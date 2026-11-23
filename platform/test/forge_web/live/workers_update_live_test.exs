@@ -418,9 +418,9 @@ defmodule ForgeWeb.WorkersUpdateLiveTest do
         machine(user, %{protocol: 3, update_state: %{"unable" => "layout"}}, connected: false)
 
       {_view, text} = page(conn, worker)
-      assert text =~ "refused: protocol 3, this platform accepts 4–14 — "
+      assert text =~ "refused: protocol 3, this platform accepts 4–15 — "
       assert text =~ "reinstall it once from the current image"
-      refute text =~ "accepts 4–14 — update it"
+      refute text =~ "accepts 4–15 — update it"
     end
 
     test "with the switch on and an update that can run, it is updating itself", %{
@@ -431,7 +431,7 @@ defmodule ForgeWeb.WorkersUpdateLiveTest do
         machine(user, %{protocol: ForgeCore.WorkerProtocol.current() + 1}, connected: false)
 
       {_view, text} = page(conn, worker)
-      assert text =~ "this platform accepts 4–14 — it is updating itself"
+      assert text =~ "this platform accepts 4–15 — it is updating itself"
     end
 
     test "with the switch off it says to turn it on, or to press Update now when connected", %{

@@ -75,6 +75,9 @@ defmodule Forge.Jobs do
   # Every job of every kind: the worker clones, resets and pushes with Git LFS, and one from before
   # would check out pointer stubs without a word (`docs/design/worker-channel.md` § Protocol 14).
   @lfs_protocol 14
+  # A conversation: the worker queues its messages and reports their delivery itself, which a
+  # button on a queued message and its guard rest on (`docs/design/worker-channel.md` § Protocol 15).
+  @chat_protocol 15
 
   # How many of the merges that landed on the default branch since a ticket's base an integrating
   # job is told about by name; the rest are counted (`docs/design/job-prompt.md` § Integrating the
@@ -939,6 +942,11 @@ defmodule Forge.Jobs do
     opens with, and a release from before it resumes the session with no word of the note or of why
     there is more room (`docs/design/worker-channel.md` § Protocol 12). Every other job asks nothing
     more.
+  - **A conversation needs protocol 15**: the worker holds its messages while a turn runs and says
+    each was delivered when it writes it, and interrupts a queued message only while it still holds
+    it. A worker from before 15 leaves queueing to the harness, which answers a message sent while a
+    tool runs inside the turn running and echoes it late, so the *queued* a person reads and the
+    button on it would be wrong (`docs/design/worker-channel.md` § Protocol 15).
   - **A conversation needs protocol 8**: it is now told the default branch, and a release from
     before 8 acts on that without being able to squash a merge that is still open — the turn dies
     on `reset --soft` and every turn after it does too, which is a trap a chat could not reach
@@ -978,10 +986,14 @@ defmodule Forge.Jobs do
       archive: archive_protocol(job),
       attachments: attachments_protocol(job),
       lfs: @lfs_protocol,
+      chat: chat_protocol(job),
       jump: jump_protocol(job),
       extension: extension_protocol(job),
       usage: @usage_protocol
     ]
+
+  defp chat_protocol(%Job{kind: :chat}), do: @chat_protocol
+  defp chat_protocol(%Job{}), do: 0
 
   defp jump_protocol(%Job{kind: :workflow} = job),
     do: if(jumped?(spec(job).entered), do: @jump_protocol, else: 0)
@@ -1993,6 +2005,32 @@ defmodule Forge.Jobs do
     )
     |> Enum.filter(&(&1.type == "job.waiting"))
     |> Map.new(&{&1.job_id, &1})
+  end
+
+  @doc """
+  Records that the worker wrote a chat's message to its harness (`job.harness.delivered`, protocol
+  15), **once**: the worker acks and resends it until the platform answers
+  (`docs/design/worker-channel.md` § Protocol 15), so a message it says twice — the ack lost on a
+  reconnect — is recorded the first time only. A second one would be newer than whatever followed
+  the first, and the chat's list reads *waiting* from its newest delivery
+  (`Forge.Conversations.summaries/1`): a chat waiting for its person would read as the agent working.
+  """
+  @spec record_delivery(String.t(), String.t()) :: :ok
+  def record_delivery(job_id, message_id) when is_binary(message_id) do
+    already? =
+      Repo.exists?(
+        from e in Event,
+          where: e.job_id == ^job_id and e.type == "job.harness.delivered",
+          where: fragment("? ->> 'message_id' = ?", e.payload, ^message_id)
+      )
+
+    if already?,
+      do: :ok,
+      else:
+        record_harness_event(job_id, %{
+          type: "job.harness.delivered",
+          payload: %{"message_id" => message_id}
+        })
   end
 
   @doc """

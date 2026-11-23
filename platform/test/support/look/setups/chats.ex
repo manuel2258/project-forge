@@ -8,8 +8,13 @@ defmodule Forge.Look.Setups.Chats do
   with one question open (`16e`–`16i`). The project has three secrets, so a new chat offers them
   as chips (`12d`); their values are made up.
 
+  Ticket 71 adds three: a conversation mid-turn with two messages waiting for it, the oldest
+  carrying *Interrupt to send now* (`queued`); one opened with files alone, whose first message is a
+  bubble holding only its names (`files_only`); and a step whose nothing-yet dock has a two-question
+  card open (`step_empty`).
+
   Users: `member`. Paths: `list`, `new`, `responding`, `changes`, `released`, `updated`, `ended`, `lost`, `conflict`,
-  `conflict_changes`, `step`, `step_ticket`.
+  `conflict_changes`, `step`, `step_ticket`, `queued`, `files_only`, `step_empty`.
   """
 
   @behaviour Forge.Look.Setups
@@ -73,6 +78,9 @@ defmodule Forge.Look.Setups.Chats do
     lost = lost!(game)
     conflict = conflict!(game)
     responding = responding!(game, machine)
+    queued = queued!(game, machine)
+    files_only = files_only!(game, member)
+    {_step_empty_ticket, step_empty} = step_empty!(game, member)
 
     %{
       users: %{"member" => member},
@@ -88,7 +96,10 @@ defmodule Forge.Look.Setups.Chats do
         "conflict" => "/chats/#{conflict.id}",
         "conflict_changes" => "/chats/#{conflict.id}?tab=changes",
         "step" => "/chats/#{step_chat.id}",
-        "step_ticket" => "/tickets/#{game.name}/#{step.number}"
+        "step_ticket" => "/tickets/#{game.name}/#{step.number}",
+        "queued" => "/chats/#{queued.id}",
+        "files_only" => "/chats/#{files_only.id}",
+        "step_empty" => "/chats/#{step_empty.id}"
       }
     }
   end
@@ -103,6 +114,7 @@ defmodule Forge.Look.Setups.Chats do
       )
 
     run!(chat)
+    chat_started!(chat)
 
     said(chat, """
     The asset step is most of it. It keys its cache on `$GITHUB_SHA`, so every push rebuilds all 212 textures, about 6½ minutes.
@@ -113,7 +125,8 @@ defmodule Forge.Look.Setups.Chats do
     tool(chat, "r1", "Read", %{"file_path" => "mix/tasks/assets.ex"}, "ok")
     turn(chat, 1, "0.09")
 
-    {:ok, _} = Conversations.send(chat, "Yes, try it.")
+    {:ok, event} = Conversations.send(chat, "Yes, try it.")
+    taken!(chat, event)
     running!(chat, machine)
 
     tool(chat, "p1", "TodoWrite", %{"todos" => plan()}, "ok")
@@ -159,6 +172,7 @@ defmodule Forge.Look.Setups.Chats do
   defp released!(project) do
     {:ok, chat} = Conversations.open(project, "Ideas for a two-player mode")
     run!(chat)
+    chat_started!(chat)
     said(chat, "Split screen is the cheap one. Online needs a server we do not have yet.")
     turn(chat, 1, "0.04")
     {:ok, _chat} = Conversations.ended(Jobs.get(chat.id), nil, "idle")
@@ -179,6 +193,7 @@ defmodule Forge.Look.Setups.Chats do
   defp updated!(project) do
     {:ok, chat} = Conversations.open(project, "How should scores be stored?")
     run!(chat)
+    chat_started!(chat)
 
     said(
       chat,
@@ -194,6 +209,7 @@ defmodule Forge.Look.Setups.Chats do
   defp ended!(project, member) do
     {:ok, chat} = Conversations.open(project, "Sketch the settings screen")
     run!(chat)
+    chat_started!(chat)
     said(chat, "Three groups: sound, controls, accessibility. Want the wireframe as a doc?")
     turn(chat, 1, "0.02")
     :ok = Conversations.close(Jobs.get(chat.id), actor: {:user, member.id})
@@ -204,9 +220,14 @@ defmodule Forge.Look.Setups.Chats do
   defp lost!(project) do
     {:ok, chat} = Conversations.open(project, "Why does the menu music stutter?")
     run!(chat)
+    chat_started!(chat)
     said(chat, "It decodes on the main thread. Moving it to a task should fix it.")
     turn(chat, 1, "0.02")
-    {:ok, _} = Conversations.send(Jobs.get(chat.id), "Try it, and tell me what the profile says.")
+
+    {:ok, event} =
+      Conversations.send(Jobs.get(chat.id), "Try it, and tell me what the profile says.")
+
+    taken!(chat, event)
     running!(chat, nil)
     {:ok, _} = Jobs.requeue(chat.id, :worker_lost)
     chat
@@ -216,6 +237,7 @@ defmodule Forge.Look.Setups.Chats do
   defp conflict!(project) do
     {:ok, chat} = Conversations.open(project, "Tidy the README's install section")
     run!(chat)
+    chat_started!(chat)
     said(chat, "Done: the install section is three steps now. Merge when you are ready.")
     turn(chat, 1, "0.03")
     running!(chat, nil)
@@ -231,6 +253,92 @@ defmodule Forge.Look.Setups.Chats do
     chat
   end
 
+  # Mid-turn — a call still running — with two messages waiting for it. The worker holds them until
+  # the turn is over, so neither is taken yet, and the oldest carries the button that stops the turn.
+  defp queued!(project, machine) do
+    {:ok, chat} = Conversations.open(project, "Add a loading bar to the title screen")
+    run!(chat)
+    chat_started!(chat)
+
+    said(chat, "I'll start with the asset loader, then the bar that reads its progress.")
+    tool(chat, "q1", "Read", %{"file_path" => "lib/game/loader.ex"}, "ok")
+    tool(chat, "q2", "Bash", %{"command" => "mix test test/game/loader_test.exs"})
+    running!(chat, machine)
+
+    {:ok, _} = Conversations.send(chat, "Keep it under 40 lines, please.")
+    {:ok, _} = Conversations.send(chat, "And no new dependencies.")
+    chat
+  end
+
+  # Opened with a picture and nothing typed: called by the file, and its first bubble holds only
+  # the names. The bytes are a few made-up words.
+  defp files_only!(project, member) do
+    path = Path.join(System.tmp_dir!(), "look-chats-#{System.unique_integer([:positive])}")
+    File.write!(path, "pixels of the title screen")
+    {:ok, upload} = Forge.Attachments.stage(project, member, {:file, path}, "title-screen.png")
+    File.rm(path)
+
+    batch = %Forge.Attachments.Batch{uploads: [%{id: upload.id, name: "title-screen.png"}]}
+
+    {:ok, chat} =
+      Conversations.open(project, "", actor: {:user, member.id}, attachments: batch)
+
+    run!(chat)
+    chat_started!(chat)
+    said(chat, "The logo sits 12 px too low on a narrow phone. I can nudge it up; want that?")
+    turn(chat, 1, "0.02")
+    chat
+  end
+
+  # A step with nothing produced yet and a card of two questions open: the dock on a phone is the
+  # composer and the card, with no *Nothing to accept yet* sentence between them.
+  defp step_empty!(project, member) do
+    {:ok, ticket} =
+      Tickets.admit(project, %{title: "Shape the settings screen"}, {:user, member.id})
+
+    [chat] = Jobs.step_chats_for_ticket(ticket.id)
+    run!(chat)
+    chat_started!(chat)
+
+    said(chat, """
+    Before I write brief.md I need two things.
+
+    ```question
+    key: groups
+    text: How should the settings be grouped?
+    options:
+      - {label: Three groups, detail: Sound and controls and accessibility, recommended: true}
+      - {label: One long list, detail: No groups}
+    ```
+
+    ```question
+    key: reset
+    text: Does the screen have a reset to defaults?
+    options:
+      - {label: Yes, detail: One button at the bottom, recommended: true}
+      - {label: No, detail: Settings stay as they are}
+    ```
+    """)
+
+    {:ok, chat} =
+      Conversations.record_turn(chat, %{
+        "turn" => 1,
+        "commit" => String.duplicate("c", 40),
+        "harness" => %{"turns" => 1, "cost_usd" => 0.02, "session_id" => "look"}
+      })
+
+    {ticket, chat}
+  end
+
+  # What the worker says when it writes a message to an idle agent: taken, so no longer queued.
+  defp taken!(chat, %{seq: seq}),
+    do:
+      :ok =
+        Jobs.record_harness_event(chat.id, %{
+          type: "job.harness.delivered",
+          payload: %{message_id: to_string(seq)}
+        })
+
   # 16f–16i: brief.md at v2, the second reply asking one question.
   defp step!(project, member) do
     {:ok, ticket} =
@@ -238,6 +346,7 @@ defmodule Forge.Look.Setups.Chats do
 
     [chat] = Jobs.step_chats_for_ticket(ticket.id)
     run!(chat)
+    chat_started!(chat)
 
     said(chat, "Wrote a first brief.md: an all-time tab and a weekly tab, each the top 25.")
 
@@ -249,7 +358,10 @@ defmodule Forge.Look.Setups.Chats do
         "harness" => %{"turns" => 1, "cost_usd" => 0.02, "session_id" => "look"}
       })
 
-    {:ok, _} = Conversations.send(chat, "Keep it to one screen. Top 10, your own rank pinned.")
+    {:ok, event} =
+      Conversations.send(chat, "Keep it to one screen. Top 10, your own rank pinned.")
+
+    taken!(chat, event)
 
     said(chat, """
     Updated brief.md to v2: one screen, top 10, your row pinned under a divider. One thing it leaves open:

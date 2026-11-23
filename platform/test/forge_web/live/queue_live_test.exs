@@ -670,6 +670,11 @@ defmodule ForgeWeb.QueueLiveTest do
       assert has_element?(view, pane <> " #form-#{version.id}")
       assert has_element?(view, "#form-#{version.id} .qcard-dock #queue-later")
       refute has_element?(view, "#queue-dock")
+
+      # Files go with the answers from a paperclip beside Send, not a row of their own
+      # (`docs/design/ui.md` § Attaching files): this card has no reply box under it.
+      assert has_element?(view, "#form-#{version.id} .qcard-dock > .ui-attach-clip")
+      refute has_element?(view, ".ui-attach-button")
     end
 
     # `docs/design/ui.md` § The affordance rule: Enter never sends a question form. A one-line
@@ -782,6 +787,7 @@ defmodule ForgeWeb.QueueLiveTest do
   # sentence is what the item is about, and "Which backend?" alone would hide the rest.
   test "a conversation asking several questions says how many", %{conn: conn, project: project} do
     {:ok, chat} = Forge.Conversations.open(project, "which?")
+    Forge.ForgeFixtures.chat_started!(chat)
 
     :ok =
       Jobs.record_harness_event(chat.id, %{

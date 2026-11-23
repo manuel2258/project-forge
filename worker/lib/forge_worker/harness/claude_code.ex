@@ -54,8 +54,10 @@ defmodule ForgeWorker.Harness.ClaudeCode do
   # A conversation has no turn ceiling — it ends when a person stops talking. **Neither mode is
   # given a money ceiling**: forge counts weighted tokens as the stream arrives and stops the
   # process itself (`ForgeWorker.Job.Meter`; `docs/design/claude-code-events.md` § Usage, counted
-  # during the run). `--replay-user-messages` is what makes delivery observable: the harness echoes a
-  # message when it takes it, which for a message sent mid-turn is after the current turn ends.
+  # during the run). `--replay-user-messages` makes the harness echo each message, which `ForgeWorker.Job.Conversation`
+  # now drops: the echo comes with a turn's first complete block, and for a message sent while a tool
+  # runs before that turn's result, so it says nothing reliable about when a message was taken, and
+  # the worker says delivery itself, when it writes (`docs/design/conversations.md` § Turns).
   defp mode_args(%Spec{} = spec, opts) do
     case Keyword.get(opts, :mode, :prompt) do
       :streaming ->
@@ -297,9 +299,11 @@ defmodule ForgeWorker.Harness.ClaudeCode do
     m
     |> content_blocks()
     |> Enum.flat_map(fn
-      # Under `--replay-user-messages` the harness echoes a message when it *takes* it, which
-      # for one sent mid-turn is after the current turn's result. That is what makes delivery
-      # observable rather than something the worker has to assert — § Turns. In prompt mode no
+      # Under `--replay-user-messages` the harness echoes a message, late: with the turn's first
+      # complete block, and for one sent while a tool runs before that turn's result (measured on
+      # 2.1.330, § The harness supports this directly). The conversation drops it and says delivery
+      # itself when it writes — § Turns — so this event is no longer what *delivered* is read from.
+      # In prompt mode no
       # such line is ever written, so this clause is only reached by a conversation.
       %{"type" => "text", "text" => text} ->
         [event("delivered", %{text: text, parent_tool_use_id: parent})]

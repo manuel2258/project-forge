@@ -1001,6 +1001,20 @@ defmodule ForgeCore.Prompt do
     received <> missing
   end
 
+  @doc """
+  A message's text with what it says about its files appended (`message_files/2`): **the one place
+  the two are joined**, for the worker's write and the platform's replay alike. A message may be
+  files alone (`docs/design/ui.md` § Attaching files), and then it is the file line and nothing
+  else, with none of the blank lines that would have separated it from words that are not there.
+  """
+  @spec with_files(String.t() | nil, [map()], [String.t()]) :: String.t()
+  def with_files(text, files, not_received) do
+    text = text || ""
+    named = message_files(files, not_received)
+
+    if String.trim(text) == "", do: String.trim_leading(named), else: text <> named
+  end
+
   defp size(bytes) when is_integer(bytes) and bytes >= 1_073_741_824,
     do: "#{Float.round(bytes / 1_073_741_824, 1)} GiB"
 

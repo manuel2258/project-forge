@@ -47,9 +47,14 @@ defmodule ForgeWorker.Job.Conversation do
   def send_message(pid, id, text, files \\ %{}),
     do: GenServer.cast(pid, {:message, id, text, files})
 
-  @doc "Ends the turn in flight, keeping the process."
-  @spec interrupt(pid()) :: :ok
-  def interrupt(pid), do: GenServer.cast(pid, :interrupt)
+  @doc """
+  Ends the turn in flight, keeping the process. **With a message id, only if this worker still holds
+  that message** (`docs/design/conversations.md` § Turns): a tap on a queued message that reaches
+  here after the message was written interrupts nothing, so it can never stop the turn that is
+  answering that very message. Without one it is Stop. Either way, what is held goes next.
+  """
+  @spec interrupt(pid(), String.t() | nil) :: :ok
+  def interrupt(pid, message_id \\ nil), do: GenServer.cast(pid, {:interrupt, message_id})
 
   @doc "Ends the conversation: stdin closes, the last turn finishes, the machine is released."
   @spec close(pid(), String.t()) :: :ok
@@ -78,12 +83,13 @@ defmodule ForgeWorker.Job.Conversation do
        worktree: nil,
        runner: nil,
        turns: 0,
-       # The platform's ids for messages written but not yet taken by the harness, oldest
-       # first. The harness echoes the text and not the id, so the queue is the correlation:
-       # it takes them in the order they were written. The prompt is the first of them, sent
-       # by the runner itself — unless it is held, when the first echo is the first message's,
-       # the prompt riding with it.
-       pending: if(hold, do: [], else: [:prompt]),
+       # **The worker queues** (`docs/design/conversations.md` § Turns): `busy` is a turn in flight,
+       # from the write that began it to the turn's report, and `held` the messages that arrived
+       # meanwhile — `{platform id, composed text}`, oldest first — written together as one message
+       # when the turn has been reported. The prompt is the first write, sent by the runner itself:
+       # unless it is held (a reopen whose last word was the agent's), the conversation starts busy.
+       busy: not hold,
+       held: [],
        hold: hold,
        # The CLI's version, from its `system/init`: recorded with each session upload, so a
        # reopen restores the file only onto the CLI that wrote it.
@@ -244,7 +250,7 @@ defmodule ForgeWorker.Job.Conversation do
   # A spec with nothing to open with is a reopened conversation whose last word was the agent's:
   # everything said has been answered, and the new process waits for the person rather than
   # answering its opening message a second time as though it were new. One decision, made here
-  # and handed to the runner, because the pending queue above has to agree with it.
+  # and handed to the runner, because `busy` above has to agree with it: a held prompt is no turn.
   defp holds?(assignment) do
     case assignment["spec"]["prompt"] do
       prompt when is_binary(prompt) -> String.trim(prompt) == ""
@@ -334,8 +340,10 @@ defmodule ForgeWorker.Job.Conversation do
   # The folder is brought up to the pool before the turn that reads this message begins, and the
   # message names the files that came with it, and those that did not arrive — here or on the
   # platform's side (`docs/design/attachments.md` § Delivery, `conversations.md` § The wire). A
-  # platform that sends no pool leaves the folder as it is.
-  defp attached(state, %{"attachments" => entries} = payload) when is_list(entries) do
+  # platform that sends no pool leaves the folder as it is. Done when the message arrives, held or
+  # not, so that what it names is fresh whenever it goes; a message may be files alone
+  # (`ForgeCore.Prompt.with_files/3`).
+  defp compose(state, text, %{"attachments" => entries} = payload) when is_list(entries) do
     job_dir = job_dir(state)
     failed = ForgeWorker.Attachments.sync(job_dir, entries)
     ForgeWorker.Attachments.refresh(job_dir)
@@ -343,33 +351,39 @@ defmodule ForgeWorker.Job.Conversation do
     files = Enum.reject(payload["files"] || [], &(&1["file"] in failed))
     lost = for %{"file" => file} <- payload["files"] || [], file in failed, do: file
 
-    ForgeCore.Prompt.message_files(files, (payload["not_received"] || []) ++ lost)
+    ForgeCore.Prompt.with_files(text, files, (payload["not_received"] || []) ++ lost)
   end
 
-  defp attached(_state, _payload), do: ""
+  defp compose(_state, text, _payload), do: text || ""
 
   @impl true
   def handle_cast({:message, id, text}, state), do: handle_cast({:message, id, text, %{}}, state)
 
+  # While a turn is in flight the message is held, and nothing is written; otherwise it goes now.
   def handle_cast({:message, id, text, files}, state) do
-    case Runner.send_message(state.runner, text <> attached(state, files)) do
-      :ok ->
-        {:noreply, reset_idle(%{state | pending: state.pending ++ [id]})}
+    message = {id, compose(state, text, files)}
 
-      {:error, reason} ->
-        Log.line(
-          "chat.undelivered",
-          :warning,
-          "the harness would not take a message: #{inspect(reason)}",
-          job_id: state.job_id
-        )
-
-        {:noreply, state}
+    if state.busy do
+      {:noreply, reset_idle(%{state | held: state.held ++ [message]})}
+    else
+      case write_held(state, [message]) do
+        {:ok, state} -> {:noreply, reset_idle(state)}
+        {:error, state} -> {:noreply, state}
+      end
     end
   end
 
-  def handle_cast(:interrupt, state) do
+  # Stop, or — with a message id — force: only a message still held can be forced, so a tap that
+  # arrives after the message was written stops nothing (`interrupt/2`).
+  def handle_cast({:interrupt, nil}, state) do
     Runner.interrupt(state.runner)
+    {:noreply, state}
+  end
+
+  def handle_cast({:interrupt, id}, state) do
+    if Enum.any?(state.held, fn {held, _text} -> held == id end),
+      do: Runner.interrupt(state.runner)
+
     {:noreply, state}
   end
 
@@ -381,16 +395,12 @@ defmodule ForgeWorker.Job.Conversation do
   # -- what the harness says ------------------------------------------------------------------
 
   @impl true
-  def handle_info({:harness_event, %{type: "job.harness.delivered"} = event}, state) do
-    {id, pending} = take_pending(state.pending)
-
-    # The prompt's own echo is not a message anyone is waiting on, so it is not reported as one.
-    if is_binary(id) do
-      send(state.link, {:event, state.job_id, delivery_event(event, id)})
-    end
-
-    {:noreply, %{state | pending: pending}}
-  end
+  # **The harness's echo is not delivery** and says nothing the platform reads: Claude Code writes
+  # it with the turn's first complete block, and for a message sent while a tool runs before that
+  # turn's result. The worker says delivery itself, when it writes (`write_held/2`). The line it
+  # writes after an interrupt, `[Request interrupted by user]`, is dropped with it.
+  def handle_info({:harness_event, %{type: "job.harness.delivered"}}, state),
+    do: {:noreply, state}
 
   def handle_info(
         {:harness_event, %{type: "job.harness.started", payload: payload} = event},
@@ -459,7 +469,10 @@ defmodule ForgeWorker.Job.Conversation do
        )}
     )
 
-    {:noreply, %{state | turns: index}}
+    # Everything held while that turn ran goes now, as one message — after the turn's report, so the
+    # log reads `chat.turn` before the `delivered` that follows it. Across a reconnect the Link
+    # keeps that order when it sends what is unacked again (`Link.resend_unacked/1`).
+    {:noreply, flush_held(%{state | turns: index, busy: false})}
   end
 
   def handle_info({:ended, _job_id, result}, state), do: {:noreply, %{state | result: result}}
@@ -467,6 +480,13 @@ defmodule ForgeWorker.Job.Conversation do
   def handle_info({:EXIT, runner, _reason}, %{runner: runner} = state) do
     {:stop, :normal, finish(state)}
   end
+
+  # **A turn in flight is not idleness.** The timer is set when a message arrives, so one that
+  # outlasts it would close the conversation in the middle of the turn, and the messages held behind
+  # the turn would never be written (`flush_held/1` takes nothing for a conversation closing). It
+  # starts again instead, and the conversation goes idle once the turn is over and the time has
+  # passed.
+  def handle_info(:idle, %{busy: true} = state), do: {:noreply, reset_idle(state)}
 
   def handle_info(:idle, state) do
     Logger.info("chat #{state.job_id} went idle; releasing the machine")
@@ -619,11 +639,36 @@ defmodule ForgeWorker.Job.Conversation do
     Slice.leave(state.user, Enum.filter(paths, &File.exists?/1))
   end
 
-  defp take_pending([]), do: {nil, []}
-  defp take_pending([id | rest]), do: {id, rest}
+  # A conversation being closed takes nothing more: its stdin is closing.
+  defp flush_held(%{held: []} = state), do: state
+  defp flush_held(%{closing: closing} = state) when closing != nil, do: state
+  defp flush_held(state), do: state |> then(&write_held(%{&1 | held: []}, state.held)) |> elem(1)
 
-  defp delivery_event(event, id) do
-    %{event | type: "job.harness.delivered", payload: Map.put(event.payload, :message_id, id)}
+  # Writes messages to an idle harness, together as one — their texts joined by a blank line, which
+  # is how Claude Code takes a queue — and says each was delivered, in the order sent, which is what
+  # the platform's *queued* is read from (`docs/design/conversations.md` § The wire). A harness that
+  # will not take it leaves the messages undelivered, as the platform's log already says.
+  defp write_held(state, messages) do
+    text = Enum.map_join(messages, "\n\n", fn {_id, text} -> text end)
+
+    case Runner.send_message(state.runner, text) do
+      :ok ->
+        for {id, _text} <- messages do
+          send(state.link, {:chat_delivered, state.job_id, id})
+        end
+
+        {:ok, %{state | busy: true}}
+
+      {:error, reason} ->
+        Log.line(
+          "chat.undelivered",
+          :warning,
+          "the harness would not take a message: #{inspect(reason)}",
+          job_id: state.job_id
+        )
+
+        {:error, state}
+    end
   end
 
   # String keys: this crosses the channel as JSON, and an atom key here arrives as a string key

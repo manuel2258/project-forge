@@ -618,6 +618,7 @@ defmodule ForgeWeb.QueuePastTest do
 
     test "a conversation about a project has no past", %{conn: conn, project: project} do
       {:ok, chat} = Conversations.open(project, "what is this?")
+      Forge.ForgeFixtures.chat_started!(chat)
       reply(chat, "It is a game.")
 
       {:ok, view, _html} = live(conn, ~p"/?item=chat-#{chat.id}")

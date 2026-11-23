@@ -113,6 +113,7 @@ defmodule Forge.ConversationsTest do
     test "an answer to a question names whoever answered it", context do
       %{project: project, person: person} = context
       {:ok, chat} = Conversations.open(project, "which?")
+      chat_started!(chat)
 
       text(chat, "```question\nkey: rows\ntext: How many rows?\n```\n")
       {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.01))
@@ -482,6 +483,8 @@ defmodule Forge.ConversationsTest do
   describe "what a turn wrote" do
     setup %{project: project} do
       {:ok, chat} = Conversations.open(project, "write it down")
+
+      chat_started!(chat)
       %{chat: chat}
     end
 
@@ -909,6 +912,7 @@ defmodule Forge.ConversationsTest do
       project: project
     } do
       {:ok, chat} = Conversations.open(project, "which?")
+      chat_started!(chat)
       text(chat, "```question\nkey: rows\ntext: How many rows?\n```\n")
       first = chat.id |> Conversations.messages() |> Conversations.reply_ref()
 
@@ -918,9 +922,10 @@ defmodule Forge.ConversationsTest do
       {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.01))
       assert chat.id |> Conversations.messages() |> Conversations.reply_ref() == first
 
-      {:ok, _event} = Conversations.send(chat, "ten")
+      {:ok, event} = Conversations.send(chat, "ten")
       assert chat.id |> Conversations.messages() |> Conversations.reply_ref() == nil
 
+      delivered(chat, to_string(event.seq))
       text(chat, "```question\nkey: rows\ntext: How many rows, again?\n```\n")
       second = chat.id |> Conversations.messages() |> Conversations.reply_ref()
       refute second in [nil, first]
@@ -1023,6 +1028,377 @@ defmodule Forge.ConversationsTest do
       # A message with none names none, and the pool is still the whole of it.
       {:ok, _event} = Conversations.send(opened, "and again", actor: {:user, user.id})
       assert_receive {"message", %{"files" => [], "attachments" => [%{"file" => "Shot-1.png"}]}}
+    end
+  end
+
+  # **Where a message stands until the agent takes it** (`docs/design/conversations.md` § The
+  # page): last, queued, whatever is being said, and then where it was taken. The worker says it
+  # was taken when it writes it (`job.harness.delivered`), and a new process takes every message
+  # that was waiting for it.
+  describe "a message nobody has taken" do
+    setup %{project: project} do
+      {:ok, chat} = Conversations.open(project, "first")
+      chat_started!(chat)
+      %{chat: chat}
+    end
+
+    test "trails the reply being spoken, and does not split it", %{chat: chat} do
+      text(chat, "Working.")
+      {:ok, _event} = Conversations.send(chat, "also this")
+      tool_use(chat, "t1", "Bash", %{"command" => "mix test"})
+      text(chat, "Done.")
+
+      assert [%{role: :user, text: "first"}, reply, %{text: "also this", delivered: false}] =
+               Conversations.transcript(chat.id)
+
+      # One reply, not two: the message was not placed where it was sent.
+      assert [{:text, "Working."}, {:action, %{id: "t1"}}, {:text, "Done."}] = reply.items
+    end
+
+    test "is placed after the closed turn when the agent takes it", %{chat: chat} do
+      text(chat, "Working.")
+      {:ok, event} = Conversations.send(chat, "also this")
+      text(chat, "Done.")
+      {:ok, _chat} = Conversations.record_turn(chat, turn(1, 0.01))
+      delivered(chat, to_string(event.seq))
+      text(chat, "And this.")
+
+      assert [
+               %{text: "first"},
+               %{role: :assistant, turn: 1, text: "Working.\n\nDone."},
+               %{text: "also this", delivered: true},
+               %{role: :assistant, turn: nil, text: "And this."}
+             ] = Conversations.transcript(chat.id)
+    end
+
+    test "a delivery names one message and leaves the others queued", %{chat: chat} do
+      {:ok, first} = Conversations.send(chat, "one")
+      {:ok, _second} = Conversations.send(chat, "two")
+      delivered(chat, to_string(first.seq))
+
+      assert [_opening, %{text: "one", delivered: true}, %{text: "two", delivered: false}] =
+               Conversations.transcript(chat.id)
+
+      # An id that is nobody's is nothing.
+      delivered(chat, "999999999")
+      assert [_, _, %{delivered: false}] = Conversations.transcript(chat.id)
+    end
+
+    test "is taken, with every other, by the process that starts after it", %{project: project} do
+      {:ok, chat} = Conversations.open(project, "opening")
+      assert [%{text: "opening", delivered: false}] = Conversations.transcript(chat.id)
+
+      {:ok, _event} = Conversations.send(chat, "and another")
+      chat_started!(chat)
+      text(chat, "Hello.")
+
+      assert [
+               %{text: "opening", delivered: true},
+               %{text: "and another", delivered: true},
+               %{role: :assistant}
+             ] = Conversations.transcript(chat.id)
+    end
+
+    test "is not a turn in flight, and the oldest one is the button's", %{chat: chat} do
+      text(chat, "Working.")
+      {:ok, one} = Conversations.send(chat, "one")
+      {:ok, _two} = Conversations.send(chat, "two")
+      messages = Conversations.transcript(chat.id)
+
+      # The reply being spoken is the turn; the queued messages are not the agent having the ball.
+      assert Conversations.turn_open?(messages)
+      assert Conversations.oldest_queued(messages) == to_string(one.seq)
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn(1, 0.01))
+      messages = Conversations.transcript(chat.id)
+      refute Conversations.turn_open?(messages)
+      assert Conversations.oldest_queued(messages) == to_string(one.seq)
+
+      delivered(chat, to_string(one.seq))
+      assert Conversations.turn_open?(Conversations.transcript(chat.id))
+      assert Conversations.oldest_queued([]) == nil
+    end
+
+    # Several messages taken in one chat: the newest delivery is the one that says the agent is
+    # working. Read from the oldest, the chat would read as waiting while the agent answers the last.
+    test "a chat that has taken one message before is still working when it takes the next", %{
+      chat: chat,
+      project: project
+    } do
+      chat = chat |> Jobs.Job.progress_changeset(%{status: :running}) |> Repo.update!()
+
+      text(chat, "Looking into it.")
+      {:ok, first} = Conversations.send(chat, "the lexer")
+      delivered(chat, to_string(first.seq))
+      text(chat, "The lexer then.")
+      {:ok, second} = Conversations.send(chat, "and the parser")
+      text(chat, "Both, in turn.")
+      {:ok, _chat} = Conversations.record_turn(chat, turn(1, 0.01))
+      delivered(chat, to_string(second.seq))
+
+      assert [%{waiting: false}] = Conversations.summaries(project_id: project.id)
+    end
+
+    # The proposal *a message sent mid-turn leaves the conversation reading as waiting while the
+    # agent works*: a message sent mid-turn, words, the turn's end, the message taken, a turn that
+    # runs tools and says nothing yet. The agent is working, not waiting on its person.
+    test "taken after a turn's end is the agent working, not waiting", %{
+      chat: chat,
+      project: project
+    } do
+      user = member_fixture(project)
+      chat = chat |> Jobs.Job.progress_changeset(%{status: :running}) |> Repo.update!()
+
+      text(chat, "Looking into it.")
+      {:ok, event} = Conversations.send(chat, "and the lexer too")
+      text(chat, "The parser first.")
+      {:ok, _chat} = Conversations.record_turn(chat, turn(1, 0.01))
+
+      # The turn ended with words, but the person has spoken since and the agent has not taken
+      # it yet: the conversation is not waiting on them.
+      refute Conversations.waiting?(Conversations.messages(chat.id))
+
+      # Then the agent takes the message and runs a tool, saying nothing yet.
+      delivered(chat, to_string(event.seq))
+      tool_use(chat, "t1", "Bash", %{"command" => "mix test"})
+
+      refute Conversations.waiting?(Conversations.messages(chat.id))
+      assert Conversations.in_flight?(Jobs.get!(chat.id))
+      assert Forge.Queue.for_chat(Jobs.get!(chat.id)) == []
+      assert Forge.Queue.count(user) == 0
+      assert [%{waiting: false}] = Conversations.summaries(project_id: project.id)
+      assert Conversations.counts(user) == %{live: 1, total: 1}
+    end
+
+    test "taken, it is in flight before the agent has said anything", %{chat: chat} do
+      text(chat, "Working.")
+      {:ok, event} = Conversations.send(chat, "also this")
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.01))
+      chat = chat |> Jobs.Job.progress_changeset(%{status: :running}) |> Repo.update!()
+      refute Conversations.in_flight?(chat)
+
+      delivered(chat, to_string(event.seq))
+      assert Conversations.in_flight?(chat)
+    end
+  end
+
+  describe "interrupting for a queued message" do
+    setup %{project: project} do
+      {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
+      {:ok, worker} = Forge.Workers.ready(worker, %{"memory_budget" => 8_000_000_000})
+      :ok = Forge.Workers.connected(worker.id)
+
+      {:ok, chat} = Conversations.open(project, "first")
+
+      chat =
+        chat
+        |> Jobs.Job.progress_changeset(%{status: :running, worker_id: worker.id})
+        |> Repo.update!()
+
+      chat_started!(chat)
+      text(chat, "Working.")
+      {:ok, event} = Conversations.send(chat, "next")
+      assert_receive {"message", _payload}
+      %{chat: chat, event: event, id: to_string(event.seq), project: project}
+    end
+
+    test "is pushed with the message's id when it is still queued", %{chat: chat, id: id} do
+      chat_id = chat.id
+      assert :ok = Conversations.interrupt(chat, id)
+      assert_receive {"interrupt", %{"job_id" => ^chat_id, "message_id" => ^id}}
+    end
+
+    test "is refused once the message has been delivered", %{chat: chat, id: id} do
+      delivered(chat, id)
+      assert {:error, :not_queued} = Conversations.interrupt(chat, id)
+      refute_received {"interrupt", _payload}
+    end
+
+    # Each message is its own: the delivery of one is not the delivery of the next. Every message
+    # of the log still queued behind a taken one keeps its button.
+    test "a message is queued whatever was delivered before it", %{chat: chat, id: id} do
+      {:ok, later} = Conversations.send(chat, "and another")
+      delivered(chat, id)
+
+      assert {:error, :not_queued} = Conversations.interrupt(chat, id)
+      assert :ok = Conversations.interrupt(chat, to_string(later.seq))
+    end
+
+    # An event of the log that is not a message is refused by its type; the opening is refused by
+    # the later process anyway, so a harness event, which no process follows, is what tells.
+    test "is refused for an event that is not a message, though nothing has taken it",
+         %{chat: chat} do
+      %{seq: seq} = Enum.find(Events.for_job(chat.id), &(&1.type == "job.harness.text"))
+
+      assert {:error, :not_queued} = Conversations.interrupt(chat, to_string(seq))
+      refute_received {"interrupt", _payload}
+    end
+
+    test "is refused for a number no event could have, and for a spelling of one that has", %{
+      chat: chat,
+      id: id
+    } do
+      assert {:error, :not_queued} = Conversations.interrupt(chat, "99999999999999999999999")
+      assert {:error, :not_queued} = Conversations.interrupt(chat, "0" <> id)
+      assert {:error, :not_queued} = Conversations.interrupt(chat, "+" <> id)
+      refute_received {"interrupt", _payload}
+    end
+
+    test "is refused once a later process has started", %{chat: chat, id: id} do
+      chat_started!(chat)
+      assert {:error, :not_queued} = Conversations.interrupt(chat, id)
+      refute_received {"interrupt", _payload}
+    end
+
+    test "is refused for another conversation's message, an event that is not one, or nonsense",
+         %{chat: chat, project: project} do
+      {:ok, other} = Conversations.open(project, "elsewhere")
+      {:ok, theirs} = Conversations.send(other, "queued there")
+      [opened | _] = Events.for_job(chat.id)
+
+      assert {:error, :not_queued} = Conversations.interrupt(chat, to_string(theirs.seq))
+      assert {:error, :not_queued} = Conversations.interrupt(chat, to_string(opened.seq))
+      assert {:error, :not_queued} = Conversations.interrupt(chat, "12abc")
+      assert {:error, :not_queued} = Conversations.interrupt(chat, "")
+      refute_received {"interrupt", _payload}
+    end
+
+    test "is refused for a conversation that is not running", %{chat: chat, id: id} do
+      {:ok, released} = Conversations.ended(chat, nil, "idle")
+      assert {:error, :not_queued} = Conversations.interrupt(released, id)
+      refute_received {"interrupt", _payload}
+    end
+  end
+
+  # A message may be files alone (`docs/design/ui.md` § Attaching files): words or files, and
+  # nothing is not a message. One rule behind every caller.
+  describe "words or files" do
+    setup %{project: project} do
+      user = member_fixture(project)
+      store = Application.get_env(:forge, Forge.Storage, [])
+      Application.put_env(:forge, Forge.Storage, Keyword.put(store, :dir, tmp_dir("store")))
+      on_exit(fn -> Application.put_env(:forge, Forge.Storage, store) end)
+      %{user: user}
+    end
+
+    defp upload(project, user, name) do
+      path = Path.join(tmp_dir("src"), "#{System.unique_integer([:positive])}")
+      File.write!(path, "pixels")
+      {:ok, staged} = Forge.Attachments.stage(project, user, {:file, path}, name)
+      %{id: staged.id, name: name}
+    end
+
+    test "nothing typed and nothing attached sends nothing, and starts nothing", context do
+      %{project: project} = context
+      {:ok, chat} = Conversations.open(project, "first")
+      before = length(Events.for_job(chat.id))
+
+      assert {:error, :empty} = Conversations.send(chat, "")
+      assert {:error, :empty} = Conversations.send(chat, "  \n ")
+      assert {:error, :empty} = Conversations.send(chat, nil)
+
+      assert {:error, :empty} =
+               Conversations.send(chat, "", attachments: %Forge.Attachments.Batch{})
+
+      assert length(Events.for_job(chat.id)) == before
+
+      chats = length(Jobs.chats_for_project(project.id))
+      assert {:error, :empty} = Conversations.open(project, " ")
+      assert length(Jobs.chats_for_project(project.id)) == chats
+    end
+
+    test "files that all failed send nothing, and start nothing", context do
+      %{project: project} = context
+      {:ok, chat} = Conversations.open(project, "first")
+      batch = %Forge.Attachments.Batch{not_received: ["big.mov"]}
+      before = length(Events.for_job(chat.id))
+
+      assert {:error, :empty} = Conversations.send(chat, "", attachments: batch)
+      assert {:error, :empty} = Conversations.open(project, "", attachments: batch)
+      assert length(Events.for_job(chat.id)) == before
+    end
+
+    # The check before the transaction sees only the client's batch. An upload the claim then
+    # refuses (gone, or past its staging life) leaves a message of no words and no file, which wakes
+    # an agent with nothing but *[Attached but not received …]*.
+    test "files the claim refused leave nothing sent and nothing started", context do
+      %{project: project, user: user} = context
+      {:ok, chat} = Conversations.open(project, "first")
+      gone = %{id: Ecto.UUID.generate(), name: "gone.png"}
+      batch = %Forge.Attachments.Batch{uploads: [gone]}
+      before = length(Events.for_job(chat.id))
+      chats = length(Jobs.chats_for_project(project.id))
+
+      assert {:error, :empty} =
+               Conversations.send(chat, "", actor: {:user, user.id}, attachments: batch)
+
+      assert length(Events.for_job(chat.id)) == before
+
+      assert {:error, :empty} =
+               Conversations.open(project, " ", actor: {:user, user.id}, attachments: batch)
+
+      assert length(Jobs.chats_for_project(project.id)) == chats
+
+      # With words, the same refused file is only named as not received.
+      assert {:ok, _event} =
+               Conversations.send(chat, "still here", actor: {:user, user.id}, attachments: batch)
+    end
+
+    test "files alone are a message, whose prompt names them with no blank lines before",
+         context do
+      %{project: project, user: user} = context
+      {:ok, chat} = Conversations.open(project, "first")
+      chat_started!(chat)
+      text(chat, "Hello.")
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.01))
+      {:ok, chat} = Conversations.ended(chat, nil, "idle")
+      batch = %Forge.Attachments.Batch{uploads: [upload(project, user, "Shot 1.png")]}
+
+      assert {:ok, event} =
+               Conversations.send(chat, "", actor: {:user, user.id}, attachments: batch)
+
+      assert event.payload["text"] == ""
+
+      assert [%{role: :user, text: ""}] =
+               Enum.filter(Conversations.messages(chat.id), &(&1.text == ""))
+
+      # What the next process answers is the line that names the file, and nothing before it.
+      assert %{prompt: "[Files attached with this message" <> _} = Conversations.opening(chat.id)
+    end
+
+    test "files alone open a conversation, named after the first file", context do
+      %{project: project, user: user} = context
+
+      batch = %Forge.Attachments.Batch{
+        uploads: [upload(project, user, "Screenshot one.png"), upload(project, user, "b.png")]
+      }
+
+      assert {:ok, chat} =
+               Conversations.open(project, "", actor: {:user, user.id}, attachments: batch)
+
+      assert Conversations.opening_words([chat.id]) == %{chat.id => "Screenshot-one.png"}
+
+      assert Conversations.title(chat, nil, Conversations.opening_words([chat.id])[chat.id]) ==
+               "Screenshot-one.png"
+
+      assert [%{first: "Screenshot-one.png"}] = Conversations.summaries(project_id: project.id)
+
+      # The project page's Chats list and the proposals page name it by `Proposals.openings/1`: the
+      # file, not the empty text the first message carries.
+      assert Forge.Proposals.openings([chat.id]) == %{chat.id => "Screenshot-one.png"}
+    end
+
+    test "words are what a conversation is called by, when there are some", context do
+      %{project: project, user: user} = context
+      batch = %Forge.Attachments.Batch{uploads: [upload(project, user, "shot.png")]}
+
+      {:ok, chat} =
+        Conversations.open(project, "Why is this red?",
+          actor: {:user, user.id},
+          attachments: batch
+        )
+
+      assert Conversations.opening_words([chat.id]) == %{chat.id => "Why is this red?"}
     end
   end
 
@@ -1187,6 +1563,8 @@ defmodule Forge.ConversationsTest do
   describe "a turn that could not commit" do
     setup %{project: project} do
       {:ok, chat} = Conversations.open(project, "merge main for me")
+
+      chat_started!(chat)
       %{chat: chat}
     end
 
@@ -1261,11 +1639,13 @@ defmodule Forge.ConversationsTest do
       refute notice.text =~ "commits it"
     end
 
-    # Once, for a turn a message sent in the middle of it split in two: both halves are the same
-    # turn, and two warnings for one turn read as two failures.
+    # Once, for a turn a message taken in the middle of it split in two — which is what a log from
+    # before protocol 15 holds, the harness having echoed it then: both halves are the same turn,
+    # and two warnings for one turn read as two failures.
     test "is drawn once for a turn split by a message", %{chat: chat} do
       text(chat, "Merging main.")
-      {:ok, _event} = Conversations.send(chat, "hurry up")
+      {:ok, event} = Conversations.send(chat, "hurry up")
+      delivered(chat, to_string(event.seq))
       text(chat, "Still merging.")
       uncommitted_turn(chat, 1, %{"reason" => "merge_unresolved", "paths" => ["README.md"]})
 
@@ -1297,6 +1677,8 @@ defmodule Forge.ConversationsTest do
   describe "a turn the harness ended on an error" do
     setup %{project: project} do
       {:ok, chat} = Conversations.open(project, "bring this up to date")
+
+      chat_started!(chat)
       %{chat: chat}
     end
 
@@ -1395,6 +1777,8 @@ defmodule Forge.ConversationsTest do
   describe "the projection" do
     setup %{project: project} do
       {:ok, chat} = Conversations.open(project, "first")
+
+      chat_started!(chat)
       %{chat: chat}
     end
 
@@ -1507,14 +1891,16 @@ defmodule Forge.ConversationsTest do
       assert [%{role: :user}] = Conversations.messages(chat.id)
     end
 
-    # A message sent mid-turn is recorded at once and splits the reply on the page, but the turn
+    # A message *taken* in the middle of a turn — which is where a log from before protocol 15 has
+    # its delivery, the harness having echoed it then — splits the reply on the page, but the turn
     # is still one turn: the call made before it gets its result after it, and the turn's end
     # closes both halves.
-    test "a turn split by a message sent mid-turn is still one turn", %{chat: chat} do
+    test "a turn split by a message taken mid-turn is still one turn", %{chat: chat} do
       text(chat, "Running the tests.")
       tool_use(chat, "k1", "Task", %{"description" => "find the lexer"})
       tool_use(chat, "t1", "Bash", %{"command" => "mix test"})
-      {:ok, _event} = Conversations.send(chat, "also check the lexer")
+      {:ok, event} = Conversations.send(chat, "also check the lexer")
+      delivered(chat, to_string(event.seq))
       tool_use(chat, "k1a", "Grep", %{"pattern" => "lex"}, "k1")
       tool_result(chat, "t1", true, "1 failure")
       tool_result(chat, "k1", false, "found it")
@@ -1649,6 +2035,8 @@ defmodule Forge.ConversationsTest do
   describe "the now line" do
     setup %{project: project} do
       {:ok, chat} = Conversations.open(project, "first")
+
+      chat_started!(chat)
       %{chat: chat}
     end
 
@@ -1771,6 +2159,8 @@ defmodule Forge.ConversationsTest do
   describe "what the next process starts with" do
     setup %{project: project} do
       {:ok, chat} = Conversations.open(project, "hello")
+
+      chat_started!(chat)
       %{chat: chat}
     end
 
@@ -1806,7 +2196,8 @@ defmodule Forge.ConversationsTest do
          } do
       text(chat, "It is a game.")
       {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.01))
-      {:ok, _event} = Conversations.send(chat, "which engine?")
+      {:ok, event} = Conversations.send(chat, "which engine?")
+      delivered(chat, to_string(event.seq))
       text(chat, "Its own.")
       {:ok, chat} = Conversations.record_turn(chat, turn(2, 0.02))
       {:ok, chat} = Conversations.ended(chat, nil, "idle")
@@ -2189,9 +2580,11 @@ defmodule Forge.ConversationsTest do
     # is not waiting because an earlier turn ended.
     test "a turn that ended before the words did not end them", %{project: project} do
       {:ok, chat} = Conversations.open(project, "first")
+      chat_started!(chat)
       text(chat, "One.")
       {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.01))
-      {:ok, _event} = Conversations.send(chat, "second")
+      {:ok, event} = Conversations.send(chat, "second")
+      delivered(chat, to_string(event.seq))
       text(chat, "Two, so far.")
 
       assert [summary] = Conversations.summaries(project_id: project.id)
@@ -2446,6 +2839,8 @@ defmodule Forge.ConversationsTest do
   describe "ending" do
     setup %{project: project} do
       {:ok, chat} = Conversations.open(project, "hello")
+
+      chat_started!(chat)
       %{chat: chat}
     end
 
@@ -2668,11 +3063,12 @@ defmodule Forge.ConversationsTest do
     end
 
     test "a release that is lost, or has said nothing, reads as a lost reply", %{chat: chat} do
-      {:ok, _event} = Conversations.send(chat, "anyone there?")
+      {:ok, event} = Conversations.send(chat, "anyone there?")
       {:ok, released} = Conversations.ended(Jobs.get!(chat.id), nil, "worker_lost")
 
       assert Conversations.lost?(released, Conversations.messages(chat.id))
 
+      delivered(chat, to_string(event.seq))
       text(chat, "yes")
       {:ok, _chat} = Conversations.record_turn(Jobs.get!(chat.id), turn(1, 0.01))
       refute Conversations.lost?(released, Conversations.messages(chat.id))
@@ -2748,6 +3144,8 @@ defmodule Forge.ConversationsTest do
   describe "its branch, when it ends" do
     setup %{project: project} do
       {:ok, chat} = Conversations.open(project, "tidy the readme")
+
+      chat_started!(chat)
       %{chat: chat, repo: Projects.repo_path(project)}
     end
 

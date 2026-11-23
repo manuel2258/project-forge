@@ -14,6 +14,7 @@ defmodule ForgeWeb.ChatWorkScreenTest do
 
   import ExUnit.CaptureLog
   import Phoenix.LiveViewTest
+  import Forge.ForgeFixtures, only: [chat_started!: 1]
   import Forge.GitFixtures
   import Forge.MergeFixtures
 
@@ -29,6 +30,8 @@ defmodule ForgeWeb.ChatWorkScreenTest do
       )
 
     {:ok, chat} = Conversations.open(project, "fix the parser")
+
+    chat_started!(chat)
     %{project: project, chat: chat}
   end
 
@@ -179,7 +182,8 @@ defmodule ForgeWeb.ChatWorkScreenTest do
 
     # A micro label heads each speaker's run, not every box.
     test "labels each speaker's run once", %{conn: conn, chat: chat} do
-      {:ok, _} = Conversations.send(chat, "and the lexer")
+      {:ok, event} = Conversations.send(chat, "and the lexer")
+      harness(chat, "job.harness.delivered", %{message_id: to_string(event.seq)})
       text(chat, "One.")
       text(chat, "Two.")
       turn(chat, 1)
@@ -694,13 +698,13 @@ defmodule ForgeWeb.ChatWorkScreenTest do
       running!(chat)
 
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?ask=lib/parser.ex:1")
-      assert sent_by_interrupt(view) == "lib/parser.ex:1 "
+      assert composer_text(view) == "lib/parser.ex:1 "
 
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?ask=")
-      assert sent_by_interrupt(view) == ""
+      assert composer_text(view) == ""
 
       {:ok, view, _html} = live(conn, "/chats/#{chat.id}?ask[]=lib/parser.ex:1")
-      assert sent_by_interrupt(view) == ""
+      assert composer_text(view) == ""
     end
 
     test "offers Ask beside each file row and each hunk header", %{conn: conn, chat: chat} do
@@ -1083,8 +1087,8 @@ defmodule ForgeWeb.ChatWorkScreenTest do
     String.replace_prefix(content, "\n", "")
   end
 
-  # What the composer holds, and so what *Interrupt and send* would send: the textarea's text.
-  defp sent_by_interrupt(view) do
+  # What the composer holds, and so what Send would send: the textarea's text.
+  defp composer_text(view) do
     view
     |> element("#draft")
     |> render()

@@ -342,6 +342,8 @@ defmodule ForgeWeb.ProjectLiveTest do
 
       assert has_element?(view, ~s(#proposal-reader button[value="start"]))
       refute has_element?(view, ~s(#proposal-reader button[value="start"][disabled]))
+      # Files go to the ticket this admits, from a paperclip in the note's corner.
+      assert has_element?(view, "#proposal-reader [data-attach] .ui-attach-clip")
       refute has_element?(view, "#proposal-admit-why")
 
       {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}?view=proposals")

@@ -20,7 +20,6 @@ defmodule Forge.Usage do
 
   alias Forge.Accounts.User
   alias Forge.{Credentials, Projects, Repo}
-  alias Forge.Events.Event
   alias Forge.Jobs.{Job, Run}
   alias ForgeCore.Capacity
 
@@ -224,7 +223,9 @@ defmodule Forge.Usage do
   defp lines(:item, rows, members) do
     jobs = Repo.all(from j in Job, where: j.id in ^Enum.map(rows, & &1.job_id), preload: :ticket)
     jobs = Map.new(jobs, &{&1.id, &1})
-    openings = openings(for %{kind: :chat, id: id} <- Map.values(jobs), do: id)
+
+    openings =
+      Forge.Conversations.opening_words(for %{kind: :chat, id: id} <- Map.values(jobs), do: id)
 
     rows
     |> Enum.map(fn row ->
@@ -278,21 +279,6 @@ defmodule Forge.Usage do
   defp total(rows), do: rows |> Enum.map(& &1.usage) |> Enum.sum()
 
   defp largest_first(lines), do: Enum.sort_by(lines, & &1.usage, :desc)
-
-  # What a person opened each conversation with: its first message, which is the closest thing a
-  # conversation has to a title.
-  defp openings([]), do: %{}
-
-  defp openings(chat_ids) do
-    Repo.all(
-      from e in Event,
-        where: e.job_id in ^chat_ids and e.type == "chat.message",
-        distinct: e.job_id,
-        order_by: [asc: e.job_id, asc: e.seq],
-        select: {e.job_id, fragment("?->>'text'", e.payload)}
-    )
-    |> Map.new()
-  end
 
   @doc """
   Weighted tokens as a share of one five-hour window — `0.22` is 22 % of one — or nil when

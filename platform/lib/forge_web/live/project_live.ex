@@ -527,21 +527,26 @@ defmodule ForgeWeb.ProjectLive do
   def handle_event("chat:start", params, socket) do
     text = if is_binary(params["text"]), do: String.trim(params["text"]), else: ""
 
-    with false <- text == "",
-         {:ok, chat} <-
-           Operator.open_chat(
-             socket.assigns.project,
-             socket.assigns.current_scope.user,
-             text,
-             ForgeWeb.Attaching.opts(params)
-           ) do
-      {:noreply,
-       socket
-       |> Drafts.forget("chat")
-       |> push_navigate(to: ~p"/chats/#{chat.id}")}
-    else
-      true ->
-        {:noreply, assign(socket, chat_error: "Say what the chat is about first.")}
+    # Words or files: the context refuses a start of neither (`Conversations.open/3`).
+    case Operator.open_chat(
+           socket.assigns.project,
+           socket.assigns.current_scope.user,
+           text,
+           ForgeWeb.Attaching.opts(params)
+         ) do
+      {:ok, chat} ->
+        {:noreply,
+         socket
+         |> Drafts.forget("chat")
+         |> push_navigate(to: ~p"/chats/#{chat.id}")}
+
+      # Nothing typed and nothing that finished uploading. The box is told the act is over, so
+      # files that all failed are named as *not sent* under it; with nothing attached it ignores it.
+      {:error, :empty} ->
+        {:noreply,
+         socket
+         |> assign(chat_error: "Say what the chat is about first.")
+         |> ForgeWeb.Attaching.sent()}
 
       # Only a refusal of membership reaches here, which the mount has already made: an
       # equivalent mutant today, said in a sentence rather than as `inspect/1` all the same.
@@ -1971,13 +1976,16 @@ defmodule ForgeWeb.ProjectLive do
     >
       <input type="hidden" name="draft" value="chat" />
       <.error_note :if={@error} id="chat-start-error" class="chat-start-error">{@error}</.error_note>
-      <.composer
-        id="chat-start-text"
-        name="text"
-        value={Drafts.field(@drafts, "chat", "text")}
-        placeholder={"Start a chat about #{@project.name}"}
-      />
-      <ForgeWeb.UI.Attach.box id="chat-start-attach" project={@project.name} />
+      <ForgeWeb.UI.Attach.field id="chat-start-attach" project={@project.name}>
+        <.composer
+          id="chat-start-text"
+          name="text"
+          value={Drafts.field(@drafts, "chat", "text")}
+          placeholder={"Start a chat about #{@project.name}"}
+        >
+          <:lead><ForgeWeb.UI.Attach.clip /></:lead>
+        </.composer>
+      </ForgeWeb.UI.Attach.field>
     </.form>
     """
   end

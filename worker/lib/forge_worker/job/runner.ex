@@ -99,8 +99,10 @@ defmodule ForgeWorker.Job.Runner do
   def cancel(pid), do: GenServer.cast(pid, :cancel)
 
   @doc """
-  Sends a user message to a streaming harness. The harness queues it if a turn is in flight and
-  echoes it when it takes it, so `:ok` means written, not answered.
+  Sends a user message to a streaming harness. `:ok` means written, not answered. A conversation
+  calls it only with the harness idle: the worker holds what arrives mid-turn
+  (`ForgeWorker.Job.Conversation`), because the harness's own queue folds a message into the turn
+  running and echoes it late (`docs/design/conversations.md` § Turns).
 
   `{:error, :closed}` when the process is already gone, which is a conversation whose machine
   was lost rather than a message worth retrying.
@@ -264,6 +266,10 @@ defmodule ForgeWorker.Job.Runner do
       resume: resume?,
       prompt_opts: [head: Keyword.get(opts, :head)],
       interrupting: nil,
+      # A turn is in flight: from a write that began one to the turn's end. An interrupt asked
+      # when none is would be written to an idle harness, and Claude Code then labels the *next*
+      # turn interrupted (`docs/design/worker-channel.md` § Protocol 15).
+      turn_open: false,
       killed: nil,
       # A cancel or the wall clock asked this run to stop — recorded even when `killed` is not,
       # which is a prompt-mode run that had already printed its result (`kill/2`). A run asked to
@@ -650,6 +656,11 @@ defmodule ForgeWorker.Job.Runner do
     {reply, state} = send_text(state, text)
     {:reply, reply, state}
   end
+
+  # **No turn open, no interrupt**: a Stop that reaches the runner just after a `result` would be
+  # written to an idle harness, and the turn that follows would be labelled interrupted — no push,
+  # and its `transition.json` dropped.
+  def handle_call(:interrupt, _from, %{turn_open: false} = state), do: {:reply, :ok, state}
 
   def handle_call(:interrupt, _from, state) do
     request_id = "forge-" <> Integer.to_string(state.turns + 1)
@@ -1106,7 +1117,18 @@ defmodule ForgeWorker.Job.Runner do
       ForgeWorker.Harness.send_message(state.harness, text, state.harness_state)
 
     state = %{state | harness_state: harness_state}
-    {if(IO.iodata_length(bytes) > 0, do: write(state, bytes), else: :ok), state}
+
+    # **Taken is a turn open, written or held**: a driver that has a message to start but is not
+    # ready (Codex, while it initialises, or one turn behind) writes nothing now and starts the turn
+    # itself, and a Stop in that turn has something to stop.
+    if IO.iodata_length(bytes) > 0 do
+      case write(state, bytes) do
+        :ok -> {:ok, %{state | turn_open: true}}
+        error -> {error, state}
+      end
+    else
+      {:ok, %{state | turn_open: true}}
+    end
   end
 
   defp close_stdin(port) do
@@ -1216,7 +1238,7 @@ defmodule ForgeWorker.Job.Runner do
         end)
 
       notify(state, {:turn, state.spec.job_id, state.turns, label(state, event)})
-      %{state | interrupting: nil}
+      %{state | interrupting: nil, turn_open: false}
     else
       # A job on a driver with a conversation of its own is one turn, and that turn's end is the
       # job's: closing stdin is how the process is told, as it is for a conversation.

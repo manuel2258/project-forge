@@ -187,8 +187,13 @@ defmodule ForgeWeb.UI.Forms do
 
   @doc """
   The reply composer (`forms/Composer`), 64px: a round field with send as an icon inside it,
-  **never a filled button**, so a message never looks like a decision. `interrupt` names the
-  cost while the agent is responding: *Interrupt and send*.
+  **never a filled button**, so a message never looks like a decision. Send is only ever Send: a
+  message sent while the agent works waits for its turn, and interrupting is a button on the queued
+  message (`docs/design/ui.md` § Talk).
+
+  The `lead` slot is drawn inside the field, left of the text, mirroring send: the paperclip that
+  attaches files (`ForgeWeb.UI.Attach.clip/1`, § Attaching files). The text keeps its own column, so
+  it never runs under it, and with the slot empty the field is what it was.
 
   Draw it inside the caller's form; send submits it. The field grows from one line to six and
   then scrolls inside itself. **Enter sends on a keyboard and ends a line on a phone**
@@ -199,16 +204,17 @@ defmodule ForgeWeb.UI.Forms do
   attr :name, :string, required: true
   attr :value, :string, default: nil
   attr :placeholder, :string, default: "Reply to the agent"
-  attr :interrupt, :boolean, default: false
   attr :enter, :atom, values: [:send, :newline], default: :send
   attr :disabled, :boolean, default: false
   attr :label, :string, default: nil, doc: "for assistive technology; the placeholder otherwise"
   attr :rest, :global, doc: "for the textarea: phx-debounce"
+  slot :lead, doc: "inside the field, left of the text"
 
   def composer(assigns) do
     ~H"""
     <div class="ui-composer">
-      <div class="ui-composer-field">
+      <div class={["ui-composer-field", @lead != [] && "ui-composer-field--lead"]}>
+        {render_slot(@lead)}
         <textarea
           id={@id}
           name={@name}
@@ -223,15 +229,6 @@ defmodule ForgeWeb.UI.Forms do
           {@rest}
         >{@value}</textarea>
         <button
-          :if={@interrupt}
-          type="submit"
-          class="ui-composer-send ui-composer-send--words"
-          disabled={@disabled}
-        >
-          Interrupt and send
-        </button>
-        <button
-          :if={!@interrupt}
           type="submit"
           class="ui-composer-send"
           aria-label="Send"

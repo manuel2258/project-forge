@@ -25,6 +25,7 @@ defmodule Forge.QueueChatTest do
       })
 
     {:ok, chat} = Conversations.open(project, "what is this?")
+    Forge.ForgeFixtures.chat_started!(chat)
     %{project: project, chat: chat, user: member_fixture(project)}
   end
 
@@ -135,6 +136,7 @@ defmodule Forge.QueueChatTest do
   test "every item names its project, ticket or not", %{project: project} do
     {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
     {:ok, chat} = Conversations.open(project, "about that", ticket: ticket)
+    Forge.ForgeFixtures.chat_started!(chat)
     reply(chat, "Looking.")
 
     for item <- Queue.items() do

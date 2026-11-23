@@ -831,7 +831,12 @@ defmodule Forge.CommandsTest do
         # Every job needs 14, for Git LFS (`docs/design/worker-channel.md` § Protocol 14); an agent
         # job and a conversation also need 13, for the files people attached, which it exceeds.
         assert Jobs.protocol_needs(each)[:lfs] == 14
-        assert Jobs.protocol(each) == 14
+
+        # A conversation also needs 15: the worker queues its messages and says each was delivered
+        # (`worker-channel.md` § Protocol 15). No other kind does, so a worker of 14 still takes
+        # an agent job and a command.
+        assert Jobs.protocol_needs(each)[:chat] == if(each.kind == :chat, do: 15, else: 0)
+        assert Jobs.protocol(each) == if(each.kind == :chat, do: 15, else: 14)
       end
 
       old = Workers.get!(FakeWorker.connect(protocol: 2, project: context.project).id)

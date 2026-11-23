@@ -213,12 +213,9 @@ defmodule ForgeWeb.ChatLive do
     )
   end
 
-  defp first_said(id) do
-    case Events.earliest_for_job(id, "chat.message") do
-      %{payload: %{"text" => text}} -> text
-      _none -> nil
-    end
-  end
+  # What the conversation was opened with, from its first message wherever it is — its words, or
+  # the first file's name when it came with files alone (`Conversations.opening_words/1`).
+  defp first_said(id), do: Conversations.opening_words([id])[id]
 
   # The agent's plan band: its latest top-level `TodoWrite` in the whole conversation, read by a
   # query of its own and not taken from the turns held.
@@ -497,11 +494,24 @@ defmodule ForgeWeb.ChatLive do
 
   # Three intentions, because guessing between them from one gesture is how a chat client loses
   # a message (`docs/design/conversations.md` § Turns). Send holds the message until the turn
-  # ends; Send while the agent responds is *Interrupt and send*, which the form says in a field
-  # drawn beside the button that names it (`15a`); stop ends the turn and sends nothing.
+  # ends, whatever it carries and whatever the agent is doing; the queued message's own button
+  # interrupts so that it is taken now; stop ends the turn and sends nothing.
   def handle_event("send", %{"text" => text} = params, socket),
-    do:
-      say(socket, text, [force: params["interrupt"] == "true"] ++ ForgeWeb.Attaching.opts(params))
+    do: say(socket, text, ForgeWeb.Attaching.opts(params))
+
+  # The button on the oldest queued message. The message id is the wire's and is parsed by the
+  # context, which acts only on a message of this conversation that is still queued; a refusal
+  # means the agent took it first (or another device did), so the page is read again and the
+  # button is gone with the *queued*.
+  def handle_event("interrupt", %{"id" => id}, socket) when is_binary(id) do
+    case Operator.interrupt_chat(socket.assigns.chat, socket.assigns.current_scope.user, id) do
+      :ok -> {:noreply, socket}
+      {:error, _not_queued} -> {:noreply, load(socket)}
+    end
+  end
+
+  # An id that is not text is a crafted event, and no button's: ignored rather than crashing the view.
+  def handle_event("interrupt", _params, socket), do: {:noreply, socket}
 
   def handle_event("attachments:withdraw", params, socket),
     do:
@@ -601,15 +611,8 @@ defmodule ForgeWeb.ChatLive do
     end
   end
 
-  defp say(socket, text, opts) do
-    case String.trim(text || "") do
-      "" ->
-        {:noreply, socket}
-
-      text ->
-        deliver(socket, text, opts)
-    end
-  end
+  # Words or files: the context refuses a message of neither (`Conversations.send/3`).
+  defp say(socket, text, opts), do: deliver(socket, String.trim(text || ""), opts)
 
   # It can have ended, or its step can be over, between the render and the tap. Reloading is what
   # takes the send box away, so the page stops offering what it cannot do rather than only saying
@@ -624,6 +627,12 @@ defmodule ForgeWeb.ChatLive do
 
       {:error, reason} when reason in [:ended, :step_over] ->
         {:noreply, socket |> assign(chat_error: {:dock, refusal(reason)}) |> load()}
+
+      # Nothing typed and nothing that finished: nothing was sent, the agent is not woken. Files
+      # that all failed are named as *not sent* under the box, which is the box's to say, so it is
+      # told the act is over; with nothing attached it ignores it.
+      {:error, :empty} ->
+        {:noreply, ForgeWeb.Attaching.sent(socket)}
 
       # Remaking a deleted branch is a git write, and it can fail — a ticket branch that is gone
       # too. Said, rather than a crash that reads as the page breaking.
@@ -658,14 +667,11 @@ defmodule ForgeWeb.ChatLive do
 
   # The agent has the ball: either it has not started this turn's reply, or it is still in it —
   # an assistant turn no `chat.turn` has closed.
-  defp responding?(%{status: status}, messages) do
-    status == :running and
-      case List.last(messages) do
-        %{role: :user} -> true
-        %{role: :assistant, turn: nil} -> true
-        _other -> false
-      end
-  end
+  #
+  # **Taken, not sent**: a message still queued is not the agent having the ball
+  # (`Conversations.turn_open?/1`).
+  defp responding?(%{status: status}, messages),
+    do: status == :running and Conversations.turn_open?(messages)
 
   # One definition, in the context that enforces it: a page that thought a conversation was live
   # while `Conversations.send/3` disagreed would offer a send box that refuses.

@@ -129,7 +129,7 @@ Platform → worker:
 | — and for any of the three, when the job names project secrets | `secrets`: one JSON object of name to value, sealed for this worker, this job and the purpose `secrets` (`docs/design/secrets.md` § Delivery); its spec's `secrets` names them | Put these in the process's environment, and mask them in what leaves (§ Masking there). |
 | `cancel` | `job_id`, reason | Stop it. For `ticket_cancelled` the worker still sends a terminal message — a `hibernated` carrying the run's result, even when its push is refused because the cancel revoked the job's credential — and that is how the platform settles what the run spent. For `not_ours` and `retired` it sends none: the platform has already given that run up — re-queued it, placed it elsewhere or finished with it — and a report would be recorded against whatever the job is now (§ Reconnection). |
 | `message` | `job_id`, `message_id`, text | A chat only: write this to the harness's stdin. |
-| `interrupt` | `job_id` | A chat only: end this turn, keep the process. |
+| `interrupt` | `job_id`, `message_id` (optional, protocol 15) | A chat only: end this turn, keep the process. With a `message_id`, only if the worker still holds that message (§ Protocol 15). |
 | `close` | `job_id`, reason | A chat only: end the conversation, release the machine. |
 | `update` | `target`: `build`, `version`, `repository`, `digest`, `raw_sha256`, `raw_size` — or null, *stand down*; and `requested_by` (the owner's email) when *Update now* pressed it | Bring yourself to this build (protocol 13). Sent when the owner flips the switch on or presses *Update now*; **the join reply carries the same target** (§ Versions), which is how a machine learns it when it connects, refused or not. It carries no secret: the image is public, fetched by digest from the one repository the machine's own image names. |
 
@@ -155,6 +155,7 @@ Worker → platform:
 | `log` | `at`, `type`, `level`, `message`, and `job_id` on a line about a job | no |
 | `event` | `job_id`, normalised harness event | no |
 | `turn` | `job_id`, turn index, commit, `uncommitted` (why there is no commit, when there is none), the turn's proposals and documents, any `transition.json` it wrote (`conversations.md` § Taking a transition), and a harness summary carrying its cost | yes |
+| `delivered` | `job_id`, `message_id`: a chat's message written to its harness (protocol 15; `conversations.md` § The wire) | yes |
 | `result` | `job_id`, `ForgeCore.Job.Result` as JSON — `status` `parked` for an agent that invoked commands, with the invocations and the commit it pushed; a command's with its exit status, duration and log key; either's `blobs` (name → key and size) and `invalid_blobs` (name → why) for its groups of files | yes |
 | `hibernated` | `job_id`, commit sha, reason, the result as far as it got; a chat adds its turn count | yes |
 | `failed` | `job_id`, reason | yes |
@@ -622,7 +623,8 @@ Three classes, and they are deliberately not treated alike.
 and nothing recovers one lost to a dropped socket. This is allowed because of what an event is
 for: `docs/decisions.md` says artifacts are the contract and the conversation is an optimisation.
 A lost event costs a line in the timeline. It never costs a decision, because no decision is taken
-from the event stream — the result carries everything the engine reads. A lost event is not
+from the event stream — the result carries everything the engine reads. (A chat's delivery used to be
+one of these and was the exception, which is why it is a message of its own: § Protocol 15.) A lost event is not
 detectable: the worker pushes `job_id` and the event and nothing else (`ForgeWorker.Link`'s
 `handle_info({:event, …})`), so there is
 no per-event sequence and the platform cannot tell a gap from a quiet job. The `seq` on an `events`
@@ -631,7 +633,8 @@ what was sent.
 
 **Terminal messages are acked and retried.** `result`, `hibernated` and `failed` are pushed with a
 reply expected, and so is a chat's `turn`, because it carries the cost the daily cap is computed
-from; the platform replies only after the transaction that records them commits. Until the ack
+from, and since protocol 15 a chat's `delivered`, because the platform places a queued message from
+it; the platform replies only after the transaction that records them commits. Until the ack
 arrives the worker keeps the message and re-sends it after any reconnect. The platform therefore
 must treat them as idempotent — keyed by the job, since the payloads carry no attempt, and a
 `turn` by its place in the conversation (`Conversations.record_turn/2`): a second `result` for a
@@ -895,6 +898,33 @@ every visit); every other job is as it was. **A ticket
 chat is not gated**: its `moving` field gains `jumps`, which an older worker drops, and the
 request is made and applied by the platform, so it works unchanged. The scheduler's *Waiting for a
 newer worker image* reason and the workers page say so as they do for the other numbers.
+
+## Protocol 15 (ticket 71)
+
+Protocol 14 → 15, a breaking change: **the worker queues a chat's messages**, and reports a message
+delivered when it writes it (`conversations.md` § Turns). A worker below 15 let the harness queue and
+reported delivery on its echo, which Claude Code 2.1.330 writes late and, for a message sent while
+a tool runs, before the turn's result; a platform that draws a button on a queued message and
+guards it by *still queued* needs the worker's word. `Forge.Jobs.protocol_needs/1` gains `chat: 15`
+for every job of kind `chat` and nothing else: a protocol 14 worker takes workflow jobs and
+commands, and no conversation. A chat already running on a protocol 14 machine at deploy finishes
+there as it was.
+
+- **`interrupt` gains an optional `message_id`.** The worker interrupts only if that message is one
+  it still holds. A message already written, or one it never held, interrupts nothing. Without a
+  `message_id` it is *Stop* and interrupts as it always did. Either way, what is held goes next.
+- **`delivered` is the worker's**, a message of its own — `job_id` and `message_id` — one for each
+  message written to an idle harness, sent after the `turn` of the turn it waited behind, which the
+  platform records as the event `job.harness.delivered`. **Acked** like `turn` and sent again after
+  a reconnect, because nothing but a later `job.started` places a queued message otherwise, and a
+  delivery lost to a restart would leave it drawn last for the rest of the process; the platform
+  records a message's delivery once, however often it is sent. The harness's echo and its interrupt
+  line are dropped. A Codex chat gets a delivery it never had.
+- **Messages held while a turn is in flight go down together as one message**, after the turn is
+  reported: their texts joined by a blank line.
+- **The runner writes no interrupt when no turn is open.** A Stop that reached it just after a
+  `result` used to be written to an idle Claude Code, and the next turn was then labelled
+  interrupted: no push, and its `transition.json` dropped.
 
 ## Protocol 14 (ticket 65)
 

@@ -288,6 +288,7 @@ defmodule ForgeWeb.ApiTest do
   # stored question is.
   test "a conversation asking questions is served with them", %{conn: conn, project: project} do
     {:ok, chat} = Forge.Conversations.open(project, "which?")
+    Forge.ForgeFixtures.chat_started!(chat)
 
     :ok =
       Jobs.record_harness_event(chat.id, %{

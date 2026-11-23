@@ -103,6 +103,46 @@ defmodule ForgeWeb.WorkerChannelTest do
       assert Jobs.get!(chat.id).usage == 0
     end
 
+    test "a delivery for another worker's conversation is refused and not recorded",
+         %{socket: socket} do
+      {:ok, other_worker, _t} = Workers.create(%{provider: "local"})
+      chat = chat_fixture(%{status: :running})
+
+      {:ok, chat} =
+        chat
+        |> Jobs.Job.progress_changeset(%{status: :running, worker_id: other_worker.id})
+        |> Forge.Repo.update()
+
+      ref = push(socket, "delivered", %{"job_id" => chat.id, "message_id" => "7"})
+      assert_reply ref, :error, %{reason: _}
+
+      refute Enum.any?(Events.for_job(chat.id), &(&1.type == "job.harness.delivered"))
+    end
+
+    test "a delivery is acked and recorded once, however often it is sent",
+         %{socket: socket, worker: worker} do
+      chat = chat_fixture(%{status: :running})
+
+      {:ok, chat} =
+        chat
+        |> Jobs.Job.progress_changeset(%{status: :running, worker_id: worker.id})
+        |> Forge.Repo.update()
+
+      for _again <- 1..2 do
+        ref = push(socket, "delivered", %{"job_id" => chat.id, "message_id" => "7"})
+        assert_reply ref, :ok, _
+      end
+
+      ref = push(socket, "delivered", %{"job_id" => chat.id, "message_id" => "8"})
+      assert_reply ref, :ok, _
+
+      assert chat.id
+             |> Events.for_job()
+             |> Enum.filter(&(&1.type == "job.harness.delivered"))
+             |> Enum.map(& &1.payload["message_id"])
+             |> Enum.sort() == ["7", "8"]
+    end
+
     test "its own job it may still write", %{socket: socket, worker: worker} do
       job = job_fixture()
 

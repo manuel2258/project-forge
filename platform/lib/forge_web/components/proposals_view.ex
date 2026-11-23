@@ -287,22 +287,22 @@ defmodule ForgeWeb.ProposalsView do
         </label>
         <%!-- Enter breaks a line: a one-line input submitted with the first button
               (`docs/design/ui.md` § The affordance rule). --%>
-        <ForgeWeb.Conversations.message_box
-          id={"proposal-comment-#{@item.version_id}"}
-          name="comment"
-          value={Drafts.field(@drafts, @draft, "comment")}
-          enter={:newline}
-          label="Note, optional"
-          placeholder="Kept with the decision: why it was declined, or why it was admitted"
-        />
         <%!-- Files go to the ticket this admits; declining takes none, and what was attached is
               left to the sweep. --%>
-        <ForgeWeb.UI.Attach.box
-          :if={@project}
-          id={"proposal-attach-#{@item.version_id}"}
-          project={@project}
-          label="Attach files to the ticket"
-        />
+        <ForgeWeb.UI.Attach.field id={"proposal-attach-#{@item.version_id}"} project={@project}>
+          <ForgeWeb.Conversations.message_box
+            id={"proposal-comment-#{@item.version_id}"}
+            name="comment"
+            value={Drafts.field(@drafts, @draft, "comment")}
+            enter={:newline}
+            label="Note, optional"
+            placeholder="Kept with the decision: why it was declined, or why it was admitted"
+          >
+            <:lead :if={@project}>
+              <ForgeWeb.UI.Attach.clip label="Attach files to the ticket" />
+            </:lead>
+          </ForgeWeb.Conversations.message_box>
+        </ForgeWeb.UI.Attach.field>
         <.error_note :if={@error} id="proposal-error">{@error}</.error_note>
         <%!-- Admit waits for a type where there is one to choose: the server refuses it without,
               and a button that is pressed only to be told so is the wrong way round. --%>

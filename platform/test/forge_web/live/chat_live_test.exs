@@ -11,6 +11,7 @@ defmodule ForgeWeb.ChatLiveTest do
   use ForgeWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  import Forge.ForgeFixtures, only: [chat_started!: 1]
   import Forge.GitFixtures
 
   alias Forge.{Conversations, Jobs, Projects, Tickets}
@@ -28,6 +29,8 @@ defmodule ForgeWeb.ChatLiveTest do
       )
 
     {:ok, chat} = Conversations.open(project, "what is this repository?")
+
+    chat_started!(chat)
     %{project: project, chat: chat}
   end
 
@@ -63,6 +66,19 @@ defmodule ForgeWeb.ChatLiveTest do
     do:
       :ok =
         Jobs.record_harness_event(chat.id, %{type: "job.harness.text", payload: %{text: text}})
+
+  # What the worker says when it writes a message to an idle harness (protocol 15): the message was
+  # taken, so it stops being queued and stands where the agent took it.
+  defp delivered(chat, %{seq: seq}), do: delivered(chat, to_string(seq))
+  defp delivered(chat, %{id: id}), do: delivered(chat, id)
+
+  defp delivered(chat, id) when is_binary(id),
+    do:
+      :ok =
+        Jobs.record_harness_event(chat.id, %{
+          type: "job.harness.delivered",
+          payload: %{message_id: id}
+        })
 
   defp turn(chat, index) do
     {:ok, _chat} =
@@ -441,24 +457,28 @@ defmodule ForgeWeb.ChatLiveTest do
     end
 
     # Stop is the now line's, and the now line is drawn only while a turn is open: with no turn
-    # open there is nothing to stop. While one is open, a typed message makes Send *Interrupt and
-    # send* (`15a`) — named for what it costs, and only once there is something to send.
-    test "stop and interrupt are there only while a turn is open", %{conn: conn, chat: chat} do
+    # open there is nothing to stop. **Send is only ever Send**: it never becomes *Interrupt and
+    # send* with a draft typed, and the form carries no field saying so (`docs/design/ui.md` §
+    # Talk) — a message sent while the agent works waits for its turn.
+    test "stop is there only while a turn is open, and Send never interrupts", %{
+      conn: conn,
+      chat: chat
+    } do
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
       refute has_element?(view, "#now-line")
       refute has_element?(view, "button", "Stop")
       view |> form("#say", %{"text" => "hello"}) |> render_change()
-      refute has_element?(view, "#say button", "Interrupt and send")
+      refute render(view) =~ "Interrupt and send"
       refute has_element?(view, ~s(#say input[name="interrupt"]))
 
       running!(chat)
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
       assert has_element?(view, "#now-line button", "Stop")
-      refute has_element?(view, "#say button", "Interrupt and send")
 
       view |> form("#say", %{"text" => "actually"}) |> render_change()
-      assert has_element?(view, "#say button", "Interrupt and send")
-      assert has_element?(view, ~s(#say input[name="interrupt"][value="true"]))
+      refute render(view) =~ "Interrupt and send"
+      refute has_element?(view, ~s(#say input[name="interrupt"]))
+      assert has_element?(view, ~s(#say button[type="submit"][aria-label="Send"]))
     end
 
     test "stop ends the turn without sending anything", %{conn: conn, chat: chat} do
@@ -471,7 +491,8 @@ defmodule ForgeWeb.ChatLiveTest do
       assert length(Conversations.messages(chat.id)) == before
     end
 
-    test "interrupt and send does send", %{conn: conn, chat: chat} do
+    # A message sent while the agent responds is a message, and it is held for the turn's end.
+    test "a message sent while the agent works is recorded and waits", %{conn: conn, chat: chat} do
       running!(chat)
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
 
@@ -542,21 +563,24 @@ defmodule ForgeWeb.ChatLiveTest do
       refute has_element?(view, "#chat-machine", "hz-fsn1-2")
     end
 
-    # Send while the agent responds is *Interrupt and send*: the turn in flight is interrupted
-    # before the message goes, which the machine is told first.
-    test "interrupt and send interrupts before it sends", %{
+    # **Send while the agent responds waits for its turn**: the machine is told the message and
+    # never told to interrupt (`docs/design/conversations.md` § Turns). Interrupting is the queued
+    # message's own button, which has its own tests below.
+    test "a message sent while the agent responds is pushed and interrupts nothing", %{
       conn: conn,
       chat: chat,
       machine: machine
     } do
       :ok = Forge.Workers.connected(machine.id)
+      chat_started!(chat)
+      text(chat, "Working on it.")
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
 
       view |> form("#say", %{"text" => "wait"}) |> render_change()
       view |> form("#say", %{"text" => "wait"}) |> render_submit()
 
-      assert_receive {"interrupt", _payload}
       assert_receive {"message", %{"text" => "wait"}}
+      refute_received {"interrupt", _payload}
     end
 
     test "send with nothing in flight does not interrupt", %{
@@ -666,7 +690,8 @@ defmodule ForgeWeb.ChatLiveTest do
       |> render()
       |> then(&Regex.run(~r/value="([^"]+)"/, &1, capture: :all_but_first))
 
-    {:ok, _event} = Conversations.send(chat, "go on")
+    {:ok, event} = Conversations.send(chat, "go on")
+    delivered(chat, event)
     ask.(2)
 
     html =
@@ -698,7 +723,13 @@ defmodule ForgeWeb.ChatLiveTest do
 
     assert Enum.any?(Conversations.messages(chat.id), &(&1.text =~ "the second"))
 
-    # The next card the agent asks with starts clean.
+    # The next card the agent asks with starts clean — once the agent has taken the answer.
+    chat.id
+    |> Forge.Events.for_job()
+    |> Enum.filter(&(&1.type == "chat.message"))
+    |> List.last()
+    |> then(&delivered(chat, &1))
+
     ask.(3)
     assert has_element?(view, "#answer-rows form")
     refute render(view) =~ "answered or changed"
@@ -908,6 +939,7 @@ defmodule ForgeWeb.ChatLiveTest do
       |> Jobs.Job.progress_changeset(%{status: :running})
       |> Forge.Repo.update()
 
+    chat_started!(running)
     text(running, "The lexer too.")
     turn(running, 2)
     {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
@@ -1435,6 +1467,236 @@ defmodule ForgeWeb.ChatLiveTest do
     end
 
     :ok
+  end
+
+  # A message the agent has not taken is drawn last, queued, and the oldest carries the way to
+  # interrupt: the button of `docs/design/ui.md` § Talk. Everything below is read from the log, so
+  # a reload draws what a reconnect does.
+  describe "a queued message and its button" do
+    setup %{chat: chat} do
+      owner = Forge.AccountsFixtures.user_fixture()
+
+      machine =
+        Forge.MachinesFixtures.machine_fixture(owner, %{
+          provider_id: "hz-fsn1-2",
+          memory_budget: 8 * 1024 * 1024 * 1024,
+          cores: 4
+        })
+
+      :ok = Forge.Workers.connected(machine.id)
+      chat = chat |> running!(%{worker_id: machine.id}) |> chat_started!()
+      text(chat, "Working on it.")
+      %{chat: chat}
+    end
+
+    defp say(view, words), do: view |> form("#say", %{"text" => words}) |> render_submit()
+
+    defp queued(chat),
+      do: for(%{role: :user, delivered: false} = m <- Conversations.transcript(chat.id), do: m)
+
+    test "carries the button, once, on the oldest only", %{conn: conn, chat: chat} do
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      say(view, "first")
+      say(view, "second")
+
+      [oldest, later] = queued(chat)
+      assert has_element?(view, "[data-queued]", "queued")
+      assert has_element?(view, "[data-interrupt]", "Interrupt to send now")
+      assert has_element?(view, ~s([data-interrupt][phx-value-id="#{oldest.id}"]))
+      refute has_element?(view, ~s([data-interrupt][phx-value-id="#{later.id}"]))
+
+      assert length(view |> render() |> Floki.parse_document!() |> Floki.find("[data-interrupt]")) ==
+               1
+
+      # Each queued bubble says so, not only the first of a run.
+      html = view |> render() |> Floki.parse_document!()
+      assert length(Floki.find(html, "[data-queued]")) == 2
+    end
+
+    # Stated beside the button, so a person knows the cost before pressing it.
+    test "says that it stops the agent's turn", %{conn: conn, chat: chat} do
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      say(view, "first")
+
+      assert has_element?(view, ".chat-interrupt-note", "Stops the agent's turn")
+    end
+
+    test "is not drawn when no turn is open", %{conn: conn, chat: chat} do
+      turn(chat, 1)
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      say(view, "next")
+
+      assert has_element?(view, "[data-queued]")
+      refute has_element?(view, "[data-interrupt]")
+    end
+
+    test "is not drawn for a message waiting for a machine", %{conn: conn, chat: chat} do
+      {:ok, _chat} = Conversations.ended(chat, nil, "idle")
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      say(view, "carry on")
+
+      assert has_element?(view, "[data-queued]")
+      refute has_element?(view, "[data-interrupt]")
+    end
+
+    test "is gone once the agent takes the message, and on a fresh mount", %{
+      conn: conn,
+      chat: chat
+    } do
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      say(view, "first")
+      [message] = queued(chat)
+
+      {:ok, fresh, _html} = live(conn, ~p"/chats/#{chat.id}")
+      assert has_element?(fresh, "[data-interrupt]")
+
+      turn(chat, 1)
+      delivered(chat, message)
+      {:ok, taken, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+      refute has_element?(taken, "[data-queued]")
+      refute has_element?(taken, "[data-interrupt]")
+      assert has_element?(taken, "[data-said=you]", "first")
+    end
+
+    test "a tap pushes the interrupt, naming the message", %{conn: conn, chat: chat} do
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      say(view, "first")
+      [message] = queued(chat)
+      assert_receive {"message", %{"text" => "first"}}
+
+      view |> element("[data-interrupt]") |> render_click()
+
+      id = message.id
+      chat_id = chat.id
+      assert_receive {"interrupt", %{"job_id" => ^chat_id, "message_id" => ^id}}
+    end
+
+    # The agent took it between the draw and the tap, or another device interrupted: the tap
+    # stops nothing, so it can never end the turn that is answering the message.
+    test "a tap on a message the agent has since taken interrupts nothing", %{
+      conn: conn,
+      chat: chat
+    } do
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      say(view, "first")
+      [message] = queued(chat)
+      assert_receive {"message", _payload}
+
+      delivered(chat, message)
+      render_click(view, "interrupt", %{"id" => message.id})
+
+      refute_received {"interrupt", _payload}
+    end
+
+    test "a tap naming another conversation's message interrupts nothing", %{
+      conn: conn,
+      project: project,
+      chat: chat
+    } do
+      {:ok, other} = Conversations.open(project, "somewhere else")
+      {:ok, event} = Conversations.send(other, "queued there")
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+      render_click(view, "interrupt", %{"id" => to_string(event.seq)})
+      render_click(view, "interrupt", %{"id" => "not a number"})
+
+      refute_received {"interrupt", _payload}
+    end
+
+    # A crafted id takes down only the sender's own page, but it should not: one past the largest
+    # sequence number is no event's, and one that is not text is no button's.
+    test "a tap with an id no event could have is refused and the page stays", %{
+      conn: conn,
+      chat: chat
+    } do
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+      render_click(view, "interrupt", %{"id" => "99999999999999999999999"})
+      render_click(view, "interrupt", %{"id" => 5})
+      render_click(view, "interrupt", %{})
+
+      refute_received {"interrupt", _payload}
+      assert render(view) =~ "Working on it."
+    end
+
+    # The page is read again on a refusal, so a button that is stale goes without waiting for the
+    # next event. The row is changed straight in the database, which tells no page, so the page is
+    # still drawing the button when the tap lands, and the tap is refused: the conversation is no
+    # longer running.
+    test "a refused tap draws the page again, so the stale button goes", %{
+      conn: conn,
+      chat: chat
+    } do
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      say(view, "first")
+      [message] = queued(chat)
+      assert has_element?(view, "[data-interrupt]")
+
+      chat |> Forge.Jobs.Job.progress_changeset(%{status: :pending}) |> Forge.Repo.update!()
+
+      assert has_element?(view, "[data-interrupt]")
+      render_click(view, "interrupt", %{"id" => message.id})
+      refute has_element?(view, "[data-interrupt]")
+    end
+
+    test "a person who may not use the conversation is refused", %{chat: chat, project: project} do
+      {:ok, event} = Conversations.send(chat, "queued")
+      stranger = Forge.AccountsFixtures.user_fixture()
+
+      assert {:error, _refused} =
+               Forge.Operator.interrupt_chat(chat, stranger, to_string(event.seq))
+
+      refute_received {"interrupt", _payload}
+
+      member = Forge.ForgeFixtures.member_fixture(project, :member)
+
+      assert :ok = Forge.Operator.interrupt_chat(chat, member, to_string(event.seq))
+      assert_receive {"interrupt", %{"message_id" => _id}}
+    end
+  end
+
+  # The case the proposal *a message sent mid-turn leaves the conversation reading as waiting while
+  # the agent works* describes (criterion 10): words, the turn's end, the taking of a message sent
+  # during it, and a turn that runs tools and says nothing yet. The agent is working.
+  describe "a message taken from the queue" do
+    setup %{chat: chat} do
+      chat = chat |> running!() |> chat_started!()
+      text(chat, "Looking into it.")
+      {:ok, event} = Conversations.send(chat, "and the lexer too")
+      text(chat, "The parser first.")
+      turn(chat, 1)
+      delivered(chat, event)
+
+      Jobs.record_harness_event(chat.id, %{
+        type: "job.harness.tool_use",
+        payload: %{id: "t1", name: "Bash", input: %{"command" => "mix test"}}
+      })
+
+      %{chat: chat}
+    end
+
+    test "is not waiting on its person anywhere", %{conn: conn, chat: chat, project: project} do
+      refute Conversations.waiting?(Conversations.messages(chat.id))
+      assert Conversations.in_flight?(Jobs.get!(chat.id))
+      assert [%{waiting: false}] = Conversations.summaries(project_id: project.id)
+
+      assert Forge.Queue.for_chat(Jobs.get!(chat.id)) == []
+
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+      refute view |> element("#top-bar .ui-top-title > .ui-top-sub") |> render() =~
+               "waiting on you"
+
+      assert has_element?(view, "#now-line")
+    end
+
+    # Every reader of the queue is built from its items, a ticket's *waiting on you* mark and the
+    # count included, so an item that is not there marks and counts nothing.
+    test "is not an item of the queue, and is not counted", %{user: user} do
+      refute Enum.any?(Forge.Queue.items(user), &(&1.kind == :chat))
+      assert Forge.Queue.count(user) == 0
+    end
   end
 
   test "it requires a logged-in operator", %{chat: chat} do

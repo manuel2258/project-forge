@@ -26,7 +26,10 @@ defmodule Forge.ConversationsPagingTest do
 
   defp turn(chat, n, opts \\ []) do
     if Keyword.get(opts, :said, true) do
-      record(chat, "chat.message", %{"text" => "question #{n}"})
+      message = record(chat, "chat.message", %{"text" => "question #{n}"})
+      # Taken, as the worker says when it writes it (protocol 15): a message nobody has taken is
+      # drawn last, queued, and this is the conversation as it was told, in order.
+      record(chat, "job.harness.delivered", %{"message_id" => to_string(message.seq)})
       record(chat, "job.harness.text", %{"text" => "answer #{n}"})
     end
 
@@ -79,7 +82,8 @@ defmodule Forge.ConversationsPagingTest do
       # Nothing of a page is in the next, nothing missed between.
       seqs = for page <- [oldest, older, latest], event <- page.events, do: event.seq
       assert seqs == Enum.sort(seqs) and seqs == Enum.uniq(seqs)
-      assert length(seqs) == 25 * 3
+      # A message, its delivery, the answer and the turn's end: four events a turn.
+      assert length(seqs) == 25 * 4
     end
 
     test "exactly ten turns, and ten and one", %{chat: chat} do
@@ -111,7 +115,7 @@ defmodule Forge.ConversationsPagingTest do
          } do
       for n <- 1..4, do: turn(chat, n)
       events = Events.for_job(chat.id)
-      inside_turn_three = Enum.at(events, 7).seq
+      inside_turn_three = Enum.at(events, 9).seq
 
       assert turns(Conversations.talk(chat.id, {:since, inside_turn_three})) == [3, 4]
       assert turns(Conversations.talk(chat.id, {:since, 1})) == [1, 2, 3, 4]
@@ -212,8 +216,9 @@ defmodule Forge.ConversationsPagingTest do
       EventReads.rows()
 
       assert length(Conversations.messages(chat.id)) == 40
-      # 20 turns of two messages and a turn's end: 60, and none of the 200 calls and results.
-      assert EventReads.most() <= 60
+      # 20 turns of a message, its delivery, an answer and a turn's end: 80, and none of the 200
+      # calls and results.
+      assert EventReads.most() <= 80
     end
 
     test "is the same words with the calls there or not", %{chat: chat} do
@@ -260,7 +265,7 @@ defmodule Forge.ConversationsPagingTest do
       page = Conversations.talk(chat.id, {:since, silent.seq})
 
       assert turns(page) == [2, 3]
-      assert page.from == Enum.at(Events.for_job(chat.id), 2).seq
+      assert page.from == Enum.at(Events.for_job(chat.id), 3).seq
     end
   end
 

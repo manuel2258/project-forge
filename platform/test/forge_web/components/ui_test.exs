@@ -709,9 +709,29 @@ defmodule ForgeWeb.UITest do
       assert attrs(newline, "textarea", "data-newline-on") == ["all"]
     end
 
-    test "names the cost while the agent is responding" do
-      html = render_component(&composer/1, id: "r", name: "b", interrupt: true)
-      assert text(html, "button") =~ "Interrupt and send"
+    # Send is only ever Send (`docs/design/ui.md` § Talk): interrupting is the queued message's.
+    test "has one button, which only sends, and no word of interrupting" do
+      html = render_component(&composer/1, id: "r", name: "b")
+      assert attrs(html, "button", "aria-label") == ["Send"]
+      refute html =~ "Interrupt"
+    end
+
+    # The paperclip is drawn inside the field, left of the text, from the caller's slot; with the
+    # slot empty the field is what it was.
+    test "draws the lead slot inside the field, before the text" do
+      html =
+        render_component(
+          &composer/1,
+          %{id: "r", name: "b", lead: [%{__slot__: :lead, inner_block: fn _, _ -> "CLIP" end}]}
+        )
+
+      [field] = Floki.find(Floki.parse_fragment!(html), ".ui-composer-field")
+      assert [{"textarea", _, _} | _] = Enum.drop(Floki.children(field), 1)
+      assert Floki.text(field) =~ "CLIP"
+      assert html =~ "ui-composer-field--lead"
+
+      plain = render_component(&composer/1, id: "r", name: "b")
+      refute plain =~ "ui-composer-field--lead"
     end
   end
 

@@ -230,6 +230,15 @@ defmodule ForgeWeb.WorkerChannel do
     ack(with(:ok <- owns(socket, job_id), do: record_turn(job_id, payload)), socket)
   end
 
+  # Acked like a turn, because nothing but a later `job.started` places a queued message otherwise: a
+  # delivery lost to a restart leaves the message drawn last for the rest of the process
+  # (`docs/design/worker-channel.md` § Protocol 15). Idempotent on the message
+  # (`Jobs.record_delivery/2`).
+  def handle_in("delivered", %{"job_id" => job_id, "message_id" => message_id}, socket)
+      when is_binary(message_id) do
+    ack(with(:ok <- owns(socket, job_id), do: Jobs.record_delivery(job_id, message_id)), socket)
+  end
+
   def handle_in("hibernated", %{"job_id" => job_id} = payload, socket) do
     ack(
       with(

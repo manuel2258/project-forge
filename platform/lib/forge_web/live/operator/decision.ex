@@ -568,16 +568,18 @@ defmodule ForgeWeb.Operator.Decision do
 
             <%!-- *Note*, not *Note, optional*: beside "required to reject" the label contradicted
                   its own hint (UX pass, A18). --%>
-            <.input
-              id="decision-note"
-              name="note"
-              value={@note}
-              multiline
-              label="Note"
-              hint="Needed to reject. Kept with the decision either way."
-            />
-
-            <ForgeWeb.UI.Attach.box id="decision-attach" project={@decision.project.name} />
+            <ForgeWeb.UI.Attach.field id="decision-attach" project={@decision.project.name}>
+              <.input
+                id="decision-note"
+                name="note"
+                value={@note}
+                multiline
+                label="Note"
+                hint="Needed to reject. Kept with the decision either way."
+              >
+                <:lead><ForgeWeb.UI.Attach.clip /></:lead>
+              </.input>
+            </ForgeWeb.UI.Attach.field>
 
             <.refusal error={@error} />
 

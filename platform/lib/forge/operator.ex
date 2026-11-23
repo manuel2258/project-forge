@@ -740,6 +740,16 @@ defmodule Forge.Operator do
   end
 
   @doc """
+  The button on a queued message: interrupts the turn in flight so that this message is taken now,
+  and only if it is still queued (`Forge.Conversations.interrupt/2`). **The same check as Stop**: a
+  person who may use the conversation.
+  """
+  @spec interrupt_chat(Job.t(), User.t(), String.t()) :: :ok | {:error, term()}
+  def interrupt_chat(%Job{kind: :chat} = chat, %User{} = user, message_id) do
+    with :ok <- allow(chat, user, :use), do: Conversations.interrupt(chat, message_id)
+  end
+
+  @doc """
   A person's *End* of a conversation (`Forge.Conversations.close/2`): refused for a workflow
   step's conversation, whoever asks, and for one already ended.
   """

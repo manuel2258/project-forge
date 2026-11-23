@@ -100,6 +100,8 @@ defmodule ForgeWeb.ExtendLiveTest do
       assert has_element?(view, ~s(#forward-extend-tokens[value="6M"]))
       assert has_element?(view, ~s(#forward-extend-turns[value="75"]))
       assert has_element?(view, "#forward-extend-note")
+      # The paperclip is inside the note's corner, not a row under it.
+      assert has_element?(view, "#ways-forward .ui-field-box .ui-attach-clip")
       assert has_element?(view, "#forward-extend-facts", "ran out of tokens")
       assert has_element?(view, "#forward-extend-facts", "12M")
       assert has_element?(view, "#forward-extend-fields", "on top of")

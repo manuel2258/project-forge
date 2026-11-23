@@ -1,13 +1,18 @@
 defmodule ForgeWeb.UI.Attach do
   @moduledoc """
-  The box a file is attached in, on every place a person writes something an agent will read
+  What attaches a file, on every place a person writes something an agent will read
   (`docs/design/ui.md` § Attaching files, `docs/design/attachments.md`).
 
-  **Draw it inside the form it belongs to.** A button opens the file picker (on a phone, the
-  phone's own: camera and library included), a file dropped on the form is attached, and so is a
-  copied image pasted into it. Each file is uploaded as it is chosen, to `UploadController`, and
-  shows its name, size and progress and can be removed; **sending waits for the uploads still
-  running**, and a file that failed is named as *not sent* while the rest go.
+  **One component in three places**, owned by one hook: `field/1` wraps the field (the list of files
+  chosen goes just above it, with the words that sending waits for them; what was not sent and the
+  refusals just under it), and `clip/1`, drawn by the caller where it belongs — a round paperclip
+  inside the field's corner, or beside a card's Send — is what opens the file picker. **It adds no
+  height while nothing is attached.** A file dropped on the form is attached, and so is a copied
+  image pasted into it. Each file is uploaded as it is chosen, to `UploadController`, and shows its
+  name, size and progress and can be removed; **sending waits for the uploads still running**, and
+  a file that failed is named as *not sent* while the rest go.
+
+  **Draw it inside the form it belongs to**, or name the form's id (`form`) when it cannot be.
 
   The form carries what finished as hidden fields — `attachments[ids][]` with `attachments[names][]`
   beside them, the name as uploaded — and what failed as `attachments[failed][]`, read by
@@ -66,20 +71,25 @@ defmodule ForgeWeb.UI.Attach do
   end
 
   @doc """
-  `id` is unique on the page; `project` is the project's name, which the upload route names; `room`
-  is `Forge.Attachments.room/1` of the pool the files go into, or nil where it is not known yet
-  (a ticket being made has an empty pool).
+  The wrapper. `id` is unique on the page; `project` is the project's name, which the upload route
+  names — **without one it draws only its inner block**, for the places that attach only when the
+  page knows a project (and the caller draws `clip/1` only then); `room` is `Forge.Attachments.room/1` of the pool the files go into, or nil where it is not
+  known yet (a ticket being made has an empty pool). Its inner block is the field, and a `clip/1`
+  somewhere in it.
   """
   attr :id, :string, required: true
-  attr :project, :string, required: true
+  attr :project, :string, default: nil
   attr :room, :map, default: nil
-  attr :label, :string, default: "Attach files"
 
   attr :form, :string,
     default: nil,
-    doc: "the id of the form the box belongs to, when it is drawn outside it"
+    doc: "the id of the form the field belongs to, when it is drawn outside it"
 
-  def box(assigns) do
+  slot :inner_block, required: true
+
+  def field(%{project: nil} = assigns), do: ~H"{render_slot(@inner_block)}"
+
+  def field(assigns) do
     limits = Attachments.limits()
     room = assigns.room || %{files: limits.pool_files, bytes: limits.pool_bytes}
 
@@ -104,11 +114,13 @@ defmodule ForgeWeb.UI.Attach do
       data-room-files={@room.files}
       data-room-bytes={@room.bytes}
     >
-      <label class="ui-attach-button">
-        <span>{@label}</span>
-        <input type="file" multiple class="ui-attach-input" aria-label={@label} />
-      </label>
-      <ul id={@id <> "-list"} class="ui-attach-list" data-attach-list phx-update="ignore"></ul>
+      <%!-- Above the field, and nothing at all while there are no files: the list is empty, so it
+            is not drawn, and the waiting words are hidden until a send is waiting. --%>
+      <div id={@id <> "-files"} class="ui-attach-files" phx-update="ignore">
+        <ul id={@id <> "-list"} class="ui-attach-list" data-attach-list></ul>
+        <p class="ui-attach-waiting" data-attach-waiting hidden>Sending when uploads finish</p>
+      </div>
+      {render_slot(@inner_block)}
       <div id={@id <> "-fields"} data-attach-fields phx-update="ignore" hidden></div>
       <p id={@id <> "-notsent"} class="ui-attach-notsent" data-attach-notsent phx-update="ignore"></p>
       <div id={@id <> "-refusals"} data-attach-refusals phx-update="ignore"></div>
@@ -139,11 +151,15 @@ defmodule ForgeWeb.UI.Attach do
           this.fields = this.el.querySelector("[data-attach-fields]")
           this.notSent = this.el.querySelector("[data-attach-notsent]")
           this.refusals = this.el.querySelector("[data-attach-refusals]")
-          this.input = this.el.querySelector("input[type=file]")
+          this.waitingWords = this.el.querySelector("[data-attach-waiting]")
 
-          this.input.addEventListener("change", () => {
-            this.add([...this.input.files])
-            this.input.value = ""
+          // On the wrapper and not on the input: the field the paperclip sits in is LiveView's, and
+          // is drawn again; a listener on the input itself would go with the element it was on.
+          this.el.addEventListener("change", (event) => {
+            const input = event.target
+            if (!(input instanceof HTMLInputElement) || !input.matches("[data-attach-input]")) return
+            this.add([...input.files])
+            input.value = ""
           })
 
           const hasFiles = (event) => [...(event.dataTransfer?.types || [])].includes("Files")
@@ -334,7 +350,7 @@ defmodule ForgeWeb.UI.Attach do
         },
 
         waiting(on) {
-          this.el.classList.toggle("ui-attach--waiting", on)
+          this.waitingWords.hidden = !on
         },
 
         release() {
@@ -357,6 +373,36 @@ defmodule ForgeWeb.UI.Attach do
         }
       }
     </script>
+    """
+  end
+
+  @doc """
+  The paperclip: a round button, the size of send (40px), that opens the file picker — on a phone
+  the phone's own, camera and library included. Labelled for assistive technology; on a coarse
+  pointer its hit area is 44px. The file input is inside it, and the hook listens for its `change`
+  on the wrapper, so a field LiveView draws again does not orphan it. Draw it inside `field/1`.
+  """
+  attr :label, :string, default: "Attach files"
+  attr :class, :any, default: nil
+
+  def clip(assigns) do
+    ~H"""
+    <label class={["ui-attach-clip", @class]} title={@label}>
+      <svg
+        width="18"
+        height="18"
+        viewBox="0 0 18 18"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.6"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M14.5 8.5 9 14a3.2 3.2 0 0 1-4.5-4.5L10.4 3.6a2.1 2.1 0 0 1 3 3L7.5 12.5a1 1 0 0 1-1.5-1.5L11 6" />
+      </svg>
+      <input type="file" multiple class="ui-attach-input" aria-label={@label} data-attach-input />
+    </label>
     """
   end
 end

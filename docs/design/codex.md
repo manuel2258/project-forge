@@ -39,7 +39,11 @@ that fails the criterion it exists for, and it is a finding for planning.
 - The worker writes `initialize`, then `thread/start` (or `thread/resume` with the stored session
   id), then `turn/start` with the prompt. In prompt mode `turn/completed` is `finished` and the
   runner closes stdin; in a chat it is the end of the turn. A message sent during a turn is held
-  and sent after `turn/completed`; an interrupt is `turn/interrupt`.
+  and sent after `turn/completed`; an interrupt is `turn/interrupt`. Since protocol 15 the
+  **worker** holds a chat's messages for every harness, and reports each one delivered when it
+  writes it (`conversations.md` § Turns); this driver's own queue then only holds the first message
+  of a chat while the app-server initialises. A Codex chat's messages therefore stop reading
+  *queued* for good.
 - Environment: `CODEX_HOME=$HOME/.codex` (the job's own home), and the update check turned off with
   `-c check_for_update_on_startup=false` on the command line. **The rest is in the messages, not
   the environment or `-c`**: `thread/start` (and `thread/resume`) carry `approvalPolicy: never`,

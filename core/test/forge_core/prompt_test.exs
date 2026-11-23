@@ -138,6 +138,25 @@ defmodule ForgeCore.PromptTest do
       assert Prompt.message_files([], ["b.mov", "c.mov"]) =~
                "[Attached but not received, so there is nothing to read: \"b.mov\", \"c.mov\"]"
     end
+
+    test "a message's words and its file line are joined in one place, and files alone are the line alone" do
+      files = [%{"file" => "a.png", "size" => 10}]
+
+      assert Prompt.with_files("look", files, []) ==
+               "look\n\n[Files attached with this message, in `attachments/`: `a.png` (10 bytes)]"
+
+      assert Prompt.with_files("look", [], []) == "look"
+
+      # No words: the file line is the whole message, with no blank lines before it.
+      assert Prompt.with_files("", files, []) ==
+               "[Files attached with this message, in `attachments/`: `a.png` (10 bytes)]"
+
+      assert Prompt.with_files("  \n", [], ["b.mov"]) ==
+               "[Attached but not received, so there is nothing to read: \"b.mov\"]"
+
+      assert Prompt.with_files(nil, files, []) =~ ~r/\A\[Files attached/
+      assert Prompt.with_files("", [], []) == ""
+    end
   end
 
   # `docs/design/secrets.md` § Delivery: a job is told which variables it holds — by name, never

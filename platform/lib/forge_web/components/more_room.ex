@@ -180,26 +180,23 @@ defmodule ForgeWeb.Components.MoreRoom do
         </p>
       <% end %>
 
-      <.input
-        id={"#{@prefix}-#{@way}-note"}
-        name="note"
-        label="Note, for the agent (optional)"
-        value={@m.note}
-        multiline
-        rows="3"
-        form={@form}
-        phx-debounce="300"
-        maxlength={4000}
-        class="[overflow-wrap:anywhere] whitespace-pre-wrap"
-        hint={note_hint(@way)}
-      />
-
-      <ForgeWeb.UI.Attach.box
-        :if={@project}
-        id={"#{@prefix}-#{@way}-attach"}
-        project={@project}
-        form={@form}
-      />
+      <ForgeWeb.UI.Attach.field id={"#{@prefix}-#{@way}-attach"} project={@project} form={@form}>
+        <.input
+          id={"#{@prefix}-#{@way}-note"}
+          name="note"
+          label="Note, for the agent (optional)"
+          value={@m.note}
+          multiline
+          rows="3"
+          form={@form}
+          phx-debounce="300"
+          maxlength={4000}
+          class="[overflow-wrap:anywhere] whitespace-pre-wrap"
+          hint={note_hint(@way)}
+        >
+          <:lead :if={@project}><ForgeWeb.UI.Attach.clip /></:lead>
+        </.input>
+      </ForgeWeb.UI.Attach.field>
 
       <div :if={@m.raise?} id={"#{@prefix}-#{@way}-raise"} class="ui-room-raise">
         <.input

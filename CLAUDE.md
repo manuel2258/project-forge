@@ -86,8 +86,8 @@ times were missed, a failure recorded and never retried before the next time, an
 queue and on the phone that a repeat does not push again; on the project page's Workflow view, in
 the queue, over the JSON API and on a scheduled ticket's details. **Not verified here:** a runner
 over days on a real node, pushes to real phones, and a scheduled ticket of a real agent type
-merged end to end (`docs/design/schedules.md` § Not verified here). Nothing under `.forge/` declares
-a schedule yet.
+merged end to end (`docs/design/schedules.md` § Not verified here). `.forge/workflows/weekly.yml` declares one,
+`weekly-maintenance`, Mondays at 06:00 UTC.
 
 `docs/design/commands.md` is the standard for commands: a fixed script a workflow declares once,
 run as a job of its own — by a command state on entry, its exit statuses mapped to an outcome, or
@@ -132,7 +132,7 @@ design assumes as the resume after a question already does; no real job has been
 chat of `attachments/<file>` versions, staged under `upload/<id>`, claimed by the act they ride on,
 handed to every run and to a chat each turn as a read-only folder `$FORGE_JOB/attachments/`, and
 withdrawable by the attacher or a project admin — the one way a blob's bytes leave the store. **It is
-being built** (ticket 60), and it needs **worker protocol 13**; read it before changing anything an
+built** (ticket 60), and it needs **worker protocol 13**; read it before changing anything an
 operator attaches, and `docs/design/worker-channel.md` § Protocol 13 for the wire. **Not verified here:**
 the bind mount on a real machine, whether Claude Code or Codex can read an image from the folder (Codex
 has never run against OpenAI here), drop and paste on a phone, and a 500 MiB body through a proxy.
@@ -169,9 +169,8 @@ step: a state with `on_enter: update`, which the platform runs itself with no jo
 default branch into the ticket's branch (or moves it forward, or leaves it) through its own push,
 re-pins the ticket's workflow at the commit it brought the code up to, moves the base, and sends a
 conflict to the state it names. **It is built, on the platform alone** (ticket 57): the grammar, the
-engine's step, the base in every job's manifest, and the screens; **nothing under `.forge/` uses it
-yet** — forge's own `dev.yml` and `bug.yml` adopt it in a follow-up — and it has not run on a real
-project.
+engine's step, the base in every job's manifest, and the screens; forge's own `dev.yml` and `bug.yml` use it once, as
+`refresh` after an approved refinement, and it has not run on a real project.
 
 ## Layout
 

@@ -4,7 +4,7 @@
   inputs = {
     # The same revision as the repository's own flake, so the store is shared and the
     # measurement does not spend its first minutes downloading a second nixpkgs.
-    nixpkgs.url = "github:NixOS/nixpkgs/aff8a0b28396750446e5537a96461bc4facdb287";
+    nixpkgs.url = "github:NixOS/nixpkgs/2786a2a72088ecf32aea5b3ec52099e6a7cff78f";
   };
 
   outputs = { self, nixpkgs }:

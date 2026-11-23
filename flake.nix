@@ -3,7 +3,7 @@
 
   inputs = {
     # Pinned to a revision so evaluation never needs the GitHub API.
-    nixpkgs.url = "github:NixOS/nixpkgs/aff8a0b28396750446e5537a96461bc4facdb287";
+    nixpkgs.url = "github:NixOS/nixpkgs/2786a2a72088ecf32aea5b3ec52099e6a7cff78f";
   };
 
   outputs = { self, nixpkgs }:
@@ -79,13 +79,13 @@
           workerDeps = mixDeps {
             name = "forge-worker";
             subdir = "worker";
-            hash = "sha256-afo51zwJb20Lr/qzUwRznxgdW5ghAPGtsmmhZxtzARo=";
+            hash = "sha256-QRVDt/y5ve0mPazIh+EGQ/TCEjyWKc5vNeldqznVUCM=";
           };
 
           platformDeps = mixDeps {
             name = "forge";
             subdir = "platform";
-            hash = "sha256-h6chxKZKv3FHeilRgF/SHCYcNV0Krah8e5TLisjZr3g=";
+            hash = "sha256-Cgw9cruZ76M0isCOrtynvaZzUKuSwfdLss9n4DH5nGA=";
           };
 
           # Lumis's NIF (`ForgeWeb.Highlight`), which `rustler_precompiled` downloads while Mix

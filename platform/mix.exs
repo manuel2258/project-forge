@@ -102,7 +102,7 @@ defmodule Forge.MixProject do
       # § Authentication says a login provisions a user on the spot, so this is the code
       # path that decides who exists. It takes its HTTP client from configuration, which
       # is what lets the tests drive a whole flow against a fake issuer.
-      {:assent, "~> 0.3"},
+      {:assent, "~> 0.3.2"},
       {:forge_core, path: "../core"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:phoenix, "~> 1.8.13"},

@@ -230,7 +230,8 @@ under `bin/look` sampled every 200 ms — Chromium 465, the BEAM 113, postgres 4
 over a nine-step list at both widths. A 200 ms sampler can miss a spike. The agent that runs it is
 about 300 MiB (the `claude` process's resident size), so a job that looks needs about **945 MiB**;
 with a quarter of room, rounded up to 256 MiB, 1280 MiB. `implementing` is given the default
-2200 MiB, which is above that, so neither `dev.yml` nor `bug.yml` declares anything of its own and
+1100 MiB (it was 2200 until four jobs were fitted to a 4400 MiB machine), which is above that by
+16 % and not by a quarter, so neither `dev.yml` nor `bug.yml` declares anything of its own and
 each says why in a comment. A heavier page, or a suite run beside it, is not what was measured.
 
 Time: a nine-step look took 17 s start to finish, almost all of it building the assets, compiling

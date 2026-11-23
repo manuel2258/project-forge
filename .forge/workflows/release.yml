@@ -14,7 +14,14 @@ release_notes: release-notes.md
 initial: refining
 
 defaults:
-  resources: { memory: 2200MiB, cpu: 1 }
+  # **1100 MiB and one core: four agent jobs on a 4400 MiB, four-core machine.** It was 2200 MiB,
+  # the sample project's cold-build peak (`docs/measurements.md` § M3), from before agents ran
+  # nothing heavy by hand. The agent is about 300 MiB; a look (`bin/look`) peaks at 645 MiB more
+  # (`docs/design/look.md` § What a look costs), 945 MiB in all, which leaves `implementing` 16 %
+  # of room. That is thinner than the 25 % the note recommends, chosen to fit four on the machine;
+  # `MemoryMax` is hard, so a look killed at 137 is the figure to raise this with. Commands
+  # declare their own.
+  resources: { memory: 1100MiB, cpu: 1 }
 
 commands:
   ghcr-check:

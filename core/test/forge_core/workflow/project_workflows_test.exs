@@ -169,7 +169,7 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
 
   # A change to the web layer is looked at and its screenshots kept on the ticket
   # (`docs/design/look.md`), so `implementing` produces the group in both workflows, and the memory
-  # a look needs (about 945 MiB with the agent, 1280 MiB with a quarter of room) fits in what the
+  # a look needs (about 945 MiB with the agent; the default is 1100, so four jobs fit on 4400 MiB) fits in what the
   # state is given. Nothing is declared on the state, so the default is what the figure is
   # compared with.
   test "implementing keeps the screenshots it takes and has memory to take them in" do
@@ -180,8 +180,8 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
       memory =
         (Workflow.state(workflow, "implementing").resources || workflow.defaults.resources).memory
 
-      assert memory >= 1280 * 1024 * 1024,
-             "#{name}: implementing has #{memory} bytes, a look needs 1280 MiB"
+      assert memory >= 945 * 1024 * 1024,
+             "#{name}: implementing has #{memory} bytes, a look needs 945 MiB"
     end
   end
 

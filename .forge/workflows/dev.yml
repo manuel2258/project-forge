@@ -83,11 +83,11 @@ states:
     # runs the look (`bin/look`), reads its own screenshots and goes round again, which is turns
     # and tokens this state did not spend before; nothing has run it yet, so the ticket's own
     # spend is the figure to correct this with.
-    # **Memory is the default's 2200 MiB, which a look fits in with room** (`docs/design/look.md`
+    # **Memory is the default's 1100 MiB, which a look fits in with 16 % to spare** (`docs/design/look.md`
     # § What a look costs): a look on the shipped setup peaked at 645 MiB of proportional set size
     # summed over the browser, the BEAM, postgres and chromedriver, and the agent itself is about
-    # 300 MiB, so a job that looks needs about 945 MiB, and 945 × 1.25 rounded up to 256 MiB is
-    # 1280 MiB. Measured on 2026-11-08 with `/proc/<pid>/smaps_rollup` every 200 ms; the default
+    # 300 MiB, so a job that looks needs about 945 MiB, and 945 MiB is 86 % of the default's 1100 MiB
+    # (the note's 25 % margin would be 1280; four jobs on 4400 MiB is why it is not). Measured on 2026-11-08 with `/proc/<pid>/smaps_rollup` every 200 ms; the default
     # is above that figure, so nothing is declared. A page much heavier than the shipped setup's
     # would move it, and the figure to correct this with is a look killed at 137.
     budget: { turns: 800, tokens: 12M }

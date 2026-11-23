@@ -129,7 +129,7 @@ defmodule ForgeWeb.UpdateStepLiveTest do
           payload: %{"chat" => "chat-1", "sha" => chat_sha}
         })
 
-      commit_over_http(project, ticket.branch, "feature.txt", "mine")
+      commit_file_on_branch(project, ticket.branch, "feature.txt", "mine")
 
       ticket = finish!(ticket)
       {:ok, view, html} = live(conn, page(project, ticket))
@@ -168,7 +168,7 @@ defmodule ForgeWeb.UpdateStepLiveTest do
     test "a conflict says where it went, with the first path, hostile names as text", context do
       %{conn: conn, project: project, ticket: ticket, bare: bare} = context
       path = "<script>alert(1)</script>.md"
-      commit_over_http(project, ticket.branch, path, "mine")
+      commit_file_on_branch(project, ticket.branch, path, "mine")
       commit_to(bare, "main", %{path => "trunk\n"}, "another ticket")
 
       ticket = finish!(ticket)
@@ -333,7 +333,7 @@ defmodule ForgeWeb.UpdateStepLiveTest do
     test "a step that stuck says why in words, with the paths, as an ordinary stuck item",
          context do
       %{conn: conn, project: project, ticket: ticket, bare: bare} = context
-      commit_over_http(project, ticket.branch, "README.md", "mine")
+      commit_file_on_branch(project, ticket.branch, "README.md", "mine")
       commit_to(bare, "main", %{"README.md" => "trunk\n"}, "another ticket")
       ticket = finish!(ticket)
       assert ticket.status == :stuck

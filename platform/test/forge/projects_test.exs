@@ -53,6 +53,23 @@ defmodule Forge.ProjectsTest do
     assert {:ok, ^before} = Git.resolve(repo, "refs/heads/main")
   end
 
+  # `HEAD` is what a clone with no `--branch` follows, and a bare repository `git init` made points
+  # it at git's own default. Registration used to set it twice (`Hooks.install/2` and
+  # `Git.ensure_head/2`); the second was removed in ticket 68, so this is what holds the first.
+  test "registering a new repository points HEAD at its default branch" do
+    repo = Path.join(tmp_dir("bare"), "trunk.git")
+
+    {:ok, _project} =
+      register_owned!(%{
+        name: "trunk-#{System.unique_integer([:positive])}",
+        repo_path: repo,
+        default_branch: "trunk"
+      })
+
+    assert {:ok, "refs/heads/trunk\n"} = Git.run(repo, ["symbolic-ref", "HEAD"])
+    assert Git.branch_exists?(repo, "trunk")
+  end
+
   # The name is the authority on who owns a repository. A registration for a name that already
   # exists must fail before any git runs, or a second caller — a member of nothing — rewrites the
   # first project's HEAD and default-branch guard and empties its clones. This is the guard for

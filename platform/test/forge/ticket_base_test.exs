@@ -39,7 +39,7 @@ defmodule Forge.TicketBaseTest do
   test "moves to the default branch's head an integration merged", context do
     %{project: project, bare: bare, user: user, ticket: ticket} = context
     base = ticket.base_commit
-    sha = commit_over_http(project, ticket.branch, "README.md", "the branch's")
+    sha = commit_file_on_branch(project, ticket.branch, "README.md", "the branch's")
     changeset!(ticket, sha)
 
     # Another ticket's work lands: one file in conflict, and one that is not this ticket's at all.
@@ -78,7 +78,7 @@ defmodule Forge.TicketBaseTest do
     %{project: project, bare: bare, ticket: ticket} = context
     base = ticket.base_commit
     commit_to(bare, "main", %{"OTHER.md" => "theirs\n"}, "other")
-    commit_over_http(project, ticket.branch, "README.md", "the branch's")
+    commit_file_on_branch(project, ticket.branch, "README.md", "the branch's")
 
     complete!(job_in(ticket, "implementing"), "implementation.md")
 

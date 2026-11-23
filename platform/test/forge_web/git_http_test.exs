@@ -827,7 +827,7 @@ defmodule ForgeWeb.GitHttpTest do
   end
 
   defp git(dir, args, env \\ []) do
-    System.cmd("git", args,
+    Forge.Git.spawn_cmd("git", args,
       cd: dir,
       stderr_to_stdout: true,
       env: [{"GIT_TERMINAL_PROMPT", "0"} | env]

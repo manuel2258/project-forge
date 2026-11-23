@@ -5,7 +5,7 @@ defmodule Forge.UsageTest do
   with spend in a project the viewer is not in counted and never named.
   """
 
-  use Forge.DataCase, async: true
+  use Forge.DataCase, async: false
 
   import Forge.AccountsFixtures
   import Forge.ForgeFixtures

@@ -47,7 +47,7 @@ defmodule ForgeWeb.MergeQueueLiveTest do
 
   defp queued!(project, user, title, file) do
     {:ok, ticket} = Tickets.admit(project, %{title: title, body: "do it"}, {:user, user.id})
-    changeset!(ticket, commit_over_http(project, ticket.branch, file, "contents of #{file}"))
+    changeset!(ticket, commit_file_on_branch(project, ticket.branch, file, "contents of #{file}"))
     commit_message!(ticket, "Add #{file}\n")
     {:ok, _queued} = Operator.decide(pend_merge(ticket), user, :approved, "ship it")
     Tickets.get!(ticket.id)
@@ -141,7 +141,7 @@ defmodule ForgeWeb.MergeQueueLiveTest do
     test "draws no merge queue under Steps of a ticket the queue never held",
          %{conn: conn, project: project, user: user} do
       {:ok, ticket} = Tickets.admit(project, %{title: "Plain", body: "x"}, {:user, user.id})
-      changeset!(ticket, commit_over_http(project, ticket.branch, "a.txt", "contents"))
+      changeset!(ticket, commit_file_on_branch(project, ticket.branch, "a.txt", "contents"))
       commit_message!(ticket, "Add a.txt\n")
       assert {:ok, merged} = Operator.decide(pend_merge(ticket), user, :approved, nil)
       assert merged.state == "merged"

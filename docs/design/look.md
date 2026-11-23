@@ -234,10 +234,16 @@ with a quarter of room, rounded up to 256 MiB, 1280 MiB. `implementing` is given
 each says why in a comment. A heavier page, or a suite run beside it, is not what was measured.
 
 Time: a nine-step look took 17 s start to finish, almost all of it building the assets, compiling
-and starting the app; a step is a fraction of a second. The gate's browser module (`bin/check` runs
-it with the rest of the suite) added about **14 s** when it was five tests, and about **38 s** at eleven tests, which is what was timed (it has grown since, and each test starts
-a browser and logs in; 38.6 s for the whole look directory, as timed at eleven, 0.6 s without the browser module), and
-about **450 MiB** to its peak, measured at five tests, one browser at a time (Chromium 428 + chromedriver 18), inside the 4 GiB the `check` command asks for.
+and starting the app; a step is a fraction of a second. The gate's browser modules (`bin/check` runs them with the rest of the suite) were timed at
+**about 14 s** when it was five tests and **about 38 s** at eleven; the figures are stale. At ticket
+68 there were two modules and **25 tests** (`browser_test.exs` 19, `installed_app_test.exs` 6), each
+starting a browser and logging in: about **100 s** of wall time alone and about **110 CPU-seconds**
+run alone (the BEAM 13.5 of it); in the diagnosis's run of the gate (1659 CPU-seconds) Chromium was about 90,
+which is 3.6 a test. Their peak was about **450 MiB**, measured at five tests, one
+browser at a time (Chromium 428 + chromedriver 18), inside the 4 GiB the `check` command asks for.
+A Chromium per module rather than per test would take about 70 of the 110 CPU-seconds out, if
+`Forge.Look.run/2` could be given a session it did not start; that is left (ticket 68's diagnosis,
+step 6) because it changes the code `bin/look` runs.
 
 The gate builds the assets itself (`mix check` runs `tailwind forge` and `esbuild forge` before the
 suite): they are an ignored directory, so a fresh clone and any ticket that never ran `bin/look`

@@ -167,14 +167,14 @@ defmodule Forge.LoopBackTest do
   # say where the first one's view of it ended.
   test "a second review is told which commit the first one read", context do
     ticket = to_implementing(context)
-    commit_over_http(context.project, ticket.branch, "score.txt", "first")
+    commit_file_on_branch(context.project, ticket.branch, "score.txt", "first")
     ticket = run(ticket, context.worker, "implementation.md")
 
     first = pending(ticket)
     [%{version: seen}] = Enum.filter(Jobs.spec(first).inputs, &(&1.name == "changeset"))
     ticket = run(ticket, context.worker, "review.md", "changes_requested")
 
-    commit_over_http(context.project, ticket.branch, "score.txt", "second")
+    commit_file_on_branch(context.project, ticket.branch, "score.txt", "second")
     ticket = run(ticket, context.worker, "implementation.md")
 
     second = pending(ticket)

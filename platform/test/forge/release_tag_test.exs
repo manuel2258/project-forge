@@ -134,7 +134,7 @@ defmodule Forge.ReleaseTagTest do
     defp push(repo, refspec, internal \\ true) do
       env = if internal, do: [{"FORGE_INTERNAL", "1"}], else: []
 
-      System.cmd("git", ["push", "--quiet", ".", refspec],
+      Forge.Git.spawn_cmd("git", ["push", "--quiet", ".", refspec],
         cd: repo,
         env: env,
         stderr_to_stdout: true

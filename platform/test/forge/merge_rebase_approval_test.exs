@@ -73,7 +73,7 @@ defmodule Forge.MergeRebaseApprovalTest do
     {:ok, ticket} =
       Tickets.admit(project, %{title: "Practice timer", body: "do it"}, {:user, user.id})
 
-    sha = commit_over_http(project, ticket.branch, "README.md", "the branch's version")
+    sha = commit_file_on_branch(project, ticket.branch, "README.md", "the branch's version")
     changeset!(ticket, sha)
     commit_message!(ticket, "Practice timer\n\nBecause.\n")
     %{project: project, bare: bare, user: user, ticket: pend_merge(ticket)}
@@ -382,7 +382,7 @@ defmodule Forge.MergeRebaseApprovalTest do
       {:ok, ticket} =
         Tickets.admit(project, %{title: "Add a.txt", body: "do it"}, {:user, user.id})
 
-      changeset!(ticket, commit_over_http(project, ticket.branch, "a.txt", "a"))
+      changeset!(ticket, commit_file_on_branch(project, ticket.branch, "a.txt", "a"))
       commit_message!(ticket, "Add a.txt\n")
       main = main(bare)
       job = ticket.id |> Jobs.for_ticket() |> List.last()
@@ -433,7 +433,7 @@ defmodule Forge.MergeRebaseApprovalTest do
       {:ok, ticket} =
         Tickets.admit(project, %{title: "Add a.txt", body: "do it"}, {:user, user.id})
 
-      changeset!(ticket, commit_over_http(project, ticket.branch, "a.txt", "a"))
+      changeset!(ticket, commit_file_on_branch(project, ticket.branch, "a.txt", "a"))
       commit_message!(ticket, "Add a.txt\n")
       approval = approved_row!(ticket, user)
       assert Artifacts.changeset_decision(ticket.id) == :stands
@@ -479,7 +479,11 @@ defmodule Forge.MergeRebaseApprovalTest do
       {:ok, ticket} =
         Tickets.admit(project, %{title: "Practice timer", body: "do it"}, {:user, user.id})
 
-      changeset!(ticket, commit_over_http(project, ticket.branch, "README.md", "the branch's"))
+      changeset!(
+        ticket,
+        commit_file_on_branch(project, ticket.branch, "README.md", "the branch's")
+      )
+
       ticket = pend_merge(ticket)
       approved_row!(ticket, user)
       assert Artifacts.changeset_decision(ticket.id) == :stands
@@ -500,7 +504,11 @@ defmodule Forge.MergeRebaseApprovalTest do
       {:ok, ticket} =
         Tickets.admit(project, %{title: "Practice timer", body: "do it"}, {:user, user.id})
 
-      changeset!(ticket, commit_over_http(project, ticket.branch, "README.md", "the branch's"))
+      changeset!(
+        ticket,
+        commit_file_on_branch(project, ticket.branch, "README.md", "the branch's")
+      )
+
       ticket = pend_merge(ticket)
       approved_row!(ticket, user)
       assert Artifacts.changeset_decision(ticket.id) == :stands

@@ -198,7 +198,9 @@ warnings as errors, format check, Credo strict, tests with coverage. In `platfor
 same checks, but the tests as **three partitions side by side** (`mix check.static`, then
 `mix test --partitions 3 --cover` three times at once, then `mix test.coverage`, which is where
 the coverage floor is now checked — a partitioned `--cover` run exports its coverage and reports
-none). Each partition also has a `TMPDIR` of its own.
+none). Each partition also has a `TMPDIR` of its own, and runs with the BEAM's scheduler busy-wait off
+(`ERL_FLAGS="+sbwt none …"`: on two cores three spinning BEAMs take CPU from each other, `bin/check`'s
+comment has the figures).
 `mix check` in `platform` is still the one-process version, which is what to run by hand. A commit
 that does not pass the gate is not made.
 
@@ -241,9 +243,11 @@ irrelevant. It goes when the run does.
 writes to a checkout: it can rewrite `mix.lock` where `mix.exs` has moved on. None of them
 relaxes a check — the suite runs against a real database either way.
 
-The gate drives Chromium once, from the devshell: `platform/test/forge/look/browser_test.exs` goes
-through `Forge.Look`, so a broken browser setup fails here and not on the next UI ticket. It adds
-about 40 seconds and 450 MiB to the suite, builds the assets it loads (`tailwind forge`, `esbuild forge`) first, and needs `FORGE_CHROMIUM` and `FORGE_CHROMEDRIVER`, which
+The gate drives Chromium from the devshell: `platform/test/forge/look/browser_test.exs` and
+`installed_app_test.exs` go through `Forge.Look`, so a broken browser setup fails here and not on the
+next UI ticket. Their 25 tests start a Chromium each and cost about 100 seconds of wall time alone,
+about 110 CPU-seconds and 450 MiB at the peak (ticket 68; it said "about 40 seconds" at eleven tests).
+The gate builds the assets it loads (`tailwind forge`, `esbuild forge`) first, and needs `FORGE_CHROMIUM` and `FORGE_CHROMEDRIVER`, which
 `nix develop` sets (`docs/design/look.md`).
 
 It also points `MIX_HOME` and `HEX_HOME` at `.mix-home/` and `.hex-home/` inside the checkout,

@@ -122,7 +122,10 @@ defmodule ForgeWeb.TicketJumpLiveTest do
   # branch changed since the merge, not the work that landed.
   test "a reopened ticket's Changes show only what came after its merge", ctx do
     %{conn: conn, project: project, ticket: ticket, user: user} = ctx
-    sha = commit_over_http(project, ticket.branch, "landed.txt", "already on the default branch")
+
+    sha =
+      commit_file_on_branch(project, ticket.branch, "landed.txt", "already on the default branch")
+
     changeset!(ticket, sha)
     commit_message!(ticket, "Land the first piece\n")
     ready = stuck!(ticket, "review_ready", :active)
@@ -135,7 +138,7 @@ defmodule ForgeWeb.TicketJumpLiveTest do
       })
 
     assert {:ok, _} = Forge.Operator.transition(Tickets.get!(ticket.id), user, "implementing")
-    commit_over_http(project, ticket.branch, "after.txt", "new work")
+    commit_file_on_branch(project, ticket.branch, "after.txt", "new work")
 
     {:ok, view, _html} = live(conn, page(project, ticket) <> "?tab=changes")
     html = render(view)
@@ -145,7 +148,7 @@ defmodule ForgeWeb.TicketJumpLiveTest do
 
   test "a jump into a state that merges is drawn as the approval it records", ctx do
     %{conn: conn, project: project, ticket: ticket} = ctx
-    sha = commit_over_http(project, ticket.branch, "a.txt", "contents")
+    sha = commit_file_on_branch(project, ticket.branch, "a.txt", "contents")
     changeset!(ticket, sha)
     commit_message!(ticket, "Add a.txt\n\nBecause the test says so.\n")
     stuck!(ticket)

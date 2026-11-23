@@ -660,7 +660,7 @@ defmodule Forge.MergeTest do
 
   # A commit on the ticket branch, pushed the way a job pushes: over the platform's endpoint.
   defp commit_on_branch(%{project: project, ticket: ticket}, path, content) do
-    commit_over_http(project, ticket.branch, path, content)
+    commit_file_on_branch(project, ticket.branch, path, content)
   end
 
   # Moves the default branch somewhere the ticket branch cannot merge into cleanly. Written
@@ -680,7 +680,7 @@ defmodule Forge.MergeTest do
       repo = Forge.Projects.repo_path(project)
       branch = Forge.Jobs.chat_branch(chat)
       work = tmp_dir("chat-work")
-      {_out, 0} = System.cmd("git", ["clone", "--quiet", "--branch", branch, repo, work])
+      {_out, 0} = Forge.Git.spawn_cmd("git", ["clone", "--quiet", "--branch", branch, repo, work])
       File.write!(Path.join(work, path), content)
 
       # FORGE_INTERNAL because this stands in for the worker, which pushes with a token scoped
@@ -693,7 +693,7 @@ defmodule Forge.MergeTest do
             ["push", "--quiet", "origin", "HEAD:refs/heads/" <> branch]
           ] do
         {_out, 0} =
-          System.cmd("git", ["-C", work] ++ args,
+          Forge.Git.spawn_cmd("git", ["-C", work] ++ args,
             stderr_to_stdout: true,
             env: [{"FORGE_INTERNAL", "1"}]
           )
@@ -761,7 +761,7 @@ defmodule Forge.MergeTest do
       commit_on_chat(project, chat, "README.md", "the conversation's version\n")
       chat_commit_message!(chat)
       work = tmp_dir("main-work")
-      {_out, 0} = System.cmd("git", ["clone", "--quiet", bare, work])
+      {_out, 0} = Forge.Git.spawn_cmd("git", ["clone", "--quiet", bare, work])
       File.write!(Path.join(work, "README.md"), "someone else's version\n")
 
       for args <- [
@@ -772,7 +772,7 @@ defmodule Forge.MergeTest do
             ["push", "--quiet", "origin", "HEAD:refs/heads/main"]
           ] do
         {_out, 0} =
-          System.cmd("git", ["-C", work] ++ args,
+          Forge.Git.spawn_cmd("git", ["-C", work] ++ args,
             stderr_to_stdout: true,
             env: [{"FORGE_INTERNAL", "1"}]
           )

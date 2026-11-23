@@ -704,7 +704,11 @@ defmodule Forge.Look.InstalledAppTest do
                      until_tags(session, ["digest", "fresh", "stuck-" <> ticket.id, "unmarked"])
 
                      # Now nothing is pending and the count does not move: another stale one is
-                     # closed by opening forge and by nothing else.
+                     # closed by opening forge and by nothing else. The asks of the page above are
+                     # let finish first: one is debounced 300 ms after it mounts, and a tidy still
+                     # on its way would read the list after this one is shown and close it; what
+                     # gets past that is shown again by `show_stale!/2`.
+                     settle()
                      show_stale!(session, "approval-gone")
                      visit(session, opts, "/")
                      until_tags(session, ["digest", "fresh", "stuck-" <> ticket.id, "unmarked"])

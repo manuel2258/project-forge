@@ -8,6 +8,7 @@ defmodule Forge.Tickets do
 
   alias Ecto.Multi
   alias Forge.{Artifacts, Events, Git, Jobs, Projects, Repo, TicketTypes}
+  alias Forge.Git.Reader
   alias Forge.Jobs.Job
   alias Forge.Projects.Project
   alias Forge.Tickets.Ticket
@@ -117,9 +118,15 @@ defmodule Forge.Tickets do
     repo = Projects.repo_path(project)
 
     with {:ok, base} <- at_or_default(repo, project, at),
-         {:ok, layout} <- TicketTypes.layout(repo, base),
-         {:ok, ticket_type, path} <- select.(layout, releases(repo, base, layout)),
-         {:ok, workflow, flat} <- load(repo, base, path) do
+         {:ok, layout} <- TicketTypes.layout(repo, base) do
+      # One `cat-file --batch` for everything the definition names, rather than a `show` each.
+      Reader.with_reader(repo, &select_and_load(&1, repo, base, layout, select))
+    end
+  end
+
+  defp select_and_load(reader, repo, base, layout, select) do
+    with {:ok, ticket_type, path} <- select.(layout, releases(reader, base, layout)),
+         {:ok, workflow, flat} <- load(reader, base, path) do
       {:ok,
        %{repo: repo, base: base, workflow: workflow, yaml_map: flat, ticket_type: ticket_type}}
     end
@@ -134,30 +141,33 @@ defmodule Forge.Tickets do
 
   # The names of the types whose file says `release: true`, read from the file's own YAML so that
   # a release that does not validate is still known to be one. A file that cannot be read is not.
-  defp releases(_repo, _base, %{form: :single}), do: []
+  defp releases(_reader, _base, %{form: :single}), do: []
 
-  defp releases(repo, base, %{form: :types, types: types}) do
+  defp releases(reader, base, %{form: :types, types: types}) do
     for %{name: name, path: path} <- types,
-        {:ok, yaml} <- [workflow_yaml(repo, base, path)],
+        {:ok, yaml} <- [workflow_yaml(reader, base, path)],
         Parser.declares_release?(yaml),
         do: name
   end
 
-  defp parsed(repo, base, path, yaml) do
-    case parse(repo, base, path, yaml) do
+  defp parsed(reader, base, path, yaml) do
+    case parse(reader, base, path, yaml) do
       {:ok, workflow, _flat} -> {:ok, workflow}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp load(repo, base, path) do
-    with {:ok, yaml} <- workflow_yaml(repo, base, path), do: parse(repo, base, path, yaml)
+  defp load(reader, base, path) do
+    with {:ok, yaml} <- workflow_yaml(reader, base, path), do: parse(reader, base, path, yaml)
   end
 
   # `.forge/workflow.yml` has no types, so it cannot be a release (`ForgeCore.Workflow.Validator`).
-  defp parse(repo, base, path, yaml),
+  defp parse(reader, base, path, yaml),
     do:
-      Parser.load(yaml, [single_file: path == TicketTypes.single_path()] ++ at_commit(repo, base))
+      Parser.load(
+        yaml,
+        [single_file: path == TicketTypes.single_path()] ++ at_commit(reader, base)
+      )
 
   @doc """
   Every ticket type the project's default branch declares, each with its workflow or why it has
@@ -186,7 +196,9 @@ defmodule Forge.Tickets do
          {:ok, layout} <- TicketTypes.layout(repo, base) do
       entries = entries(layout, Keyword.get(opts, :single, true))
 
-      types = Enum.map(entries, &read_type(repo, base, &1))
+      types =
+        Reader.with_reader(repo, fn reader -> Enum.map(entries, &read_type(reader, base, &1)) end)
+
       {:ok, %{form: layout.form, types: types, not_types: layout.not_types}}
     end
   end
@@ -202,11 +214,11 @@ defmodule Forge.Tickets do
   end
 
   # One type's file read once: its workflow or why it has none, and whether it sets `release: true`.
-  defp read_type(repo, base, %{path: path} = entry) do
-    case workflow_yaml(repo, base, path) do
+  defp read_type(reader, base, %{path: path} = entry) do
+    case workflow_yaml(reader, base, path) do
       {:ok, yaml} ->
         entry
-        |> Map.put(:workflow, parsed(repo, base, path, yaml))
+        |> Map.put(:workflow, parsed(reader, base, path, yaml))
         |> Map.put(:release, release?(entry, yaml))
 
       {:error, reason} ->
@@ -440,25 +452,18 @@ defmodule Forge.Tickets do
 
   # What the validator asks of the repository, answered at the commit the workflow is read at:
   # a prompt file under `.forge/`, a command's script by its full path, and a library's text.
-  defp at_commit(repo, base) do
+  defp at_commit(reader, base) do
     [
-      prompt_exists: &Git.exists?(repo, base, ".forge/" <> &1),
-      file_exists: &Git.exists?(repo, base, &1),
-      read_library: &read_at(repo, base, ".forge/" <> &1)
+      prompt_exists: &Reader.exists?(reader, base, ".forge/" <> &1),
+      file_exists: &Reader.exists?(reader, base, &1),
+      read_library: &Reader.read(reader, base, ".forge/" <> &1)
     ]
   end
 
-  defp read_at(repo, base, path) do
-    case Git.show(repo, base, path) do
-      {:ok, text} -> {:ok, text}
-      {:error, _reason} -> :error
-    end
-  end
-
-  defp workflow_yaml(repo, base, path) do
-    case Git.show(repo, base, path) do
+  defp workflow_yaml(reader, base, path) do
+    case Reader.read(reader, base, path) do
       {:ok, yaml} -> {:ok, yaml}
-      {:error, :not_found} -> {:error, {:no_workflow_file, path}}
+      :error -> {:error, {:no_workflow_file, path}}
     end
   end
 

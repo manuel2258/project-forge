@@ -294,7 +294,7 @@ defmodule Forge.GitLfsTest do
       File.write!(file, text)
 
       {_out, status} =
-        System.cmd("git", ["lfs", "pointer", "--check", "--file=" <> file],
+        Forge.Git.spawn_cmd("git", ["lfs", "pointer", "--check", "--file=" <> file],
           stderr_to_stdout: true
         )
 

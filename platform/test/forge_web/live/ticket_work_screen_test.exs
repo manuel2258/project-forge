@@ -574,7 +574,7 @@ defmodule ForgeWeb.TicketWorkScreenTest do
 
   describe "Changes" do
     setup %{project: project, ticket: ticket} do
-      sha = commit_over_http(project, ticket.branch, "lib/score.ex", "def persist, do: :ok")
+      sha = commit_file_on_branch(project, ticket.branch, "lib/score.ex", "def persist, do: :ok")
       %{sha: sha}
     end
 
@@ -665,7 +665,7 @@ defmodule ForgeWeb.TicketWorkScreenTest do
       project: project,
       ticket: ticket
     } do
-      commit_over_http(project, ticket.branch, "lib/rank.ex", "def rank, do: 1")
+      commit_file_on_branch(project, ticket.branch, "lib/rank.ex", "def rank, do: 1")
       {:ok, view, _html} = live(conn, page(project, ticket, "?tab=changes"))
 
       assert length(found(view, "li[data-path]", "#changes-files")) == 2
@@ -898,7 +898,7 @@ defmodule ForgeWeb.TicketWorkScreenTest do
         Artifacts.record_version(ticket.id, "plan.md", :document, :system, %{content: "# P\n"})
 
       # The changeset is a commit and not a file, and says so.
-      sha = commit_over_http(project, ticket.branch, "lib/score.ex", "def persist, do: :ok")
+      sha = commit_file_on_branch(project, ticket.branch, "lib/score.ex", "def persist, do: :ok")
       changeset!(ticket, sha)
 
       {:ok, view, _html} = live(conn, page(project, ticket, "?tab=docs"))
@@ -972,7 +972,7 @@ defmodule ForgeWeb.TicketWorkScreenTest do
       project: project,
       ticket: ticket
     } do
-      sha = commit_over_http(project, ticket.branch, "lib/score.ex", "def persist, do: :ok")
+      sha = commit_file_on_branch(project, ticket.branch, "lib/score.ex", "def persist, do: :ok")
       changeset!(ticket, sha)
 
       for name <- ~w(plan.md notes.md) do

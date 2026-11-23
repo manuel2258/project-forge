@@ -67,7 +67,7 @@ defmodule ForgeWeb.GitLfsMirrorTest do
   defp mirror(c), do: Projects.list_mirrors(c.project) |> Enum.find(&(&1.name == "backup"))
 
   test "the destination receives the objects with the refs, and the mirror reads as working", c do
-    sha = commit_pointers_to(c.bare, "main", %{"sound.bin" => "THE REAL SOUND"})
+    sha = push_pointers_to(c.bare, "main", %{"sound.bin" => "THE REAL SOUND"})
 
     assert Forge.Git.Lfs.held?(c.destination_bare, oid("THE REAL SOUND"))
 
@@ -86,7 +86,7 @@ defmodule ForgeWeb.GitLfsMirrorTest do
     Application.put_env(:forge, Forge.Jobs, Keyword.put(config, :lfs_max_object_bytes, 10))
     on_exit(fn -> Application.put_env(:forge, Forge.Jobs, config) end)
 
-    sha = commit_pointers_to(c.bare, "main", %{"sound.bin" => "THE REAL SOUND, TOO BIG"})
+    sha = push_pointers_to(c.bare, "main", %{"sound.bin" => "THE REAL SOUND, TOO BIG"})
 
     assert {:ok, ^sha} = Forge.Git.resolve(c.destination_bare, "refs/heads/main")
     refute Forge.Git.Lfs.held?(c.destination_bare, oid("THE REAL SOUND, TOO BIG"))
@@ -112,11 +112,11 @@ defmodule ForgeWeb.GitLfsMirrorTest do
 
     elsewhere = "http://127.0.0.1:#{port}/stolen/info/lfs"
 
-    commit_to(c.bare, "main", %{
+    push_commit_to(c.bare, "main", %{
       ".lfsconfig" => "[lfs]\n\turl = #{elsewhere}\n\tpushurl = #{elsewhere}\n"
     })
 
-    commit_pointers_to(c.bare, "main", %{"sound.bin" => "THE REAL SOUND"})
+    push_pointers_to(c.bare, "main", %{"sound.bin" => "THE REAL SOUND"})
 
     refute_receive :dialled, 500
     assert Forge.Git.Lfs.held?(c.destination_bare, oid("THE REAL SOUND"))
@@ -134,7 +134,7 @@ defmodule ForgeWeb.GitLfsMirrorTest do
     :ok =
       Projects.put_mirror(c.project, c.owner, "nogit", bare_url, user: "forge", token: c.token)
 
-    commit_pointers_to(c.bare, "main", %{"sound.bin" => "THE REAL SOUND"})
+    push_pointers_to(c.bare, "main", %{"sound.bin" => "THE REAL SOUND"})
 
     assert Forge.Git.Lfs.held?(c.destination_bare, oid("THE REAL SOUND"))
   end
@@ -148,7 +148,7 @@ defmodule ForgeWeb.GitLfsMirrorTest do
     :ok = Forge.Git.Hooks.delete_mirror(repo, "backup")
     :ok = Forge.Git.Hooks.put_mirror(repo, "old", "http://user:SECRETTOKEN@127.0.0.1:1/x.git", [])
 
-    commit_pointers_to(c.bare, "main", %{"sound.bin" => "THE REAL SOUND"})
+    push_pointers_to(c.bare, "main", %{"sound.bin" => "THE REAL SOUND"})
 
     assert %{last_status: "failed", last_error: error} =
              Enum.find(Forge.Git.Hooks.list_mirrors(repo), &(&1.name == "old"))
@@ -158,7 +158,7 @@ defmodule ForgeWeb.GitLfsMirrorTest do
   end
 
   test "a repository with no LFS objects is pushed as before, with no LFS push", c do
-    commit_to(c.bare, "main", %{"README.md" => "plain\n"})
+    push_commit_to(c.bare, "main", %{"README.md" => "plain\n"})
 
     assert %{last_status: "ok"} = mirror(c)
     refute File.exists?(Path.join(c.destination_bare, "lfs"))

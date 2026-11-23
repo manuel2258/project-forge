@@ -10,7 +10,7 @@ defmodule ForgeWeb.GitLfsHookTest do
   use Forge.DataCase, async: false
 
   import Forge.ForgeFixtures
-  import Forge.GitFixtures, only: [seeded_repo: 0, commit_to: 3]
+  import Forge.GitFixtures, only: [seeded_repo: 0, push_commit_to: 3]
   import Forge.LfsFixtures
 
   alias Forge.Git
@@ -189,7 +189,7 @@ defmodule ForgeWeb.GitLfsHookTest do
     {:ok, before} = head(c)
 
     assert_raise MatchError, fn ->
-      commit_to(c.bare, "ticket/1", %{
+      push_commit_to(c.bare, "ticket/1", %{
         ".gitattributes" => attributes(),
         "x.bin" => pointer("gone")
       })

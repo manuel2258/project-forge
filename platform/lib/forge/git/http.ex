@@ -60,7 +60,7 @@ defmodule Forge.Git.Http do
         env = env(conn, project, repo_path, tail, token, length)
 
         {_out, status} =
-          System.cmd("sh", ["-c", script(), "forge-git", in_path, out_path, err_path],
+          Forge.Git.spawn_cmd("sh", ["-c", script(), "forge-git", in_path, out_path, err_path],
             cd: Path.dirname(repo_path),
             env: env
           )

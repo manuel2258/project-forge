@@ -1335,7 +1335,7 @@ defmodule ForgeWeb.TicketChangesTest do
       end
     end
 
-    # The repository page's bound, at both edges: `commit_over_http/5` adds the final newline.
+    # The repository page's bound, at both edges: `commit_file_on_branch/5` adds the final newline.
     test "draws a file under 512 KB and says so at 512 KB", context do
       %{conn: conn, ticket: ticket} = context
       commit_on_branch(context, "under.txt", String.duplicate("x", 512 * 1024 - 2), "under")
@@ -1449,11 +1449,11 @@ defmodule ForgeWeb.TicketChangesTest do
   # -- helpers ---------------------------------------------------------------------------------
 
   defp commit_on_branch(%{project: project, ticket: ticket}, path, content, message \\ nil) do
-    commit_over_http(project, ticket.branch, path, content, message)
+    Forge.GitFixtures.commit_file_on_branch(project, ticket.branch, path, content, message)
   end
 
   # A file of exactly `@max_read_bytes` bytes, plus `over`, in lines small enough that what is
-  # quoted out of it is nowhere near the per-quote caps. `commit_over_http/5` appends a newline,
+  # quoted out of it is nowhere near the per-quote caps. `commit_file_on_branch/5` appends a newline,
   # which is the byte this leaves out.
   defp at_budget(over) do
     String.duplicate("x\n", 524_287) <> "x" <> String.duplicate("y", over)

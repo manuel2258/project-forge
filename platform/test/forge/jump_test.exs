@@ -66,7 +66,7 @@ defmodule Forge.JumpTest do
 
   # A ticket with work on its branch, a changeset and a commit message, resting in `review_ready`.
   defp ready!(%{project: project, ticket: ticket}, file \\ "a.txt") do
-    sha = commit_over_http(project, ticket.branch, file, "contents of #{file}")
+    sha = commit_file_on_branch(project, ticket.branch, file, "contents of #{file}")
     changeset!(ticket, sha)
     commit_message!(ticket, "Add #{file}\n\nBecause.\n")
     rest_in(ticket, "review_ready", :active)
@@ -238,7 +238,7 @@ defmodule Forge.JumpTest do
       assert {:error, {:merge_impossible, :no_changeset}} =
                Operator.transition(ticket, user, "merged")
 
-      sha = commit_over_http(context.project, ticket.branch, "a.txt", "a")
+      sha = commit_file_on_branch(context.project, ticket.branch, "a.txt", "a")
       changeset!(ticket, sha)
 
       assert {:error, {:merge_impossible, :no_commit_message}} =
@@ -410,7 +410,7 @@ defmodule Forge.JumpTest do
       assert {:ok, head} = Git.resolve(bare, "refs/heads/" <> ticket.branch)
       assert Git.ancestor?(bare, first_merge, head)
 
-      new = commit_over_http(project, ticket.branch, "a.txt", "contents of a.txt, changed")
+      new = commit_file_on_branch(project, ticket.branch, "a.txt", "contents of a.txt, changed")
       changeset!(ticket, new)
       commit_message!(ticket, "Change a.txt\n")
       rest_in(reopened, "review_ready", :active)
@@ -426,7 +426,7 @@ defmodule Forge.JumpTest do
       %{user: user, project: project} = context
       ticket = ready!(context, "old.txt")
       assert {:ok, %{status: :done}} = Operator.transition(ticket, user, "merged")
-      commit_over_http(project, ticket.branch, "new.txt", "after the merge")
+      commit_file_on_branch(project, ticket.branch, "new.txt", "after the merge")
 
       assert {:ok, moved} = Operator.transition(fresh(ticket), user, "integrating")
       assert moved.base_commit == latest_payload(ticket, "ticket.merged")["sha"]
@@ -460,7 +460,7 @@ defmodule Forge.JumpTest do
       assert {:ok, %{status: :done}} = Operator.transition(ticket, user, "merged")
 
       # The branch was changed after it merged, against what landed: add/add on `a.txt`.
-      commit_over_http(project, ticket.branch, "a.txt", "something else entirely")
+      commit_file_on_branch(project, ticket.branch, "a.txt", "something else entirely")
       document!(ticket, "plan.md")
       done = fresh(ticket)
 
@@ -678,7 +678,7 @@ defmodule Forge.JumpTest do
     test "merges under the old message, and the manifest does not list one as missing",
          context do
       %{user: user, project: project, ticket: ticket, bare: bare} = context
-      sha = commit_over_http(project, ticket.branch, "a.txt", "a")
+      sha = commit_file_on_branch(project, ticket.branch, "a.txt", "a")
       changeset!(ticket, sha)
 
       old =
@@ -799,7 +799,7 @@ defmodule Forge.JumpTest do
       {:ok, %{sha: landed}} = Forge.Merge.changeset(fresh(ticket))
       assert Forge.Merge.check(fresh(ticket), landed) == :ok
 
-      sha = commit_over_http(project, other.branch, "README.md", "the other's version")
+      sha = commit_file_on_branch(project, other.branch, "README.md", "the other's version")
       assert {:conflict, ["README.md"], _head} = Forge.Merge.check(other, sha)
     end
   end

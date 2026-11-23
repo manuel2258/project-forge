@@ -819,6 +819,45 @@ in this one module, which is what keeps the credential's handling in one place.
   request's `protocol` and `host` are the platform's, so an LFS endpoint the agent configured itself
   is asked for a credential and handed none.
 
+## What a question costs
+
+The platform asks git by running it, and **a process is the unit of cost**: about 3 ms of CPU before
+a trivial command (`rev-parse`, `show`, `config`) has done anything, and 1.3 to 1.9 ms more in the
+BEAM when it is found by name. At 1cec7c8 a gate run started 89,516 git processes and a third of its
+CPU went on them: 448 CPU-seconds of git and 64 of the `sh` that wraps some calls, of the 1659 the
+diagnosis's run took. The platform suite's three partitions with coverage, on the
+same two-core machine, took 1724 CPU-seconds in 883 s at 1cec7c8 and 1300 in 674 s after ticket 68's
+changes (the busy-wait flag of `bin/check` among them); one partition alone, without coverage, went
+from 42,335 git processes, 574 CPU-seconds and 444 s to 29,750, 436 and 397 (git's trace2 `start`
+events count every process git starts, its own children included). The rules that keep that down:
+
+- **Every process goes by an absolute path, found once.** `Forge.Git.executable/1` keeps the path of
+  `git` and `sh` in `:persistent_term`, and `Forge.Git.spawn_cmd/3` and `Forge.Git.Reader` are the
+  places the platform starts them: `System.cmd/3` given a bare name splits the whole `PATH` and stats
+  directories on every call. `Forge.Git.run/3`, the `cat-file` batches that feed from a file,
+  `Forge.Git.Http` and the branch-name check go through `spawn_cmd/3`; the one `cat-file --batch`
+  port of a reader is opened by the reader. (`flock` for LFS and the `local_vm.ex` tools are left:
+  a handful per operator action.)
+- **Every spawn is announced** as the telemetry event `[:forge, :git, :spawn]`, metadata `%{executable,
+  args}`, so a test can count them. `Forge.GitSpawnTest` is that test, and the regression check for
+  the cost: a limit on the number of processes an operation starts does not move with the machine,
+  where a limit on time would. Admitting a ticket is at most 5 (10 before), listing the ticket types
+  3 (8), registering a repository that has its branch 4 (7), and a new one 8 (12).
+- **Many files at a commit are one process.** `Forge.Git.Reader` runs one `git cat-file --batch` for
+  the length of an operation and is asked for each path in turn; `Forge.Tickets` reads a workflow
+  and every prompt, script and library it names through one. A path that is a directory exists but is
+  not read as text. `Forge.Git.ls_paths/3` lists `.forge/workflow.yml` and `.forge/workflows/` in one
+  `ls-tree`.
+- **Not reduced, on purpose:** the hooks, which are bash spawning git by design (§ Git LFS records
+  why `pre-receive` reads blobs one process each, and the production push rate does not make that
+  matter), and the `diff` and `log` calls of the Changes and work screens, which are a rendering
+  matter with their own risk.
+- **Tests that are not about transport do not use it.** `Forge.GitFixtures.commit_file_on_branch/5`
+  and `commit_to/4` make a commit on a branch by git's plumbing in the bare repository — 6 processes
+  each — where a clone, a commit and a push over HTTP with both hooks was 39 and `commit_to/4`'s
+  clone and push 18 (counted by git's trace2 `start` events). A test
+  of the token, the branch discipline, a hook or the endpoint pushes for itself.
+
 ## Not built, and named so the absence is a decision
 
 - **Tags made by anyone but the platform**, signed tags, and a tag moved or deleted. A job, a

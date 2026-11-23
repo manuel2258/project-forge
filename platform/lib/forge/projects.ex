@@ -64,11 +64,12 @@ defmodule Forge.Projects do
     we_made_it? = not File.exists?(path)
 
     with :ok <- Git.init_bare(path),
+         # `Hooks.install/2` also points HEAD at the default branch. A bare repository `git init`
+         # made points HEAD at whatever git's default is, which a worker's `clone --branch
+         # <default>` then cannot find; not harmless once the clone comes over the wire.
+         # `Git.ensure_head/2` ran here as well, two or three more processes to set what `install` had
+         # just set (ticket 68).
          :ok <- Hooks.install(path, project),
-         # A bare repository `git init` made points HEAD at whatever git's default is, which a
-         # worker's `clone --branch <default>` then cannot find. Harmless while the platform
-         # cloned on its own disk; not harmless once the clone comes over the wire.
-         :ok <- Git.ensure_head(path, project.default_branch),
          # And a commit on it. Everything the platform does starts from the default branch — a
          # ticket's base, a conversation's branch, a merge's destination — and `pre-receive`
          # lets nothing but the platform's own merge write it, so no push could create it.

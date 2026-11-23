@@ -49,9 +49,12 @@ defmodule Forge.TicketTypes do
   """
   @spec layout(Git.repo(), Git.sha()) :: {:ok, layout()} | {:error, term()}
   def layout(repo, sha) do
-    with {:ok, entries} <- Git.ls_dir(repo, sha, @dir) do
+    # One listing of both places, where a `ls-tree` of the directory and a `show` of the single
+    # file were two processes (and one more, a `cat-file`, when a listed file was small enough to be an LFS pointer).
+    with {:ok, listed} <- Git.ls_paths(repo, sha, [@single, @dir <> "/"]) do
+      {single, entries} = Enum.split_with(listed, &(&1.path == @single))
       {types, not_types} = classify(entries)
-      single? = Git.exists?(repo, sha, @single)
+      single? = single != []
 
       cond do
         single? and types != [] ->

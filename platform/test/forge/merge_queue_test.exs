@@ -63,7 +63,7 @@ defmodule Forge.MergeQueueTest do
     {:ok, ticket} =
       Tickets.admit(project, %{title: "Add #{file}", body: "do it"}, {:user, user.id})
 
-    sha = commit_over_http(project, ticket.branch, file, "contents of #{file}")
+    sha = commit_file_on_branch(project, ticket.branch, file, "contents of #{file}")
     changeset!(ticket, sha)
     if Keyword.get(opts, :message, true), do: commit_message!(ticket, "Add #{file}\n\nBecause.\n")
     pend_merge(ticket)
@@ -74,7 +74,7 @@ defmodule Forge.MergeQueueTest do
     {:ok, ticket} =
       Tickets.admit(project, %{title: "Add #{file}", body: "do it"}, {:user, user.id})
 
-    changeset!(ticket, commit_over_http(project, ticket.branch, file, "contents of #{file}"))
+    changeset!(ticket, commit_file_on_branch(project, ticket.branch, file, "contents of #{file}"))
     commit_message!(ticket, "Add #{file}\n")
 
     {:ok, _ticket} = finish_job!(ticket, "engine_merges")
@@ -183,7 +183,7 @@ defmodule Forge.MergeQueueTest do
       approve!(ticket, user)
 
       # Written after the approval: neither the changeset nor the message may be what is merged.
-      late = commit_over_http(project, ticket.branch, "late.txt", "written later")
+      late = commit_file_on_branch(project, ticket.branch, "late.txt", "written later")
       changeset!(ticket, late)
       commit_message!(ticket, "A later message\n")
 
@@ -892,7 +892,7 @@ defmodule Forge.MergeQueueTest do
 
       join!(project, user)
       {:ok, ticket} = Tickets.admit(project, %{title: "Pick", body: "x"}, {:user, user.id})
-      changeset!(ticket, commit_over_http(project, ticket.branch, "a.txt", "contents"))
+      changeset!(ticket, commit_file_on_branch(project, ticket.branch, "a.txt", "contents"))
       commit_message!(ticket, "Add a.txt\n")
 
       ticket.id

@@ -534,7 +534,7 @@ defmodule ForgeWeb.OperatorLiveTest do
       )
 
     {:ok, ticket} = Tickets.admit(project, %{title: "Settings"}, {:user, user.id})
-    sha = commit_over_http(project, ticket.branch, "README.md", "the ticket's")
+    sha = commit_file_on_branch(project, ticket.branch, "README.md", "the ticket's")
 
     {:ok, _version} =
       Forge.Artifacts.record_version(ticket.id, "changeset", :blob, :system, %{
@@ -586,7 +586,7 @@ defmodule ForgeWeb.OperatorLiveTest do
       )
 
     {:ok, ticket} = Tickets.admit(project, %{title: "Settings"}, {:user, user.id})
-    sha = commit_over_http(project, ticket.branch, "README.md", "the ticket's")
+    sha = commit_file_on_branch(project, ticket.branch, "README.md", "the ticket's")
     changeset!(ticket, sha)
     ticket |> Ecto.Changeset.change(state: "review_ready") |> Forge.Repo.update!()
     path = ~p"/tickets/#{project.name}/#{ticket.number}"
@@ -649,7 +649,7 @@ defmodule ForgeWeb.OperatorLiveTest do
       )
 
     {:ok, ticket} = Tickets.admit(project, %{title: "Settings"}, {:user, user.id})
-    sha = commit_over_http(project, ticket.branch, "README.md", "the ticket's")
+    sha = commit_file_on_branch(project, ticket.branch, "README.md", "the ticket's")
     changeset!(ticket, sha)
     commit_message!(ticket, "Settings\n")
     ticket = pend_merge(ticket)
@@ -760,7 +760,7 @@ defmodule ForgeWeb.OperatorLiveTest do
     path = ~p"/tickets/#{project.name}/#{ticket.number}"
 
     record = fn content ->
-      sha = commit_over_http(project, ticket.branch, "README.md", content)
+      sha = commit_file_on_branch(project, ticket.branch, "README.md", content)
 
       {:ok, _version} =
         Forge.Artifacts.record_version(ticket.id, "changeset", :blob, :system, %{
@@ -810,7 +810,7 @@ defmodule ForgeWeb.OperatorLiveTest do
       )
 
     {:ok, ticket} = Tickets.admit(project, %{title: "Settings"}, {:user, user.id})
-    sha = commit_over_http(project, ticket.branch, "README.md", "the ticket's")
+    sha = commit_file_on_branch(project, ticket.branch, "README.md", "the ticket's")
 
     {:ok, _version} =
       Forge.Artifacts.record_version(ticket.id, "changeset", :blob, :system, %{
@@ -1288,7 +1288,7 @@ defmodule ForgeWeb.OperatorLiveTest do
     # draw this one card.
     test "a non-merging approval of the changeset shows none, and still approves", context do
       %{conn: conn, project: project, ticket: ticket} = context
-      sha = commit_over_http(project, ticket.branch, "score.ex", "def persist, do: :ok")
+      sha = commit_file_on_branch(project, ticket.branch, "score.ex", "def persist, do: :ok")
       changeset!(ticket, sha)
       pending!(ticket, "verifying", ["changeset"])
 

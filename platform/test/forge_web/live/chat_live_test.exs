@@ -1449,7 +1449,7 @@ defmodule ForgeWeb.ChatLiveTest do
     repo = Projects.repo_path(project)
     branch = Jobs.chat_branch(chat)
     work = tmp_dir("chat-work")
-    {_out, 0} = System.cmd("git", ["clone", "--quiet", "--branch", branch, repo, work])
+    {_out, 0} = Forge.Git.spawn_cmd("git", ["clone", "--quiet", "--branch", branch, repo, work])
     File.write!(Path.join(work, path), content)
 
     for args <- [
@@ -1460,7 +1460,7 @@ defmodule ForgeWeb.ChatLiveTest do
           ["push", "--quiet", "origin", "HEAD:refs/heads/" <> branch]
         ] do
       {_out, 0} =
-        System.cmd("git", ["-C", work] ++ args,
+        Forge.Git.spawn_cmd("git", ["-C", work] ++ args,
           stderr_to_stdout: true,
           env: [{"FORGE_INTERNAL", "1"}]
         )

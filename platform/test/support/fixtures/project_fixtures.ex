@@ -39,7 +39,7 @@ defmodule Forge.ProjectFixtures do
 
   Options: `message` (else `look: <paths>`); `author`, a name, written as author and committer
   with `<name>@example.invalid` (else `look`); `days_ago` for both dates (else now); `from`, a
-  branch to start `branch` at instead of its own head.
+  branch to start `branch` at instead of its own head. A path mapped to `nil` is removed.
   """
   def commit_files!(repo, branch, files, opts \\ []) do
     work =
@@ -53,14 +53,18 @@ defmodule Forge.ProjectFixtures do
     git = fn args -> git!(repo, work, args, env) end
 
     try do
-      for {path, content} <- files do
+      File.mkdir_p!(work)
+      {removed, present} = Enum.split_with(files, fn {_path, content} -> is_nil(content) end)
+
+      for {path, content} <- present do
         File.mkdir_p!(Path.join(work, Path.dirname(path)))
         File.write!(Path.join(work, path), content)
       end
 
       parent = git.(["rev-parse", "refs/heads/" <> Keyword.get(opts, :from, branch)])
       git.(["read-tree", parent])
-      git.(["add", "--" | Map.keys(files)])
+      if present != [], do: git.(["add", "--" | Enum.map(present, &elem(&1, 0))])
+      if removed != [], do: git.(["rm", "--cached", "-q", "--" | Enum.map(removed, &elem(&1, 0))])
       tree = git.(["write-tree"])
       message = Keyword.get(opts, :message, "look: #{Enum.join(Map.keys(files), ", ")}")
       commit = git.(["commit-tree", tree, "-p", parent, "-m", message])
@@ -99,7 +103,7 @@ defmodule Forge.ProjectFixtures do
   defp git!(repo, work, args, env) do
     identity = ~w(-c user.name=look -c user.email=look@example.invalid)
     full = identity ++ ["--git-dir=#{repo}", "--work-tree=#{work}"] ++ args
-    {out, 0} = System.cmd("git", full, env: env, cd: work, stderr_to_stdout: true)
+    {out, 0} = Forge.Git.spawn_cmd("git", full, env: env, cd: work, stderr_to_stdout: true)
     String.trim(out)
   end
 end

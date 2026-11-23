@@ -86,7 +86,7 @@ defmodule Forge.MergeWatchTest do
       assert length(events_of(waiting, "ticket.conflict_found")) == 1
 
       # A new version is a new question.
-      sha = commit_over_http(project, waiting.branch, "README.md", "the ticket's, again")
+      sha = commit_file_on_branch(project, waiting.branch, "README.md", "the ticket's, again")
       changeset!(waiting, sha)
       assert [_found] = Watch.check(project.id, second, %{"ticket" => 98})
       assert length(events_of(waiting, "ticket.conflict_found")) == 2
@@ -222,7 +222,7 @@ defmodule Forge.MergeWatchTest do
     end
 
     test "is gone once the changeset changes", %{project: project, waiting: waiting} do
-      sha = commit_over_http(project, waiting.branch, "README.md", "resolved by hand")
+      sha = commit_file_on_branch(project, waiting.branch, "README.md", "resolved by hand")
       changeset!(waiting, sha)
 
       assert Watch.notice(waiting) == nil
@@ -340,7 +340,7 @@ defmodule Forge.MergeWatchTest do
   # A ticket whose branch changes `path`, with that commit recorded as its changeset.
   defp ticket!(%{project: project, user: user}, path, content) do
     {:ok, ticket} = Tickets.admit(project, %{title: content, body: ""}, {:user, user.id})
-    sha = commit_over_http(project, ticket.branch, path, content)
+    sha = commit_file_on_branch(project, ticket.branch, path, content)
     changeset!(ticket, sha)
     # A ticket at the edge of its merge has what the commit will say, as its agent wrote it.
     commit_message!(ticket)

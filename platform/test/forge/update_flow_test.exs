@@ -101,7 +101,7 @@ defmodule Forge.UpdateFlowTest do
   defp head(bare, ticket), do: elem(Git.resolve(bare, "refs/heads/" <> ticket.branch), 1)
 
   defp own_commit!(%{project: project, ticket: ticket}, path \\ "feature.txt", text \\ "mine") do
-    commit_over_http(project, ticket.branch, path, text)
+    commit_file_on_branch(project, ticket.branch, path, text)
   end
 
   describe "already current" do

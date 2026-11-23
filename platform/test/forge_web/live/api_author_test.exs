@@ -49,7 +49,7 @@ defmodule ForgeWeb.ApiAuthorTest do
 
     changeset!(
       ticket,
-      commit_over_http(project, ticket.branch, "score.ex", "def persist, do: :ok")
+      commit_file_on_branch(project, ticket.branch, "score.ex", "def persist, do: :ok")
     )
 
     ticket

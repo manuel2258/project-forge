@@ -130,6 +130,38 @@ defmodule Forge.TicketTypesTest do
       assert message =~ "does not exist at this commit"
     end
 
+    # What `Forge.Tickets` answers the validator when it asks whether a file the workflow names is at
+    # the commit: through `Forge.Git.Reader` since ticket 68. Without these, an `exists?` that said yes
+    # to everything left the whole platform suite green, and a workflow naming a prompt that is not
+    # there was admitted, to fail later on a machine.
+    test "a prompt the workflow names that is not at the commit is refused" do
+      project =
+        project_with(%{
+          ".forge/workflow.yml" => @importing,
+          ".forge/common.yml" => @library,
+          ".forge/agents/implement.md" => nil
+        })
+
+      assert {:error, errors} = Tickets.admit(project, %{title: "Fix the save"})
+
+      assert ForgeCore.Error.format(errors) =~
+               ~s(file "agents/implement.md" does not exist at the pinned commit)
+    end
+
+    test "a command's script that is not at the commit is refused" do
+      project =
+        project_with(%{
+          ".forge/workflow.yml" => @importing,
+          ".forge/common.yml" => @library,
+          ".forge/commands/build.sh" => nil
+        })
+
+      assert {:error, errors} = Tickets.admit(project, %{title: "Fix the save"})
+
+      assert ForgeCore.Error.format(errors) =~
+               ~s(file ".forge/commands/build.sh" does not exist at the pinned commit)
+    end
+
     test "a mistake in a library is refused, naming the library" do
       broken = String.replace(@library, "turns: 20", "turns: 0")
 

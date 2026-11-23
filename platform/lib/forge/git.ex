@@ -30,23 +30,6 @@ defmodule Forge.Git do
     end
   end
 
-  @doc """
-  Points an unborn `HEAD` at `branch`. A bare repository starts with `HEAD` on whatever git's
-  `init.defaultBranch` was, and a clone of a repository whose `HEAD` names a branch that does
-  not exist checks out nothing — which is what a worker cloning its project would get. An
-  existing `HEAD` is left alone: it is the operator's to set.
-  """
-  @spec ensure_head(repo(), String.t()) :: :ok
-  def ensure_head(repo, branch) do
-    with {:ok, current} <- run(repo, ["symbolic-ref", "--quiet", "HEAD"]),
-         false <-
-           branch_exists?(repo, current |> String.trim() |> String.replace("refs/heads/", "")) do
-      run(repo, ["symbolic-ref", "HEAD", {:data, "refs/heads/" <> branch}])
-    end
-
-    :ok
-  end
-
   @root_message """
   Empty
 
@@ -164,6 +147,49 @@ defmodule Forge.Git do
       {:ok, _out} -> :ok
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  @doc """
+  The absolute path of `name` (`"git"`, `"sh"`), found once and kept in `:persistent_term`.
+
+  **Every process the platform starts for git goes by this path.** `System.cmd/3` given a bare name
+  runs `:os.find_executable/1` on each call, which splits the whole `PATH` — 8,263 characters in the
+  devshell — and stats directories until one holds the file: 1.3 to 1.9 ms of the BEAM's CPU per
+  spawn against 0.4 ms by path, over about 90,000 spawns a gate run (ticket 68). A name that is
+  not found is not remembered, and is handed on as the bare name, so the failure is `System.cmd/3`'s
+  own `:enoent` as before.
+  """
+  @spec executable(String.t()) :: String.t()
+  def executable(name) do
+    key = {__MODULE__, :executable, name}
+
+    case :persistent_term.get(key, nil) do
+      nil ->
+        case System.find_executable(name) do
+          nil ->
+            name
+
+          path ->
+            :persistent_term.put(key, path)
+            path
+        end
+
+      path ->
+        path
+    end
+  end
+
+  @doc """
+  `System.cmd/3` for `"git"` or `"sh"`, by `executable/1`, announcing the spawn as the telemetry
+  event `[:forge, :git, :spawn]` with `%{executable: path, args: args}`. **With `Forge.Git.Reader`,
+  which announces its own, the places the platform starts a git process**, so that a test can count
+  them (`Forge.GitSpawnTest`): the cost of a question is the number of processes it takes.
+  """
+  @spec spawn_cmd(String.t(), [String.t()], keyword()) :: {String.t(), non_neg_integer()}
+  def spawn_cmd(name, args, opts \\ []) do
+    path = executable(name)
+    :telemetry.execute([:forge, :git, :spawn], %{}, %{executable: path, args: args})
+    System.cmd(path, args, opts)
   end
 
   @doc "Resolves a ref to a commit sha."
@@ -465,6 +491,24 @@ defmodule Forge.Git do
     end
   end
 
+  @doc """
+  What is at each of `paths` in `sha`, in one `ls-tree`: a file as itself, a path ending in `/` as
+  what is directly inside it. The entries `ls_dir/3` gives, without its look at whether a small blob
+  is an LFS pointer — which costs a further process (a `cat-file`) when a small blob is listed and which a caller that wants names and
+  kinds does not need. And no `stderr: :separate`, which is a `sh`, a scratch file and the read of
+  it for a command that writes nothing to stderr when it works.
+  """
+  @spec ls_paths(repo(), sha(), [String.t()]) :: {:ok, [map()]} | {:error, term()}
+  def ls_paths(repo, sha, paths) do
+    with {:ok, out} <-
+           run(
+             repo,
+             ["ls-tree", "-z", "-l", {:data, sha}, "--"] ++ Enum.map(paths, &{:data, &1})
+           ) do
+      {:ok, out |> String.split(<<0>>, trim: true) |> Enum.map(&tree_entry/1)}
+    end
+  end
+
   # `-l` pads the size, so the meta is split on whitespace; a tree and a submodule have `-`.
   defp tree_entry(line) do
     [meta, path] = String.split(line, "\t", parts: 2)
@@ -531,7 +575,7 @@ defmodule Forge.Git do
   # file the command reads as its standard input. `{:ok, [{sha, content}]}` for the ones that exist.
   defp cat_blobs(repo, shas) do
     with_scratch_file("cat-file", Enum.map_join(shas, "", &(&1 <> "\n")), fn input ->
-      case System.cmd("sh", ["-c", ~s(exec git cat-file --batch < "$0"), input],
+      case spawn_cmd("sh", ["-c", ~s(exec git cat-file --batch < "$0"), input],
              cd: repo,
              env: [{"GIT_TERMINAL_PROMPT", "0"}]
            ) do
@@ -554,7 +598,7 @@ defmodule Forge.Git do
   def small_blobs(repo, shas) do
     result =
       with_scratch_file("cat-file", Enum.map_join(shas, "", &(&1 <> "\n")), fn input ->
-        System.cmd("sh", ["-c", ~s(exec git cat-file --batch-check < "$0"), input],
+        spawn_cmd("sh", ["-c", ~s(exec git cat-file --batch-check < "$0"), input],
           cd: repo,
           env: [{"GIT_TERMINAL_PROMPT", "0"}]
         )
@@ -835,6 +879,11 @@ defmodule Forge.Git do
   close had deleted wrote `fatal: ambiguous argument 'refs/heads/main..refs/heads/chat/…'` into
   the server log on every render — eleven times for two chats in production. It is written to a
   file of its own now and read back.
+
+  **Started by absolute path** (`executable/1`), and announced as `[:forge, :git, :spawn]`
+  (`spawn_cmd/3`): a call is a process of its own, 3 ms of CPU before it does anything, so the
+  number a question takes is what to keep down. `Forge.Git.Reader` answers many reads of files at a
+  commit with one.
   """
   @spec run(String.t(), [arg()], keyword()) ::
           {:ok, String.t()} | {:error, {integer(), String.t()} | {:not_a_rev, String.t()}}
@@ -935,14 +984,14 @@ defmodule Forge.Git do
   end
 
   defp cmd(dir, args, env, _merged) do
-    {out, code} = System.cmd("git", args, cd: dir, stderr_to_stdout: true, env: env)
+    {out, code} = spawn_cmd("git", args, cd: dir, stderr_to_stdout: true, env: env)
     {out, code, ""}
   end
 
   defp separated(dir, args, env, err) do
     # `$0` is the file and `"$@"` git's arguments, so nothing in them is read by the shell.
     {out, code} =
-      System.cmd("sh", ["-c", ~s(exec git "$@" 2>"$0"), err | args], cd: dir, env: env)
+      spawn_cmd("sh", ["-c", ~s(exec git "$@" 2>"$0"), err | args], cd: dir, env: env)
 
     stderr =
       case File.read(err) do

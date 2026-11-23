@@ -6,7 +6,7 @@ defmodule Forge.Credentials.KeyCheckTest do
   under another key.
   """
 
-  use Forge.DataCase, async: true
+  use Forge.DataCase, async: false
 
   import Ecto.Query, only: [from: 2]
   import Forge.ForgeFixtures

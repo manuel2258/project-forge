@@ -81,10 +81,14 @@ defmodule Forge.GitFixtures do
   how to seed a repository that is pushed but missing something.
 
   **Made once per distinct `files` in a run, and copied** (`seed_template/1`): it was `git init`,
-  `add`, `commit` and `push` for every one of its 140-odd call sites' tests. One measured run
-  (the suite on two cores beside another job's load, `git` replaced by a script that timed it) made 69 000 git calls
-  taking 304 s of process wall time, 140 s of them `init`, `add`, `commit` and `push`, of which
-  this is one of several callers; the saving was not measured on its own. The copy is a repository
+  `add`, `commit` and `push` for every one of its 140-odd call sites' tests. An early run (the suite
+  on two cores beside another job's load, `git` replaced by a script that timed it) made 69 000 git
+  calls taking 304 s of process wall time, 140 s of them `init`, `add`, `commit` and `push`, of which
+  this is one of several callers; the saving was not measured on its own. At 1cec7c8 a gate run
+  started 89,516 git processes, 448 CPU-seconds of git's own, counted by a `git` first on `PATH`;
+  one partition of three (the second, 1931 tests, no coverage) started 42,335 by git's own trace2
+  `start` events, and 29,750 after ticket 68 (`docs/design/git-hosting.md` § What a question costs).
+  The copy is a repository
   of its own, which no test shares with another — and the same commit, so two calls with the same
   `files` now always have a common root (`mirror_target/1`).
   """
@@ -170,43 +174,31 @@ defmodule Forge.GitFixtures do
   end
 
   @doc """
-  Commits `content` at `path` on a ticket's branch, over the platform's own git endpoint, the
-  way a job does — clone, commit, push, all with a write token scoped to that branch. Returns
-  the sha the branch now points at.
+  Commits `content` and a newline at `path` on `branch` of the project's repository, with `message`
+  (else the content), and returns the sha the branch now points at. Made by git's plumbing in the
+  bare repository: no token, no clone, no push through the platform's endpoint and no hooks.
 
-  A plain git client rather than `ForgeWorker.Checkout`: since milestone 3 the platform does
-  not compile the worker in, so its tests cannot borrow the worker's git any more than its code
-  can. The token rides in the URL, which is the form `Forge.Git.Url.with_token/2` exists for.
+  **It replaced `commit_over_http/5`, which did what a job does** — a clone, a commit and a push over
+  the endpoint with a write token scoped to the branch. That is 6 git processes against 39 (counted
+  by git's trace2 `start` events), the push running both hooks (ticket 68), for tests whose subject is what happens to a branch with a
+  commit on it: a merge, the queue, a page. A test of the token, of the branch discipline, of a hook
+  or of the endpoint pushes the way a job does (`ForgeWeb.GitHttpTest`'s own helpers), because that
+  is its subject.
   """
-  def commit_over_http(project, branch, path, content, message \\ nil) do
-    dir = Path.join(tmp_dir("client"), "clone")
-
-    {:ok, token, _row} =
-      Forge.Git.Tokens.issue(project, name: "t", ref: "refs/heads/" <> branch)
-
-    url = Forge.Git.Url.with_token(project, token)
-
-    git!(Path.dirname(dir), ["clone", "--quiet", "--branch", branch, url, dir])
-    File.mkdir_p!(Path.dirname(Path.join(dir, path)))
-    File.write!(Path.join(dir, path), content <> "\n")
-    git!(dir, ["add", path])
-
-    git!(dir, [
-      "-c",
-      "user.name=job",
-      "-c",
-      "user.email=job@forge",
-      "commit",
-      "-q",
-      "-m",
-      message || content
-    ])
-
-    git!(dir, ["push", "--quiet", "--force", url, "HEAD:refs/heads/" <> branch])
-
-    {:ok, sha} = Git.resolve(Forge.Projects.repo_path(project), "refs/heads/" <> branch)
-    sha
+  def commit_file_on_branch(project, branch, path, content, message \\ nil) do
+    Forge.ProjectFixtures.commit_files!(
+      Forge.Projects.repo_path(project),
+      branch,
+      %{path => content <> "\n"},
+      message: message || default_message(content),
+      author: "job"
+    )
   end
+
+  # The content as the message, as the push over HTTP made it, unless git would take it for
+  # something else: a message that is not text (a PNG's bytes, a file in latin-1) is a warning and a
+  # spoilt sha for `commit-tree`, which `git commit` merely warned about.
+  defp default_message(content), do: if(String.printable?(content), do: content, else: "change")
 
   @doc """
   Commits `files` (`%{path => content}`) to the project's default branch and returns the new head.
@@ -217,11 +209,25 @@ defmodule Forge.GitFixtures do
     do: commit_to(Forge.Projects.repo_path(project), project.default_branch, files, "fix")
 
   @doc """
-  Commits `files` (`%{path => content}`) onto `branch` of the repository at `repo`, pushed as the
-  platform pushes — past the hooks that keep everyone else off a protected branch — and returns
-  the new head. A path mapped to `nil` is removed.
+  Commits `files` (`%{path => content}`) onto `branch` of the repository at `repo` and returns the
+  new head. A path mapped to `nil` is removed.
+
+  **By git's plumbing in the bare repository, not a clone and a push past the hooks** (ticket 68):
+  it is what the platform's own merge does to the default branch, which the hooks otherwise keep
+  everyone off, and what no test of it needs the hooks for. That is 6 git processes against 18
+  (counted by trace2). A test of what the hooks do pushes for itself.
   """
   def commit_to(repo, branch, files, message \\ "change") do
+    Forge.ProjectFixtures.commit_files!(repo, branch, files, message: message, author: "t")
+  end
+
+  @doc """
+  `commit_to/4` the way a job pushes: a clone, a commit and a push as the platform pushes — past the
+  hooks that keep everyone else off a protected branch, but through them: `pre-receive` judges it and
+  `post-receive` mirrors it. For a test of what a hook does with a push, which `commit_to/4`'s
+  plumbing does not run. Raises (`MatchError`) when a hook refuses.
+  """
+  def push_commit_to(repo, branch, files, message \\ "change") do
     work = Path.join(tmp_dir("commit"), "work")
     git!(Path.dirname(work), ["clone", "-q", "--branch", branch, repo, work])
 
@@ -240,7 +246,7 @@ defmodule Forge.GitFixtures do
     git!(work, ["-c", "user.name=t", "-c", "user.email=t@forge", "commit", "-q", "-m", message])
 
     {_out, 0} =
-      System.cmd("git", ["push", "-q", "origin", "HEAD:refs/heads/" <> branch],
+      Forge.Git.spawn_cmd("git", ["push", "-q", "origin", "HEAD:refs/heads/" <> branch],
         cd: work,
         env: [{"FORGE_INTERNAL", "1"}],
         stderr_to_stdout: true
@@ -524,7 +530,7 @@ defmodule Forge.GitFixtures do
   (`docs/design/git-hosting.md` § The per-job token).
   """
   def job_git(dir, args) do
-    System.cmd(
+    Forge.Git.spawn_cmd(
       "git",
       ["-c", "user.name=job", "-c", "user.email=job@forge", "-c", "commit.gpgsign=false" | args],
       cd: dir,

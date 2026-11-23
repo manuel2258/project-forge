@@ -84,7 +84,7 @@ defmodule Forge.MergeFixtures do
   authority. Returns `{output, status}`.
   """
   def git(dir, args) do
-    System.cmd(
+    Forge.Git.spawn_cmd(
       "git",
       ["-c", "user.name=job", "-c", "user.email=job@forge", "-c", "commit.gpgsign=false" | args],
       cd: dir,

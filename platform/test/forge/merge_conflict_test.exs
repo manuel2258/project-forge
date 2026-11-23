@@ -173,7 +173,7 @@ defmodule Forge.MergeConflictTest do
   describe "the late race" do
     test "leaves the merging state by on_conflict rather than sticking in it", context do
       %{ticket: ticket, bare: bare, user: user} = context
-      sha = commit_over_http(context.project, ticket.branch, "README.md", "the branch's")
+      sha = commit_file_on_branch(context.project, ticket.branch, "README.md", "the branch's")
       changeset!(ticket, sha)
       {:ok, before} = Git.resolve(bare, "refs/heads/main")
       other = commit_beside(bare, before, "README.md", "the trunk's")
@@ -204,7 +204,7 @@ defmodule Forge.MergeConflictTest do
 
     test "a failure that is not a conflict still sticks, in the merging state", context do
       %{ticket: ticket, bare: bare, user: user} = context
-      sha = commit_over_http(context.project, ticket.branch, "feature.txt", "the change")
+      sha = commit_file_on_branch(context.project, ticket.branch, "feature.txt", "the change")
       changeset!(ticket, sha)
       race(bare, refuse: true)
 
@@ -221,7 +221,7 @@ defmodule Forge.MergeConflictTest do
     # `done` with nothing merged.
     test "a move that cannot be made sticks the ticket in the merging state", context do
       %{ticket: ticket, bare: bare, user: user} = context
-      sha = commit_over_http(context.project, ticket.branch, "README.md", "the branch's")
+      sha = commit_file_on_branch(context.project, ticket.branch, "README.md", "the branch's")
       changeset!(ticket, sha)
       {:ok, before} = Git.resolve(bare, "refs/heads/main")
       race(bare, moves: [commit_beside(bare, before, "README.md", "the trunk's")])
@@ -271,7 +271,7 @@ defmodule Forge.MergeConflictTest do
     @tag route: :plain
     test "without on_conflict sticks in the merging state, as it always did", context do
       %{ticket: ticket, bare: bare, user: user} = context
-      sha = commit_over_http(context.project, ticket.branch, "README.md", "the branch's")
+      sha = commit_file_on_branch(context.project, ticket.branch, "README.md", "the branch's")
       changeset!(ticket, sha)
       {:ok, before} = Git.resolve(bare, "refs/heads/main")
       race(bare, moves: [commit_beside(bare, before, "README.md", "the trunk's")])
@@ -468,7 +468,10 @@ defmodule Forge.MergeConflictTest do
     # engine's after a clean integration. The merge after the second is of what the second named.
     test "is the latest transition's, when the ticket has entered the state before", context do
       %{ticket: ticket, bare: bare, user: user} = context
-      sha = commit_over_http(context.project, ticket.branch, "README.md", "the branch's version")
+
+      sha =
+        commit_file_on_branch(context.project, ticket.branch, "README.md", "the branch's version")
+
       changeset!(ticket, sha)
       {:ok, before} = Git.resolve(bare, "refs/heads/main")
       race(bare, moves: [commit_beside(bare, before, "README.md", "the trunk's version")])
@@ -490,9 +493,9 @@ defmodule Forge.MergeConflictTest do
     # whatever has been recorded since.
     test "is the version the check was made on, when the transition is told it", context do
       %{ticket: ticket, user: user} = context
-      first = commit_over_http(context.project, ticket.branch, "first.txt", "first")
+      first = commit_file_on_branch(context.project, ticket.branch, "first.txt", "first")
       changeset!(ticket, first)
-      later = commit_over_http(context.project, ticket.branch, "later.txt", "later")
+      later = commit_file_on_branch(context.project, ticket.branch, "later.txt", "later")
       changeset!(ticket, later)
 
       workflow = Tickets.workflow(ticket)
@@ -542,7 +545,7 @@ defmodule Forge.MergeConflictTest do
     # and the merge after it is not what the merge merges. Read as "the latest version", it was.
     test "is the one its transition named, not one recorded after it", context do
       %{ticket: ticket, bare: bare, user: user} = context
-      first = commit_over_http(context.project, ticket.branch, "first.txt", "first")
+      first = commit_file_on_branch(context.project, ticket.branch, "first.txt", "first")
       changeset!(ticket, first)
 
       workflow = Tickets.workflow(ticket)
@@ -553,7 +556,7 @@ defmodule Forge.MergeConflictTest do
         |> Engine.put_transition(pend_merge(ticket), workflow, transition, nil, {:user, user.id})
         |> Repo.transaction()
 
-      later = commit_over_http(context.project, ticket.branch, "later.txt", "later")
+      later = commit_file_on_branch(context.project, ticket.branch, "later.txt", "later")
       changeset!(ticket, later)
 
       moved = Engine.enter(moved, workflow, "merged", user.id)
@@ -586,7 +589,7 @@ defmodule Forge.MergeConflictTest do
   end
 
   defp conflicting!(%{project: project, ticket: ticket, bare: bare}) do
-    sha = commit_over_http(project, ticket.branch, "README.md", "the branch's version")
+    sha = commit_file_on_branch(project, ticket.branch, "README.md", "the branch's version")
     changeset!(ticket, sha)
     commit_to(bare, "main", %{"README.md" => "the trunk's version\n"}, "another ticket")
     sha

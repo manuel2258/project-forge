@@ -63,15 +63,28 @@ for project in core worker; do
   (cd "$project" && mix deps.get > /dev/null && mix check)
 done
 
-# The platform's tests are most of the gate's time and almost all of it serial: 127 of the suite's
-# 194 files were `async: false` when this was written, which one BEAM runs one after another on
-# one core while the machine's other cores stand idle. So they run as three partitions of the same suite (`mix test
-# --partitions 3`) side by side, each against a database and a directory of its own
-# (`platform/config/test.exs`), a temporary directory (`TMPDIR`, below) and a port the kernel picks
-# (`Forge.TestEndpoint`) — the last of which could not have been done while the endpoint sat on 4002. On two cores the suite cannot finish in
-# less than half its CPU time however it is split. Ticket 52 measured it without coverage on two
-# cores: 522 s in one process, 365 s as two partitions and 322 s as three, which is the last that
-# pays.
+# The platform's tests are most of the gate's time, and they are bound by CPU, not by being serial.
+# They were once: one BEAM ran 127 of 194 files one after another on one core while the others stood
+# idle, so they run as three partitions of the same suite (`mix test --partitions 3`) side by side,
+# each against a database and a directory of its own (`platform/config/test.exs`), a temporary
+# directory (`TMPDIR`, below) and a port the kernel picks (`Forge.TestEndpoint`). Ticket 52 measured
+# that without coverage on two cores: 522 s in one process, 365 s as two partitions, 322 s as three.
+#
+# **With coverage, on two cores, three partitions keep both cores busy** (ticket 68, 1cec7c8: 1724
+# CPU-seconds in 883 s of wall time, so 97% of two cores), which makes the phase its CPU time over two:
+# the only way to shorten it is to take CPU out. Where the CPU went is in `docs/design/git-hosting.md`
+# § What a question costs (89,516 git processes, a third of it), `docs/design/look.md` § What a look
+# costs (a Chromium per browser test) and in the cover-compile each partition does before its first
+# test (75 CPU-seconds, measured at 1cec7c8). After ticket 68's changes the same phase took 1300
+# CPU-seconds in 674 s on the same machine. Two partitions took 1216 in 718 s, so three still pay: the
+# third costs 84 CPU-seconds (75 of them the cover compile) and a partition alone wants only about 1.3
+# cores of two (the diagnosis: 521 CPU-seconds in 414 s, no coverage).
+#
+# **The BEAM's idle schedulers spin here for nothing.** An idle scheduler busy-waits before it
+# sleeps, and three BEAMs and their git children share two cores, so each spin is CPU taken from
+# another partition: with `+sbwt none` and its two siblings the partitions' BEAM CPU fell from 575 s
+# to 479 s and the phase from 1659 to 1552 CPU-seconds (one run each, ticket 68's diagnosis). Set on
+# the three `mix test` processes only, not on the compile or the other projects.
 #
 # A partitioned `--cover` run exports its coverage and reports none (Mix, `test.ex`): the threshold
 # in `platform/mix.exs` is checked by `mix test.coverage`, which merges the exports, so the floor is
@@ -128,7 +141,8 @@ echo "==> platform"
     mkdir "$logs/tmp$i"
     (
       status=0
-      TMPDIR="$logs/tmp$i" MIX_TEST_PARTITION="$i" \
+      ERL_FLAGS="+sbwt none +sbwtdcpu none +sbwtdio none" \
+        TMPDIR="$logs/tmp$i" MIX_TEST_PARTITION="$i" \
         mix test --partitions "$partitions" --cover > "$logs/$i.log" 2>&1 || status=$?
       # Written aside and moved into place: the file exists from the moment a redirection opens it,
       # before its content does, and a wait loop that read it there saw "" and failed a good gate.

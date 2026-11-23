@@ -60,7 +60,7 @@ defmodule ForgeWeb.ApiTest do
     project: project
   } do
     {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
-    sha = commit_over_http(project, ticket.branch, "score.ex", "def persist, do: :ok")
+    sha = commit_file_on_branch(project, ticket.branch, "score.ex", "def persist, do: :ok")
     changeset!(ticket, sha)
 
     assert %{"commit_message" => nil} =

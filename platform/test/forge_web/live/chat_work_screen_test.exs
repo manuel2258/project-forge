@@ -610,7 +610,7 @@ defmodule ForgeWeb.ChatWorkScreenTest do
   describe "Changes" do
     setup %{project: project, chat: chat} do
       sha =
-        commit_over_http(
+        commit_file_on_branch(
           project,
           Jobs.chat_branch(chat),
           "lib/parser.ex",
@@ -635,7 +635,12 @@ defmodule ForgeWeb.ChatWorkScreenTest do
     end
 
     test "counts the files changed on its tab", %{conn: conn, chat: chat, project: project} do
-      commit_over_http(project, Jobs.chat_branch(chat), "lib/lexer.ex", "defmodule Lexer do\nend")
+      commit_file_on_branch(
+        project,
+        Jobs.chat_branch(chat),
+        "lib/lexer.ex",
+        "defmodule Lexer do\nend"
+      )
 
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=changes")
       # And sums the change up in the wide screen's right column, whichever view is open.
@@ -724,7 +729,13 @@ defmodule ForgeWeb.ChatWorkScreenTest do
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=changes")
       refute has_element?(view, ~s(#changes-files li[data-path="lib/lexer.ex"]))
 
-      commit_over_http(project, Jobs.chat_branch(chat), "lib/lexer.ex", "defmodule Lexer do\nend")
+      commit_file_on_branch(
+        project,
+        Jobs.chat_branch(chat),
+        "lib/lexer.ex",
+        "defmodule Lexer do\nend"
+      )
+
       tool(chat, "b1", "Bash", %{"command" => "git push"}, {false, "ok"})
 
       assert eventually(fn ->
@@ -741,7 +752,7 @@ defmodule ForgeWeb.ChatWorkScreenTest do
       chat: chat,
       project: project
     } do
-      commit_over_http(project, Jobs.chat_branch(chat), "README.md", "the branch's version")
+      commit_file_on_branch(project, Jobs.chat_branch(chat), "README.md", "the branch's version")
       diverge_main(project, "README.md", "the trunk's version")
       chat_commit_message!(chat)
 
@@ -772,7 +783,7 @@ defmodule ForgeWeb.ChatWorkScreenTest do
       project: project
     } do
       running!(chat)
-      commit_over_http(project, Jobs.chat_branch(chat), "README.md", "the branch's version")
+      commit_file_on_branch(project, Jobs.chat_branch(chat), "README.md", "the branch's version")
       diverge_main(project, "README.md", "the trunk's version")
       chat_commit_message!(chat)
 
@@ -834,7 +845,14 @@ defmodule ForgeWeb.ChatWorkScreenTest do
       project: project
     } do
       running!(chat)
-      commit_over_http(project, Jobs.chat_branch(chat), "lib/new.ex", "defmodule New do\nend")
+
+      commit_file_on_branch(
+        project,
+        Jobs.chat_branch(chat),
+        "lib/new.ex",
+        "defmodule New do\nend"
+      )
+
       chat_commit_message!(chat)
 
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=changes")
@@ -853,7 +871,7 @@ defmodule ForgeWeb.ChatWorkScreenTest do
       chat: chat,
       project: project
     } do
-      commit_over_http(project, Jobs.chat_branch(chat), "README.md", "the branch's version")
+      commit_file_on_branch(project, Jobs.chat_branch(chat), "README.md", "the branch's version")
       diverge_main(project, "README.md", "the trunk's version")
       chat_commit_message!(chat)
 
@@ -893,7 +911,13 @@ defmodule ForgeWeb.ChatWorkScreenTest do
       send(view.pid, {:ticket_changed, nil})
       assert has_element?(view, "#decision-panel")
 
-      commit_over_http(project, Jobs.chat_branch(chat), "lib/more.ex", "defmodule More do\nend")
+      commit_file_on_branch(
+        project,
+        Jobs.chat_branch(chat),
+        "lib/more.ex",
+        "defmodule More do\nend"
+      )
+
       send(view.pid, {:ticket_changed, nil})
       refute has_element?(view, "#decision-panel")
       assert has_element?(view, "#decision-row", "2 commits")

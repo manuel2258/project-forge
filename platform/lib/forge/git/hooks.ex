@@ -134,8 +134,14 @@ defmodule Forge.Git.Hooks do
   # A URL the new rules refuse — an ssh remote, say — is carried over rather than dropped, so the
   # hook can report it as failing and an operator can see that it stopped.
   defp migrate_scalar(repo_path) do
-    with [] <- names(repo_path),
-         url when is_binary(url) <- get(repo_path, "forge.mirror") do
+    # One read for both questions — are there named mirrors, and is there a scalar — which were
+    # `names/1` and a `get/2`: two processes on every registration and every boot, for a node
+    # that has neither (ticket 68).
+    lines = config_lines(repo_path, ~S|^forge\.mirror(\.[a-z0-9-]+\.url)?$|)
+    named? = Enum.any?(lines, &String.starts_with?(&1, "forge.mirror."))
+
+    with false <- named?,
+         url when is_binary(url) <- scalar(lines, "forge.mirror") do
       refs = get(repo_path, "forge.mirrorRefs")
 
       with :ok <- put_mirror(repo_path, "default", url, refs: refs),
@@ -145,6 +151,23 @@ defmodule Forge.Git.Hooks do
     else
       _already -> :ok
     end
+  end
+
+  # `key value` lines of `config --local --get-regexp`, nothing when none match (exit 1).
+  defp config_lines(repo_path, regexp) do
+    case Git.run(repo_path, ["config", "--local", "--get-regexp", regexp]) do
+      {:ok, out} -> String.split(out, "\n", trim: true)
+      {:error, _reason} -> []
+    end
+  end
+
+  defp scalar(lines, key) do
+    Enum.find_value(lines, fn line ->
+      case String.split(line, " ", parts: 2) do
+        [^key, value] -> blank_to_nil(String.trim(value))
+        _other -> nil
+      end
+    end)
   end
 
   defp write_hooks(repo_path) do

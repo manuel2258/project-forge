@@ -178,7 +178,7 @@ defmodule Forge.Look.Setups.Chats do
     {:ok, _chat} = Conversations.ended(Jobs.get(chat.id), nil, "idle")
 
     _ =
-      System.cmd("git", [
+      Forge.Git.spawn_cmd("git", [
         "--git-dir=#{Projects.repo_path(project)}",
         "branch",
         "-D",

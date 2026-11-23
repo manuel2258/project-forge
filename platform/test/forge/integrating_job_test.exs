@@ -34,7 +34,7 @@ defmodule Forge.IntegratingJobTest do
     join!(project, user)
     {:ok, ticket} = Tickets.admit(project, %{title: "Settings", body: "do it"}, {:user, user.id})
 
-    sha = commit_over_http(project, ticket.branch, "README.md", "the branch's version")
+    sha = commit_file_on_branch(project, ticket.branch, "README.md", "the branch's version")
 
     {:ok, _version} =
       Artifacts.record_version(ticket.id, "changeset", :blob, :system, %{blob_uri: "git:" <> sha})
@@ -98,7 +98,7 @@ defmodule Forge.IntegratingJobTest do
     end
 
     {_out, 0} =
-      System.cmd("git", ["push", "-q", "origin", "HEAD:refs/heads/main"],
+      Forge.Git.spawn_cmd("git", ["push", "-q", "origin", "HEAD:refs/heads/main"],
         cd: work,
         env: [{"FORGE_INTERNAL", "1"}],
         stderr_to_stdout: true
@@ -125,7 +125,7 @@ defmodule Forge.IntegratingJobTest do
     {_out, 0} = job_git(work, ["merge", "-q", "--no-ff", "-m", "Merge ticket/11: Side", "side"])
 
     {_out, 0} =
-      System.cmd("git", ["push", "-q", "origin", "HEAD:refs/heads/main"],
+      Forge.Git.spawn_cmd("git", ["push", "-q", "origin", "HEAD:refs/heads/main"],
         cd: work,
         env: [{"FORGE_INTERNAL", "1"}],
         stderr_to_stdout: true

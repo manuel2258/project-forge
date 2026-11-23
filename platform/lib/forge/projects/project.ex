@@ -89,7 +89,9 @@ defmodule Forge.Projects.Project do
     with branch when is_binary(branch) <- get_change(changeset, :default_branch),
          false <- Keyword.has_key?(changeset.errors, :default_branch),
          {_out, code} when code != 0 <-
-           System.cmd("git", ["check-ref-format", "--branch", branch], stderr_to_stdout: true) do
+           Forge.Git.spawn_cmd("git", ["check-ref-format", "--branch", branch],
+             stderr_to_stdout: true
+           ) do
       add_error(changeset, :default_branch, "must be a valid git branch name")
     else
       _valid_or_already_refused -> changeset

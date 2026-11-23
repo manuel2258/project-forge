@@ -58,18 +58,25 @@ defmodule Forge.LfsFixtures do
   adding `.gitattributes` for `*.bin`: what the pages read, with no LFS client involved.
   """
   def commit_pointers_to(repo, branch, files, message \\ "lfs") do
+    GitFixtures.commit_to(repo, branch, pointer_files(repo, files), message)
+  end
+
+  @doc """
+  `commit_pointers_to/4` pushed through the repository's hooks, as `GitFixtures.push_commit_to/4` does: for
+  a test of what a hook does with the push, such as the mirror's.
+  """
+  def push_pointers_to(repo, branch, files, message \\ "lfs") do
+    GitFixtures.push_commit_to(repo, branch, pointer_files(repo, files), message)
+  end
+
+  defp pointer_files(repo, files) do
     pointers =
       for {path, content} <- files, into: %{} do
         store!(repo, content)
         {path, pointer(content)}
       end
 
-    GitFixtures.commit_to(
-      repo,
-      branch,
-      Map.put(pointers, ".gitattributes", attributes()),
-      message
-    )
+    Map.put(pointers, ".gitattributes", attributes())
   end
 
   @doc "A directory to use as a client's `HOME`, with git-lfs installed in its global config."
@@ -77,7 +84,7 @@ defmodule Forge.LfsFixtures do
     home = GitFixtures.tmp_dir("lfs-home")
 
     {_out, 0} =
-      System.cmd("git", ["lfs", "install", "--skip-repo"],
+      Forge.Git.spawn_cmd("git", ["lfs", "install", "--skip-repo"],
         env: [{"HOME", home}],
         stderr_to_stdout: true
       )
@@ -87,7 +94,7 @@ defmodule Forge.LfsFixtures do
 
   @doc "A stock git, under `home`, with prompting off."
   def git(dir, home, args, env \\ []) do
-    System.cmd("git", args,
+    Forge.Git.spawn_cmd("git", args,
       cd: dir,
       stderr_to_stdout: true,
       env: [{"HOME", home}, {"GIT_TERMINAL_PROMPT", "0"}, {"GIT_CONFIG_NOSYSTEM", "1"} | env]

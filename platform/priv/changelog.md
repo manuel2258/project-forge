@@ -10,6 +10,12 @@ until it changes) or **may adopt** (new and optional). A project records the rel
 brought up to in `.forge/forge-release`; `platform.md` § Upgrading to a newer forge says how an
 upgrade goes.
 
+## 0.26.0
+
+- **may adopt** — in a chat, a message sent while the agent is working now always waits for the turn to end; sending is never an interrupt. The oldest queued message carries an **Interrupt** button, which stops the turn, keeps the partial reply and then sends everything queued. If the agent has already taken that message, the tap stops nothing. Messages queued together reach the agent as one message, their texts joined by a blank line, so a prompt need not expect several turns. A **Stop** keeps what is queued and sends it next. Nothing in a workflow changes. (`platform.md` § Conversations)
+
+- **may adopt** — a chat message, or a chat's opening, may be files alone. The agent's copy of such a message is only the line naming the files, with no words before it, so a prompt that reads a chat's messages should not expect text beside each file. (`platform.md` § Files people attach)
+
 ## 0.25.0
 
 - **may adopt** — a workflow file may declare `schedules:`, a list of tickets of its own type admitted on a clock. Each entry has `name`, `cron` (five fields, read in UTC; no `@weekly`), `title` and `body`, all required. A schedule is off until a project admin switches it on from the project page, and then admits an ordinary ticket in that admin's name; one ticket however many times were missed. It is refused in the release type's file and in a library. Before and after:

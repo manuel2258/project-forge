@@ -40,7 +40,7 @@ defmodule ForgeWeb.TicketViews do
            ticket.stopped ticket.refreshed transition.held ticket.retitled
            ticket.milestone_set ticket.moved ticket.branch_updated ticket.base_moved
            ticket.retried job.extended ticket.cap_raised ticket.admitted attachment.added
-           attachment.withdrawn)
+           attachment.withdrawn page.published page.data_changed page.outside_access)
 
   @doc """
   Who an event of the ticket's Activity was made by, in the words the product uses: a person by
@@ -139,10 +139,15 @@ defmodule ForgeWeb.TicketViews do
         {current, _held} -> Forge.Events.Stream.count(current.id)
       end
 
+    # A page is one doc and its files are none (`ForgeWeb.PageViews`).
+    pages = ForgeWeb.PageViews.names({:ticket, ticket.id})
+
     docs =
-      Enum.count(Artifacts.list(ticket.id), fn artifact ->
-        doc?(%{artifact: artifact, latest: Artifacts.latest(ticket.id, artifact.name)})
-      end)
+      MapSet.size(pages) +
+        Enum.count(Artifacts.list(ticket.id), fn artifact ->
+          not ForgeWeb.PageViews.member?(pages, artifact.name) and
+            doc?(%{artifact: artifact, latest: Artifacts.latest(ticket.id, artifact.name)})
+        end)
 
     strip(
       project,

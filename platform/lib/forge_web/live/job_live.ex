@@ -72,14 +72,26 @@ defmodule ForgeWeb.JobLive do
 
   defp load(%{assigns: %{job_id: job_id, ticket: ticket, project: project}} = socket) do
     job = Jobs.get!(job_id)
-    written = Artifacts.written_by(job.id)
+    # A page's files are not rows of the job's *Wrote*: the page is one (`ForgeWeb.PageViews`).
+    page_names = ForgeWeb.PageViews.names({:ticket, ticket.id})
+    pages = ForgeWeb.PageViews.written(%{project: project, ticket: ticket, chat: nil}, job.id)
+
+    written =
+      Enum.reject(Artifacts.written_by(job.id), fn {artifact, _v} ->
+        ForgeWeb.PageViews.member?(page_names, artifact.name)
+      end)
 
     assign(socket,
       page_title: "#{project.name}##{ticket.number} · #{job.state} ##{job.attempt}",
       job: job,
       spec: Jobs.spec(job),
       written: written,
-      written_names: MapSet.new(written, fn {artifact, _v} -> artifact.name end),
+      pages: pages,
+      written_names:
+        MapSet.union(
+          MapSet.new(written, fn {artifact, _v} -> artifact.name end),
+          MapSet.new(pages, & &1.name)
+        ),
       refusals: Jobs.refusals(job),
       archive_reads: Archive.reads(job.id),
       runs: Runs.for_job(job.id),
@@ -635,7 +647,7 @@ defmodule ForgeWeb.JobLive do
           options={[
             {"Stream #{@stream.count}", "stream"},
             {"Manifest", "manifest"},
-            {"Wrote #{length(@written)}", "wrote"}
+            {"Wrote #{length(@written) + length(@pages)}", "wrote"}
           ]}
         />
 
@@ -656,7 +668,13 @@ defmodule ForgeWeb.JobLive do
           written_names={@written_names}
           refusals={@refusals}
         />
-        <.wrote :if={@pane == "wrote"} project={@project} ticket={@ticket} written={@written} />
+        <.wrote
+          :if={@pane == "wrote"}
+          project={@project}
+          ticket={@ticket}
+          written={@written}
+          pages={@pages}
+        />
       </section>
     </div>
     """
@@ -930,12 +948,21 @@ defmodule ForgeWeb.JobLive do
   attr :project, :map, required: true
   attr :ticket, :map, required: true
   attr :written, :list, required: true
+  attr :pages, :list, default: []
 
   # What the job produced, each with its type's tile and linked to its exact bytes (`ui.md`
-  # § Addressable artifact versions).
+  # § Addressable artifact versions) — a page, once, and linked to the page (§ Pages).
   defp wrote(assigns) do
     ~H"""
     <ul id="job-wrote" class="job-wrote">
+      <li :for={page <- @pages} id={"wrote-page-#{page.name}"}>
+        <.link href={page.href} class="job-file">
+          <FileType.file_icon artifact={%{name: page.name, kind: :page}} />
+          <span class="job-file-name">{page.name}</span>
+          <span class="job-dim">v{page.version}</span>
+          <span class="job-dim" aria-hidden="true">›</span>
+        </.link>
+      </li>
       <li :for={{artifact, version} <- @written}>
         <.link
           href={
@@ -949,7 +976,7 @@ defmodule ForgeWeb.JobLive do
           <span class="job-dim" aria-hidden="true">›</span>
         </.link>
       </li>
-      <li :if={@written == []} class="job-none">this run wrote nothing</li>
+      <li :if={@written == [] and @pages == []} class="job-none">this run wrote nothing</li>
     </ul>
     """
   end

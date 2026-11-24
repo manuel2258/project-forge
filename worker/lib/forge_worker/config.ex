@@ -23,6 +23,18 @@ defmodule ForgeWorker.Config do
   def platform_url, do: get(:platform_url, "FORGE_PLATFORM_URL")
 
   @doc """
+  The platform's door for a running job's pages' stores (`docs/design/pages.md`): `/job/pages`
+  under `platform_url/0`, or nil on a worker that has no platform to name.
+  """
+  @spec pages_url() :: String.t() | nil
+  def pages_url do
+    case platform_url() do
+      url when is_binary(url) -> String.trim_trailing(url, "/") <> "/job/pages"
+      _none -> nil
+    end
+  end
+
+  @doc """
   The websocket URI. Carries `worker_id` and no credential.
 
   The token goes in a header (`socket_headers/0`) and never in the URL: a URL is recorded by

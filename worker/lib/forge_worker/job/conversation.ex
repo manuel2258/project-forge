@@ -21,7 +21,7 @@ defmodule ForgeWorker.Job.Conversation do
 
   alias ForgeCore.Job.Result
   alias ForgeWorker.Config
-  alias ForgeWorker.Job.{Dir, Runner, Secrets, Session, Workspace}
+  alias ForgeWorker.Job.{Blobs, Dir, Runner, Secrets, Session, Workspace}
   alias ForgeWorker.{Log, Slice, Store}
 
   require Logger
@@ -83,6 +83,9 @@ defmodule ForgeWorker.Job.Conversation do
        worktree: nil,
        runner: nil,
        turns: 0,
+       # `"<page>/<file>" => sha256` of the page files this process last reported, so a turn
+       # uploads only what changed and is silent about a page that did not (`turn_pages/1`).
+       pages_sent: %{},
        # **The worker queues** (`docs/design/conversations.md` § Turns): `busy` is a turn in flight,
        # from the write that began it to the turn's report, and `held` the messages that arrived
        # meanwhile — `{platform id, composed text}`, oldest first — written together as one message
@@ -333,8 +336,12 @@ defmodule ForgeWorker.Job.Conversation do
 
   defp put_effort(opts, _spec), do: opts
 
+  # The pages' door (`docs/design/pages.md`) answers to the same token as the git URL, so it is
+  # named exactly when that is, and the same for either harness: the environment is the worker's.
   defp git_env(%{"git" => %{"url" => url, "token" => token}}) when is_binary(token),
-    do: [{"FORGE_GIT_URL", url}, {"FORGE_GIT_TOKEN", {:secret, token}}]
+    do:
+      [{"FORGE_GIT_URL", url}, {"FORGE_GIT_TOKEN", {:secret, token}}] ++
+        if(Config.pages_url(), do: [{"FORGE_PAGES_URL", Config.pages_url()}], else: [])
 
   defp git_env(_assignment), do: []
 
@@ -458,6 +465,7 @@ defmodule ForgeWorker.Job.Conversation do
     # by content, so re-reporting the same file every turn costs nothing.
     proposals = Dir.proposals(job_dir(state))
     documents = Dir.documents(job_dir(state))
+    {pages, invalid_pages, pages_sent} = turn_pages(state)
     # Read once per turn and removed by the read, so a request is carried exactly once — and
     # only off a turn that ended cleanly (`docs/design/conversations.md` § Taking a transition).
     transition = transition_request(state, event.payload)
@@ -499,6 +507,8 @@ defmodule ForgeWorker.Job.Conversation do
            "invalid_proposals" => proposals.invalid_proposals,
            "documents" => documents.documents,
            "invalid_documents" => documents.invalid_documents,
+           "pages" => pages,
+           "invalid_pages" => invalid_pages,
            "harness" => turn_summary(event, session, state)
          }
          |> Map.merge(transition_keys(transition))
@@ -508,7 +518,8 @@ defmodule ForgeWorker.Job.Conversation do
     # Everything held while that turn ran goes now, as one message — after the turn's report, so the
     # log reads `chat.turn` before the `delivered` that follows it. Across a reconnect the Link
     # keeps that order when it sends what is unacked again (`Link.resend_unacked/1`).
-    {:noreply, flush_held(%{state | turns: index, busy: false, files_lost: []})}
+    {:noreply,
+     flush_held(%{state | turns: index, pages_sent: pages_sent, busy: false, files_lost: []})}
   end
 
   def handle_info({:ended, _job_id, result}, state), do: {:noreply, %{state | result: result}}
@@ -534,6 +545,60 @@ defmodule ForgeWorker.Job.Conversation do
     Logger.debug("conversation ignored #{inspect(message)}")
     {:noreply, state}
   end
+
+  # The pages this turn left: a folder of `out/` holding an `index.html` is one, and any other
+  # folder is refused with why (`docs/design/pages.md` § Recording a publish). Each page file is uploaded
+  # under the chat's prefix — unless its bytes are what the platform holds or this process last
+  # sent — and a page is reported only when its files are not what was last reported: a file
+  # uploaded, added or removed. Reported as `%{page => %{file => %{"hash", "size"} + "key"}}`, a
+  # file with no `"key"` being one the platform has already.
+  #
+  # Returns the pages, what was refused (`"<page>"` or `"<page>/<file>"` => why) and the
+  # `pages_sent` to keep.
+  defp turn_pages(state) do
+    dir = job_dir(state)
+    %{pages: names, invalid: invalid} = Dir.chat_pages(dir)
+    staging = Dir.blobs_dir(dir)
+    File.rm_rf(staging)
+
+    known = Map.merge(Blobs.held_hashes(state.assignment), state.pages_sent)
+
+    result =
+      %Result{status: :finished}
+      |> Blobs.stage(dir, [], names)
+      |> Blobs.upload(state.assignment, staging, known: state.pages_sent, keys: :hash)
+
+    current = Map.new(result.blobs, fn {name, entry} -> {name, entry["hash"]} end)
+
+    changed =
+      Enum.filter(names, fn page ->
+        files_of(current, page) != files_of(known, page)
+      end)
+
+    pages =
+      Map.new(changed, fn page ->
+        {page,
+         for({name, entry} <- result.blobs, String.starts_with?(name, page <> "/"), into: %{}) do
+           {String.replace_prefix(name, page <> "/", ""), entry}
+         end}
+      end)
+
+    kept =
+      known
+      |> Map.reject(fn {name, _hash} ->
+        Enum.any?(changed, &String.starts_with?(name, &1 <> "/"))
+      end)
+      |> Map.merge(
+        Map.filter(current, fn {name, _hash} -> Map.has_key?(pages, page_of(name)) end)
+      )
+
+    {pages, Map.merge(invalid, result.invalid_blobs), kept}
+  end
+
+  defp files_of(hashes, page),
+    do: Map.filter(hashes, fn {name, _hash} -> String.starts_with?(name, page <> "/") end)
+
+  defp page_of(name), do: name |> String.split("/", parts: 2) |> hd()
 
   # **Only a clean turn's request is read; any other's file is removed unread.** The same gate
   # `invoke.json` has, for the same reason it has it — a run that may not invoke has its file

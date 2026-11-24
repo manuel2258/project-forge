@@ -3401,6 +3401,30 @@ defmodule ForgeWorker.LinkTest do
     refute List.keyfind(slice.env, "FORGE_GIT_TOKEN", 0)
   end
 
+  # `docs/design/pages.md` § How a running job reaches the store: the door's address is the
+  # worker's own platform address plus `/job/pages`, in the environment of any job that holds a
+  # git token — the harness is not asked, so it is the same for Claude Code and Codex.
+  test "a job is told where the pages' door is, and a job with no token is not", context do
+    %{client: client, origin: origin} = context
+    Application.put_env(:forge_worker, :slice, RecordingSlice)
+    Application.put_env(:forge_worker, :slice_reporter, self())
+
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    job = put_in(assignment(origin), ["git", "token"], "push-secret")
+    push(client, @topic, "assign", job)
+    {%{"result" => _result}, _events} = take_push("result")
+
+    assert_receive {:slice, slice}
+    assert {"FORGE_PAGES_URL", "http://platform.test/job/pages"} in slice.env
+
+    push(client, @topic, "assign", assignment(origin))
+    {%{"result" => _result}, _events} = take_push("result")
+    assert_receive {:slice, slice}
+    refute List.keymember?(slice.env, "FORGE_PAGES_URL", 0)
+  end
+
   # The archive is promised in the job's prompt, so the platform's door and the job's own token
   # have to reach the runner by the route the job really takes (`docs/design/archive.md`): a
   # `nil` in `Link.start_runner/4` leaves a job with no folder and nothing else failing.
@@ -5056,6 +5080,153 @@ defmodule ForgeWorker.LinkTest do
       {%{"turn" => 2, "proposals" => proposals}, _} = take_push("turn")
 
       assert proposals["score-table.md"]["title"] == "Extract the score table"
+    end
+
+    defp page_chat(origin) do
+      origin
+      |> chat()
+      |> Map.put("outputs", %{"prefix" => "job/c1/out/", "token" => "out-token"})
+    end
+
+    defp say_for_turn(client, job, id, text) do
+      push(client, @topic, "message", %{
+        "job_id" => job["job_id"],
+        "message_id" => id,
+        "text" => text
+      })
+
+      {turn, _} = take_push("turn")
+      turn
+    end
+
+    # `docs/design/pages.md` § Recording a publish: a page travels with the turn that wrote it, its files
+    # uploaded under the chat's prefix by their hash, and a turn that changed nothing says nothing.
+    test "a page written in a turn goes out with it, and only a changed page after that",
+         context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = page_chat(origin)
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1, "pages" => none, "invalid_pages" => %{}}, _} = take_push("turn")
+      assert none == %{}
+
+      %{"turn" => 2, "pages" => %{"form" => files}, "invalid_pages" => %{}} =
+        say_for_turn(client, job, "m-2", "PAGE the form")
+
+      assert Map.keys(files) == ["app.js", "index.html"]
+      html_hash = :crypto.hash(:sha256, "<p>the form</p>\n") |> Base.encode16(case: :lower)
+      assert %{"hash" => ^html_hash, "key" => key, "size" => 16} = files["index.html"]
+      assert String.starts_with?(key, "job/c1/out/" <> html_hash <> "-")
+      assert_receive {:uploaded, "/store/" <> ^key, ["Bearer out-token"], _q, "<p>the form</p>\n"}
+
+      assert_receive {:uploaded, "/store/job/c1/out/" <> _, ["Bearer out-token"], _q,
+                      "start();\n"}
+
+      # Nothing changed: not reported, not uploaded again.
+      assert %{"turn" => 3, "pages" => same} = say_for_turn(client, job, "m-3", "thanks")
+      assert same == %{}
+      refute_receive {:uploaded, "/store/job/c1/out/" <> _, _, _, _}
+
+      # One file changed: the page is reported whole, the file that did not change without a key.
+      assert %{"turn" => 4, "pages" => %{"form" => files}} =
+               say_for_turn(client, job, "m-4", "PAGEEDIT")
+
+      assert %{"hash" => ^html_hash} = files["index.html"]
+      refute Map.has_key?(files["index.html"], "key")
+      assert %{"key" => _} = files["app.js"]
+
+      # A file removed is a change too, though nothing was uploaded.
+      assert %{"turn" => 5, "pages" => %{"form" => files}} =
+               say_for_turn(client, job, "m-5", "PAGEGONE")
+
+      assert Map.keys(files) == ["index.html"]
+      refute Map.has_key?(files["index.html"], "key")
+
+      push(client, @topic, "close", %{"job_id" => job["job_id"], "reason" => "done"})
+      take_push("hibernated")
+    end
+
+    test "a conversation is told where the pages' door is, as a job is", context do
+      %{client: client, origin: origin} = context
+      Application.put_env(:forge_worker, :slice, RecordingSlice)
+      Application.put_env(:forge_worker, :slice_reporter, self())
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = origin |> page_chat() |> put_in(["git", "token"], "push-secret")
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      assert_receive {:slice, slice}
+      assert {"FORGE_PAGES_URL", "http://platform.test/job/pages"} in slice.env
+
+      push(client, @topic, "close", %{"job_id" => job["job_id"], "reason" => "done"})
+      take_push("hibernated")
+    end
+
+    test "a page that the platform already holds, by its spec, is not uploaded or reported",
+         context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      html = "<p>the form</p>\n"
+      js = "start();\n"
+      hash = fn bytes -> :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower) end
+
+      job =
+        origin
+        |> page_chat()
+        |> put_in(["spec", "pages"], [
+          %{
+            "name" => "form",
+            "version" => 1,
+            "files" => %{
+              "index.html" => %{"hash" => hash.(html), "size" => byte_size(html)},
+              "app.js" => %{"hash" => hash.(js), "size" => byte_size(js)}
+            }
+          }
+        ])
+
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      assert %{"turn" => 2, "pages" => pages} = say_for_turn(client, job, "m-2", "PAGE the form")
+      assert pages == %{}
+      refute_receive {:uploaded, "/store/job/c1/out/" <> _, _, _, _}
+
+      push(client, @topic, "close", %{"job_id" => job["job_id"], "reason" => "done"})
+      take_push("hibernated")
+    end
+
+    test "a folder that is not a page, and the platform's library, are reported with why",
+         context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = page_chat(origin)
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      assert %{"invalid_pages" => invalid, "pages" => %{}} =
+               say_for_turn(client, job, "m-2", "BADPAGE")
+
+      assert invalid["draft"] =~ "index.html"
+
+      assert %{"pages" => %{"form" => _files}} = say_for_turn(client, job, "m-3", "PAGE the form")
+
+      # Refused with why, and the page as it was is still the page: nothing new to report of it.
+      assert %{"pages" => same, "invalid_pages" => invalid} =
+               say_for_turn(client, job, "m-4", "PAGELIB")
+
+      assert same == %{}
+      assert invalid["form/forge-page.js"] =~ "library"
+
+      push(client, @topic, "close", %{"job_id" => job["job_id"], "reason" => "done"})
+      take_push("hibernated")
     end
 
     # A conversation has no result, so a document it wrote reaches the platform with a turn or

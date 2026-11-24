@@ -85,7 +85,10 @@ defmodule Forge.Steps do
         }
       end
 
-    missing = for %{version: nil, optional: false, own: true, name: name} <- documents, do: name
+    missing =
+      for(%{version: nil, optional: false, own: true, name: name} <- documents, do: name) ++
+        Engine.unwritten_pages(ticket, state)
+
     in_flight = Conversations.in_flight?(chat)
 
     outcomes = outcomes(ticket, workflow, chat, state)

@@ -23,6 +23,7 @@ defmodule Forge.Jobs do
     Engine,
     Events,
     Git,
+    Pages,
     Projects,
     Proposals,
     Repo,
@@ -78,6 +79,10 @@ defmodule Forge.Jobs do
   # A conversation: the worker queues its messages and reports their delivery itself, which a
   # button on a queued message and its guard rest on (`docs/design/worker-channel.md` § Protocol 15).
   @chat_protocol 15
+  # Every agent job and chat: the assignment carries the ticket's pages and the worker sets
+  # `FORGE_PAGES_URL`, which a worker from before drops without a word, and a ticket can gain a page
+  # after a job is scheduled (`docs/design/worker-channel.md` § Protocol 16).
+  @pages_protocol 16
 
   # How many of the merges that landed on the default branch since a ticket's base an integrating
   # job is told about by name; the rest are counted (`docs/design/job-prompt.md` § Integrating the
@@ -251,6 +256,9 @@ defmodule Forge.Jobs do
           "visit" => visit,
           "inputs" => state.inputs,
           "produces" => for(name <- state.produces, Workflow.document?(name), do: name),
+          # A step's pages, by name without the marker: the one thing but documents a chat step may
+          # declare (`docs/design/workflow-grammar-v1.md` § Chat steps).
+          "pages" => Workflow.page_names(state.produces),
           "optional" => state.optional,
           "outcomes" => step_outcomes(workflow, state),
           "entered" => entered
@@ -987,6 +995,7 @@ defmodule Forge.Jobs do
       attachments: attachments_protocol(job),
       lfs: @lfs_protocol,
       chat: chat_protocol(job),
+      pages: pages_protocol(job),
       jump: jump_protocol(job),
       extension: extension_protocol(job),
       usage: @usage_protocol
@@ -1031,6 +1040,12 @@ defmodule Forge.Jobs do
     do: @attachments_protocol
 
   defp attachments_protocol(%Job{}), do: 0
+
+  # Every workflow job and chat, as attachments: a ticket can gain a page after the job is
+  # scheduled, and a worker that dropped it would run on without a word. A command stays where it
+  # was (`docs/design/worker-channel.md` § Protocol 16).
+  defp pages_protocol(%Job{kind: kind}) when kind in [:workflow, :chat], do: @pages_protocol
+  defp pages_protocol(%Job{}), do: 0
 
   defp secrets_protocol(%Job{secret_names: [_ | _]}), do: @secrets_protocol
   defp secrets_protocol(%Job{}), do: 0
@@ -1241,7 +1256,13 @@ defmodule Forge.Jobs do
 
   # Where a job's groups of files go, for a job that declares one (`Forge.Jobs.Blobs`). Uploaded
   # when the job stops, so the token lives as long as a transcript's does.
-  defp group_outputs(%Job{kind: :chat}), do: %{}
+  defp group_outputs(%Job{kind: :chat} = job),
+    do:
+      Blobs.outputs(
+        job,
+        %Spec{job_id: job.id, branch: "", produces: []},
+        wall_clock_ms(job) + preparation_margin_ms()
+      )
 
   defp group_outputs(%Job{} = job),
     do: Blobs.outputs(job, spec(job), wall_clock_ms(job) + preparation_margin_ms())
@@ -1452,6 +1473,7 @@ defmodule Forge.Jobs do
       commit: ticket && ticket.base_commit,
       base: ticket && ticket.base_commit,
       attachments: Attachments.manifest(Conversations.pool(job), files),
+      pages: Pages.manifest(Pages.scope_of_job(job)),
       prompt: opening.prompt,
       replay: opening.replay,
       inputs: chat_inputs(job, ticket),
@@ -1494,6 +1516,7 @@ defmodule Forge.Jobs do
         entered_commands: entered,
         previous_changeset: previous_changeset(job, spec),
         attachments: Attachments.manifest({:ticket, ticket_id}, files),
+        pages: Pages.manifest({:ticket, ticket_id}),
         base: ticket.base_commit,
         integration: integration_now(spec.integration, spec.entered, ticket)
     }
@@ -2471,8 +2494,11 @@ defmodule Forge.Jobs do
     do: Commands.put_resumed_event(multi, job, batch)
 
   defp record_and_follow_up(job, ticket, result) do
+    result = Blobs.require_pages(spec(job), result)
+
     case record(job, ticket, result) do
       {:ok, %{job: job, ticket_cost: ticket} = changes} ->
+        Blobs.announce(changes)
         followed_up(job, moved_base(ticket, changes[:base]), result)
 
       # Finished between the read in `complete/2` and the lock below: its ticket was cancelled.

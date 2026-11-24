@@ -401,7 +401,8 @@ defmodule ForgeWorker.Job.DirTest do
 
     # The worker manager is a more privileged user than the agent: a link would have it read a
     # file the agent cannot, and publish it as a document.
-    test "a symlink or a directory is refused, not followed", %{job_dir: job_dir, out: out} do
+    test "a symlink is refused, not followed, and a directory is a page's or refused as one",
+         %{job_dir: job_dir, out: out} do
       secret = Path.join(tmp_dir("secret-chat"), "key")
       File.write!(secret, "BEGIN PRIVATE KEY")
       File.ln_s!(secret, Path.join(out, "leak.md"))
@@ -411,7 +412,9 @@ defmodule ForgeWorker.Job.DirTest do
 
       assert documents == %{}
       assert invalid["leak.md"] =~ "symlink"
-      assert invalid["folder.md"] =~ "directory"
+      # A folder is not a document, so it is not refused as one: `chat_pages/1` answers for it.
+      refute Map.has_key?(invalid, "folder.md")
+      assert %{invalid: %{"folder.md" => _}} = Dir.chat_pages(job_dir)
     end
 
     # Opening a FIFO blocks until something writes to it, and the agent can make one. The lstat
@@ -1325,6 +1328,110 @@ defmodule ForgeWorker.Job.DirTest do
       File.write!(Path.join([job_dir, "out", "plan.md"]), "---\noutcome: done\n---\n# P\n")
 
       assert %{undeclared: []} = Dir.collect(job_dir, spec)
+    end
+  end
+
+  describe "pages" do
+    setup %{root: root} do
+      spec = spec(%{produces: ["plan.md", "form@"]})
+      job_dir = Dir.prepare(root, spec)
+      page = Path.join([job_dir, "out", "form"])
+      File.mkdir_p!(page)
+
+      %{spec: spec, job_dir: job_dir, page: page, staging: tmp_dir("staging")}
+    end
+
+    test "a declared page without an index.html is missing; with one it is not", context do
+      assert %{missing: missing} = Dir.collect(context.job_dir, context.spec)
+      assert "form" in missing
+
+      File.write!(Path.join(context.page, "app.js"), "x")
+      assert %{missing: missing} = Dir.collect(context.job_dir, context.spec)
+      assert "form" in missing
+
+      File.write!(Path.join(context.page, "index.html"), "<p>hi")
+      assert %{missing: missing, undeclared: []} = Dir.collect(context.job_dir, context.spec)
+      refute "form" in missing
+    end
+
+    test "a page that was never written is missing, and its directory is no document",
+         context do
+      File.rm_rf!(context.page)
+
+      assert %{missing: missing, documents: documents} =
+               Dir.collect(context.job_dir, context.spec)
+
+      assert "form" in missing
+      assert documents == %{}
+    end
+
+    # `lstat` of a path through a link follows the link; the entry's own directory is tested first.
+    test "a page directory that is a link has no entry, however it resolves", context do
+      elsewhere = tmp_dir("elsewhere")
+      File.write!(Path.join(elsewhere, "index.html"), "<p>not the job's")
+      File.rm_rf!(context.page)
+      File.ln_s!(elsewhere, context.page)
+
+      assert %{missing: missing} = Dir.collect(context.job_dir, context.spec)
+      assert "form" in missing
+    end
+
+    test "an index.html that is a link is no entry", context do
+      File.ln_s!("/etc/hostname", Path.join(context.page, "index.html"))
+      assert %{missing: missing} = Dir.collect(context.job_dir, context.spec)
+      assert "form" in missing
+    end
+
+    test "the platform's library cannot be a page's file, and the rest of the page is kept",
+         context do
+      File.write!(Path.join(context.page, "index.html"), "<p>hi")
+      File.write!(Path.join(context.page, "forge-page.js"), "evil")
+      File.write!(Path.join(context.page, "app.js"), "ok")
+
+      assert %{staged: staged, invalid: %{"form/forge-page.js" => reason}} =
+               Dir.stage_groups(context.job_dir, ["form"], context.staging,
+                 pages: ["form"],
+                 max_bytes: 1024,
+                 max_files: 10
+               )
+
+      assert Enum.map(staged, &elem(&1, 0)) == ["form/app.js", "form/index.html"]
+      assert reason =~ "library"
+    end
+
+    test "the library's name is an ordinary file's in a group that is not a page", context do
+      shots = Path.join([context.job_dir, "out", "shots"])
+      File.mkdir_p!(shots)
+      File.write!(Path.join(shots, "forge-page.js"), "fine here")
+
+      assert %{staged: [{"shots/forge-page.js", _}], invalid: %{}} =
+               Dir.stage_groups(context.job_dir, ["shots"], context.staging,
+                 pages: ["form"],
+                 max_bytes: 1024,
+                 max_files: 10
+               )
+    end
+
+    test "a chat's folders: one with an index.html is a page, any other is refused", context do
+      out = Path.join(context.job_dir, "out")
+      File.write!(Path.join(context.page, "index.html"), "<p>hi")
+      File.mkdir_p!(Path.join(out, "draft"))
+      File.write!(Path.join(out, "draft/notes.txt"), "no entry")
+      File.mkdir_p!(Path.join(out, "proposals"))
+      File.write!(Path.join(out, "note.md"), "a document")
+      elsewhere = tmp_dir("elsewhere")
+      File.write!(Path.join(elsewhere, "index.html"), "x")
+      File.ln_s!(elsewhere, Path.join(out, "linked"))
+
+      assert %{pages: ["form"], invalid: invalid} = Dir.chat_pages(context.job_dir)
+      assert Map.keys(invalid) == ["draft"]
+      assert invalid["draft"] =~ "index.html"
+
+      # A link to a folder is not a folder: it is the document's refusal that names it.
+      assert %{documents: %{"note.md" => _}, invalid_documents: %{"linked" => why}} =
+               Dir.documents(context.job_dir)
+
+      assert why =~ "symlink"
     end
   end
 end

@@ -1152,6 +1152,12 @@ in words if sent. At the end of the pass, the first item to arrive is drawn.
   outline link to the view **where the decision row is**. It never approves here. There is no
   *Reviewer said* block: what a reviewer wrote is the presentation's, and the platform gives a
   presentation no slots (§ Semantics that must not be lost).
+- **A ticket with pages** links each one — *Open `<page>` ›* — from its item, after the ways on that
+  the kind already has, and a human state that names a page to open (`opens`, `workflow-grammar-v1.md`
+  § Semantics) leads with *Open `<name>` ›* **first in the item's dock**: a link (`<a>`) and not a
+  decision, so the state's decisions stay where they are and the count does not change. Until the
+  page has a version the action is drawn and says *no version yet*. A decision panel that pins the
+  ticket's documents lists its pages the same way (`#decision-pages`), as links.
 - **Questions** (`13b`) show what the agent said when it stopped with the passage that asked
   highlighted, **before** the context card — it is what the questions are about, and under the card
   it was beneath the split pane on a phone — with **Read `<document>` v`<n>` ›** beside *The whole
@@ -1558,6 +1564,10 @@ other, so nothing is approved that the person did not see. **The queue offers no
 queue): a jump is a repair, made while reading the ticket. On a phone the fold and its rows are
 the same and the dock button takes the pick.
 
+**A human state that names a page to open** (`opens: form`) puts *Open `form` ›* at the head of the
+ticket page while the ticket rests there, as the queue item does: a link to the page, drawn as *no
+version yet* until there is one. It is not a decision and is not counted.
+
 **A human state's documents are written here**, above its ways forward: one editor per name the
 state declares in `produces` (`workflow-grammar-v1.md` § Semantics), holding the latest version
 when there is one, and a filled *Save* that records what was typed as a new version by the person.
@@ -1780,6 +1790,14 @@ refusal is drawn above the rows, where the press was. A project chat's Docs does
 chat's files, and a ticket's and a document's text name the files that came with their latest
 version under the row.
 
+**A page is one row** (`pages.md`, § Pages): under *Produced* — or, for a project chat, in the chat's
+Docs — with the `page` tile, its name as text (cut with the whole name in its `title`, as other names
+are), who wrote it (*agent · `<state>`*, or *chat*) and its version, and the row opens the page
+(a link, not a body). The files of a page are not drawn as rows of their own: earlier versions
+fold under the row as links that **download** — each earlier version's own files, not only its
+`index.html` — and are never run, because the store is shared
+across versions and an old page may not fit today's data. A page that has no version yet has no row.
+
 **A file has no body here**: its whole row is the link to its bytes, drawn at the same height.
 Reading every one of a build's outputs from the store to draw its row would be a store read per
 row per patch, and a file's bytes are one tap away at its address.
@@ -1868,7 +1886,8 @@ the person reads one that failed.
   minute**, as a small divider over the row that opens it, rather than on every row, where the
   same `21:50:56` nine times took a fifth of the width. The manifest is the pinned input manifest,
   led by **the prompt the job was given**, folded: it is an input like the rest. Wrote is what the
-  job produced, each with its type's tile and linked to its version.
+  job produced, each with its type's tile and linked to its version — a page's one row opens the
+  page, and its member files are not listed beside it.
 - **Its plan** — the agent's latest `TodoWrite` — **and its facts**, and **the earlier attempts at
   this state in this visit**, each linked. The facts name **the harness with its model**, `Codex ·
   gpt-5` (a command has none), and its usage, *converted from dollars* where the migration made
@@ -3505,6 +3524,39 @@ neighbouring column, which is the failure this rule was written for.
 The body sits on `--surface-1` inside an 8px block, because a document is the one thing on the page
 that is not the product's own writing, and the ground is what says so.
 
+## Pages
+
+`pages.md` is the note; this is how a page and its bar are drawn. A page opens on a forge page of its
+own, `/tickets/:project/:number/pages/:name` or `/chats/:id/pages/:name`, in a live session of its
+own (it forces a full page load on the way in). Always the latest version.
+
+- **The bar** is slim and sits **outside the frame**: forge's own element, which nothing the page
+  draws can cover, move or restyle, so a page cannot pass itself off as a forge screen by hiding it.
+  It holds a way back, the page's name as text (cut, the whole name in its `title`), *written by an
+  agent in `<state>` · v`<n>`* or *written in a chat*, the save state, the read-only reason when
+  there is one, and the outside-access toggle. It names no outside address.
+- **The save state** is *saved*, *saving*, *offline · `n`* (the changes waiting) or *refused* with
+  the reason. It is drawn by a script hook in an element the server never patches
+  (`phx-update="ignore"`), so it can change while the socket is down. Saves made offline are held
+  and sent on rejoin, in order, none dropped and none twice; a reload, a closed tab or another
+  device keeps none (§ A reconnect is not a reload). Leaving with saves waiting gives no warning:
+  the *offline* count is the only sign.
+- **A newer version** published while the page is open shows *newer version · reload* in the bar;
+  nothing reloads the frame by itself.
+- **Read only** (a done or cancelled ticket, an ended project chat) says so in the bar with why, and
+  the page's script is told so it can say so in its own way; a save it attempts anyway is refused
+  and the bar says so.
+- **The toggle** lets the page reach any outside address, for the person viewing and on that page
+  only, across its new versions, until they switch it off. Every other viewer starts with it off.
+  Switching it is recorded (`page.outside_access`).
+- **The frame fills the rest of the screen at every width**, with the installed app's safe areas
+  (§ The installed app). It is an `iframe` with `sandbox="allow-scripts"`, `referrerpolicy="no-referrer"`
+  and `allowfullscreen`; a page's video plays and scrubs from its own files.
+- **A value is never drawn by forge**: a key name is text wherever forge shows one (the raw log), and
+  there is no table of a page's data in forge's screens.
+- **Not in the installed app's cache**: the service worker keeps only the offline page and static
+  files (§ The installed app), and a page is not among them.
+
 ## Artifact types
 
 An artifact's row carries its kind, so a build's package, its log and the plan beside them are told
@@ -3514,7 +3566,8 @@ decision panel's pinned versions. Where an artifact is named inline among other 
 queue sentence, a question's answer, a human state's editor — it stays words.
 `ForgeWeb.FileType` is the one place a type is decided.
 
-The type is the name's extension. A document, which is text by construction, is Markdown unless its
+The type is the name's extension, **except a page's row**, which takes the `page` tile
+whatever its member files' extensions are (`FileType` gains `:page`). A document, which is text by construction, is Markdown unless its
 extension says text, a log or code; a blob with an extension not below is a *file*. It is never read
 from the bytes: drawing a row must not cost a store read.
 
@@ -3528,6 +3581,7 @@ from the bytes: drawing a row must not cost a store read.
 | archive | `.zip` `.tar` `.gz` `.tgz` `.xz` `.bz2` `.zst` `.7z` `.jar` `.aab` | `zip` | 95 |
 | Android app | `.apk` | `apk` | 125 |
 | file | anything else | `file` | neutral |
+| page | a declared `name@` (`pages.md`), whatever its files' extensions | `pg` | 260 |
 | changeset | the `changeset` blob, which is a commit and not a file | `±` | neutral |
 
 The glyph sits in the `TypeIcon` tile — 26px, 20px in a chip — tinted with its hue at 16 %, on a
@@ -3627,11 +3681,16 @@ content is now:
 | The workers page | § Machines |
 | A job waiting for a machine | § A job waiting for a machine |
 | Documents, References | § Documents, § References |
+| Pages | § Pages |
 | Artifact types | § Artifact types |
 | Addressable artifact versions | § Addressable artifact versions |
 | The project's repository | § The project's repository |
 
 ## Not built yet
+
+- **Pages** (ticket 66, `pages.md` § Not built yet) are being built: § Pages and the rows named in
+  § Docs, § The job page and § The queue describe what the code at this commit does only as far as
+  that note's *Built* says.
 
 The code at this commit follows the previous version of this note (§ Where this comes from, and
 what is built). Each

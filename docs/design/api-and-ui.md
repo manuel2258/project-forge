@@ -91,6 +91,10 @@ bearer, tried in this order.
   token; the name is copied into the event and version so drawing them needs no lookup, and a
   revoked token reads the same. A job's token is refused (401).
 
+**A running job's own door to a page's store is not this API**: `/job/pages` takes the per-job git
+token and reaches only the job's own ticket (`design/pages.md`), while this API still refuses a
+job's token.
+
 A token with *read* gets 403 `forbidden` on every `POST`, decided before the ticket is looked up. A
 project token is always refused (403) `POST /projects` and `GET /queue`, which are a person's, and
 nothing here exposes settings, secrets, members, mirrors, tokens, conversations or workers to
@@ -119,6 +123,9 @@ it. Every refusal to authenticate is the same 401 body.
 | `GET /tickets/:project/:number/artifacts` | Every artifact (name, kind) with **all** its versions: number, id, author, `inserted_at`, `content_hash`, and `form` (`text`, `file` or `commit`). One call, no limit |
 | `GET /tickets/:project/:number/artifacts/:name/:version/raw` | The version's stored bytes, `:name` one encoded segment (`group%2Ffile`). The listed `content_hash` is `sha256:` of exactly these bytes for anything a worker's result or a person wrote (a blob recorded without a hash, milestone 1's, lists `uri:…` instead). Text is `text/plain`; a raster image blob (`.png` `.jpg` `.jpeg` `.gif` `.webp` `.avif`) is its `image/*` type, inline; anything else, `.svg` included, an attachment. `nosniff` and `content-security-policy: default-src 'none'; sandbox` on all (`ui.md` § Addressable artifact versions). A commit is 422 `not_a_file` naming the review endpoint; a version that is not a positive integer, or does not exist, is 404 |
 | `POST /tickets/:project/:number/artifacts/:name` | New version `{content}` |
+| `GET /tickets/:project/:number/pages` | The ticket's pages that have a version: name, version, files, `key_count`, `data_bytes`, `read_only` and why (`design/pages.md`). A project token with read |
+| `GET /tickets/:project/:number/pages/:name/data` | The page's store: every key with its JSON value, counter, who last wrote it and when. A token read |
+| `GET`, `PUT`, `DELETE /tickets/:project/:number/pages/:name/data/:key` | One key, `:key` one encoded segment. `PUT {value, counter}` and `DELETE {counter}` **require `counter`** — the one the writer last read, or `null` for a key it expects absent — and a request that omits it is 400; 409 `changed` with the current value and counter, 409 `read_only` with the reason, 413 `limit` naming the limit and its maximum, 404 for a page or key that does not exist. `PUT` and `DELETE` need a project token with *write*, and are recorded under the token. There are no chat routes |
 | `DELETE /tickets/:project/:number/attachments/:file[/:version]` | Withdraws a person's file — every version, or one — with an optional `reason` (`design/attachments.md` § Withdrawing). A user token only; a project token is refused 403, and who may withdraw is the context's rule (the attacher or a project admin; a token's file by an admin). A withdrawn version's `…/raw` answers 410 `withdrawn` |
 | `POST /tickets/:project/:number/answers` | `{key, choice, text}` |
 | `POST /tickets/:project/:number/approve` | `{decision, comment}` |

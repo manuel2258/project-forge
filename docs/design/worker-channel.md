@@ -904,6 +904,26 @@ chat is not gated**: its `moving` field gains `jumps`, which an older worker dro
 request is made and applied by the platform, so it works unchanged. The scheduler's *Waiting for a
 newer worker image* reason and the workers page say so as they do for the other numbers.
 
+## Protocol 16 (ticket 66)
+
+Protocol 15 → 16, a breaking change: a job declares pages (`pages.md`), and a worker from before 16
+would read `form@` in a state's `produces` as a document that is missing, drop the spec's `pages`,
+refuse a chat's page directory in `out/`, and never put `FORGE_PAGES_URL` in the agent's
+environment. `Forge.Jobs.protocol_needs/1` gains `pages: 16` for **every** `:workflow` and `:chat`
+job, **not only those whose ticket has a page**, because a ticket can gain a page after a job is
+scheduled, as `attachments: 13` is for the same reason. A command needs no more than before (it
+produces no page and is told of no door), so `minimum` stays 4 and a worker at 14 or 15 still
+takes commands. A worker below 16 therefore takes no workflow job or chat; the scheduler's placement
+reasons say so (the workers page flags only a machine below 11, as § Protocol 14 says).
+
+The spec gains `pages` (per page: name, version, per file `{hash, size}`, the number of keys, read only,
+by, at — filled when the run starts and never stored, `ForgeCore.Job.Spec`). A chat's assignment gets
+an outputs prefix too, with the conversation's long-lived prefix token, so its turn can upload a
+page's files. A chat turn's report gains `pages` (the pages the turn changed) and `invalid_pages`.
+The agent's environment gains `FORGE_PAGES_URL`, the worker's own `Config.platform_url()` plus
+`/job/pages`, set in `git_env/1` for a job and a chat alike and so for both harnesses. No store call
+changes shape; a page's files are uploaded as a group's are.
+
 ## Protocol 15 (ticket 71)
 
 Protocol 14 → 15, a breaking change: **the worker queues a chat's messages**, and reports a message

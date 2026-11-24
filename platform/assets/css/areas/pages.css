@@ -1,0 +1,92 @@
+/* The pages area's styles (docs/design/ui.md § Pages). Edited only by the slice that builds that area. */
+
+/* A page an agent wrote: forge's own bar over the page's frame, outside it, so nothing the page draws
+   can cover or restyle it. The view fills the screen at every width, under the installed app's
+   safe areas, and the frame is what is left. */
+@layer components {
+  .pg {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    height: 100dvh;
+    flex-direction: column;
+    background: var(--bg);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .pg-bar {
+    position: relative;
+    z-index: var(--z-panel);
+    display: flex;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    padding: env(safe-area-inset-top) max(var(--gutter-phone), env(safe-area-inset-right)) 0 max(var(--gutter-phone), env(safe-area-inset-left));
+    font-size: 13px;
+  }
+
+  .pg-back {
+    display: inline-flex;
+    min-height: 44px;
+    min-width: 44px;
+    max-width: 40%;
+    align-items: center;
+    gap: 6px;
+    color: var(--link);
+  }
+  .pg-back-label { overflow: hidden; font-family: var(--font-mono); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* The name is text, cut with the whole of it in its `title`, as other names are. */
+  .pg-name {
+    overflow: hidden;
+    min-width: 0;
+    flex: 1 1 0%;
+    font-family: var(--font-mono);
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pg-by,
+  .pg-read-only,
+  .pg-newer { color: var(--ink-2); font-size: 12.5px; }
+  .pg-by { overflow: hidden; min-width: 0; text-overflow: ellipsis; white-space: nowrap; }
+  .pg-read-only { color: var(--warning); }
+  .pg-newer { color: var(--accent-text); text-decoration: underline; }
+
+  /* A phone's second line: who wrote it, and why it is read only. */
+  @media (max-width: 767.98px) {
+    .pg-by { order: 10; flex: 1 1 100%; padding-bottom: 6px; }
+    .pg-read-only { order: 11; flex: 1 1 100%; padding-bottom: 6px; }
+    .pg-newer { order: 12; flex: 1 1 100%; padding-bottom: 6px; }
+  }
+
+  /* Drawn by the hook: saved, saving, offline · n, refused. */
+  .pg-save { flex-shrink: 0; font-family: var(--font-mono); font-size: 12px; color: var(--ink-3); }
+  .pg-save[data-state="saving"] { color: var(--info); }
+  .pg-save[data-state="offline"] { color: var(--warning); }
+  .pg-save[data-state="refused"] { color: var(--danger); }
+
+  .pg-outside {
+    display: inline-flex;
+    min-height: 44px;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 6px;
+    background: none;
+    color: var(--ink-2);
+    font-size: 12.5px;
+    cursor: pointer;
+  }
+  .pg-outside-state { font-family: var(--font-mono); color: var(--ink-3); }
+  .pg-outside[aria-pressed="true"] .pg-outside-state { color: var(--warning); }
+  @media (max-width: 767.98px) {
+    .pg-outside-long { display: none; }
+  }
+
+  .pg-frame { display: flex; min-height: 0; flex: 1 1 0%; }
+  .pg-frame iframe { width: 100%; min-height: 0; flex: 1 1 0%; border: 0; background: Canvas; }
+}

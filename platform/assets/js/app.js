@@ -27,6 +27,7 @@ import topbar from "../vendor/topbar"
 import {PushSubscribe, registerServiceWorker} from "./push"
 import {Connection, listen, reconnectAfterMs, rejoinAfterMs} from "./connection"
 import {guard} from "./moved_guard"
+import {PageFrame} from "./page_frame"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 // The look a connected render of a ticket's page drew (`ForgeWeb.TicketLive`); none elsewhere.
@@ -58,7 +59,7 @@ const liveSocket = new LiveSocket("/live", Socket, {
   // opened with, so the rejoin records none (`docs/design/ui.md` § The end of the pass, and
   // *All*).
   params: () => ({_csrf_token: csrfToken, ...ticketLook(), ...streamReach()}),
-  hooks: {...colocatedHooks, PushSubscribe, Connection},
+  hooks: {...colocatedHooks, PushSubscribe, Connection, PageFrame},
   // Given rather than Phoenix's own, so the top bar can count down to the next try.
   reconnectAfterMs,
   rejoinAfterMs,

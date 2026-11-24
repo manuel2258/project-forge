@@ -41,6 +41,25 @@ defmodule Forge.JobsResultTest do
            }
   end
 
+  test "a run that declared a page and lost its index.html ends in error, not converged" do
+    ticket = ticket_fixture()
+
+    job =
+      job_fixture(%{ticket: ticket, status: :running, spec: %{"produces" => ["form@"]}})
+
+    {:ok, _job} =
+      Jobs.complete(job.id, %Result{
+        status: :finished,
+        outcome: :converged,
+        declared_outcome: "done",
+        blobs: %{"form/app.js" => %{"hash" => String.duplicate("ab", 32)}}
+      })
+
+    assert [event] = Enum.filter(Events.for_job(job.id), &(&1.type == "job.finished"))
+    assert event.payload["outcome"] == "error"
+    assert event.payload["reason"] =~ "index.html"
+  end
+
   # What arrives over the channel has already been through `Result.to_map/1`, which renders the
   # errors as text; the payload keeps it as it came.
   test "errors that arrived as text are kept as they came" do

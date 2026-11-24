@@ -85,8 +85,8 @@ the platform's decision.
 the job assignment (`docs/design/worker-channel.md`), and calls `GET`/`PUT /store/:key`.
 
 The token is `Phoenix.Token.sign/4` over the endpoint's `secret_key_base`, with
-`%{key: key, op: :get | :put}` and a `max_age` from config (default 15 minutes). It is the only
-`Phoenix.Token` in the codebase. The per-job git token was expected to be the second and is not:
+`%{key: key, op: :get | :put}` and a `max_age` from config (default 15 minutes). **It is one of two
+`Phoenix.Token`s in the codebase**; the other is the page-file path token below. The per-job git token was expected to be the second and is not:
 it is 32 random bytes stored as a sha256 hash in `git_tokens`, with the mechanics of
 `Forge.Accounts.UserToken`. It is revoked when its job ends and its rows are the audit trail, and a
 signed token offers neither (`docs/design/git-hosting.md` § The per-job token).
@@ -141,6 +141,20 @@ attachment would make a cost per download. A `put`'s temporary file is removed o
 not by a store token, and it reads through `Forge.Artifacts.served/2` like the operator's route
 does, so a large file is fetched from the store into a temporary file and sent, and removed after.
 It lists a version by its id, never by a store key: a key never leaves the platform on this door.
+
+**A page's files are a fourth door** (`pages.md`): `/page-files/:token/:file`, which the sandboxed
+frame of a page loads its own script, images and video from. The frame's document has an opaque origin
+and the session cookie is `SameSite=Lax`, so the browser sends no session on its requests; the path
+carries a `Phoenix.Token` (salt `"forge page"`, 24 hours) over the viewer and the page version
+instead. **This is the one token that travels in a path and not in a header** (§ The token is a
+header), and the reason is that a page's relative references (`app.js`, `clip.webm`) can only
+inherit a path, never a header. What keeps that safe: `PageFileController` checks the viewer's reach
+to the page again on every request, so a member removed loses the files at once (the 24 hours only
+bounds a leaked path); every response is `Referrer-Policy: no-referrer`, so the path never leaves in
+a `Referer`; and no response sets a cookie. It reads through `Forge.Artifacts.served/2` as the
+others do, and answers `Range` with `206` and `Accept-Ranges` through `Forge.Storage.read_range/3`,
+a range capped at 8 MiB a response — **the only door of the platform that is seekable**.
+The reserved name `forge-page.js` is served from the platform's own library and never from a blob.
 
 ## The local implementation
 
@@ -283,7 +297,8 @@ was recorded has none, and says so.
 
 ## The token is a header
 
-A store token goes in `Authorization: Bearer <token>`, never in the query string, for the reason
+A store token goes in `Authorization: Bearer <token>`, never in the query string (a page-file path
+token is the one exception, above), for the reason
 `docs/design/worker-channel.md` § Authentication gives at greater length: a URL is recorded by
 every proxy and access log on the path, and a request header is not.
 

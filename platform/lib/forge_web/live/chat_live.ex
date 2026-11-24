@@ -378,9 +378,21 @@ defmodule ForgeWeb.ChatLive do
 
   defp docs(chat, project, ticket) do
     approvable = approvable(ticket)
+    where = %{project: project, ticket: ticket, chat: chat}
+    pages = ForgeWeb.PageViews.names(ForgeWeb.PageViews.scope(where))
 
+    # A page is one row (`ForgeWeb.PageViews`): a project chat's own, or, in a ticket chat, those
+    # whose latest version this conversation wrote — as for a document. Its files are no rows.
+    ForgeWeb.PageViews.docs(where, %{}, if(ticket, do: chat.id)) ++
+      files_written(chat, project, ticket, approvable, pages)
+  end
+
+  defp files_written(chat, project, ticket, approvable, pages) do
     chat.id
     |> Artifacts.written_by()
+    |> Enum.reject(fn {artifact, _version} ->
+      ForgeWeb.PageViews.member?(pages, artifact.name)
+    end)
     |> Enum.chunk_by(fn {artifact, _version} -> artifact.id end)
     |> Enum.map(fn [{artifact, _} | _] = written ->
       WorkScreen.doc(

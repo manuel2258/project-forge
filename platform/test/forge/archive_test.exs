@@ -586,4 +586,64 @@ defmodule Forge.ArchiveTest do
       assert Archive.record_read(other_job, v1, facts) == :recorded
     end
   end
+
+  describe "a page's data" do
+    test "is one inline file beside the page's files, values only, as it is now",
+         %{project: project, ticket: ticket} do
+      {page, _version} =
+        ForgeWeb.PageDoorFixtures.published!({:ticket, ticket.id}, "form", %{
+          "index.html" => "<p>x</p>",
+          "app.js" => "1"
+        })
+
+      writer = {:user, Ecto.UUID.generate()}
+      {:ok, _} = Forge.Pages.put(page, "name", %{"first" => "Ada"}, writer)
+      {:ok, _} = Forge.Pages.put(page, "gone", 1, writer)
+      {:ok, _} = Forge.Pages.delete(page, "gone", writer)
+
+      {:ok, %{"files" => files}} = Archive.ticket(project, "1")
+      assert "form/index.html" in Enum.map(files, & &1["path"])
+
+      assert %{"inline" => json, "ref" => nil} =
+               Enum.find(files, &(&1["path"] == "form@data.json"))
+
+      assert Jason.decode!(json) == %{
+               "page" => "form",
+               "version" => 1,
+               "files" => ["app.js", "index.html"],
+               "keys" => %{"name" => %{"first" => "Ada"}}
+             }
+
+      # Values only: not who wrote them, not the counter.
+      {_user, id} = writer
+      refute json =~ id
+      refute json =~ "counter"
+
+      # Live, not pinned: the next listing has the next value.
+      {:ok, _} = Forge.Pages.put(page, "name", "changed", writer)
+      {:ok, %{"files" => later}} = Archive.ticket(project, "1")
+      %{"inline" => json} = Enum.find(later, &(&1["path"] == "form@data.json"))
+      assert Jason.decode!(json)["keys"] == %{"name" => "changed"}
+    end
+
+    test "is listed only for a page that has a version, and only the ticket's own",
+         %{project: project, ticket: ticket} do
+      {:ok, store_only} = Forge.Pages.ensure({:ticket, ticket.id}, "seeded")
+      {:ok, _} = Forge.Pages.put(store_only, "k", 1, {:user, Ecto.UUID.generate()})
+
+      other = ticket_fixture(%{project: project, number: 2})
+      ForgeWeb.PageDoorFixtures.published!({:ticket, other.id}, "theirs")
+
+      assert paths(Archive.ticket(project, 1)) == ["jobs.tsv"]
+      assert "theirs@data.json" in paths(Archive.ticket(project, 2))
+    end
+
+    test "a project chat's page is not in the archive", %{project: project} do
+      chat = chat_fixture(%{project: project})
+      ForgeWeb.PageDoorFixtures.published!({:chat, chat.id}, "notes")
+
+      refute Enum.any?(paths(Archive.ticket(project, 1)), &String.contains?(&1, "notes"))
+      refute Enum.any?(Archive.root(project)["files"], &String.contains?(&1["path"], "notes"))
+    end
+  end
 end

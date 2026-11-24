@@ -59,6 +59,8 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/chats" => :member,
     "/chats/new" => :member,
     "/chats/:id" => :member,
+    "/chats/:id/pages/:name" => :member,
+    "/tickets/:project/:number/pages/:name" => :member,
     "/chats/:id/artifacts/:name/:version" => :member,
     "/projects/:name/uploads" => :member,
     "/projects/:name/uploads/:id" => :member,
@@ -110,6 +112,11 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/api/v1/tickets/:project/:number/artifacts" => :member,
     "/api/v1/tickets/:project/:number/artifacts/:name" => :member,
     "/api/v1/tickets/:project/:number/artifacts/:name/:version/raw" => :member,
+    # A page's live store: `Forge.Pages` asks the same reach of a person and a token, and a write
+    # asks `:use` again through `Forge.Operator.write_page/5` (`docs/design/pages.md`).
+    "/api/v1/tickets/:project/:number/pages" => :member,
+    "/api/v1/tickets/:project/:number/pages/:name/data" => :member,
+    "/api/v1/tickets/:project/:number/pages/:name/data/:key" => :member,
     "/api/v1/tickets/:project/:number/answers" => :member,
     "/api/v1/tickets/:project/:number/approve" => :member,
     "/api/v1/tickets/:project/:number/transition" => :member,
@@ -152,6 +159,13 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/archive" => :token,
     "/archive/tickets/:number" => :token,
     "/archive/tickets/:number/:ref" => :token,
+    # The job's own git token, scoped by its job row: its ticket's pages, or its own chat's.
+    "/job/pages" => :token,
+    "/job/pages/:name/data" => :token,
+    "/job/pages/:name/data/:key" => :token,
+    # A signed path over the viewer and the page version, no session; membership is asked again on
+    # every request (`ForgeWeb.PageFileController`).
+    "/page-files/:token/:file" => :token,
     "/git" => :token
   }
 
@@ -177,6 +191,11 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"accounts_live.ex", "promote"} => :node_admin,
     {"accounts_live.ex", "demote"} => :node_admin,
     {"accounts_live.ex", "delete"} => :node_admin,
+    {"page_live.ex", "outside"} => :member,
+    {"page_live.ex", "page:all"} => :member,
+    {"page_live.ex", "page:batch"} => :member,
+    {"page_live.ex", "page:get"} => :member,
+    {"page_live.ex", "page:hello"} => :member,
     {"chat_live.ex", "send"} => :member,
     # The question form's draft is the page's alone; its Send goes through
     # `Operator.answer_chat/4`, which resolves the chat off the wire and checks membership.

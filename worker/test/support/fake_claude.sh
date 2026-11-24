@@ -251,6 +251,30 @@ case "${FAKE_SCENARIO:-success}" in
           ;;
       esac
 
+      # A conversation writing a page: a folder of `out/` with an `index.html`. `PAGEEDIT` changes
+      # one file of it, `PAGELIB` adds the name the platform reserves, `PAGEGONE` removes a file
+      # and `BADPAGE` leaves a folder that is not a page.
+      case "$text" in
+        *PAGEEDIT*)
+          printf 'edited();\n' > "$out/form/app.js"
+          ;;
+        *PAGELIB*)
+          printf 'evil();\n' > "$out/form/forge-page.js"
+          ;;
+        *PAGEGONE*)
+          rm -f "$out/form/app.js"
+          ;;
+        *BADPAGE*)
+          mkdir -p "$out/draft"
+          printf 'no entry\n' > "$out/draft/notes.txt"
+          ;;
+        *PAGE*)
+          mkdir -p "$out/form"
+          printf '<p>the form</p>\n' > "$out/form/index.html"
+          printf 'start();\n' > "$out/form/app.js"
+          ;;
+      esac
+
       # A conversation filing a ticket. Written once and left there, because `out/` is not
       # cleared between turns — which is the case the platform's record-by-content rule is for.
       case "$text" in

@@ -51,6 +51,21 @@ defmodule ForgeWeb.FileTypeTest do
     end
   end
 
+  # A page is told by the record that says so: its entry's kind, never a member file's extension,
+  # so `form` — or one named `form.json` — is a page and not code.
+  describe "a page" do
+    test "is its own type whatever its name says" do
+      assert type("form", :page) == :page
+      assert type("report.json", :page) == :page
+      assert FileType.glyph(:page) == "pg"
+      assert FileType.label(:page) == "page"
+    end
+
+    test "its member files, being blobs, are drawn as the files they are" do
+      assert type("form/index.html", :blob) == :code
+    end
+  end
+
   describe "download_type/1" do
     test "an Android app is its own type, so a phone hands it to the installer" do
       assert FileType.download_type("package/app.apk") ==

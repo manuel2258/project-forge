@@ -302,6 +302,10 @@ defmodule ForgeWeb.QueueLive do
       looked: looked,
       since: Views.events_since(ticket.id, looked, @since),
       documents: documents(ticket, artifacts),
+      # The ticket's pages, and the one its human state asks to be opened, if any
+      # (`docs/design/ui.md` § The queue).
+      pages: ForgeWeb.PageViews.links(page_where(project, ticket)),
+      opens: opens(project, ticket, workflow),
       presented: presented?(ticket, artifacts),
       past: past,
       loops: Past.loops(ticket, workflow)
@@ -342,6 +346,22 @@ defmodule ForgeWeb.QueueLive do
   end
 
   defp said_ago(at, now), do: Format.ago_phrase(at, now)
+
+  defp page_where(project, ticket), do: %{project: project, ticket: ticket, chat: nil}
+
+  # What a human state names to open while the ticket rests in it: a link when the page has a
+  # version, and `href: nil` — drawn as *no version yet* — when it has none.
+  defp opens(project, ticket, %Workflow{} = workflow) do
+    case Workflow.state(workflow, ticket.state) do
+      %{opens: name} when is_binary(name) ->
+        ForgeWeb.PageViews.opens(page_where(project, ticket), name)
+
+      _no_page ->
+        nil
+    end
+  end
+
+  defp opens(_project, _ticket, nil), do: nil
 
   defp documents(ticket, artifacts) do
     for artifact <- artifacts,
@@ -906,10 +926,19 @@ defmodule ForgeWeb.QueueLive do
       </ol>
     </section>
 
-    <section :if={(@detail[:documents] || []) != []} class="queue-docs">
+    <section
+      :if={(@detail[:documents] || []) != [] or (@detail[:pages] || []) != []}
+      class="queue-docs"
+    >
       <.eyebrow>Documents</.eyebrow>
+      <%!-- A page opens on a screen of its own, so it is a full page load and not a patch. --%>
+      <.link :for={page <- @detail[:pages] || []} href={page.href} class="queue-doc">
+        <span class="queue-doc-name">{page.name}</span>
+        <span class="queue-doc-version">v{page.version}</span>
+        <span class="queue-doc-read">Open ›</span>
+      </.link>
       <.link
-        :for={doc <- @detail.documents}
+        :for={doc <- @detail[:documents] || []}
         navigate={
           ~p"/tickets/#{@item.project}/#{@item.ticket.number}/artifacts/#{doc.name}/#{doc.version}"
         }
@@ -1460,6 +1489,27 @@ defmodule ForgeWeb.QueueLive do
     ~H"""
     <Actions.refused id="queue-refusal" refusal={@refusal} at={~w(retry extend transition)} />
     <div id="queue-dock" class="queue-dock">
+      <%!-- A link to the page a human state asks to be opened, first and never a decision
+            (`docs/design/ui.md` § The queue). --%>
+      <.button
+        :if={@detail[:opens] && @detail.opens.href}
+        id="queue-open-page"
+        variant="outline"
+        fill
+        chevron
+        href={@detail.opens.href}
+      >
+        Open {@detail.opens.name}
+      </.button>
+      <.button
+        :if={@detail[:opens] && !@detail.opens.href}
+        id="queue-open-page"
+        variant="outline"
+        fill
+        disabled
+      >
+        Open {@detail.opens.name} · no version yet
+      </.button>
       <.later />
       <%!-- Never decided here: an approval is the decision row on its ticket, beside what it
             approves (`docs/design/ui.md` § The decision row) — and so is a way forward that
@@ -1483,6 +1533,16 @@ defmodule ForgeWeb.QueueLive do
         navigate={link.href}
       >
         {link.label}
+      </.button>
+      <.button
+        :for={{page, index} <- Enum.with_index(other_pages(@detail))}
+        id={"queue-page-#{index}"}
+        variant="outline"
+        fill
+        chevron
+        href={page.href}
+      >
+        Open {page.name}
       </.button>
       <.button
         :if={@offered != []}
@@ -1539,6 +1599,12 @@ defmodule ForgeWeb.QueueLive do
       </.button>
     </div>
     """
+  end
+
+  # The ticket's pages but the one its state asks to be opened, which leads the dock.
+  defp other_pages(detail) do
+    opened = detail[:opens] && detail.opens.name
+    for page <- detail[:pages] || [], page.name != opened, do: page
   end
 
   defp later(assigns) do

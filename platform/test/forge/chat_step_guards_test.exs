@@ -55,9 +55,36 @@ defmodule Forge.ChatStepGuardsTest do
                         "approve: [notes.md, refinement.md, extras.md]"
                       )
 
+  # The step also declares a page, which is required as a document is unless it is optional.
+  @paged String.replace(
+           @workflow,
+           "produces: [notes.md, extras.md]",
+           "produces: [notes.md, extras.md, form@]"
+         )
+  @paged_optional String.replace(@paged, "optional: [extras.md]", "optional: [extras.md, form]")
+
+  # The same, with a command that produces a log and a group of files, whose names a chat's page
+  # may not take.
+  @commanded String.replace(
+               @workflow,
+               "states:\n",
+               """
+               commands:
+                 build:
+                   run: .forge/commands/build.sh
+                   produces: [build.log, package/*]
+                   timeout: 5m
+               states:
+               """,
+               global: false
+             )
+
   setup context do
     workflow =
       cond do
+        context[:commanded] -> @commanded
+        context[:paged] -> @paged
+        context[:paged_optional] -> @paged_optional
         context[:looping] -> @looping
         context[:approves_optional] -> @approving_optional
         true -> @workflow
@@ -68,7 +95,11 @@ defmodule Forge.ChatStepGuardsTest do
     {:ok, project} =
       register_owned!(%{
         name: "guards-#{System.unique_integer([:positive])}",
-        repo_path: seeded_repo(%{".forge/workflow.yml" => workflow})
+        repo_path:
+          seeded_repo(%{
+            ".forge/workflow.yml" => workflow,
+            ".forge/commands/build.sh" => "#!/bin/sh\nexec make\n"
+          })
       })
 
     user = member_fixture(project)
@@ -109,12 +140,19 @@ defmodule Forge.ChatStepGuardsTest do
     do: Operator.accept_step(Repo.get!(Job, chat.id), user, outcome, seen)
 
   # A chat that has answered once, and the earlier state's document its edge approves.
-  defp ready(%{ticket: ticket, chat: chat}, documents \\ %{"notes.md" => "# Notes\n"}) do
+  defp ready(
+         %{ticket: ticket, chat: chat},
+         documents \\ %{"notes.md" => "# Notes\n"},
+         pages \\ %{}
+       ) do
     write!(ticket, "refinement.md", "# Refinement\n")
     run!(chat)
-    {:ok, chat} = Conversations.record_turn(chat, turn(1, documents))
+    {:ok, chat} = Conversations.record_turn(chat, Map.put(turn(1, documents), "pages", pages))
     chat
   end
+
+  # What a worker reports for a page it found in `out/`: refused before any file is read.
+  defp page_files, do: %{"index.html" => %{"hash" => String.duplicate("a", 64)}}
 
   test "a step with no outcomes: is accepted as `done`", context do
     %{ticket: ticket, user: user} = context
@@ -151,6 +189,67 @@ defmodule Forge.ChatStepGuardsTest do
 
     assert {:error, {:no_version, ["extras.md"]}} = accept(chat, user, "done", drawn)
     assert Tickets.get!(ticket.id).state == "scoping"
+  end
+
+  @tag paged: true
+  test "a page the step declares must have a version before Accept", context do
+    %{ticket: ticket, user: user} = context
+    chat = ready(context)
+    drawn = seen(ticket, ["notes.md", "refinement.md"])
+    view = Steps.view(Tickets.get!(ticket.id), Repo.get!(Job, chat.id))
+
+    assert view.missing == ["form@"]
+    refute view.ready
+    assert {:error, {:no_version, ["form@"]} = refusal} = accept(chat, user, "done", drawn)
+    assert Steps.refusal(refusal) =~ ~s("form@")
+    assert Tickets.get!(ticket.id).state == "scoping"
+
+    ForgeWeb.PageDoorFixtures.published!({:ticket, ticket.id}, "form")
+    assert Steps.view(Tickets.get!(ticket.id), Repo.get!(Job, chat.id)).ready
+    assert {:ok, %{state: "finished"}} = accept(chat, user, "done", drawn)
+  end
+
+  @tag paged_optional: true
+  test "an optional page nobody wrote does not stop Accept", context do
+    %{ticket: ticket, user: user} = context
+    chat = ready(context)
+
+    assert {:ok, _} = accept(chat, user, "done", seen(ticket, ["notes.md", "refinement.md"]))
+  end
+
+  @tag paged: true
+  test "a chat may publish a page the workflow declares", context do
+    chat = ready(context, %{"notes.md" => "# Notes\n"}, %{"form" => page_files()})
+
+    refute Map.has_key?(Conversations.unrecorded(chat.id), "form")
+  end
+
+  describe "a chat's page and a document may not share a name" do
+    @tag commanded: true
+    test "a page cannot take the name of a command's log or group of files", context do
+      pages = %{"package" => page_files(), "build.log" => page_files()}
+      chat = ready(context, %{"notes.md" => "# Notes\n"}, pages)
+
+      refused = Conversations.unrecorded(chat.id)
+      assert refused["package"] =~ "group of files"
+      assert refused["build.log"] =~ "command log"
+    end
+
+    @tag paged: true
+    test "a document cannot take the name of a page the workflow declares", context do
+      chat = ready(context, %{"notes.md" => "# Notes\n", "form" => "# Form\n"})
+
+      assert Conversations.unrecorded(chat.id)["form"] =~ "is a page here, not a document"
+      assert Artifacts.latest(context.ticket.id, "form") == nil
+    end
+
+    test "a document cannot take the name of a page the ticket already holds", context do
+      ForgeWeb.PageDoorFixtures.published!({:ticket, context.ticket.id}, "gallery")
+      chat = ready(context, %{"notes.md" => "# Notes\n", "gallery" => "# Gallery\n"})
+
+      assert Conversations.unrecorded(chat.id)["gallery"] =~ "is a page here, not a document"
+      assert Artifacts.latest(context.ticket.id, "gallery") == nil
+    end
   end
 
   test "a plain member may press it", %{project: project, ticket: ticket} = context do

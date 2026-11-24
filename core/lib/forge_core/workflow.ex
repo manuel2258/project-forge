@@ -301,9 +301,30 @@ defmodule ForgeCore.Workflow do
     end
   end
 
-  @doc "Whether an artifact name denotes a document: not the changeset, and not a group of files."
+  @doc """
+  Whether an artifact name denotes a document: not the changeset, not a group of files and not a
+  page.
+  """
   @spec document?(artifact_name()) :: boolean()
-  def document?(name), do: name != @changeset and not group?(name)
+  def document?(name), do: name != @changeset and not group?(name) and not page?(name)
+
+  @doc """
+  Whether a `produces` entry is a page, `name@` (`docs/design/pages.md`): a directory of files a
+  job writes into `out/<name>/`, `index.html` its entry, each kept as a blob, and a store of its
+  own that outlives every version. `@` is never valid in an artifact's name, so the marker cannot
+  be part of one.
+  """
+  @spec page?(artifact_name()) :: boolean()
+  def page?(name), do: is_binary(name) and String.ends_with?(name, "@")
+
+  @doc "The directory a page's files are written to and the name its store is kept under: the declaration less its `@`."
+  @spec page_name(artifact_name()) :: String.t()
+  def page_name(name), do: String.replace_suffix(name, "@", "")
+
+  @doc "The pages among `produces`, by name, in the order declared."
+  @spec page_names([artifact_name()]) :: [String.t()]
+  def page_names(produces) when is_list(produces),
+    do: for(name <- produces, page?(name), do: page_name(name))
 
   @doc """
   Whether a `produces` entry is a group of files, `name/*` (`docs/design/workflow-grammar-v1.md`
@@ -334,15 +355,16 @@ defmodule ForgeCore.Workflow do
   For callers that hold an entry without knowing which kind it is. A caller that already knows it
   has a group calls `group_name/1`, which says so at the call site.
 
-  The order of the two branches is an equivalent mutant: `/*` and `!` cannot both end one name —
-  the validator refuses `x!/*` and `x/*!` because neither strips to an artifact name — so no test
-  can tell them apart, and none should be written that claims to.
+  The order of the branches is an equivalent mutant: `/*`, `!` and `@` cannot end one name
+  together — the validator refuses `x!/*`, `x/*!` and `x@!` because none strips to an artifact
+  name — so no test can tell them apart, and none should be written that claims to.
   """
   @spec produced_name(artifact_name()) :: String.t()
   def produced_name(name) do
     cond do
       group?(name) -> group_name(name)
       presentation?(name) -> presentation_name(name)
+      page?(name) -> page_name(name)
       true -> name
     end
   end

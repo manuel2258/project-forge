@@ -1277,8 +1277,12 @@ defmodule ForgeWorker.Link do
   # and credential the worker uses. Marked secret, which is what keeps it out of argv, out of the
   # runner's state and out of the unit's properties: it reaches the process through the file the
   # process loads itself (`ForgeWorker.Job.Exec`).
+  # The pages' door (`docs/design/pages.md`) answers to the same token as the git URL, so it is
+  # named exactly when that is, and the same for either harness: the environment is the worker's.
   defp git_env(%{"git" => %{"url" => url, "token" => token}}) when is_binary(token),
-    do: [{"FORGE_GIT_URL", url}, {"FORGE_GIT_TOKEN", {:secret, token}}]
+    do:
+      [{"FORGE_GIT_URL", url}, {"FORGE_GIT_TOKEN", {:secret, token}}] ++
+        if(Config.pages_url(), do: [{"FORGE_PAGES_URL", Config.pages_url()}], else: [])
 
   defp git_env(_assignment), do: []
 

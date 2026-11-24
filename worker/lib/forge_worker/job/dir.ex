@@ -35,6 +35,10 @@ defmodule ForgeWorker.Job.Dir do
 
   require Logger
 
+  # A page's entry, and the one name a page's file may not take (`docs/design/pages.md`).
+  @page_entry "index.html"
+  @page_library "forge-page.js"
+
   @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/i
 
   @doc """
@@ -757,6 +761,7 @@ defmodule ForgeWorker.Job.Dir do
     declared = Spec.document_outputs(spec)
     reserved = Workflow.proposals_dir()
     groups = Spec.group_outputs(spec)
+    pages = Spec.page_outputs(spec)
     written = out |> list_dir() |> Enum.sort()
 
     parsed =
@@ -769,12 +774,67 @@ defmodule ForgeWorker.Job.Dir do
     %{
       documents: for({name, {:ok, doc}} <- parsed, into: %{}, do: {name, doc}),
       invalid: for({name, {:error, errors}} <- parsed, into: %{}, do: {name, errors}),
-      missing: declared -- written,
-      # A declared group's directory is declared, and its files are `stage_groups/4`'s to read.
-      undeclared: (written -- declared) -- [reserved | groups],
+      # A declared page is missing without its entry, `index.html` (`docs/design/pages.md`); the
+      # job's `optional` is what excuses it, decided where a missing document's is.
+      missing: (declared -- written) ++ Enum.reject(pages, &page_entry?(out, &1)),
+      # A declared group's or page's directory is declared, and its files are `stage_groups/4`'s
+      # to read.
+      undeclared: (written -- declared) -- [reserved | groups ++ pages],
       proposals: for({name, {:ok, p}} <- proposals, into: %{}, do: {name, p}),
       invalid_proposals: for({name, {:error, why}} <- proposals, into: %{}, do: {name, why})
     }
+  end
+
+  # A page has an entry when `out/<page>/` is a real directory — not a link to one — holding a
+  # regular `index.html`. Whose file it is and how big is `stage_groups/4`'s to say, as for any
+  # other file of a group; a page whose entry is refused there is refused whole (`Blobs.stage/4`).
+  @doc false
+  @spec page_entry?(String.t(), String.t()) :: boolean()
+  def page_entry?(out, page) do
+    match?({:ok, %File.Stat{type: :directory}}, File.lstat(Path.join(out, page))) and
+      match?(
+        {:ok, %File.Stat{type: :regular}},
+        File.lstat(Path.join([out, page, @page_entry]))
+      )
+  end
+
+  @doc """
+  What a conversation's turn left in `out/` that is a page: every folder holding an `index.html`
+  is one, and any other folder (a page without its entry, a name that is not a page name) is
+  refused with why. Documents are the files, so folders are neither (`documents/1`).
+  `out/proposals/` is the proposals' and is left alone.
+  """
+  @spec chat_pages(String.t()) :: %{pages: [String.t()], invalid: %{String.t() => String.t()}}
+  def chat_pages(job_dir) do
+    out = Path.join(job_dir, "out")
+
+    out
+    |> folders()
+    |> Enum.reduce(%{pages: [], invalid: %{}}, fn name, acc ->
+      cond do
+        Workflow.document_name_error(name) != nil ->
+          %{acc | invalid: Map.put(acc.invalid, name, Workflow.document_name_error(name))}
+
+        not page_entry?(out, name) ->
+          %{
+            acc
+            | invalid:
+                Map.put(acc.invalid, name, "is a folder without an #{@page_entry}, so not a page")
+          }
+
+        true ->
+          %{acc | pages: acc.pages ++ [name]}
+      end
+    end)
+  end
+
+  # The real folders of `out/`, sorted, `proposals/` excepted. A link to a folder is not one.
+  defp folders(out) do
+    out
+    |> list_dir()
+    |> Kernel.--([Workflow.proposals_dir()])
+    |> Enum.filter(&match?({:ok, %File.Stat{type: :directory}}, File.lstat(Path.join(out, &1))))
+    |> Enum.sort()
   end
 
   @doc """
@@ -786,6 +846,11 @@ defmodule ForgeWorker.Job.Dir do
   *handle's* stat decides — a regular file the job owns, no larger than `:max_bytes` — and the
   copy is made through that handle, so what is uploaded is what was checked. A group's count is
   capped at `:max_files`; a name that is not an artifact name is refused, not rewritten.
+
+  `:pages`, the names among `groups` that are pages, adds the one name a page's file may not have:
+  `forge-page.js` is the platform's library and is served in its place (`docs/design/pages.md`).
+  Staged the same way and under the same limits otherwise, so a page and a group of one run count
+  from the one `staging` without a collision.
   """
   @spec stage_groups(String.t(), [String.t()], String.t(), keyword()) :: %{
           staged: [{String.t(), String.t()}],
@@ -796,7 +861,8 @@ defmodule ForgeWorker.Job.Dir do
 
     limits = %{
       max_bytes: Keyword.fetch!(opts, :max_bytes),
-      max_files: Keyword.fetch!(opts, :max_files)
+      max_files: Keyword.fetch!(opts, :max_files),
+      pages: Keyword.get(opts, :pages, [])
     }
 
     groups
@@ -833,6 +899,13 @@ defmodule ForgeWorker.Job.Dir do
           acc,
           name,
           "is not a name: letters, digits, . _ -, starting with one of the first two"
+        )
+
+      file == @page_library and group in limits.pages ->
+        refuse(
+          acc,
+          name,
+          "is the platform's own library; it is served in place of a file of that name"
         )
 
       index >= limits.max_files ->
@@ -975,6 +1048,8 @@ defmodule ForgeWorker.Job.Dir do
       out
       |> list_dir()
       |> Kernel.--([Workflow.proposals_dir()])
+      # A real folder is a page's or an invalid page's (`chat_pages/1`), never a document.
+      |> Kernel.--(folders(out))
       |> Map.new(&{&1, read_output(out, &1, owner)})
 
     %{

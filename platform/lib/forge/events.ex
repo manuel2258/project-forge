@@ -715,6 +715,22 @@ defmodule Forge.Events do
     bounded("withdrew #{p["name"]} #{versions}" <> note(p["reason"], bound), 200, bound)
   end
 
+  # Pages (`docs/design/pages.md` § Recording a publish): a new version, the burst of a writer's changes to a
+  # page's data — how many and never which values — and a person's toggle of outside access.
+  # Names are text here as everywhere; the page's keys are in the payload and not in the words.
+  defp describe(%Event{type: "page.published", payload: p}, bound) do
+    files = p["files"] || 0
+    bounded("published page #{p["page"]} v#{p["version"]} (#{count(files, "file")})", 200, bound)
+  end
+
+  defp describe(%Event{type: "page.data_changed", payload: p}, bound),
+    do: bounded("made #{count(p["changes"] || 0, "change")} to page #{p["page"]}", 200, bound)
+
+  defp describe(%Event{type: "page.outside_access", payload: p}, bound) do
+    state = if p["on"] == true, do: "on", else: "off"
+    bounded("switched outside addresses #{state} for page #{p["page"]}", 200, bound)
+  end
+
   # A day's deletion of LFS objects nothing uses (`docs/design/git-hosting.md` § Git LFS): how many
   # and how many bytes, never which.
   defp describe(

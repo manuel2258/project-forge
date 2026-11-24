@@ -18,6 +18,7 @@ defmodule ForgeCore.Workflow.Validator do
       initial(workflow),
       state_shapes(workflow),
       optional_outputs(workflow),
+      opens_pages(workflow),
       entry_actions(workflow),
       conflict_targets(workflow),
       queueing_edges(workflow),
@@ -298,7 +299,7 @@ defmodule ForgeCore.Workflow.Validator do
           Error.new(
             Error.join(path, "produces"),
             "a human state writes documents, not #{Workflow.changeset_artifact()}, " <>
-              "groups of files or presentations"
+              "groups of files, presentations or pages"
           )
         ],
         else: []
@@ -418,10 +419,10 @@ defmodule ForgeCore.Workflow.Validator do
             ]
 
           Workflow.group?(entry) ->
-            [Error.new(at, "a chat step writes documents, not a group of files")]
+            [Error.new(at, "a chat step writes documents and pages, not a group of files")]
 
           Workflow.presentation?(entry) ->
-            [Error.new(at, "a chat step writes documents, not a presentation")]
+            [Error.new(at, "a chat step writes documents and pages, not a presentation")]
 
           true ->
             []
@@ -789,12 +790,22 @@ defmodule ForgeCore.Workflow.Validator do
   defp presents?(workflow, name),
     do: Workflow.presentation?(name) or Workflow.producers(workflow, name <> "!") != []
 
+  # A group is not an input yet; a page's store is read live and pinned to nothing, so there is no
+  # version of it to hand a job (`docs/design/pages.md`).
+  defp unpinned_input_refusal(name) do
+    cond do
+      Workflow.group?(name) -> "a group of files is not an input yet"
+      Workflow.page?(name) -> "a page is not an input: its store is read live"
+      true -> nil
+    end
+  end
+
   defp input_error(workflow, producers_before, path, name, index) do
     producers = Workflow.producers(workflow, name)
 
     cond do
-      Workflow.group?(name) ->
-        Error.new(Error.join(path, index), "a group of files is not an input yet")
+      refusal = unpinned_input_refusal(name) ->
+        Error.new(Error.join(path, index), refusal)
 
       name == Workflow.answers_artifact() ->
         Error.new(Error.join(path, index), "answers.md is platform-managed and never declared")
@@ -863,6 +874,20 @@ defmodule ForgeCore.Workflow.Validator do
     end
   end
 
+  # The error of a name that is a group, a presentation or a page, which each have rules of their
+  # own (`own_rules?/1`); nil when it is declared correctly.
+  defp kind_error(workflow, path, name, producers) do
+    cond do
+      Workflow.group?(name) -> group_error(workflow, path, name, producers)
+      Workflow.presentation?(name) -> presentation_error(workflow, path, name, producers)
+      Workflow.page?(name) -> page_error(workflow, path, name, producers)
+      true -> nil
+    end
+  end
+
+  defp own_rules?(name),
+    do: Workflow.group?(name) or Workflow.presentation?(name) or Workflow.page?(name)
+
   defp produce_error(workflow, path, name, index) do
     producers = Workflow.producers(workflow, name)
 
@@ -872,11 +897,8 @@ defmodule ForgeCore.Workflow.Validator do
       marked = commit_message_kind_error(Error.join(path, index), name) ->
         marked
 
-      Workflow.group?(name) ->
-        group_error(workflow, Error.join(path, index), name, producers)
-
-      Workflow.presentation?(name) ->
-        presentation_error(workflow, Error.join(path, index), name, producers)
+      own_rules?(name) ->
+        kind_error(workflow, Error.join(path, index), name, producers)
 
       name in [Workflow.ticket_artifact(), Workflow.answers_artifact()] ->
         Error.new(Error.join(path, index), "#{inspect(name)} is reserved and cannot be produced")
@@ -910,6 +932,9 @@ defmodule ForgeCore.Workflow.Validator do
 
       Workflow.producers(workflow, name) != [] ->
         Error.new(path, "#{inspect(name)} is also produced as a document")
+
+      Workflow.producers(workflow, name <> "@") != [] ->
+        Error.new(path, "#{inspect(name)} is also produced as a page")
 
       length(producers) > 1 ->
         Error.new(
@@ -948,6 +973,46 @@ defmodule ForgeCore.Workflow.Validator do
       Workflow.producers(workflow, name <> "/*") != [] ->
         Error.new(path, "#{inspect(name)} is also produced as a group of files")
 
+      Workflow.producers(workflow, name <> "@") != [] ->
+        Error.new(path, "#{inspect(name)} is also produced as a page")
+
+      command_producing(workflow, name <> "/*") != [] ->
+        Error.new(path, "#{inspect(name)} is also produced as a group of files by a command")
+
+      command = Workflow.log_producer(workflow, name) ->
+        Error.new(path, "#{inspect(name)} is also produced by command #{inspect(command)}")
+
+      length(producers) > 1 ->
+        Error.new(
+          path,
+          "#{inspect(declared)} is produced by more than one state: #{Enum.join(Enum.sort(producers), ", ")}"
+        )
+
+      true ->
+        nil
+    end
+  end
+
+  # A page is a directory under `out/` and a row of its own, so the name it is kept under may not
+  # also be a document, a group of files or a presentation, nor a command's log or group, and it is
+  # one job state's (`docs/design/workflow-grammar-v1.md` § Validation). Checked from here and only
+  # from here, as `presentation_error/4` is: the other kinds' declarations are not this one's.
+  defp page_error(workflow, path, declared, producers) do
+    name = Workflow.page_name(declared)
+
+    cond do
+      reserved = Workflow.document_name_error(name) ->
+        Error.new(path, reserved)
+
+      Workflow.producers(workflow, name) != [] ->
+        Error.new(path, "#{inspect(name)} is also produced as a document")
+
+      Workflow.producers(workflow, name <> "/*") != [] ->
+        Error.new(path, "#{inspect(name)} is also produced as a group of files")
+
+      Workflow.producers(workflow, name <> "!") != [] ->
+        Error.new(path, "#{inspect(name)} is also produced as a presentation")
+
       command_producing(workflow, name <> "/*") != [] ->
         Error.new(path, "#{inspect(name)} is also produced as a group of files by a command")
 
@@ -979,7 +1044,9 @@ defmodule ForgeCore.Workflow.Validator do
       path = Error.join(Error.join("states", name), "optional")
 
       documents =
-        for entry <- state.produces, Workflow.document?(entry), do: Workflow.produced_name(entry)
+        for entry <- state.produces,
+            Workflow.document?(entry) or Workflow.page?(entry),
+            do: Workflow.produced_name(entry)
 
       repeated = state.optional -- Enum.uniq(state.optional)
 
@@ -1036,6 +1103,40 @@ defmodule ForgeCore.Workflow.Validator do
       true ->
         "#{inspect(entry)} is not a document this state produces"
     end
+  end
+
+  # -- the page a human state opens ----------------------------------------------------------
+
+  # `docs/design/pages.md`: a human state may name one page, without its marker, that a person
+  # opens while the ticket rests there. Only a human state waits for a person, and the page has to
+  # be one some state produces or the link would never lead anywhere.
+  defp opens_pages(%Workflow{states: states} = workflow) do
+    states
+    |> Enum.filter(fn {_name, state} -> state.opens != nil end)
+    |> Enum.sort()
+    |> Enum.flat_map(fn {name, state} ->
+      at = Error.join(Error.join("states", name), "opens")
+
+      cond do
+        not State.human?(state) ->
+          [Error.new(at, "only a human state opens a page: it is where a person waits")]
+
+        not valid_name?(state.opens) ->
+          [Error.new(at, "must be a page's name: " <> Workflow.name_rule())]
+
+        Workflow.producers(workflow, state.opens <> "@") == [] ->
+          [
+            Error.new(
+              at,
+              "#{inspect(state.opens)} is not a page that a state of this workflow produces " <>
+                "(declare #{inspect(state.opens <> "@")} in produces)"
+            )
+          ]
+
+        true ->
+          []
+      end
+    end)
   end
 
   # -- secrets ------------------------------------------------------------------------------
@@ -1180,6 +1281,9 @@ defmodule ForgeCore.Workflow.Validator do
           do: other
 
     cond do
+      Workflow.page?(produces) ->
+        [Error.new(path, "a command produces no page: #{inspect(produces)}")]
+
       not valid_name?(produces) ->
         [Error.new(path, "artifact name must be a single path segment: " <> Workflow.name_rule())]
 
@@ -1389,6 +1493,9 @@ defmodule ForgeCore.Workflow.Validator do
       cond do
         Workflow.group?(artifact) ->
           [Error.new(at, "a group of files cannot be approved")]
+
+        Workflow.page?(artifact) ->
+          [Error.new(at, "a page cannot be approved")]
 
         # The operator reads it above the control that merges and confirms; no surface offers to
         # approve or edit it (`docs/design/ui.md` § Changes), and a transition pinning it would

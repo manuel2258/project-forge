@@ -466,9 +466,13 @@ defmodule ForgeCore.Workflow.ParserTest do
       # it on a human state — and nothing would ever write it, since `Forge.Operator` records
       # what a person writes as a document whatever the state declared.
       deck = put_in(map, ["states", "review_ready", "produces"], ["deck.md!"])
-      refusal = "a human state writes documents, not changeset, groups of files or presentations"
 
-      for bad <- [map, groups, deck] do
+      refusal =
+        "a human state writes documents, not changeset, groups of files, presentations or pages"
+
+      page = put_in(map, ["states", "review_ready", "produces"], ["form@"])
+
+      for bad <- [map, groups, deck, page] do
         assert messages(bad) == [{"states.review_ready.produces", refusal}]
       end
     end

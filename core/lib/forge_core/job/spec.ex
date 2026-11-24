@@ -7,6 +7,16 @@ defmodule ForgeCore.Job.Spec do
   `answered_keys` lists question keys a person has already answered on this ticket; a
   blocking question with one of these keys does not stop the job again. It is filled at
   run time, not stored.
+
+  `pages` is the same kind of field: the ticket's pages (a project chat's, its own) as they stand
+  when the run starts, filled at assignment and never stored, each a string-keyed map —
+  `"name"`, `"version"` (the latest page version, an integer), `"files"` (file name to
+  `%{"hash" => sha256 hex, "size" => bytes}`, which is what lets a worker skip uploading a file
+  that has not changed), `"keys"` (how many keys the store holds), `"read_only"` (nil while it is
+  writable, otherwise the reason: `"done"`, `"cancelled"` or `"ended"`), `"by"` (who wrote the
+  latest version, in words) and `"at"` (when, ISO 8601). A page declared but not yet published has
+  no entry. Nil for a command and for a run built before pages existed; the store itself is
+  reached live through `$FORGE_PAGES_URL` and is never in a spec (`docs/design/pages.md`).
   """
 
   alias ForgeCore.Job.Spec.Input
@@ -149,10 +159,16 @@ defmodule ForgeCore.Job.Spec do
     # before this existed. The worker composes the manifest's § Attached files from it, which is why
     # a worker has to speak protocol 13 to be given a job.
     attachments: nil,
+    # The pages a run may read and write the store of, as they stand when it starts: see the
+    # moduledoc for the shape. Filled at run time and never stored. The worker reads it to skip a
+    # page file whose hash it already holds and to tell the agent which pages exist, which is why a
+    # worker has to speak protocol 16 to be given one (`docs/design/pages.md` § Recording a publish).
+    pages: nil,
     # A chat step's contract (`docs/design/conversations.md` § A conversation that is a step),
     # string keys: `state`, `prompt` (the state's text), `visit`, `inputs` (the declared input
-    # names), `produces` (the documents it must write, by name on disk), `optional`, `outcomes`
-    # (each `%{"outcome", "to", "approve"}`) and `entered`, how the ticket arrived on this visit.
+    # names), `produces` (the documents it must write, by name on disk), `optional` (documents
+    # and pages), `outcomes` (each `%{"outcome", "to", "approve"}`), `pages` (the pages it must
+    # write, by name) and `entered`, how the ticket arrived on this visit.
     # Nil for every other job.
     # The worker composes the manifest's § This step from it, which is why a worker has to speak
     # protocol 10 to be given one.
@@ -185,6 +201,7 @@ defmodule ForgeCore.Job.Spec do
           secrets_gone: [String.t()],
           moving: %{String.t() => term()} | nil,
           attachments: %{String.t() => [%{String.t() => term()}]} | nil,
+          pages: [%{String.t() => term()}] | nil,
           step: %{String.t() => term()} | nil,
           extension: %{String.t() => term()} | nil,
           ticket:
@@ -277,6 +294,16 @@ defmodule ForgeCore.Job.Spec do
     do: for(name <- produces, Workflow.group?(name), do: Workflow.group_name(name))
 
   @doc """
+  The pages this job writes, by directory name: its declared `name@`, with the marker gone, which
+  is why the worker needs to know nothing about it. Each is a directory of files under `out/<name>/`
+  with `index.html` as its entry, and none is a document, a group or a presentation. Empty for a
+  command, which may not declare one, and for a chat, which declares nothing
+  (`docs/design/pages.md`).
+  """
+  @spec page_outputs(t()) :: [String.t()]
+  def page_outputs(%__MODULE__{produces: produces}), do: Workflow.page_names(produces)
+
+  @doc """
   The names, as recorded, of this job's outputs that are presentations rather than documents.
 
   What the platform reads to decide an arriving document's kind. A chat and a command never carry
@@ -351,9 +378,29 @@ defmodule ForgeCore.Job.Spec do
       secrets_gone: or_default(get, :secrets_gone, []),
       moving: moving_from_map(get.(:moving)),
       attachments: attachments_from_map(get.(:attachments)),
+      pages: pages_from_map(get.(:pages)),
       step: step_from_map(get.(:step)),
       extension: extension_from_map(get.(:extension))
     }
+  end
+
+  # Every entry's keys present whichever way the spec arrived, so the manifest and the worker read
+  # them by string and a spec built in memory renders as one read back from the row. Nil stays nil:
+  # a run that was told nothing of pages is not one told there are none.
+  defp pages_from_map(nil), do: nil
+
+  defp pages_from_map(pages) when is_list(pages) do
+    Enum.map(pages, fn page ->
+      %{
+        "name" => nested(page, :name),
+        "version" => nested(page, :version),
+        "files" => nested(page, :files) || %{},
+        "keys" => nested(page, :keys) || 0,
+        "read_only" => nested(page, :read_only),
+        "by" => nested(page, :by),
+        "at" => nested(page, :at)
+      }
+    end)
   end
 
   # Both lists always, so the manifest folds over them whichever way the spec arrived.
@@ -387,6 +434,7 @@ defmodule ForgeCore.Job.Spec do
       "visit" => nested(map, :visit) || 1,
       "inputs" => nested(map, :inputs) || [],
       "produces" => nested(map, :produces) || [],
+      "pages" => nested(map, :pages) || [],
       "optional" => nested(map, :optional) || [],
       "outcomes" => Enum.map(nested(map, :outcomes) || [], &step_outcome/1),
       "entered" => entered_from_map(nested(map, :entered))

@@ -608,9 +608,19 @@ What that comes to (taking a ticket out of the merge queue is `member`, as appro
   by a token write, or never for a token (`/projects` registration, `/queue`). The inventory test
   fails on an unclassified route (the table is `test/support/token_routes.ex`), and
   `ForgeWeb.Api.ProjectTokenTest` drives each class against a token that must be refused.
-- **`token`** is three: `/git`, `/store/*key` and the worker socket. None of them carries a
-  person. The LiveView socket is not one of them: it carries the session, and every route behind
+- **`token`** is five: `/git`, `/store/*key`, `/archive` and `/job/pages` — the last two authorised
+  by the per-job git token (`Git.Tokens.authorise_job/1`), `/job/pages` refusing a command's job and
+  taking its scope from the token's job row and never from the path (`pages.md`) — and the worker socket. None of them carries a
+  person. (The count was three and left `/archive` out; all five are named now.) The LiveView socket is not one of them: it carries the session, and every route behind
   it sits in a `live_session` whose `on_mount` checks it.
+- **`/page-files/:token/:file`** is `token` by a signed path, **bound to the viewer**: it carries no
+  session (the sandboxed frame sends none) and `PageFileController` re-checks the viewer's reach to the
+  page's ticket or chat on every request, so removing a member ends their access at once. It is in
+  the inventory as `token`, with the reason. The page's own route (`/tickets/.../pages/:name`,
+  `/chats/:id/pages/:name`) is `member`, and its store writes are `Forge.Operator.write_page/5` and
+  `set_page_outside/4`. The API's page-data routes
+  (`/api/v1/tickets/:project/:number/pages[/:name/data[/:key]]`) are classified for a token — `GET` is
+  a token read, `PUT` and `DELETE` a token write — in `test/support/token_routes.ex`.
 - **`public`** is the three login routes, the two OIDC ones and the log-out — plus `/health`,
   which carries nothing and reads nothing. There is no registration route: accounts are made on
   the host or by an OIDC login, and then approved.

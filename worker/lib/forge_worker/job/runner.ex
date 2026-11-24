@@ -1330,7 +1330,13 @@ defmodule ForgeWorker.Job.Runner do
   # stops on a question keeps `out/` for its resume, and the run that finishes is the one whose
   # files count.
   defp stage(%Result{status: :finished} = result, %{spec: spec, job_dir: job_dir}),
-    do: ForgeWorker.Job.Blobs.stage(result, job_dir, Spec.group_outputs(spec))
+    do:
+      ForgeWorker.Job.Blobs.stage(
+        result,
+        job_dir,
+        Spec.group_outputs(spec),
+        Spec.page_outputs(spec)
+      )
 
   defp stage(result, _state), do: result
 

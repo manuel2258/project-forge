@@ -162,21 +162,28 @@ defmodule ForgeWeb.WorkScreen do
             do: "version",
             else: "versions"}
         </summary>
-        <.link
-          :for={version <- @doc.earlier}
-          href={version.href}
-          class="work-doc-earlier"
-        >
-          <span>
-            {meta([
-              "v#{version.version}",
-              if(version[:withdrawn], do: "withdrawn", else: "superseded"),
-              version.author,
-              ago(version.at, @now)
-            ])}
-          </span>
-          <span aria-hidden="true">›</span>
-        </.link>
+        <div :for={version <- @doc.earlier} class="work-doc-earlier-version">
+          <.link href={version.href} class="work-doc-earlier">
+            <span>
+              {meta([
+                "v#{version.version}",
+                if(version[:withdrawn], do: "withdrawn", else: "superseded"),
+                version.author,
+                ago(version.at, @now)
+              ])}
+            </span>
+            <span aria-hidden="true">›</span>
+          </.link>
+          <%!-- A page's earlier version also has its other files, each a download. --%>
+          <.link
+            :for={file <- version[:files] || []}
+            href={file.href}
+            class="work-doc-earlier work-doc-earlier-file"
+          >
+            <span>{file.name}</span>
+            <span aria-hidden="true">›</span>
+          </.link>
+        </div>
       </details>
     </section>
     """
@@ -290,16 +297,19 @@ defmodule ForgeWeb.WorkScreen do
       <%!-- The version once, at the row's end, where its link is: drawn here as well it was
             `plan.md v2 … v2 ›` (UX pass, B29). --%>
       <span class="work-doc-name">
-        <%!-- A person's file is cut short with the whole name in the title; any other name breaks,
-              which is how a long artifact name has always read (criterion 22). --%>
+        <%!-- A person's file and a page are cut short with the whole name in the title; any other
+              name breaks, which is how a long artifact name has always read (criterion 22; a
+              page's name is text and cut, criterion 26 of ticket 66). --%>
         <span
-          :if={@entry[:attached]}
+          :if={@entry[:attached] || @entry.kind == :page}
           class="min-w-0 work-doc-name-cut"
           title={@entry.name}
         >
           {@entry.name}
         </span>
-        <span :if={!@entry[:attached]} class="min-w-0 break-all">{@entry.name}</span>
+        <span :if={!(@entry[:attached] || @entry.kind == :page)} class="min-w-0 break-all">
+          {@entry.name}
+        </span>
       </span>
       <span class="work-doc-meta">
         {meta([@entry[:by] || @entry.latest.author, ago(@entry.latest[:at], @now)])}

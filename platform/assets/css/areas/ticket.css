@@ -3,6 +3,9 @@
 /* The ticket (docs/design/ui.md § The ticket) and what a ticket, a conversation and a job share:
    the Docs rows and the Activity stream (`ForgeWeb.WorkScreen`). */
 @layer components {
+  /* *Open `<name>` ›* at the head of a ticket resting in a human state that names a page. */
+  .work-open-page { padding: 10px var(--gutter-phone) 0; }
+
   /* -- Steps (`5g`) ----------------------------------------------------------------------- */
 
   .ticket-steps { display: flex; flex-direction: column; }
@@ -246,6 +249,8 @@
     font-size: 12px;
   }
   .work-doc-earlier:hover { color: var(--ink); }
+  /* A page's earlier version also lists its other files, under its own row. */
+  .work-doc-earlier-file { padding-left: 54px; border-top-style: dashed; }
   .work-doc-earlier-count {
     display: flex;
     min-height: 44px;

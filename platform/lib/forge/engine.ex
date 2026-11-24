@@ -3052,6 +3052,8 @@ defmodule Forge.Engine do
             name not in state.optional or name in approved,
             do: name
 
+      missing = missing ++ unwritten_pages(ticket, state)
+
       stale =
         for name <- names,
             Map.get(seen, name) != (latest[name] && latest[name].version),
@@ -3068,6 +3070,20 @@ defmodule Forge.Engine do
         {tag, names} -> {:error, {tag, Enum.sort(names)}}
       end
     end
+  end
+
+  # A page the step declares and does not list as optional is required, as a document is: named as
+  # the state spells it, `form@`, so that it is not read as a document. The page is the ticket's,
+  # whether this chat wrote it or an earlier job did.
+  @doc false
+  @spec unwritten_pages(Ticket.t(), State.t()) :: [String.t()]
+  def unwritten_pages(ticket, state) do
+    written = for %{page: page} <- Forge.Pages.list({:ticket, ticket.id}), do: page.name
+
+    for name <- Workflow.page_names(state.produces),
+        name not in state.optional,
+        name not in written,
+        do: name <> "@"
   end
 
   defp none_or([], _refusal), do: []

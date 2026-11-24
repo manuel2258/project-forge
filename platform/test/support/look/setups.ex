@@ -49,7 +49,8 @@ defmodule Forge.Look.Setups do
     "milestones" => Forge.Look.Setups.Milestones,
     "schedules" => Forge.Look.Setups.Schedules,
     "update_step" => Forge.Look.Setups.UpdateStep,
-    "paged_streams" => Forge.Look.Setups.PagedStreams
+    "paged_streams" => Forge.Look.Setups.PagedStreams,
+    "pages" => Forge.Look.Setups.Pages
   }
 
   @doc "The registered setups, by name."

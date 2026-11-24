@@ -289,6 +289,25 @@ not be produced as a document or a group of files by one state and a presentatio
 is one artifact with one kind. Like any other produced document it may be declared `optional`
 (below), which is how a workflow says whether a ticket must have one.
 
+**A name ending `@` is a page** — `form@` — an HTML page that forge hosts, sandboxed, with a live
+store of its own that survives every new version of it (`pages.md`). The job writes the page's files,
+flat, into `$FORGE_JOB/out/form/`; `index.html` is required and is its entry, and each file becomes a
+version of a blob `form/<file>` on the ticket (or on the project chat), as a group's files do, under
+the same limits (1 GiB a file, 100 files a run), a file that cannot be kept reported with why and not
+failing the job. The artifact name is the name with the `@` stripped, as a presentation's is, and
+the marker stays in `produces` because it is the declaration. `forge-page.js` is a reserved file
+name. **A declared page the job did not write — no `out/form/index.html` — ends the job `error`**,
+which `optional: [form]` excuses (the spelling of `inputs` and `approve`: no marker). A later job
+that produces the same name publishes a new version; the store is untouched. A page is **not an
+input and is never approved** — a job reads its data live, not as a pinned copy. **A command
+produces no page.** A name may not be produced as a page in one state and as a document, group or
+presentation in another.
+
+**A human state may name one page to open**, with `opens: form` (one name, no marker): while the
+ticket rests there its queue item and its page lead with *Open `form` ›*, a link and not a decision
+(`ui.md` § The queue). The page must be produced by some state, and until it has a version the
+action says so.
+
 **`optional` names what the job may finish without writing.** Everything in `produces` is
 required by default: a job that ends having not written a document it declared has outcome
 `error`, which is what makes a document a contract. A name in a job state's `optional` is excused
@@ -296,7 +315,7 @@ from that one rule and nothing else — the file's absence is not a failure, and
 document is the one that carries the outcome the job is `done`, by the same rule as a state that
 produces no document at all. The names are the artifacts' own, with no marker:
 `produces: [presentation.md!]` is excused by `optional: [presentation.md]`, the spelling `inputs`
-and `approve` use. Only a document may be optional — `changeset` is the branch the job's commits
+and `approve` use. Only a document or a page may be optional — `changeset` is the branch the job's commits
 made, and a group of files already has no minimum — and only a job state may say so, since nothing
 obliges a person to write a human state's documents in the first place. **A state that declares a
 choice of outcomes may not excuse the document that carries it** (§ Validation): the choice is
@@ -764,7 +783,7 @@ release_notes: release-notes.md        # the document that is the release's note
 ## Chat steps
 
 **A job state marked `chat: true` is a conversation, not a one-shot job.** It keeps everything a
-conversation can use — `prompt`, `inputs`, `produces` (documents only), `outcomes`, `env`,
+conversation can use — `prompt`, `inputs`, `produces` (documents and pages), `outcomes`, `env`,
 `model`, `effort`, `resources`, `secrets` — and gains one difference: when a ticket enters it, no
 job runs. A ticket conversation opens on the ticket (`conversations.md` § A conversation that is
 a step) and the ticket waits for a person. The documents the step declares are written as the
@@ -1249,7 +1268,7 @@ seconds, and at most a day. One unit only; `1h30m` is written `90m`. A command t
 stopped, and ends with no exit status. `run` and `timeout` are required; `env`, `produces` and `resources` are not.
 `produces` is where the combined output is recorded on the ticket, as a blob: without it the
 output is still kept with the command's own job, and still handed to an agent that invoked it.
-It may instead be a list of at most one such name and any number of groups of files —
+**It produces no page** (`name@` is refused here). It may instead be a list of at most one such name and any number of groups of files —
 `produces: [package.log, package/*]` — whose files the script writes into `$FORGE_OUT/package/`.
 
 **The script is read at the ticket's pinned base commit**, like this file, never from the branch a
@@ -1472,16 +1491,22 @@ merges: re-pinning takes the default branch, never the ticket's own.
 
 ## Validation (rejects the file, never partially runs it)
 
+- **Pages** (`name@`, § Semantics): refused on a command, a command state, and a human or `on_enter`
+  state; refused where one name is a page in one state and a document, group or presentation in
+  another, a command's groups included; refused as an `inputs` entry and as an `approve` entry;
+  `optional` may name a page. **`opens`** is refused anywhere but on a human state, and when it names
+  a page no state produces, or more than one name. A chat step may declare pages (it still declares
+  neither groups nor presentations). Each is refused by name, with the reason.
 - `version` is `1`; `initial` names a job state; every state name is unique.
 - A job state has `prompt` and `budget` (a chat step has no `budget`; § Chat steps), and neither `invoke` nor `exit`. A command state has
   `invoke` and `exit` and none of `prompt`, `inputs`, `produces`, `optional`, `outcomes`,
   `budget`, `model`, `effort`, `env`, `may_invoke` or `secrets`. A human state has
-  none of those but `produces`, and no `invoke` either; `on_enter` and `produces` are the keys it
+  none of those but `produces`, and no `invoke` either; `on_enter`, `opens` and `produces` are the keys it
   may carry, and what it produces is documents — never `changeset`, a group of files or a
   presentation, and never `optional`, which is a job state's.
 - `chat`, where present, is `true` or `false`. A chat step is a job state with a `prompt` and has
   no `budget` (it has no ceiling), no `may_invoke`, no `changeset` or `commit-message` in
-  `produces` (a chat commits to its own branch), no group of files or presentation in `produces`,
+  `produces` (a chat commits to its own branch), no group of files or presentation in `produces` (a page may be),
   and no `optional` naming its outcome document. Each is refused by name, with the reason. Command
   and human states cannot be chat steps. Every other rule of a job state holds.
 - `model`, where present, is a non-empty string. Its value is not checked against anything.

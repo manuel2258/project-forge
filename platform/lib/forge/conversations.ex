@@ -860,6 +860,7 @@ defmodule Forge.Conversations do
   defp do_record_turn(chat, run, turn, payload) do
     harness = payload["harness"] || %{}
     {documents, refused} = documents(chat, payload)
+    {pages, refused_pages} = pages(chat, payload)
 
     # The turn's figure is the process's running total, so it is *set* on this run
     # (`docs/design/conversations.md` § Spend) — and the conversation's usage is every run's, since
@@ -872,6 +873,7 @@ defmodule Forge.Conversations do
     |> Multi.merge(fn %{step_open: open?} ->
       put_documents(Multi.new(), chat, documents, open?)
     end)
+    |> Multi.merge(fn %{step_open: open?} -> put_pages(Multi.new(), chat, pages, open?) end)
     |> Multi.run(:spent_before, fn _repo, _changes -> {:ok, Runs.total(chat.id)} end)
     |> Forge.Credentials.put_renew(chat, harness["credential_return"])
     |> Runs.record(chat.id, Runs.figure(harness))
@@ -917,13 +919,17 @@ defmodule Forge.Conversations do
           "memory" => harness["memory"],
           # Every turn, empty or not: the page reads the newest, so a file the agent fixed stops
           # being listed as refused the turn it is fixed.
-          "refused_documents" => refused_in(open?, refused, documents)
+          "refused_documents" => refused_in(open?, refused, documents),
+          # The pages a turn could not keep, by name with why, beside the documents: the page lists
+          # both from the newest turn (`unrecorded/1`).
+          "refused_pages" => refused_pages_in(open?, refused_pages, pages)
         }
       })
     end)
     |> Repo.transaction()
     |> case do
-      {:ok, %{job: chat, turn: event}} ->
+      {:ok, %{job: chat, turn: event} = changes} ->
+        Forge.Jobs.Blobs.announce(changes)
         Events.notify_job(chat.id, event)
         Events.notify_changed(chat)
         # A turn ending is the event worth a notification; an interrupted one is not, because
@@ -1334,6 +1340,7 @@ defmodule Forge.Conversations do
   defp documents(chat, payload) do
     held = held(chat)
     own = document_scope(chat)
+    paged = paged_names(chat, payload["documents"] || %{})
 
     checked =
       (payload["documents"] || %{})
@@ -1341,7 +1348,7 @@ defmodule Forge.Conversations do
       |> Enum.map(fn {name, raw} ->
         scope = document_scope(chat, name)
         holds = if scope == own, do: held, else: %{}
-        {scope, name, raw, check(scope, holds, name, raw)}
+        {scope, name, raw, check(scope, {holds, paged}, name, raw)}
       end)
 
     write =
@@ -1383,11 +1390,11 @@ defmodule Forge.Conversations do
   # the parse, a name that on this ticket is already something a document version would
   # contradict — a transcript, the changeset — and a document a person's decision is waiting on.
   # The front matter comes back because the version is written without a second parse (below).
-  defp check(scope, held, name, raw) do
+  defp check(scope, {held, paged}, name, raw) do
     with nil <- ForgeCore.Workflow.document_name_error(name),
          nil <- ForgeCore.Document.text_error(raw),
          {:ok, document} <- parse(raw),
-         nil <- kind_error(scope, name),
+         nil <- kind_error(scope, paged, name),
          nil <- held[name] do
       {:ok, document.front_matter}
     else
@@ -1460,12 +1467,22 @@ defmodule Forge.Conversations do
     end)
   end
 
-  defp kind_error(scope, name) do
+  # A document may not take the name of a page: the page's files are `<page>/<file>`, so a
+  # document `form` beside a page `form` is a file and a folder of one name in the archive. A page
+  # is one the scope already holds, or one the pinned workflow produces and has not published yet.
+  defp kind_error(scope, paged, name) do
     case Forge.Artifacts.find(scope, name) do
-      %{kind: kind} when kind != :document -> "is a #{kind} here, not a document"
-      _document_or_nothing -> nil
+      %{kind: kind} when kind != :document ->
+        "is a #{kind} here, not a document"
+
+      _document_or_nothing ->
+        if MapSet.member?(paged, name) or Forge.Pages.get(page_scope(scope), name),
+          do: "is a page here, not a document"
     end
   end
+
+  defp page_scope({:job, id}), do: {:chat, id}
+  defp page_scope({:ticket, _id} = scope), do: scope
 
   # Unchanged since this conversation last wrote it — not since anyone did (§ Commits).
   defp unchanged?(scope, name, raw, chat) do
@@ -1498,6 +1515,134 @@ defmodule Forge.Conversations do
     end)
   end
 
+  # -- pages --------------------------------------------------------------------------------------
+
+  # The pages a turn reports (`docs/design/pages.md` § Recording a publish): `payload["pages"]` is
+  # `%{page => %{file => info}}`, the same infos a result's blobs carry, and
+  # `payload["invalid_pages"]` is the worker's own refusals, by name with why. A name is refused
+  # here when it could not be a page on this ticket: not a name, a document or file the pinned
+  # workflow produces under it, or an artifact already holding it as another kind.
+  # The workflow is read to know which names are pages only when there is a document to check
+  # against them: a turn with none (nearly every turn) costs no parse.
+  defp paged_names(_chat, documents) when map_size(documents) == 0, do: MapSet.new()
+
+  defp paged_names(chat, _documents),
+    do: for({name, "page"} <- produced_elsewhere(chat), into: MapSet.new(), do: name)
+
+  defp pages(_chat, %{"pages" => pages} = payload) when pages in [nil, %{}],
+    do: {%{}, payload["invalid_pages"] || %{}}
+
+  defp pages(_chat, payload) when not is_map_key(payload, "pages"),
+    do: {%{}, payload["invalid_pages"] || %{}}
+
+  defp pages(chat, payload) do
+    elsewhere = produced_elsewhere(chat)
+    scope = document_scope(chat)
+
+    checked =
+      for {name, files} <- Enum.sort(payload["pages"] || %{}), is_map(files) do
+        {name, files, page_error(scope, elsewhere, name)}
+      end
+
+    refused =
+      for {name, _files, reason} when is_binary(reason) <- checked, into: %{}, do: {name, reason}
+
+    kept = for {name, files, nil} <- checked, into: %{}, do: {name, files}
+    {kept, Map.merge(payload["invalid_pages"] || %{}, refused)}
+  end
+
+  defp page_error(scope, elsewhere, name) do
+    cond do
+      not ForgeCore.Workflow.valid_name?(name) ->
+        "must be a single path segment: " <> ForgeCore.Workflow.name_rule()
+
+      kind = other_kind(elsewhere, name) ->
+        "is a #{kind} in this ticket's workflow, not a page"
+
+      name in [ForgeCore.Workflow.answers_artifact(), "ticket"] ->
+        "#{inspect(name)} is reserved"
+
+      artifact = Forge.Artifacts.find(scope, name) ->
+        "is a #{artifact.kind} here, not a page"
+
+      true ->
+        nil
+    end
+  end
+
+  # What the ticket's pinned workflow produces under each name, as the kind a person would call it:
+  # a page of a chat may not take the name of another kind, nor a document the name of a page. A
+  # project chat has no workflow. The states' entries and the commands' logs and groups: a name
+  # the workflow gives a command's group is as taken as one it gives a state.
+  defp produced_elsewhere(%Job{ticket_id: nil}), do: %{}
+
+  defp produced_elsewhere(%Job{ticket_id: ticket_id}) do
+    case Tickets.parsed_workflow(Tickets.get!(ticket_id)) do
+      {:ok, workflow} ->
+        states = for {_n, state} <- workflow.states, entry <- state.produces, do: produced(entry)
+        commands = for {_n, c} <- workflow.commands, entry <- command_entries(c), do: entry
+        Map.new(states ++ commands)
+
+      _unreadable ->
+        %{}
+    end
+  end
+
+  defp produced(entry), do: {ForgeCore.Workflow.produced_name(entry), produced_kind(entry)}
+
+  defp command_entries(%{produces: log, outputs: groups}) do
+    logs = if log, do: [{log, "command log"}], else: []
+    logs ++ Enum.map(groups, &{ForgeCore.Workflow.group_name(&1), "group of files"})
+  end
+
+  defp produced_kind(entry) do
+    cond do
+      ForgeCore.Workflow.page?(entry) -> "page"
+      ForgeCore.Workflow.group?(entry) -> "group of files"
+      ForgeCore.Workflow.presentation?(entry) -> "presentation"
+      true -> "document"
+    end
+  end
+
+  # The kind another entry gives `name`, unless it is a page: a chat may publish a page the
+  # workflow declares.
+  defp other_kind(elsewhere, name) do
+    case elsewhere[name] do
+      "page" -> nil
+      kind -> kind
+    end
+  end
+
+  defp put_pages(multi, _chat, _pages, false), do: multi
+
+  defp put_pages(multi, chat, pages, true) do
+    blobs =
+      for {page, files} <- pages,
+          {file, info} <- files,
+          into: %{},
+          do: {page <> "/" <> file, info}
+
+    Forge.Jobs.Blobs.put_pages(
+      multi,
+      document_scope(chat),
+      chat,
+      Map.keys(pages),
+      blobs,
+      always?: false
+    )
+  end
+
+  defp refused_pages_in(true, refused, _pages), do: refused
+
+  defp refused_pages_in(false, refused, pages),
+    do:
+      Map.merge(
+        refused,
+        Map.new(pages, fn {name, _files} ->
+          {name, "arrived after the step was accepted, so it was not recorded"}
+        end)
+      )
+
   @doc """
   What the conversation's last turn left in `out/` that was not recorded, by name, with why. The
   newest turn's, because every turn reports all of `out/` and says so even when it is nothing.
@@ -1505,8 +1650,11 @@ defmodule Forge.Conversations do
   @spec unrecorded(String.t()) :: %{String.t() => String.t()}
   def unrecorded(job_id) do
     case Events.latest_for_job(job_id, "chat.turn") do
-      %Event{payload: %{"refused_documents" => %{} = refused}} -> refused
-      _none -> %{}
+      %Event{payload: %{"refused_documents" => %{} = refused} = payload} ->
+        Map.merge(payload["refused_pages"] || %{}, refused)
+
+      _none ->
+        %{}
     end
   end
 

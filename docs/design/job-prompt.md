@@ -180,6 +180,7 @@ $FORGE_JOB/inputs/answers.md             # present after any question was answer
 $FORGE_JOB/out/plan.md                   # written by the agent
 $FORGE_JOB/out/proposals/<name>.md       # ticket proposals, optional (ticket-proposals.md)
 $FORGE_JOB/out/<group>/<file>            # a declared group's files, any number, any bytes
+$FORGE_JOB/out/<page>/<file>             # a declared page's files, flat, index.html required (pages.md)
 $FORGE_JOB/invoke.json                   # commands to run, written by an agent that may invoke
 $FORGE_JOB/commands/<n>-<command>.log    # a resumed run's command logs, read-only
 $FORGE_JOB/commands/entered-<n>-<command>.log  # the logs of the batch that sent it here
@@ -571,6 +572,24 @@ Only the group's directory is declared, as a directory: a *file* straight in `ou
 `package` is kept out of `undeclared` like the directory would be, and reported instead under the
 group, `package/*`, as "must be a directory, not a file". A directory under `out/` that is not a
 declared group is undeclared.
+
+## Pages
+
+A state producing `form@` is told, in its manifest's outputs, to write the page's files flat into
+`$FORGE_JOB/out/form/`, `index.html` being required (`pages.md`). Only a page's directory is
+declared, as a group's is, and it is *missing* without `index.html`, which ends the job `error`
+unless the state lists `form` in `optional`. `forge-page.js` is a reserved file name: the platform
+serves its own library under it, and the worker refuses a page file of that name, with why.
+
+**The manifest has a § Pages only when the ticket has a page or the state declares one.** A workflow
+that declares no page produces the same spec and prompt as before. When it is there it names each
+page, says the store is live and pinned to nothing, and says how to use it: `$FORGE_PAGES_URL` with
+`$FORGE_GIT_TOKEN` as a bearer, over `curl` (`GET` all, `GET`/`PUT`/`DELETE` one key as one encoded
+segment), a write naming the `counter` it expects (`null` for a key it expects absent) and a `409`
+that returns the current value and counter to read again, the limits that a `413` names, and that
+a done or cancelled ticket is read only. It also says a page is cloned by copying its files out of
+`archive/` and seeding the store from `<page>@data.json`. A step's pages are named where its
+documents are (`step_documents/2`). A conversation's preamble has the same as § Writing a page.
 
 ## Attached files
 

@@ -96,6 +96,9 @@ defmodule ForgeWeb.Operator.Decision do
       from: pending["from"],
       to: pending["to"],
       pins: pins,
+      # The ticket's pages, which are not pinned and are named beside what is: a link each
+      # (`docs/design/ui.md` § The queue).
+      pages: ForgeWeb.PageViews.links(%{project: project, ticket: ticket, chat: nil}),
       diff: size(diff),
       merges: merges,
       commit: commit,
@@ -537,6 +540,21 @@ defmodule ForgeWeb.Operator.Decision do
                   class="flex min-h-[46px] items-center gap-2 font-mono text-[12.5px] text-link"
                 >
                   Read {pin.name} v{pin.version} ›
+                </.link>
+              </li>
+            </ul>
+
+            <ul
+              :if={Map.get(@decision, :pages, []) != []}
+              id="decision-pages"
+              class="flex flex-col"
+            >
+              <li :for={page <- @decision.pages}>
+                <.link
+                  href={page.href}
+                  class="flex min-h-[46px] items-center gap-2 font-mono text-[12.5px] text-link"
+                >
+                  Open {page.name} v{page.version} ›
                 </.link>
               </li>
             </ul>

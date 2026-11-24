@@ -138,9 +138,30 @@ defmodule Forge.Archive do
         |> Enum.flat_map(fn {_id, versions} -> entries(versions) end)
         |> unique()
 
-      {:ok, %{"files" => entries ++ [inline("jobs.tsv", jobs_tsv(project_id, ticket.id))]}}
+      files =
+        entries ++ page_data(ticket.id) ++ [inline("jobs.tsv", jobs_tsv(project_id, ticket.id))]
+
+      {:ok, %{"files" => files}}
     else
       _other -> :not_found
+    end
+  end
+
+  # A page's store as it is now, one inline file for each page of the ticket that has a version
+  # (`docs/design/archive.md` § Layout): the values only, with no writer and no counter, so a later
+  # job can clone a page by copying its files and seeding a new store from this. Live, not pinned.
+  # `@` is never in an artifact's name, so the file cannot take one's place.
+  defp page_data(ticket_id) do
+    for %{page: page, version: version} <- Forge.Pages.list({:ticket, ticket_id}) do
+      text =
+        Jason.encode!(%{
+          "page" => page.name,
+          "version" => version.version,
+          "files" => version.files |> Map.keys() |> Enum.sort(),
+          "keys" => Forge.Pages.data_map(page)
+        })
+
+      inline(page.name <> "@data.json", text)
     end
   end
 

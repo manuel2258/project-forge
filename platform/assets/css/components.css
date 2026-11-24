@@ -13,6 +13,7 @@
 .file-icon[data-file-type="image"] { --file: var(--file-image); }
 .file-icon[data-file-type="archive"] { --file: var(--file-archive); }
 .file-icon[data-file-type="apk"] { --file: var(--file-apk); }
+.file-icon[data-file-type="page"] { --file: var(--file-page); }
 
 /* ---------------------------------------------------------------------------------------------
    The 24 primitives (docs/design/ui/design_system/components/, ported in ForgeWeb.UI.* and

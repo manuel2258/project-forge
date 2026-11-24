@@ -43,6 +43,10 @@ These decisions are settled. They are not to be reopened.
 - A job commits its work before hibernating, when its state declares a `changeset`. A state
   that declares none has a scratch tree and commits nothing, ever. History is squashed.
 - Resuming the agent's own conversation is an optimisation, never a dependency. Artifacts are the contract.
+- **A page's store is the other thing a job reads live and nothing pins** (as the archive is): the
+  keys a page's script and people write are read and written by a running job through its own door
+  and are not an input (`design/pages.md`). *This widens "inputs pinned by version" above, and it
+  is the second such widening.*
 - A job waiting on a human holds no process and no machine, so waiting is free.
 
 ## Artifacts and the human loop
@@ -52,6 +56,11 @@ These decisions are settled. They are not to be reopened.
 - People may attach files of any kind to what they write; every run on the ticket (and a chat, each turn) is handed the pool as files to open, and the pages draw no new preview (`design/attachments.md`).
 - Three kinds: documents (the contract between steps, approvable), blobs (behind a storage behaviour, referenced by URI), presentations (rich, human-only, never consumed downstream).
 - Blobs are served to the operator through the platform, not via provider-specific signed links.
+- **A page is hosted by forge and runs sandboxed**: a job or chat declares `name@` and writes HTML,
+  script, images and video; forge serves them from its own address under `sandbox allow-scripts`
+  and never `allow-same-origin`, so the page's script has no session, and it reaches only its own
+  store, through the forge page around it, as the viewing person (`design/pages.md`). A page's files
+  are blobs (the three kinds above stay three) and its store is not an artifact.
 - Questions are embedded in the document, next to the passage they concern, with a small set of options and a recommended default.
 - Non-blocking questions state the assumption taken and let work continue. Blocking questions stop the job until answered — no timeout, no automatic fallback.
 - Answers are their own versioned, attributed artifact.

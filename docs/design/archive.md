@@ -38,11 +38,21 @@ archive/<n>/<name>               # the latest version of a document or file, its
 archive/<n>/<stem>.v001<ext>     # each version; zero-padded to 3, wider past 999
 archive/<n>/<group>/<file>       # a `name/*` member: the artifact name's `/` is a folder
 archive/<n>/attachments/<file>   # a file a person attached to the ticket (attachments.md); a withdrawn version is not here
+archive/<n>/<page>@data.json     # a page's store as it is now, inline (pages.md); one per page that has a version
 ```
 
 - **People's files** (`attachments.md`) are blobs of the ticket like any other and are listed and
   versioned as they are (`attachments/shot.v001.png`). **A withdrawn version is neither listed nor
   served**, and the newest version not withdrawn takes the plain name. A project chat's files are not
+  here, as its other artifacts are not.
+- **A page's data** (`pages.md`). A page's files are blobs `<page>/<file>` and are listed as a group's
+  are (`archive/<n>/<page>/index.html`). Beside them `Forge.Archive.ticket/2` appends one inline file,
+  `<page>@data.json`, for each page of the ticket that has a version, holding `{page, version,
+  files, keys: {key: value}}`: **the values only** — no writer, no counter, as `jobs.tsv` holds no
+  identities — so a later ticket or chat can clone a page by copying its files and seeding a new store
+  from it. `@` is valid in a `Tree` name and never in an artifact name, so the file cannot collide with
+  an artifact. It is the page's store **live, not pinned**: it is bounded by the store's 4 MiB limit
+  and a listing's 60 s TTL refreshes it, and it is read only here. A project chat's pages are not
   here, as its other artifacts are not.
 - **Documents, presentations and blobs** of every ticket, of every status. **Not** the changeset
   (that is git, and the agent has the repository), **not** `proposal-*` (they stay in `tickets/`),

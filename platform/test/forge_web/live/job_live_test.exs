@@ -362,6 +362,47 @@ defmodule ForgeWeb.JobLiveTest do
              )
     end
 
+    # `docs/design/ui.md` § The job page: a page is one row of Wrote, which opens it, and its
+    # files — blobs named `<page>/<file>` — are none.
+    test "a page it published is one row, and its files are not", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      job = run_pending(ticket, "success", "refinement.md")
+      scope = {:ticket, ticket.id}
+      {:ok, page} = Forge.Pages.ensure(scope, "form")
+
+      {:ok, file} =
+        Forge.Artifacts.record_version(ticket.id, "form/index.html", :blob, {:job, job.id}, %{
+          blob_uri: "store:page-test/index.html",
+          content_hash: "sha256:" <> String.duplicate("0", 64)
+        })
+
+      Repo.insert!(%Forge.Pages.Version{
+        page_id: page.id,
+        version: 1,
+        job_id: job.id,
+        files: %{"index.html" => file.id}
+      })
+
+      {:ok, view, _html} = live(conn, page(project, ticket, job))
+      view |> element(~s(#job-panes button[value="wrote"])) |> render_click()
+
+      assert has_element?(
+               view,
+               ~s(#wrote-page-form a[href="/tickets/#{project.name}/#{ticket.number}/pages/form"] [data-file-type="page"])
+             )
+
+      assert has_element?(view, "#wrote-page-form .job-file-name", "form")
+
+      refute has_element?(view, ~s(#job-wrote a[href*="form%2Findex.html"]))
+      refute render(view) =~ "form/index.html"
+      assert has_element?(view, ~s(#job-wrote a[href$="/artifacts/refinement.md/1"]))
+      html = view |> element("#job-wrote") |> render()
+      assert length(Regex.scan(~r{/pages/form"}, html)) == 1
+    end
+
     test "a pane the switch does not draw changes nothing", %{
       conn: conn,
       project: project,

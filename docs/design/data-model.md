@@ -334,6 +334,21 @@ A trigger refuses a delete, and any update but setting the withdrawal columns fr
 foreign keys restrict, as `artifacts`' do. Withdrawing never touches the version row, which stays
 append-only.
 
+## Pages (ticket 66)
+
+Five tables (`design/pages.md`); a page's files are not among them, being blob artifacts
+`<page>/<file>` written as a group's members are.
+
+| Table | Holds |
+|---|---|
+| `pages` | `id`, `project_id`, `ticket_id` xor `job_id` (the chat; a CHECK as on `artifacts`), `name`, `seq` (the counter source, taken `+ 1` under `FOR UPDATE` by every write), `key_count`, `data_bytes`. Unique per scope and name |
+| `page_versions` | `page_id`, `version`, the publishing `job_id`, `files` (file name → artifact version id). Append-only (`forge_append_only()`) |
+| `page_entries` | `page_id`, `key`, `value` (`jsonb`), `counter`, `size`, `written_at`, and exactly one of `user_id`, `job_id`, `token_id` (a `git_tokens` row) |
+| `page_outside` | `user_id`, `page_id`; a row's presence is the viewer's outside-access toggle on |
+| `page_bursts` | `page_id`, the writer, `opened_at`, `last_at`, `changes`, `keys` (at most 50 names) and a count; one row per open burst, deleted when the sweeper writes its `page.data_changed` event |
+
+The store is live and pinned to nothing; no document version is made of it.
+
 ## Not in v1, but shaped for
 
 `parent_job_id` and `spec.permitted_children` carry subagents. `worker_id` carried the

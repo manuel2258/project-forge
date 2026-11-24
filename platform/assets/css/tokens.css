@@ -66,6 +66,7 @@
   --file-image: oklch(74% 0.120 340);
   --file-archive: oklch(78% 0.090 315);
   --file-apk: oklch(78% 0.120 125);
+  --file-page: oklch(76% 0.120 260);
   --file-plain: oklch(78% 0.010 300);
 
   /* diff */
@@ -138,6 +139,7 @@
   --file-image: oklch(50% 0.120 340);
   --file-archive: oklch(50% 0.080 315);
   --file-apk: oklch(52% 0.120 125);
+  --file-page: oklch(50% 0.120 260);
   --file-plain: oklch(45% 0.012 300);
   --diff-add: oklch(60% 0.130 162 / .12);
   --diff-del: oklch(60% 0.190 25 / .10);

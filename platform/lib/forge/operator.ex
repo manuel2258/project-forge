@@ -1078,6 +1078,70 @@ defmodule Forge.Operator do
   defp scope_of(%User{} = user, project), do: Scope.for_project(Scope.for_user(user), project)
   defp scope_of(%Token{} = token, project), do: Scope.for_token(token, project)
 
+  @doc """
+  Writes one key of a page's store as a person or a project token (`docs/design/pages.md` § Who
+  may write). `op` is `{:set, value}` or `:delete`; `opts[:counter]` is `:any` for a person's
+  last-write-wins and **required** (an integer, or `nil` for a key expected to be absent) from a
+  token, which never overwrites what it has not read — a token's write without one is
+  `{:error, :counter_required}`.
+
+  The page must be one the actor reaches: a member of its project, or a token with write access to
+  it. A page in another project answers `{:error, :not_found}` and not `:forbidden`, so the answer
+  does not say it exists. A done or cancelled ticket and an ended chat refuse in `Forge.Pages`.
+  """
+  @spec write_page(Forge.Pages.Page.t(), actor(), String.t(), {:set, term()} | :delete, keyword()) ::
+          {:ok, term()} | {:error, term()}
+  def write_page(%Forge.Pages.Page{} = page, actor, key, op, opts \\ []) do
+    with :ok <- allow_page(page, actor),
+         :ok <- counter_for(actor, opts) do
+      writer = page_writer(actor)
+
+      case op do
+        {:set, value} -> Forge.Pages.put(page, key, value, writer, opts)
+        :delete -> Forge.Pages.delete(page, key, writer, opts)
+      end
+    end
+  end
+
+  @doc """
+  Switches outside addresses on or off for a person on a page, for them alone
+  (`docs/design/pages.md`). Only a person who reaches the page: a token has no viewing to switch.
+  """
+  @spec set_page_outside(Forge.Pages.Page.t(), actor(), boolean(), keyword()) ::
+          {:ok, boolean()} | {:error, term()}
+  def set_page_outside(%Forge.Pages.Page{} = page, actor, on?, _opts \\ [])
+      when is_boolean(on?) do
+    with %User{id: user_id} <- actor || {:error, :forbidden},
+         :ok <- allow_page(page, actor) do
+      Forge.Pages.set_outside(user_id, page, on?)
+    else
+      %Token{} -> {:error, :forbidden}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # A page outside the actor's reach is one that does not exist.
+  defp allow_page(%Forge.Pages.Page{project_id: project_id}, actor) do
+    if Access.can?(scope_of(actor, Projects.get!(project_id)), :use),
+      do: :ok,
+      else: {:error, :not_found}
+  end
+
+  # Equivalent mutant: letting a token name `:any` changes nothing observable, because the doors
+  # build `opts` from a request's `counter` field, which parses to an integer or nil and never to
+  # `:any` (`ForgeWeb.PageData`), so the `!= :any` test never has `:any` to refuse.
+  defp counter_for(%Token{}, opts),
+    do:
+      if(Keyword.has_key?(opts, :counter) and opts[:counter] != :any,
+        do: :ok,
+        else: {:error, :counter_required}
+      )
+
+  defp counter_for(%User{}, _opts), do: :ok
+
+  defp page_writer(%User{id: id}), do: {:user, id}
+  defp page_writer(%Token{id: id}), do: {:token, id}
+
   # A proposal's page is its origin ticket's, when it has one. A project chat's has none, and
   # nothing needs telling.
   defp notify_origin(version_id) do

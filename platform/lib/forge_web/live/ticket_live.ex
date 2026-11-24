@@ -162,6 +162,7 @@ defmodule ForgeWeb.TicketLive do
       workflow: nil,
       errors: errors,
       docs: docs(project, ticket, artifacts, [], %{}),
+      opens: nil,
       attached_events: %{},
       ticket_files: [],
       events: Events.newest_for_ticket(ticket.id, 10),
@@ -225,7 +226,15 @@ defmodule ForgeWeb.TicketLive do
       current: current,
       step: step,
       accepted: accepted_steps(ticket),
-      steps: steps(work, artifacts, ticket, workflow, socket.assigns.current_scope.user.id),
+      # A page's files are not chips of a step: the page is one thing, listed in Docs.
+      steps:
+        steps(
+          work,
+          without_page_files(artifacts, ticket),
+          ticket,
+          workflow,
+          socket.assigns.current_scope.user.id
+        ),
       waits: waits(work),
       # Why the last batch sent the ticket where it is, under the commands that failed in it.
       tails: Forge.Jobs.Commands.failure_tails(ticket.id, @tail_bytes),
@@ -260,6 +269,7 @@ defmodule ForgeWeb.TicketLive do
         ticket.status in Forge.Tickets.Ticket.open_statuses() and
           Workflow.State.human?(Workflow.state(workflow, ticket.state)),
       writable: writable(ticket, workflow),
+      opens: opens(project, ticket, workflow),
       proposals: Proposals.open_for_ticket(ticket.id),
       changeset: Artifacts.latest(ticket.id, Workflow.changeset_artifact()),
       release: release(ticket),
@@ -528,32 +538,61 @@ defmodule ForgeWeb.TicketLive do
         "refs/heads/" <> ticket.branch
       )
 
+  defp without_page_files(artifacts, ticket) do
+    pages = ForgeWeb.PageViews.names({:ticket, ticket.id})
+    Enum.reject(artifacts, &ForgeWeb.PageViews.member?(pages, &1.artifact.name))
+  end
+
+  # The page a human state names to open while the ticket rests in it, or nil: a link to it when it
+  # has a version, and `href: nil` — drawn as *no version yet* — when it has none
+  # (`docs/design/ui.md` § The ticket). Not a decision, and not counted.
+  defp opens(project, ticket, %Workflow{} = workflow) do
+    with true <- ticket.status in Forge.Tickets.Ticket.open_statuses(),
+         %{opens: name} when is_binary(name) <- Workflow.state(workflow, ticket.state) do
+      ForgeWeb.PageViews.opens(%{project: project, ticket: ticket, chat: nil}, name)
+    else
+      _no_page -> nil
+    end
+  end
+
+  defp opens(_project, _ticket, nil), do: nil
+
   # Every artifact the ticket has, a row each — a document's rendered when opened — its latest
   # version first and the earlier ones linked, grouped by what it asks of the person. The
   # changeset is not one: it is Changes.
   defp docs(project, ticket, artifacts, waiting, jobs, scope \\ nil, user \\ nil) do
-    for %{artifact: artifact, latest: latest} = entry <- artifacts, TicketViews.doc?(entry) do
-      href = fn version ->
-        ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/#{artifact.name}/#{version}"
+    where = %{project: project, ticket: ticket, chat: nil}
+    pages = ForgeWeb.PageViews.names({:ticket, ticket.id})
+
+    # A page is one row of its own (`ForgeWeb.PageViews`), and its files are not.
+    files =
+      for %{artifact: artifact, latest: latest} = entry <- artifacts,
+          TicketViews.doc?(entry),
+          not ForgeWeb.PageViews.member?(pages, artifact.name) do
+        href = fn version ->
+          ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/#{artifact.name}/#{version}"
+        end
+
+        doc =
+          WorkScreen.doc(
+            artifact,
+            Artifacts.versions(ticket.id, artifact.name),
+            href,
+            entry.approvable,
+            Forge.References.ticket_scope(project.name, ticket)
+          )
+
+        versions = Artifacts.versions(ticket.id, artifact.name)
+
+        doc
+        |> Map.put(:group, group(doc, latest, waiting))
+        |> Map.put(:by, TicketViews.written_by(latest.author, jobs))
+        |> WorkScreen.mark_attached(versions, scope, user)
+        |> Map.put(:came_with, came_with(project, ticket, latest))
       end
 
-      doc =
-        WorkScreen.doc(
-          artifact,
-          Artifacts.versions(ticket.id, artifact.name),
-          href,
-          entry.approvable,
-          Forge.References.ticket_scope(project.name, ticket)
-        )
-
-      versions = Artifacts.versions(ticket.id, artifact.name)
-
-      doc
-      |> Map.put(:group, group(doc, latest, waiting))
-      |> Map.put(:by, TicketViews.written_by(latest.author, jobs))
-      |> WorkScreen.mark_attached(versions, scope, user)
-      |> Map.put(:came_with, came_with(project, ticket, latest))
-    end
+    # What a ticket's jobs wrote, so under *Produced*.
+    files ++ Enum.map(ForgeWeb.PageViews.docs(where, jobs), &Map.put(&1, :group, :produced))
   end
 
   # The files that came with this version of a document or the ticket's text, named under its row
@@ -1121,6 +1160,24 @@ defmodule ForgeWeb.TicketLive do
       <:aside :if={TicketViews.aside?(assigns)}>
         <TicketViews.aside {assigns} />
       </:aside>
+
+      <%!-- A link to the page a human state asks to be opened, at the head of every view and
+            never a decision (`docs/design/ui.md` § The ticket). A page opens on a screen of its
+            own, so it is a full page load. --%>
+      <div :if={@opens} id="open-page" class="work-open-page">
+        <.button
+          :if={@opens.href}
+          id="open-page-link"
+          variant="outline"
+          chevron
+          href={@opens.href}
+        >
+          Open {@opens.name}
+        </.button>
+        <.button :if={!@opens.href} id="open-page-link" variant="outline" disabled>
+          Open {@opens.name} · no version yet
+        </.button>
+      </div>
 
       <WorkScreen.body :if={@view == "steps"} id="steps">
         <TicketViews.steps {assigns} />

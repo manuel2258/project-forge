@@ -43,6 +43,9 @@ defmodule Forge.Application do
         # Before anything is served: a node whose `SECRET_KEY_BASE` opens none of the credentials
         # it holds refuses to start, rather than starting broken in five places at once.
         Forge.Credentials.KeyCheck,
+        # Which of a person's page's batches were applied already, across a reconnect, which is a
+        # new LiveView process (`Forge.Pages.Batches`).
+        Forge.Pages.Batches,
         # Start to serve requests, typically the last entry
         ForgeWeb.Endpoint
       ] ++ scheduler() ++ digest()
@@ -85,6 +88,7 @@ defmodule Forge.Application do
         Forge.MergeQueue.Runner,
         Forge.ImageBuilds.Runner,
         Forge.Attachments.Sweeper,
+        Forge.Pages.Bursts,
         Forge.Events.Retention.Sweeper,
         Forge.Git.Lfs.Sweeper,
         Forge.Schedules.Runner

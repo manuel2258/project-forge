@@ -63,6 +63,18 @@ defmodule ForgeWeb.OperatorLiveTest do
     end
   end
 
+  # The same wait for a text: the question that arrived meanwhile is counted by the frame at the
+  # end of its second, which a loaded machine can take past the click.
+  defp heard_text(view, text, attempts \\ 150) do
+    html = render(view)
+
+    cond do
+      html =~ text -> html
+      attempts == 0 -> flunk("the queue page never said #{inspect(text)}")
+      true -> Process.sleep(20) && heard_text(view, text, attempts - 1)
+    end
+  end
+
   defp run_pending(ticket_id) do
     [job] = Enum.filter(Jobs.for_ticket(ticket_id), &(&1.status == :pending))
     {name, doc} = Process.get(:scenario, {"success", "plan.md"})
@@ -230,8 +242,7 @@ defmodule ForgeWeb.OperatorLiveTest do
     # — and the question that arrived meanwhile is next.
     assert has_element?(view, "#queue-gone")
     view |> element("#queue-later") |> render_click()
-    html = render(view)
-    assert html =~ "blocking question"
+    html = heard_text(view, "blocking question")
     assert html =~ "Which backend?"
 
     # a human edit in between makes the question live on a new version; answering still works
@@ -1298,5 +1309,29 @@ defmodule ForgeWeb.OperatorLiveTest do
       refute has_element?(view, ~s([id="#{commit_message_id(ticket)}"]))
       assert has_element?(view, ~s(button[value="approved"]))
     end
+  end
+
+  # `docs/design/ui.md` § The queue: a page is linked from the item of its ticket and from the
+  # decision panel, as a full page load (a link, not a patch) — and never decided.
+  test "a ticket's page is linked from its queue item and from its decision panel", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    scenario("success", "refinement.md")
+    run_pending(ticket.id)
+    ForgeWeb.PageDoorFixtures.published!({:ticket, ticket.id}, "form")
+    path = "/tickets/#{project.name}/#{ticket.number}/pages/form"
+
+    {:ok, queue, _html} = live(conn, ~p"/")
+    assert has_element?(queue, ~s(#queue-page-0[href="#{path}"]), "Open form")
+    assert has_element?(queue, ~s(.queue-docs a[href="#{path}"]), "v1")
+    refute has_element?(queue, ~s(#queue-open-page))
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=docs")
+    open!(view)
+    assert has_element?(view, ~s(#decision-pages a[href="#{path}"]), "Open form v1")
+    refute has_element?(view, ~s(#decision-pins a[href="#{path}"]))
   end
 end

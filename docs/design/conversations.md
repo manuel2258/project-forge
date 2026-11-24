@@ -349,6 +349,16 @@ scope above: the ticket's for a ticket chat, the conversation's for a project ch
 stays a proposal, scoped to the job that wrote it whichever kind of chat that is
 (`ticket-proposals.md` § Scope: the job, not the ticket).
 
+**A conversation may write a page** (`pages.md`) as it writes a document: a directory in `out/` that
+holds an `index.html` is a page, and any other directory is reported as invalid with why
+(`invalid_pages` on the turn). A ticket chat's page is the ticket's, under the ticket's pages; a
+project chat's is the chat's own, at `/chats/:id/pages/:name`, **read only once the chat has
+ended** as a done ticket's are, and not in the archive. A turn records a new page version only when
+a file was added, removed or changed, and a name the ticket's pinned workflow produces as another
+kind, or one an artifact already holds as another kind, is refused with the reason and listed with
+the unrecorded documents. A conversation reaches the store of its ticket's pages (a project chat,
+its own) through the same door as a job (`/job/pages`), live and for as long as its process runs.
+
 They are held to a workflow job's output rules where those apply, and the rules have one
 definition each, shared rather than copied:
 

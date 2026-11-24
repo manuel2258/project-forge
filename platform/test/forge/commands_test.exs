@@ -829,18 +829,21 @@ defmodule Forge.CommandsTest do
         assert Jobs.protocol_needs(each)[:usage] == 11
 
         # Every job needs 14, for Git LFS (`docs/design/worker-channel.md` § Protocol 14); an agent
-        # job and a conversation also need 13, for the files people attached, which it exceeds.
+        # job and a conversation also need 13, for the files people attached, which it exceeds, and
+        # 16, for pages (§ Protocol 16), which a command does not.
         assert Jobs.protocol_needs(each)[:lfs] == 14
 
         # A conversation also needs 15: the worker queues its messages and says each was delivered
         # (`worker-channel.md` § Protocol 15). No other kind does, so a worker of 14 still takes
-        # an agent job and a command.
+        # a command.
         assert Jobs.protocol_needs(each)[:chat] == if(each.kind == :chat, do: 15, else: 0)
-        assert Jobs.protocol(each) == if(each.kind == :chat, do: 15, else: 14)
+        assert Jobs.protocol_needs(each)[:pages] == if(each.kind == :command, do: 0, else: 16)
+        assert Jobs.protocol(each) == if(each.kind == :command, do: 14, else: 16)
       end
 
       old = Workers.get!(FakeWorker.connect(protocol: 2, project: context.project).id)
-      new = Workers.get!(FakeWorker.connect(protocol: 14, project: context.project).id)
+      new = Workers.get!(FakeWorker.connect(protocol: 16, project: context.project).id)
+      before_pages = Workers.get!(FakeWorker.connect(protocol: 15, project: context.project).id)
       before_lfs = Workers.get!(FakeWorker.connect(protocol: 13, project: context.project).id)
       before_files = Workers.get!(FakeWorker.connect(protocol: 12, project: context.project).id)
       agent = %{kind: :workflow, memory: 1, cores: 1, project_id: context.project.id}
@@ -854,6 +857,10 @@ defmodule Forge.CommandsTest do
       refute Workers.fits?(before_lfs, agent)
       refute Workers.fits?(before_lfs, command)
       assert Workers.fits?(new, agent)
+
+      # A worker of 15 takes every command and no agent job: pages are the agent's, not a command's.
+      refute Workers.fits?(before_pages, agent)
+      assert Workers.fits?(before_pages, command)
       refute Workers.fits?(old, command)
       assert Workers.fits?(new, command)
     end

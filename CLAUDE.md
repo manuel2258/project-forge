@@ -157,6 +157,16 @@ git-lfs honours `http.followRedirects=false`, and a worker against a real platfo
 HTTP (`docs/design/git-hosting.md` § Git LFS). **Never commit** a `.gitattributes` naming `filter=lfs`,
 or a valid pointer at such a path, to forge's own tree: forge is hosted on forge.
 
+`docs/design/pages.md` is the standard for pages: an HTML page a job or a chat writes (`name@` in
+`produces`, files flat in `out/<name>/`, `index.html` its entry), hosted by forge at a sub-page of its
+own and **sandboxed** (`sandbox allow-scripts`, never `allow-same-origin`) so its script never acts as
+the viewer, with a live store of JSON keys of its own that people fill in through a slim forge bar and
+a running job reads and writes live through `/job/pages` (`$FORGE_PAGES_URL`), pinned to nothing. It
+needs **worker protocol 16**; read it before touching anything a page's script can reach. **It is
+being built** (ticket 66): its § Built and § Not built yet say what the code does. **Not verified
+here:** iPhone Safari and video scrubbing on a phone, a Codex job's page against OpenAI, a real
+worker against `/job/pages`, and Project Sundive's own page (`docs/design/pages.md` § Not verified here).
+
 `docs/design/look.md` is the standard for looking at the platform: `bin/look` opens a page in
 headless Chromium as a fixture user over a setup built from the suite's fixtures, runs steps and
 takes screenshots, in a network namespace of its own with a database of its own. Every change to

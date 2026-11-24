@@ -343,6 +343,12 @@ Rewriting a commit would change the agent's work, and the agent can push on its 
 token; a group's files are uploaded as they are, and may be binary, where a substring replaced is
 a file broken. A push carrying a value is § Open.
 
+**A page's files and a job's writes to a page's store are not masked either** (`pages.md`). A page's
+files are uploaded as a group's are, and a value written to the store is JSON a page will read back:
+rewriting a substring would break the data. The page's files and the store are read by every member
+and, through the archive, by every job and chat of the project — the same § Open as a group's files.
+Nothing looks for a secret in a page.
+
 **People's files are not masked either** (`attachments.md` § Not masked): they are downloaded to the
 machine as uploaded and never uploaded by it, and neither the worker's sync of them nor the bind
 mount that shows them to the job opens the secrets. Nothing looks for a secret in a picture.

@@ -10,7 +10,8 @@ defmodule ForgeWeb.FileType do
 
   use Phoenix.Component
 
-  @type t :: :markdown | :text | :log | :code | :image | :archive | :apk | :file | :changeset
+  @type t ::
+          :markdown | :text | :log | :code | :image | :archive | :apk | :file | :changeset | :page
 
   @markdown ~w(.md .markdown)
   @text ~w(.txt .csv .tsv)
@@ -28,6 +29,10 @@ defmodule ForgeWeb.FileType do
   """
   @spec of(%{name: String.t(), kind: atom()}) :: t()
   def of(%{name: name, kind: :blob}) when name == @changeset, do: :changeset
+
+  # A page is told by the record that says so (`docs/design/pages.md`), never by a member file's
+  # extension: the entry the Docs view builds for one carries the kind `:page`.
+  def of(%{kind: :page}), do: :page
 
   def of(%{name: name, kind: kind}) do
     case {by_extension(name), kind} do
@@ -63,6 +68,7 @@ defmodule ForgeWeb.FileType do
   def label(:apk), do: "Android app"
   def label(:file), do: "file"
   def label(:changeset), do: "changeset"
+  def label(:page), do: "page"
 
   @doc """
   The media type a version called `name` is downloaded as, when it is not served as text. An
@@ -156,6 +162,7 @@ defmodule ForgeWeb.FileType do
   def glyph(:file), do: "file"
   # The Changes tab's `+n −m`, since a changeset is a change and not a file.
   def glyph(:changeset), do: "±"
+  def glyph(:page), do: "pg"
 
   # The handoff's `TypeIcon`: 12px for one character, 9.5 for a word; a chip a step down. `file`
   # is the one four-letter glyph, and at 9.5 it still fits the 26px tile.

@@ -31,6 +31,7 @@ defmodule ForgeCore.Workflow.State do
     :resources,
     :exit,
     :on_conflict,
+    :opens,
     chat: false,
     inputs: [],
     produces: [],
@@ -79,6 +80,9 @@ defmodule ForgeCore.Workflow.State do
           # A merging or updating state's: where a conflict sends the ticket instead of refusing or
           # sticking.
           on_conflict: String.t() | nil,
+          # A human state's: the page, by name and without its marker, that a person opens while
+          # the ticket rests here (`docs/design/pages.md`). A state elsewhere produces it.
+          opens: String.t() | nil,
           # A command state's: what it runs on entry, and the outcome each exit status selects —
           # keyed by the status, or `"*"` for any other.
           invoke: [invocation()],

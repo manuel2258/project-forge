@@ -98,6 +98,15 @@ defmodule ForgeWeb.Router do
       live "/usage", UsageLive
     end
 
+    # A page an agent wrote, in a live session of its own with no frame: the bar the page view
+    # draws is forge's own and the frame under it is the page's (`docs/design/ui.md` § Pages).
+    # A live session of its own is also what forces a full page load on the way in, so the page
+    # never shares a document with another screen of forge.
+    live_session :page, on_mount: [{ForgeWeb.UserAuth, :require_approved}] do
+      live "/tickets/:project/:number/pages/:name", PageLive
+      live "/chats/:id/pages/:name", PageLive
+    end
+
     # Not a LiveView: this serves bytes, and every artifact name in the product links to it.
     # See docs/design/ui.md § Addressable artifact versions.
     get "/tickets/:project/:number/artifacts/:name/:version", ArtifactController, :show
@@ -146,6 +155,11 @@ defmodule ForgeWeb.Router do
     get "/tickets/:project/:number/artifacts", TicketController, :artifacts
     get "/tickets/:project/:number/artifacts/:name/:version/raw", TicketController, :raw
     get "/tickets/:project/:number/artifacts/:name", TicketController, :artifact
+    get "/tickets/:project/:number/pages", PageController, :index
+    get "/tickets/:project/:number/pages/:name/data", PageController, :data
+    get "/tickets/:project/:number/pages/:name/data/:key", PageController, :show
+    put "/tickets/:project/:number/pages/:name/data/:key", PageController, :put
+    delete "/tickets/:project/:number/pages/:name/data/:key", PageController, :delete
     post "/tickets/:project/:number/artifacts/:name", TicketController, :edit
     delete "/tickets/:project/:number/attachments/:file", TicketController, :withdraw
     delete "/tickets/:project/:number/attachments/:file/:version", TicketController, :withdraw
@@ -194,6 +208,26 @@ defmodule ForgeWeb.Router do
     get "/", ArchiveController, :root
     get "/tickets/:number", ArchiveController, :ticket
     get "/tickets/:number/:ref", ArchiveController, :show
+  end
+
+  # A running job's door to the live store of its ticket's pages (`docs/design/pages.md` § How a
+  # running job reaches the store).
+  # No session: the job's own git token authorises it, the scope is the token's job row's and never
+  # the path's.
+  scope "/job/pages", ForgeWeb do
+    get "/", JobPagesController, :index
+    get "/:name/data", JobPagesController, :data
+    get "/:name/data/:key", JobPagesController, :show
+    put "/:name/data/:key", JobPagesController, :put
+    delete "/:name/data/:key", JobPagesController, :delete
+  end
+
+  # A page's own files, for the sandboxed frame. No session and no pipeline: a sandboxed document
+  # has an opaque origin and sends no cookie, so the path carries a signed token over the viewer and
+  # the page version, and the controller asks again whether that viewer still reaches the project
+  # (`docs/design/pages.md` § Serving a page's files).
+  scope "/page-files", ForgeWeb do
+    get "/:token/:file", PageFileController, :show
   end
 
   # Liveness for a container runtime and a proxy. Forwarded from the router rather than mounted

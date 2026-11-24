@@ -41,7 +41,7 @@ defmodule ForgeCore.Workflow.Parser do
   @top_keys ~w(version description initial states transitions limits defaults commands schedules
                 release release_files release_notes)
   @state_keys ~w(prompt env model effort harness inputs produces optional outcomes budget on_enter
-                 on_conflict resources invoke exit may_invoke secrets chat)
+                 on_conflict resources invoke exit may_invoke secrets chat opens)
   @command_keys ~w(run env produces timeout resources secrets)
   @grant_keys ~w(max concurrent)
   @transition_keys ~w(from to when approve max queue)
@@ -427,6 +427,7 @@ defmodule ForgeCore.Workflow.Parser do
     {effort, e16} = optional_string(definition, "effort", path)
     {chat, e17} = boolean(definition, "chat", path)
     {harness, e18} = harness(definition, path)
+    {opens, e19} = optional_string(definition, "opens", path)
 
     state = %State{
       name: name,
@@ -447,7 +448,8 @@ defmodule ForgeCore.Workflow.Parser do
       may_invoke: may_invoke,
       on_conflict: on_conflict,
       secrets: secrets || [],
-      chat: chat
+      chat: chat,
+      opens: opens
     }
 
     {state,
@@ -456,7 +458,8 @@ defmodule ForgeCore.Workflow.Parser do
        e2 ++
        e3 ++
        e4 ++
-       e5 ++ e6 ++ e7 ++ e8 ++ e9 ++ e10 ++ e11 ++ e12 ++ e13 ++ e14 ++ e15 ++ e16 ++ e17 ++ e18}
+       e5 ++
+       e6 ++ e7 ++ e8 ++ e9 ++ e10 ++ e11 ++ e12 ++ e13 ++ e14 ++ e15 ++ e16 ++ e17 ++ e18 ++ e19}
   end
 
   defp state(name, _definition) do

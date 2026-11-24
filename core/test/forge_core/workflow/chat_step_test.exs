@@ -305,6 +305,7 @@ defmodule ForgeCore.Workflow.ChatStepTest do
           "prompt" => "Refine the ticket.",
           "optional" => ["notes.md"],
           "produces" => ["refinement.md", "notes.md"],
+          "pages" => ["form"],
           "entered" => %{
             "from" => "planning",
             "outcome" => "plan_invalid",
@@ -339,6 +340,7 @@ defmodule ForgeCore.Workflow.ChatStepTest do
                "visit" => 2,
                "inputs" => ["ticket"],
                "produces" => ["a.md"],
+               "pages" => [],
                "optional" => ["a.md"],
                "outcomes" => [%{"outcome" => "done", "to" => "next", "approve" => ["a.md"]}],
                "entered" => nil

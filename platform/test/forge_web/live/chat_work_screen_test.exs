@@ -1088,6 +1088,30 @@ defmodule ForgeWeb.ChatWorkScreenTest do
       refute html =~ "chat.turn"
     end
 
+    # A file the machine could not put where the agent reads it is a line under the turn's divider,
+    # in the words the transcript uses (ticket 75); a turn with none draws no line.
+    test "says under the turn that a file could not be put where the agent reads it",
+         %{conn: conn, chat: chat} do
+      {:ok, _chat} =
+        Conversations.record_turn(chat, %{
+          "turn" => 1,
+          "harness" => %{"turns" => 1, "usage" => 1, "cost_usd" => 0.01, "subtype" => "success"},
+          "files_lost" => [%{"file" => "shot.png", "why" => "it could not be downloaded"}]
+        })
+
+      {:ok, _chat} = wrote(chat, 2, %{"notes.md" => "# Notes\n"})
+
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=activity")
+
+      assert has_element?(
+               view,
+               ~s(#job-events .work-act--turn [data-activity="files-lost"]),
+               "A file sent with a message could not be put where the agent reads it: shot.png (it could not be downloaded)."
+             )
+
+      assert view |> render() |> String.split(~s(data-activity="files-lost")) |> length() == 2
+    end
+
     test "names the agent's words as the agent's", %{conn: conn, chat: chat} do
       text(chat, "Looking at the lexer.")
 

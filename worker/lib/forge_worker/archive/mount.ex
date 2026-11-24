@@ -29,10 +29,18 @@ defmodule ForgeWorker.Archive.Mount do
   @callback bind_ro(source :: Path.t(), dir :: Path.t()) :: :ok | {:error, term()}
 
   @doc """
-  Makes `dir` show what `source` holds now. A bind mount always does, and has nothing to do; a copy
-  is made again.
+  Makes `dir` show what `source` holds now. A bind mount does while it is mounted, and has nothing
+  to do; a copy is made again.
   """
   @callback refresh(source :: Path.t(), dir :: Path.t()) :: :ok | {:error, term()}
+
+  @doc """
+  Whether `dir` shows what `source` holds — the question to ask before a message says a file is
+  there. **Asked of the mount table, not of `dir`**, which the job owns: for a bind, that `dir` is
+  a mountpoint now (a mount that was released leaves an empty directory that looks like any other);
+  for a copy, that it holds the names `source` does.
+  """
+  @callback shows?(source :: Path.t(), dir :: Path.t()) :: boolean()
 
   @doc "The module in use on this machine."
   @spec impl() :: module()
@@ -144,6 +152,9 @@ defmodule ForgeWorker.Archive.Mount do
     @impl true
     def refresh(_source, _dir), do: :ok
 
+    @impl true
+    def shows?(_source, dir), do: mounted?(dir)
+
     defp run(command, args) do
       case System.cmd(command, args, stderr_to_stdout: true) do
         {_out, 0} -> :ok
@@ -205,6 +216,18 @@ defmodule ForgeWorker.Archive.Mount do
       case File.cp_r(source, dir) do
         {:ok, _files} -> :ok
         {:error, reason, _file} -> {:error, {:copy, reason}}
+      end
+    end
+
+    @impl true
+    def shows?(source, dir) do
+      with {:ok, wanted} <- File.ls(source),
+           {:ok, shown} <- File.ls(dir) do
+        # The sort is an equivalent mutant at the sizes a test can name: `File.ls/1` lists both
+        # directories in one order on one filesystem. It is for a copy made on another.
+        Enum.sort(wanted) == Enum.sort(shown)
+      else
+        _error -> false
       end
     end
   end

@@ -153,6 +153,22 @@ turn, and a message's own files are in the folder before the turn that reads the
 `message` the worker is pushed carries the pool and names that message's files
 (`conversations.md` § The wire).
 
+**A file is named as there only when the job's folder shows it** (ticket 75). Syncing the worker's
+directory says nothing of what the job can read: the folder is a bind mount of it, and a mount that
+is not there leaves an empty directory. So the worker, once it has synced and refreshed, asks the
+mount (`Mount.shows?/2`: for a bind, the mount table, which the job cannot write; for a copy, that it
+holds the names the worker's directory does), and names every file of the message as *not received*
+when the answer is no or the refresh was refused, and for a name the pool it was sent does not hold —
+as it already did for a download that failed. The same names go to the person: the next turn report
+the worker makes carries `files_lost` (`{file, why}`) — for a message held behind a running turn,
+that is the running turn's — and the page draws a line of the platform's own where
+that turn stands, as it does for a turn that did not reach the branch (`conversations.md` § Commits),
+and under the turn's divider in Activity. The line says what happened to the file, not that the agent
+was told: a message held when its chat closes is never written. The agent's own line carries the same
+reason after each name (`(it could not be put in the folder on this machine)`).
+A workflow run has no such check after its start: a bind that cannot be made ends the run with
+nothing started, and a failed download is *not received* in its manifest.
+
 **Commands are not given the pool.** A command is a fixed script that reads no manifest; skipping it
 saves up to 5 GiB of download per build.
 
@@ -191,8 +207,12 @@ removed from both, bytes included. A failed download is named to the agent as no
 could swap the folder for a link to anywhere between a check and a write. So the worker's directory
 is shown to the job by a **read-only bind mount** at `$FORGE_JOB/attachments/`, and the worker
 writes only where the job cannot reach. The mount is made where the archive's is, by
-`Runner.with_attachments/3` beside `with_archive/3`, and released by `Archive.release/1`, through `ForgeWorker.Archive.Mount`, still the one module that runs
-`mount`, which gains a `bind_ro/2` callback. It **shares the archive's accepted gap** (a process that
+`Runner.with_attachments/3` around `with_archive/3`, and released by `Archive.release/1` — **when a
+job ends** (the folder's own `Attachments.start/1` and the start-up sweep release it too):
+`Archive.start/3` releases the archive's own mount and server and not
+this one, which it used to, so that every run with both began on an empty directory (ticket 75).
+Both go through `ForgeWorker.Archive.Mount`, still the one module that runs `mount`, which gains
+`bind_ro/2`, `refresh/2` and `shows?/2` callbacks. It **shares the archive's accepted gap** (a process that
 outlived a killed worker could plant a link where the folder goes before root mounts over it,
 `Archive.start/3`'s comment). **The switch** is `FORGE_ATTACHMENTS=bind`, set on the
 image: without it (a developer's machine, the suite) the worker copies into a plain folder, as the
@@ -288,7 +308,10 @@ files over the API only.
 ## Not verified here
 
 - **The bind mount on a real machine.** The suite drives it through a recording double and the
-  fallback copies; no kernel has mounted it.
+  fallback copies; no kernel has mounted it. Two real machines (tickets 70's and 75's jobs) showed
+  the folder as an empty `root` directory with no mount, which the archive's start was undoing; the
+  suite now holds the bind through the archive's start (`RecordingBind.bound?/1`), and a bind that
+  stays up on a real machine is still unobserved.
 - **Whether Claude Code and Codex can read an image from the folder.** Neither is observed here;
   Codex has never run against OpenAI. An agent is told where the file is, and what its harness makes
   of the bytes is the harness's.

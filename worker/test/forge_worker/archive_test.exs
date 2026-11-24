@@ -41,7 +41,7 @@ defmodule ForgeWorker.ArchiveTest do
 
   import ForgeWorker.Fixtures
 
-  alias ForgeWorker.{Archive, RecordingMount, Slice}
+  alias ForgeWorker.{Archive, RecordingBind, RecordingMount, Slice}
 
   @grant %{url: "http://platform.test", token: "secret-token"}
 
@@ -89,6 +89,31 @@ defmodule ForgeWorker.ArchiveTest do
 
     assert Archive.release(context.job_dir) == :ok
     assert Archive.release(Path.join(context.job_dir, "never-started")) == :ok
+  end
+
+  # The runner makes the attached files' bind and then starts the archive: starting the archive
+  # released both, so the harness began on an empty directory (ticket 75).
+  test "starting leaves the attached files' folder where it is, which releasing does not",
+       context do
+    RecordingBind.watch(context.root)
+    folder = ForgeWorker.Attachments.dir(context.job_dir)
+    :ok = ForgeWorker.Attachments.start(context.job_dir)
+    assert RecordingBind.bound?(folder)
+    flush()
+
+    assert Archive.start(context.job_dir, @grant, "j") == :ok
+    refute_received {:unbound, _}
+    assert RecordingBind.bound?(folder)
+
+    # A mount that fails takes down its own server and nothing beside it.
+    RecordingMount.watch(context.root, mount: {:error, :boom})
+    assert {:error, :boom} = Archive.start(context.job_dir, @grant, "j")
+    refute_received {:unbound, _}
+    assert RecordingBind.bound?(folder)
+
+    assert Archive.release(context.job_dir) == :ok
+    assert_received {:unbound, ^folder}
+    refute RecordingBind.bound?(folder)
   end
 
   test "a resume starts over: what was mounted is released first, and the socket is new",

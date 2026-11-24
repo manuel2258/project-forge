@@ -105,6 +105,9 @@ defmodule ForgeWorker.RecordingMount do
   @impl true
   def refresh(source, dir), do: None.refresh(source, dir)
 
+  @impl true
+  def shows?(source, dir), do: None.shows?(source, dir)
+
   @doc "Sends `message` to the test that watches the root `dir` is under, if any."
   def tell(dir, message) do
     case lookup(dir) do

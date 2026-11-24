@@ -972,9 +972,11 @@ defmodule ForgeCore.Prompt do
   it (`docs/design/conversations.md` § Context): the names in the folder they are in, and the
   files that were attached but not received. Empty when there is neither.
 
-  `files` are the platform's entries (`"file"` and `"size"`), `not_received` the names as uploaded.
+  `files` are the platform's entries (`"file"` and `"size"`), `not_received` the names as uploaded
+  — or, from the worker, `%{"file" => name, "why" => reason}` where the machine knows why, which the
+  agent reads in parentheses after the name.
   """
-  @spec message_files([map()], [String.t()]) :: String.t()
+  @spec message_files([map()], [String.t() | map()]) :: String.t()
   def message_files([], []), do: ""
 
   def message_files(files, not_received) do
@@ -995,11 +997,17 @@ defmodule ForgeCore.Prompt do
 
         names ->
           "\n\n[Attached but not received, so there is nothing to read: " <>
-            Enum.map_join(names, ", ", &inspect/1) <> "]"
+            Enum.map_join(names, ", ", &not_received_name/1) <> "]"
       end
 
     received <> missing
   end
+
+  defp not_received_name(%{"file" => name, "why" => why}) when is_binary(why),
+    do: "#{inspect(name)} (#{why})"
+
+  defp not_received_name(%{"file" => name}), do: inspect(name)
+  defp not_received_name(name), do: inspect(name)
 
   @doc """
   A message's text with what it says about its files appended (`message_files/2`): **the one place
@@ -1007,7 +1015,7 @@ defmodule ForgeCore.Prompt do
   files alone (`docs/design/ui.md` § Attaching files), and then it is the file line and nothing
   else, with none of the blank lines that would have separated it from words that are not there.
   """
-  @spec with_files(String.t() | nil, [map()], [String.t()]) :: String.t()
+  @spec with_files(String.t() | nil, [map()], [String.t() | map()]) :: String.t()
   def with_files(text, files, not_received) do
     text = text || ""
     named = message_files(files, not_received)

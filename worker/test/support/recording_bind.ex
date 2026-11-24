@@ -8,7 +8,10 @@ defmodule ForgeWorker.RecordingBind do
   setting (`docs/design/attachments.md` § The folder).
 
   Messages: `{:bound, source, folder}`, `{:refreshed, source, folder}` and `{:unbound, folder}`.
-  `watch/2` options: `bind:` what `bind_ro/2` answers (`:ok`).
+  `watch/2` options: `bind:` what `bind_ro/2` answers (`:ok`), `refresh:` what `refresh/2` answers
+  (`:ok`) and `shows:` what `shows?/2` answers — by default whether the folder is bound now, which
+  is tracked here (`bound?/1`): a bind that was made and not released since, as the kernel's mount
+  table would say.
   """
 
   @behaviour ForgeWorker.Archive.Mount
@@ -46,6 +49,9 @@ defmodule ForgeWorker.RecordingBind do
     :ok
   end
 
+  @doc "Whether `dir` is bound now: `bind_ro/2` answered `:ok` for it and `unmount/1` has not since."
+  def bound?(dir), do: :ets.member(@table, {:bound, dir})
+
   @impl true
   def serves?(_dir), do: false
 
@@ -60,7 +66,15 @@ defmodule ForgeWorker.RecordingBind do
 
       {pid, opts} ->
         send(pid, {:bound, source, dir})
-        Keyword.get(opts, :bind, :ok)
+
+        case Keyword.get(opts, :bind, :ok) do
+          :ok ->
+            :ets.insert(@table, {{:bound, dir}})
+            :ok
+
+          error ->
+            error
+        end
     end
   end
 
@@ -70,9 +84,17 @@ defmodule ForgeWorker.RecordingBind do
       nil ->
         None.refresh(source, dir)
 
-      {pid, _opts} ->
+      {pid, opts} ->
         send(pid, {:refreshed, source, dir})
-        :ok
+        Keyword.get(opts, :refresh, :ok)
+    end
+  end
+
+  @impl true
+  def shows?(source, dir) do
+    case lookup(dir) do
+      nil -> None.shows?(source, dir)
+      {_pid, opts} -> Keyword.get_lazy(opts, :shows, fn -> bound?(dir) end)
     end
   end
 
@@ -84,13 +106,15 @@ defmodule ForgeWorker.RecordingBind do
 
       {pid, _opts} ->
         send(pid, {:unbound, dir})
+        :ets.delete(@table, {:bound, dir})
         :ok
     end
   end
 
   defp lookup(dir) do
-    Enum.find_value(:ets.tab2list(@table), fn {root, pid, opts} ->
-      if String.starts_with?(dir, root <> "/"), do: {pid, opts}
+    Enum.find_value(:ets.tab2list(@table), fn
+      {root, pid, opts} -> if String.starts_with?(dir, root <> "/"), do: {pid, opts}
+      {{:bound, _dir}} -> nil
     end)
   end
 end

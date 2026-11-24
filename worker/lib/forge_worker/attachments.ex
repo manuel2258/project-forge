@@ -259,6 +259,15 @@ defmodule ForgeWorker.Attachments do
   @spec refresh(Path.t()) :: :ok | {:error, term()}
   def refresh(job_dir), do: Mount.attachments_impl().refresh(source_dir(job_dir), dir(job_dir))
 
+  @doc """
+  Whether the job's folder shows what the worker's directory holds now (`Mount.shows?/2`): the check
+  a message makes before it names a file as there, because a sync that reached the worker's
+  directory has said nothing of what the job can read.
+  """
+  @spec shows?(Path.t()) :: boolean()
+  def shows?(job_dir),
+    do: Mount.attachments_impl().shows?(source_dir(job_dir), dir(job_dir))
+
   @doc "Unmounts the folder. Idempotent."
   @spec release(Path.t()) :: :ok
   def release(job_dir) do

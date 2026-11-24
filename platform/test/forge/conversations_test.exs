@@ -1663,6 +1663,88 @@ defmodule Forge.ConversationsTest do
       assert notice.text == "Nothing from this turn reached the branch."
     end
 
+    # A file the worker could not put where the agent reads it is named to the agent as not
+    # received, and the person is told here (ticket 75).
+    test "names the files the agent could not read, and why", %{chat: chat} do
+      text(chat, "Looking.")
+
+      {:ok, _chat} =
+        Conversations.record_turn(
+          chat,
+          Map.put(turn(1, 0.01), "files_lost", [
+            %{"file" => "shot.png", "why" => "it could not be put in the folder on this machine"}
+          ])
+        )
+
+      assert [%{role: :user}, %{role: :assistant}, notice] = Conversations.transcript(chat.id)
+      assert notice.role == :notice
+      assert notice.turn == 1
+
+      assert notice.text ==
+               "A file sent with a message could not be put where the agent reads it: " <>
+                 "shot.png (it could not be put in the folder on this machine)."
+    end
+
+    test "cuts a long list of lost files and ignores what is not an entry", %{chat: chat} do
+      lost = for n <- 1..7, do: %{"file" => "f#{n}.png"}
+
+      {:ok, _chat} =
+        Conversations.record_turn(
+          chat,
+          Map.put(turn(1, 0.01), "files_lost", lost ++ [%{"why" => "no name"}, "junk"])
+        )
+
+      assert [%{role: :user}, notice] = Conversations.transcript(chat.id)
+      assert notice.text =~ "7 files"
+      assert notice.text =~ "f1.png; f2.png; f3.png; f4.png; f5.png; and 2 more."
+      refute notice.text =~ "f6.png"
+    end
+
+    test "cuts a file's name and reason to 200 characters", %{chat: chat} do
+      long = String.duplicate("x", 300)
+
+      {:ok, _chat} =
+        Conversations.record_turn(
+          chat,
+          Map.put(turn(1, 0.01), "files_lost", [%{"file" => long, "why" => long}])
+        )
+
+      assert [%{role: :user}, notice] = Conversations.transcript(chat.id)
+      cut = String.duplicate("x", 200)
+
+      assert notice.text ==
+               "A file sent with a message could not be put where the agent reads it: " <>
+                 cut <> " (" <> cut <> ")."
+    end
+
+    # A worker's entry is not trusted to hold text: a `file` or a `why` that is not a string is
+    # left out, and does not raise where the transcript and Activity draw it.
+    test "leaves out a name that is not text and a reason that is not text", %{chat: chat} do
+      {:ok, _chat} =
+        Conversations.record_turn(
+          chat,
+          Map.put(turn(1, 0.01), "files_lost", [
+            %{"file" => 5},
+            %{"file" => "g.png", "why" => 5}
+          ])
+        )
+
+      assert [%{role: :user}, notice] = Conversations.transcript(chat.id)
+
+      assert notice.text ==
+               "A file sent with a message could not be put where the agent reads it: g.png."
+    end
+
+    test "draws no line for a turn with no lost files, or only entries that are not files",
+         %{chat: chat} do
+      {:ok, _chat} = Conversations.record_turn(chat, Map.put(turn(1, 0.01), "files_lost", []))
+
+      {:ok, _chat} =
+        Conversations.record_turn(chat, Map.put(turn(2, 0.01), "files_lost", ["junk"]))
+
+      assert [%{role: :user}] = Conversations.transcript(chat.id)
+    end
+
     test "a turn that committed draws no notice", %{chat: chat} do
       text(chat, "Done.")
       {:ok, _chat} = Conversations.record_turn(chat, turn(1, 0.01))

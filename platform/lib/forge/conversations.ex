@@ -898,6 +898,10 @@ defmodule Forge.Conversations do
           # say it in the conversation rather than leaving it in the machine's log, which the
           # person in the chat does not read (`docs/design/conversations.md` § Commits).
           "uncommitted" => payload["uncommitted"],
+          # The files a message named as not received since the last turn, and why: the worker
+          # names a file as there only when the job's folder shows it, and the person who
+          # attached it reads this on the turn (`docs/design/attachments.md` § Delivery).
+          "files_lost" => payload["files_lost"],
           "interrupted" => payload["interrupted"] == true,
           "usage" => Runs.figure(harness).usage,
           "cost_usd" => harness["cost_usd"],
@@ -2092,6 +2096,7 @@ defmodule Forge.Conversations do
     done
     |> add_notice(failed(payload), event, turn)
     |> add_notice(uncommitted(payload["uncommitted"]), event, turn)
+    |> add_notice(files_lost_notice(payload["files_lost"]), event, turn)
   end
 
   defp add_notice(done, nil, _event, _turn), do: done
@@ -2139,6 +2144,45 @@ defmodule Forge.Conversations do
 
   defp uncommitted(%{}), do: "Nothing from this turn reached the branch."
   defp uncommitted(_none), do: nil
+
+  @files_lost_shown 5
+  @files_lost_chars 200
+
+  @doc """
+  **A file the machine could not put where the agent reads it**, as a line for the person who
+  attached it, from a turn's `files_lost`: the page showed the file as sent until this line. The
+  worker says which and why; nothing in an entry is trusted to be text, and a long list is cut, as
+  a long reason is, so that a hostile name cannot make the line the page. It says what happened to
+  the file and not that the agent was told: a message held when its chat closed is never written.
+  `nil` when there is nothing to say. Drawn in the transcript and in Activity.
+  """
+  @spec files_lost_notice(term()) :: String.t() | nil
+  def files_lost_notice([_ | _] = lost) do
+    entries =
+      for %{"file" => file} = entry <- lost, is_binary(file) do
+        why =
+          if is_binary(entry["why"]),
+            do: " (#{String.slice(entry["why"], 0, @files_lost_chars)})",
+            else: ""
+
+        "#{String.slice(file, 0, @files_lost_chars)}#{why}"
+      end
+
+    case entries do
+      [] ->
+        nil
+
+      entries ->
+        more = length(entries) - @files_lost_shown
+
+        if(length(entries) == 1, do: "A file", else: "#{length(entries)} files") <>
+          " sent with a message could not be put where the agent reads it: " <>
+          Enum.join(Enum.take(entries, @files_lost_shown), "; ") <>
+          if(more > 0, do: "; and #{more} more", else: "") <> "."
+    end
+  end
+
+  def files_lost_notice(_none), do: nil
 
   defp conflicted(paths) when is_list(paths) and paths != [],
     do: " in " <> Enum.map_join(paths, ", ", &string/1)

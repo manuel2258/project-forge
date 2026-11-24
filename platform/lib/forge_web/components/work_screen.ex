@@ -556,8 +556,19 @@ defmodule ForgeWeb.WorkScreen do
               <.line line={{:one, action}} />
             </div>
           <% {:event, %{type: "chat.turn"} = event} -> %>
-            <%!-- A turn is where one exchange ends and the next begins: a divider, not a row. --%>
-            <span class="work-act-turn" data-activity="turn">turn {event.payload["turn"]}</span>
+            <%!-- A turn is where one exchange ends and the next begins: a divider, not a row. A file
+                  the machine could not put where the agent reads it is a line under it, the words
+                  of the transcript's own (`Conversations.files_lost_notice/1`). --%>
+            <div class="work-act-turnbox">
+              <span class="work-act-turn" data-activity="turn">turn {event.payload["turn"]}</span>
+              <p
+                :if={lost = Forge.Conversations.files_lost_notice(event.payload["files_lost"])}
+                class="work-act-lost"
+                data-activity="files-lost"
+              >
+                {lost}
+              </p>
+            </div>
           <% {:event, %{type: "chat.message"} = event} -> %>
             <div class="work-act-main work-act-said" data-activity="message">
               <span class="work-act-who">{ForgeWeb.Format.author(event.actor) || "you"}:</span>

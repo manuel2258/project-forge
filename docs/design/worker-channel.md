@@ -591,6 +591,11 @@ conversation, which needs the archive; the minimum is unchanged.
 older platform builds the `chat.turn` payload key by key (`Conversations.record_turn/2`) and so
 drops it: the turn is recorded as it was before, with no commit and no reason.
 
+**`files_lost` on a turn rides along without a bump** (ticket 75): the files a message named to the
+agent as not received since the previous report, `[{file, why}]`, empty when none. An older worker
+never sends it and an older platform drops it, so the person is not told, which is what they were
+before.
+
 What rides along without a bump, because an older side may ignore it: `job.harness.memory`
 events and the `memory` a `starting` event carries (`docs/design/claude-code-events.md` § Memory),
 which an older platform records like any other harness event; and `memory` in a result's or a

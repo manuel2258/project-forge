@@ -13,8 +13,12 @@ defmodule Forge.Look.Setups.Chats do
   bubble holding only its names (`files_only`); and a step whose nothing-yet dock has a two-question
   card open (`step_empty`).
 
+  Ticket 75 adds `files_lost`, a conversation whose second turn reports two files the machine could
+  not put where the agent reads them, one whose name is cut at 200 characters: the line under that turn in the
+  transcript and in Activity (`files_lost_activity`).
+
   Users: `member`. Paths: `list`, `new`, `responding`, `changes`, `released`, `updated`, `ended`, `lost`, `conflict`,
-  `conflict_changes`, `step`, `step_ticket`, `queued`, `files_only`, `step_empty`.
+  `conflict_changes`, `step`, `step_ticket`, `queued`, `files_only`, `step_empty`, `files_lost`, `files_lost_activity`.
   """
 
   @behaviour Forge.Look.Setups
@@ -80,6 +84,7 @@ defmodule Forge.Look.Setups.Chats do
     responding = responding!(game, machine)
     queued = queued!(game, machine)
     files_only = files_only!(game, member)
+    files_lost = files_lost!(game)
     {_step_empty_ticket, step_empty} = step_empty!(game, member)
 
     %{
@@ -99,7 +104,9 @@ defmodule Forge.Look.Setups.Chats do
         "step_ticket" => "/tickets/#{game.name}/#{step.number}",
         "queued" => "/chats/#{queued.id}",
         "files_only" => "/chats/#{files_only.id}",
-        "step_empty" => "/chats/#{step_empty.id}"
+        "step_empty" => "/chats/#{step_empty.id}",
+        "files_lost" => "/chats/#{files_lost.id}",
+        "files_lost_activity" => "/chats/#{files_lost.id}?tab=activity"
       }
     }
   end
@@ -287,6 +294,37 @@ defmodule Forge.Look.Setups.Chats do
     chat_started!(chat)
     said(chat, "The logo sits 12 px too low on a narrow phone. I can nudge it up; want that?")
     turn(chat, 1, "0.02")
+    chat
+  end
+
+  # The second turn's message came with two files the machine could not show the agent: one
+  # named in a few words, one with a very long name (the line cuts at 200 characters).
+  defp files_lost!(project) do
+    {:ok, chat} = Conversations.open(project, "Here is the crash screen.")
+    run!(chat)
+    chat_started!(chat)
+    said(chat, "That is a null reference in the save loader. I can guard it; want that?")
+    turn(chat, 1, "0.02")
+
+    {:ok, _event} = Conversations.send(chat, "Yes, and here are two more screenshots.")
+    said(chat, "I could not open the screenshots, so I will guard it from the trace alone.")
+
+    {:ok, chat} =
+      Conversations.record_turn(chat, %{
+        "turn" => 2,
+        "harness" => %{"turns" => 1, "cost_usd" => 0.03, "session_id" => "look"},
+        "files_lost" => [
+          %{
+            "file" => "crash-1.png",
+            "why" => "it could not be put in the folder on this machine"
+          },
+          %{
+            "file" => String.duplicate("very-long-screenshot-name-", 12) <> ".png",
+            "why" => "it could not be downloaded to this machine"
+          }
+        ]
+      })
+
     chat
   end
 

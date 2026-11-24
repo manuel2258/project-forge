@@ -31,7 +31,11 @@ defmodule ForgeWorker.Archive do
           :ok | {:error, term()}
   def start(job_dir, %{url: url, token: token}, job_id \\ nil) do
     mount = Mount.impl()
-    release(job_dir)
+
+    # **Its own mount and server only.** `release/1` also takes down the attached files' bind, which
+    # the runner has just made beside this folder: starting the archive released it, and every run
+    # with both began on an empty directory (`docs/design/attachments.md` § The folder).
+    release_archive(job_dir)
     folder = dir(job_dir)
 
     # As root, in a job directory that the slice has handed to the job's user (the runner makes the
@@ -59,7 +63,7 @@ defmodule ForgeWorker.Archive do
         :ok
       else
         {:error, reason} ->
-          release(job_dir)
+          release_archive(job_dir)
 
           # Untested: reached only when `Server.start_link/1` fails before it listens, which no test
           # provokes (a mount that fails after it is cleaned by the server's own `terminate/2`, so
@@ -106,13 +110,19 @@ defmodule ForgeWorker.Archive do
 
   def grant(_assignment), do: nil
 
-  @doc "Unmounts the folder and stops its server. Idempotent: a job with none finds nothing to do."
+  @doc """
+  Unmounts the folder and stops its server, and the attached files' folder with it. Idempotent: a
+  job with none finds nothing to do. **For the places that end a job** (`finish`, `Slice.leave/2`,
+  the stale sweep), where a `chown -R` over either mount is the same walk; `start/3` releases only
+  its own (`release_archive/1`).
+  """
   @spec release(Path.t()) :: :ok
   def release(job_dir) do
-    # The attached files' folder is released wherever the archive's is, because the same three
-    # places end a job and a `chown -R` over either mount is the same walk.
     ForgeWorker.Attachments.release(job_dir)
+    release_archive(job_dir)
+  end
 
+  defp release_archive(job_dir) do
     case Mount.impl().unmount(dir(job_dir)) do
       :ok -> :ok
       {:error, reason} -> Logger.warning("could not unmount #{dir(job_dir)}: #{inspect(reason)}")

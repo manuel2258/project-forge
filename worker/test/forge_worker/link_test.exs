@@ -3824,6 +3824,28 @@ defmodule ForgeWorker.LinkTest do
       refute File.exists?(shown)
     end
 
+    # The platform's pool entry for `bytes` as the worker fetches it from `/store/<key>`.
+    defp attached(bytes, name \\ "shot.png") do
+      key = "upload/" <> uuid()
+
+      Application.put_env(:forge_worker, :req_options,
+        plug: fn conn ->
+          if conn.method == "GET" and conn.request_path == "/store/" <> key,
+            do: Plug.Conn.send_resp(conn, 200, bytes),
+            else: Plug.Conn.send_resp(conn, 404, "")
+        end
+      )
+
+      %{
+        "file" => name,
+        "version_id" => uuid(),
+        "key" => key,
+        "token" => "get",
+        "size" => byte_size(bytes),
+        "hash" => "sha256:" <> Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
+      }
+    end
+
     # A message may be files alone (`docs/design/ui.md` § Attaching files): what the harness is
     # written is the line naming them, with none of the blank lines that would have followed words
     # that are not there.
@@ -3838,19 +3860,137 @@ defmodule ForgeWorker.LinkTest do
       push(client, @topic, "assign", job)
       {%{"turn" => 1}, _} = take_push("turn")
 
+      entry = attached("pixels")
+
       push(client, @topic, "message", %{
         "job_id" => job_id,
         "message_id" => "m-2",
         "text" => "",
         "files" => [%{"file" => "shot.png", "size" => 6}],
         "not_received" => [],
-        "attachments" => []
+        "attachments" => [entry]
       })
 
-      {%{"turn" => 2}, _} = take_push("turn")
+      {%{"turn" => 2, "files_lost" => []}, _} = take_push("turn")
 
       last = root |> written(job_id) |> List.last()
       assert last =~ ~s("text":"[Files attached with this message)
+    end
+
+    # **A file is named as there only when the job's folder shows it** (ticket 75): the folder is a
+    # bind of the worker's directory, and a bind that is gone leaves an empty one. The agent is told
+    # the file was not received, and so is the person, with the next turn's report.
+    test "names a file as not received when the folder does not show it, and says so in the turn",
+         context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      # The attached files' folder of this test's jobs only, as `Attachments.start/1` makes it.
+      ForgeWorker.RecordingBind.watch(Path.join(root, "jobs"))
+
+      job = origin |> chat() |> Map.put("attachments", [])
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1, "files_lost" => []}, _} = take_push("turn")
+      assert ForgeWorker.RecordingBind.bound?(Path.join([root, "jobs", job_id, "attachments"]))
+
+      entry = attached("pixels")
+
+      message = %{
+        "job_id" => job_id,
+        "message_id" => "m-2",
+        "text" => "look",
+        "files" => [%{"file" => "shot.png", "size" => 6}],
+        "not_received" => [],
+        "attachments" => [entry]
+      }
+
+      # While the folder shows what the worker holds, the file is there.
+      push(client, @topic, "message", message)
+      {%{"turn" => 2, "files_lost" => []}, _} = take_push("turn")
+      assert root |> written(job_id) |> List.last() =~ "Files attached with this message"
+
+      # The bind is gone (the folder is an empty directory, and the sync reached the worker's own).
+      ForgeWorker.RecordingBind.unmount(Path.join([root, "jobs", job_id, "attachments"]))
+      push(client, @topic, "message", %{message | "message_id" => "m-3"})
+      {%{"turn" => 3, "files_lost" => lost}, _} = take_push("turn")
+
+      last = root |> written(job_id) |> List.last()
+      assert last =~ "Attached but not received"
+      assert last =~ ~s(\\"shot.png\\")
+      refute last =~ "Files attached with this message"
+      assert [%{"file" => "shot.png", "why" => why}] = lost
+      assert why =~ "folder"
+      # The agent reads the reason too.
+      assert last =~ "it could not be put in the folder on this machine"
+
+      # A refresh the mount refused is the same, and what was reported is not reported again.
+      folder = Path.join([root, "jobs", job_id, "attachments"])
+      ForgeWorker.RecordingBind.bind_ro(Path.join(root, "x"), folder)
+      assert ForgeWorker.RecordingBind.bound?(folder)
+      ForgeWorker.RecordingBind.watch(Path.join(root, "jobs"), refresh: {:error, :boom})
+      push(client, @topic, "message", %{message | "message_id" => "m-4"})
+      {%{"turn" => 4, "files_lost" => [%{"file" => "shot.png"}]}, _} = take_push("turn")
+      assert root |> written(job_id) |> List.last() =~ "Attached but not received"
+    end
+
+    # A name the pool does not have cannot be in the folder, whatever the platform said.
+    test "names a file the pool does not hold as not received", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = origin |> chat() |> Map.put("attachments", [])
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      push(client, @topic, "message", %{
+        "job_id" => job_id,
+        "message_id" => "m-2",
+        "text" => "",
+        "files" => [%{"file" => "ghost.png", "size" => 6}],
+        "not_received" => [],
+        "attachments" => []
+      })
+
+      {%{"turn" => 2, "files_lost" => [%{"file" => "ghost.png"}]}, _} = take_push("turn")
+      assert root |> written(job_id) |> List.last() =~ "Attached but not received"
+    end
+
+    # A download that fails is the rule the old code had, which the folder's check does not replace:
+    # nothing of the file is in the worker's directory, and the folder shows exactly that.
+    test "names a file that could not be downloaded as not received, with the reason", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = origin |> chat() |> Map.put("attachments", [])
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      # The bytes served are not the ones the pool's hash is of.
+      entry = Map.put(attached("pixels"), "hash", "sha256:" <> String.duplicate("0", 64))
+
+      push(client, @topic, "message", %{
+        "job_id" => job_id,
+        "message_id" => "m-2",
+        "text" => "look",
+        "files" => [%{"file" => "shot.png", "size" => 6}],
+        "not_received" => [],
+        "attachments" => [entry]
+      })
+
+      {%{"turn" => 2, "files_lost" => [%{"file" => "shot.png", "why" => why}]}, _} =
+        take_push("turn")
+
+      assert why =~ "downloaded"
+      last = root |> written(job_id) |> List.last()
+      assert last =~ "Attached but not received"
+      assert last =~ "it could not be downloaded to this machine"
+      refute last =~ "Files attached with this message"
     end
 
     # `docs/measurements.md` § Session resume: the reopened process's total starts from what the

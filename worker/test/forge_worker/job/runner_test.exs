@@ -1592,6 +1592,62 @@ defmodule ForgeWorker.Job.RunnerTest do
       assert lifecycle() == [:slice, :unmounted, :mounted, :unmounted]
     end
 
+    # The attached files' folder is bound before the archive starts, and the archive's start used to
+    # release it: the harness began on an empty directory (ticket 75). Everything the runner does to
+    # the two mounts comes to this mailbox, in order, before the harness's first event.
+    test "does not take the attached files' folder down when it starts", context do
+      ForgeWorker.RecordingBind.watch(context.root)
+      spec = spec()
+      folder = Path.join([context.root, spec.job_id, "attachments"])
+
+      pid = run(context, "success", spec: spec, archive: @grant, attachments: [])
+      assert {:ok, _result} = Runner.await(pid, 30_000)
+
+      assert bound_at_harness_start(folder) == :bound
+      # And it is released when the job ends, with the archive.
+      refute ForgeWorker.RecordingBind.bound?(folder)
+    end
+
+    # The same reason as the archive's: the slice's recursive `chown` would walk the bind.
+    test "the attached files' folder is bound after the slice is made, never before", context do
+      ForgeWorker.RecordingBind.watch(context.root)
+
+      pid =
+        run(context, "success",
+          slice: RecordingSlice,
+          slice_opts: %{reply_to: self()},
+          archive: @grant,
+          attachments: []
+        )
+
+      assert {:ok, _result} = Runner.await(pid, 30_000)
+      assert lifecycle_with_binds() == [:slice, :unbound, :bound, :unbound]
+    end
+
+    defp lifecycle_with_binds do
+      receive do
+        {:slice_prepared, _} -> [:slice | lifecycle_with_binds()]
+        {:bound, _, _} -> [:bound | lifecycle_with_binds()]
+        {:unbound, _} -> [:unbound | lifecycle_with_binds()]
+        {:mounted, _, _} -> lifecycle_with_binds()
+        {:unmounted, _} -> lifecycle_with_binds()
+      after
+        0 -> []
+      end
+    end
+
+    # What the folder was when the harness's first event came, from the mailbox's order.
+    defp bound_at_harness_start(folder, state \\ :never) do
+      receive do
+        {:bound, _source, ^folder} -> bound_at_harness_start(folder, :bound)
+        {:unbound, ^folder} -> bound_at_harness_start(folder, :unbound)
+        {:event, %{type: "job.harness.started"}} -> state
+        _other -> bound_at_harness_start(folder, state)
+      after
+        0 -> flunk("the harness never started")
+      end
+    end
+
     test "is not made for a job with no grant", context do
       pid = run(context, "success")
       assert {:ok, _result} = Runner.await(pid, 30_000)

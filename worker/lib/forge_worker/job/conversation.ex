@@ -90,6 +90,9 @@ defmodule ForgeWorker.Job.Conversation do
        # unless it is held (a reopen whose last word was the agent's), the conversation starts busy.
        busy: not hold,
        held: [],
+       # The files a message named whose folder could not show them, `%{"file", "why"}`, until the
+       # next turn report says so to the person (`files_lost` in `{:turn, …}`'s report).
+       files_lost: [],
        hold: hold,
        # The CLI's version, from its `system/init`: recorded with each session upload, so a
        # reopen restores the file only onto the CLI that wrote it.
@@ -343,25 +346,53 @@ defmodule ForgeWorker.Job.Conversation do
   # platform that sends no pool leaves the folder as it is. Done when the message arrives, held or
   # not, so that what it names is fresh whenever it goes; a message may be files alone
   # (`ForgeCore.Prompt.with_files/3`).
+  #
+  # **A file is named as there only if the job's folder shows it**, which is not the same as the
+  # worker's directory holding it: the folder is a bind mount of that directory, and a mount that
+  # is not there leaves an empty one. So the sync's own failures are not the only way a file is not
+  # received — `Mount.shows?/2` is asked of the mount table, and a refused refresh is one too — and
+  # every file of the message is then named as not received, with the reason, to the agent here and
+  # to the person with the next turn's report (`files_lost`).
   defp compose(state, text, %{"attachments" => entries} = payload) when is_list(entries) do
     job_dir = job_dir(state)
     failed = ForgeWorker.Attachments.sync(job_dir, entries)
-    ForgeWorker.Attachments.refresh(job_dir)
+    refreshed = ForgeWorker.Attachments.refresh(job_dir)
+    shown? = refreshed == :ok and ForgeWorker.Attachments.shows?(job_dir)
+    pool = for %{"file" => file} <- entries, do: file
 
-    files = Enum.reject(payload["files"] || [], &(&1["file"] in failed))
-    lost = for %{"file" => file} <- payload["files"] || [], file in failed, do: file
+    {files, lost} =
+      payload["files"]
+      |> List.wrap()
+      |> Enum.map(&{&1, why_not_received(&1["file"], failed, pool, shown?)})
+      |> Enum.split_with(fn {_file, why} -> why == nil end)
 
-    ForgeCore.Prompt.with_files(text, files, (payload["not_received"] || []) ++ lost)
+    files = Enum.map(files, &elem(&1, 0))
+    lost = for {file, why} <- lost, do: %{"file" => file["file"], "why" => why}
+    state = %{state | files_lost: state.files_lost ++ lost}
+
+    # The platform's own names, and the worker's with the reason it has for each.
+    {state, ForgeCore.Prompt.with_files(text, files, (payload["not_received"] || []) ++ lost)}
   end
 
-  defp compose(_state, text, _payload), do: text || ""
+  defp compose(state, text, _payload), do: {state, text || ""}
+
+  # Why the worker cannot say a file is in the folder, or nil when it can.
+  defp why_not_received(name, failed, pool, shown?) do
+    cond do
+      name in failed -> "it could not be downloaded to this machine"
+      name not in pool -> "it was not in the pool sent with the message"
+      not shown? -> "it could not be put in the folder on this machine"
+      true -> nil
+    end
+  end
 
   @impl true
   def handle_cast({:message, id, text}, state), do: handle_cast({:message, id, text, %{}}, state)
 
   # While a turn is in flight the message is held, and nothing is written; otherwise it goes now.
   def handle_cast({:message, id, text, files}, state) do
-    message = {id, compose(state, text, files)}
+    {state, composed} = compose(state, text, files)
+    message = {id, composed}
 
     if state.busy do
       {:noreply, reset_idle(%{state | held: state.held ++ [message]})}
@@ -455,6 +486,11 @@ defmodule ForgeWorker.Job.Conversation do
            # and the person in the chat never reads it, so this is the only way they learn that
            # what the turn did is not on the branch (`docs/design/conversations.md` § Commits).
            "uncommitted" => uncommitted,
+           # The files a message named as not received since the last report, with why, so that
+           # the person who attached them sees it too. A message held when the chat closes is
+           # never written (`flush_held/1`), so this says what became of the files, and not that
+           # the agent was told (`docs/design/attachments.md` § Delivery).
+           "files_lost" => state.files_lost,
            "interrupted" => event.payload[:interrupted] == true,
            "proposals" =>
              Map.new(proposals.proposals, fn {file, p} ->
@@ -472,7 +508,7 @@ defmodule ForgeWorker.Job.Conversation do
     # Everything held while that turn ran goes now, as one message — after the turn's report, so the
     # log reads `chat.turn` before the `delivered` that follows it. Across a reconnect the Link
     # keeps that order when it sends what is unacked again (`Link.resend_unacked/1`).
-    {:noreply, flush_held(%{state | turns: index, busy: false})}
+    {:noreply, flush_held(%{state | turns: index, busy: false, files_lost: []})}
   end
 
   def handle_info({:ended, _job_id, result}, state), do: {:noreply, %{state | result: result}}

@@ -1065,8 +1065,15 @@ for ever — taking its cost with it. So the key is the caller's: `send_acked/4`
 platform lists it now — each file with its folder name, version, size, hash, key and a `get` token —
 and `files`, the names this message was sent with, with any *not received*. The worker syncs the
 folder before it writes the text to the harness, and the text it writes names the files under the
-message (`ForgeCore.Prompt.message_files/2`). A reopen's opening and the replay name a message's
-files the same way.
+message (`ForgeCore.Prompt.message_files/2`) — **only those the job's folder shows**: a file the
+worker could not download, that the sent pool does not hold, or that the folder does not show (a bind
+that is gone, a refresh refused) is named as not received, and the next `turn` report the worker makes carries it as
+`files_lost` (`{file, why}`), which the page draws as a line of its own where that turn stands
+(`attachments.md` § Delivery). The agent reads the reason after each name that has one
+(`ForgeCore.Prompt.message_files/2` takes `%{"file", "why"}` as well as a bare name). **A reopen's
+opening and the replay are composed by the platform and are not checked this way**: they name the
+files the pool holds, and what keeps them true is that a run whose bind cannot be made ends before
+anything starts (`attachments.md` § Delivery).
 
 `close` exists because stdin EOF is enough to end the process cleanly — the spike measured that —
 so closing a conversation is closing the pipe, not killing anything.

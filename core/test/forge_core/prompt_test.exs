@@ -139,6 +139,18 @@ defmodule ForgeCore.PromptTest do
                "[Attached but not received, so there is nothing to read: \"b.mov\", \"c.mov\"]"
     end
 
+    # The worker knows why it could not show a file, and the agent is told (ticket 75).
+    test "a file not received names the reason when the machine gave one" do
+      assert Prompt.message_files([], [
+               "b.mov",
+               %{"file" => "c.mov", "why" => "it could not be put in the folder on this machine"},
+               %{"file" => "d.mov"},
+               %{"file" => "e.mov", "why" => nil}
+             ]) =~
+               "[Attached but not received, so there is nothing to read: \"b.mov\", " <>
+                 "\"c.mov\" (it could not be put in the folder on this machine), \"d.mov\", \"e.mov\"]"
+    end
+
     test "a message's words and its file line are joined in one place, and files alone are the line alone" do
       files = [%{"file" => "a.png", "size" => 10}]
 

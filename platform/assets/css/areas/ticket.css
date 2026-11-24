@@ -288,6 +288,8 @@
   a.work-act-version { display: inline-flex; min-height: 32px; align-items: center; color: var(--link); }
   /* A turn's end: a thin divider between exchanges, not a row of its own. */
   .work-act--turn { justify-content: center; padding: 6px 0; border-bottom: 0; }
+  .work-act-turnbox { display: flex; width: 100%; min-width: 0; flex-direction: column; gap: 4px; }
+  .work-act-lost { color: var(--warning); font-family: var(--font-sans); font-size: 12.5px; overflow-wrap: anywhere; text-align: center; }
   .work-act-turn {
     display: flex;
     width: 100%;

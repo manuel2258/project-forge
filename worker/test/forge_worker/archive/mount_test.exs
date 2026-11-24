@@ -43,6 +43,35 @@ defmodule ForgeWorker.Archive.MountTest do
     assert Mount.NineP.serves?("/x")
   end
 
+  # What a message asks before it names a file as there (`ForgeWorker.Attachments.shows?/1`).
+  test "a bind shows its source only while the folder is a mountpoint" do
+    assert Mount.NineP.shows?("/anywhere", "/")
+    refute Mount.NineP.shows?("/anywhere", "/nonexistent/attachments")
+  end
+
+  test "a copy shows its source when it holds the same names" do
+    base = Path.join(System.tmp_dir!(), "forge-shows-#{System.unique_integer([:positive])}")
+    source = Path.join(base, "source")
+    dir = Path.join(base, "dir")
+    File.mkdir_p!(source)
+    File.write!(Path.join(source, "a.txt"), "a")
+    on_exit(fn -> File.rm_rf!(base) end)
+
+    refute Mount.None.shows?(source, dir)
+    File.mkdir_p!(dir)
+    refute Mount.None.shows?(source, dir)
+    assert Mount.None.refresh(source, dir) == :ok
+    assert Mount.None.shows?(source, dir)
+    File.write!(Path.join(source, "b.txt"), "b")
+    refute Mount.None.shows?(source, dir)
+
+    # A name the copy still holds that the source no longer does (a withdrawn file) is not shown.
+    assert Mount.None.refresh(source, dir) == :ok
+    assert Mount.None.shows?(source, dir)
+    File.write!(Path.join(dir, "withdrawn.txt"), "gone")
+    refute Mount.None.shows?(source, dir)
+  end
+
   test "unmounting what is not mounted is not an error" do
     assert Mount.NineP.unmount("/nonexistent/archive") == :ok
   end

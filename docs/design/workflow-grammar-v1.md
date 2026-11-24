@@ -1261,15 +1261,28 @@ commands:
     produces: build.log              # one artifact: the command's combined output
     timeout: 20m                     # required
     resources: { memory: 4GiB, cpu: 4 }
+    keep_build: [0, 1]               # optional: exit statuses whose tree the ticket's next command starts from
+    warm_start: false                # optional: do not start from that tree (default true)
 ```
 
 **`timeout` is a duration**: a whole number and one unit — `90s`, `20m`, `2h` — or a bare number of
 seconds, and at most a day. One unit only; `1h30m` is written `90m`. A command that outlives it is
-stopped, and ends with no exit status. `run` and `timeout` are required; `env`, `produces` and `resources` are not.
+stopped, and ends with no exit status. `run` and `timeout` are required; `env`, `produces`, `resources`, `keep_build` and `warm_start` are not.
 `produces` is where the combined output is recorded on the ticket, as a blob: without it the
 output is still kept with the command's own job, and still handed to an agent that invoked it.
 **It produces no page** (`name@` is refused here). It may instead be a list of at most one such name and any number of groups of files —
 `produces: [package.log, package/*]` — whose files the script writes into `$FORGE_OUT/package/`.
+
+**`keep_build` and `warm_start`** say what a command passes on and what it starts from
+(`docs/design/worker-tier.md` § The command copy). `keep_build` is a non-empty list of whole
+numbers from 0 to 255: when the script exits *on its own* with one of them, its tree becomes the
+ticket's command copy on that machine, for the ticket's next command. Absent, the command keeps
+nothing, as before. The numbers are written as numbers — not `"*"`, and not digits in quotes — and a
+timeout, a cancel or a kill never keeps whatever is listed. `warm_start` is `true` or `false`, and
+`true` when absent: `false` makes the command ignore the ticket's copy and start as it would
+without one. Both are on a *command* and nowhere else; on a state or under `defaults` they meet
+the unknown-key refusal, which names where they are, and a value of the wrong kind is refused
+naming the command and the value (`commands.build.keep_build`).
 
 **The script is read at the ticket's pinned base commit**, like this file, never from the branch a
 job is working on. Otherwise an agent that edits `build.sh` changes what `build` means for the
@@ -1292,8 +1305,10 @@ climbing from `dirname "$0"` leaves it — the `cd` succeeds, and the build then
 with no repository in it. Use the working directory or `$FORGE_CHECKOUT`.
 
 **Nothing in `HOME` outlives the job.** A tool cache that should carry from one job to the next
-belongs inside the checkout, ignored by git: that is what the project's seed and a ticket's volume
-keep (`docs/design/worker-tier.md` § Volumes and the seed).
+belongs inside the checkout, ignored by git: that is what the project's seed, a ticket's volume and
+a ticket's command copy keep (`docs/design/worker-tier.md` § Volumes and the seed, § The command
+copy). The command copy is the one a *command* leaves, and only when its definition says
+`keep_build`.
 
 **Arguments are freeform and carry no schema.** An invocation supplies a list of strings and the
 worker `exec`s the script with them as an argument vector — never a string given to a shell, so

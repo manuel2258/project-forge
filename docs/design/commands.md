@@ -136,10 +136,20 @@ ceiling** ran to a status too — `systemd-run` reports a signal as 255 (`EXIT_E
 `signal` result; observed on the worker image, `docs/measurements.md` § The worker at its
 ceiling, on the image) — and stays `converged`; its
 reason says *the script was killed at its 2 GiB memory ceiling*, read from the unit's last reading
-as an agent's is (`worker-tier.md` § The job slice), and its log ends with `systemd-run`'s own
-summary, which names the signal, for the agent that reads it. A command whose `systemd-run` failed on the bus is not a command that ran
+as an agent's is (`worker-tier.md` § The job slice), and its log has `systemd-run`'s own
+summary, which names the signal, for the agent that reads it, before forge's last line. A command whose `systemd-run` failed on the bus is not a command that ran
 at all: it is the machine's failure, reported by nobody, and requeued with the rest of the
 machine's work (`worker-tier.md` § A machine whose systemd stops answering).
+
+**Two facts about the tree, as built.** A command's row also holds where its tree came from
+(`warm_source`: `copy`, `ticket`, `seed` or `clone`; and `warm_from_id`, the job that left the
+copy) and whether its build was kept (`warm_kept`, with `warm_unkept` the reason when not, and
+`warm_size`), from the worker's `warm` in its result, and the epoch it was assigned under
+(`warm_epoch`). A command run by a worker that does not report them has none of them and shows
+none: that is the difference between not reported and `clone`. The words are
+`ForgeCore.WarmBuild`'s, shared with the worker's log. A command waiting for the machine that
+holds its ticket's copy shows its wait on its page (`Waiting for the machine that holds this
+ticket's warm build: up to two minutes, then any machine with room.`).
 
 **A command state's outcome** is its batch's: the first non-zero status in `invoke` order, or zero
 when every command exited zero, looked up in `exit`. A command that ended with no status — its
@@ -285,8 +295,9 @@ level down, to get a build directory (§ How a command gets the code).
 ## How a command gets the code
 
 The command worker fetches the ticket's branch from the platform's git host at the recorded
-commit, into a checkout on a snapshot of its warm seed, and runs the script in `nix develop
-.#<env>` inside its slice.
+commit, into a checkout that is a snapshot of the ticket's command copy, ticket volume or the
+project's seed, or a clone (the order is below, and `worker-tier.md` § The command copy has the copy), and runs
+the script in `nix develop .#<env>` inside its slice.
 
 **A read-only per-job token, and no write credential.** This paragraph first argued for no per-job
 token at all: the worker token the machine already holds for the channel, accepted by the git host
@@ -314,6 +325,18 @@ is why three jobs could not find it: the one condition that mattered, being the 
 the one nothing but a command job reproduces. Writing the copy over its own path in the checkout
 would have made that script work, and was not done: the worker would write, as root, to a path the
 ticket's branch controls, through whatever links the branch put on it.
+
+**What a command starts from, and what it may leave.** In order: the ticket's **command copy** on
+that machine, when one is usable and the command does not say `warm_start: false`; the ticket's
+volume; the project's seed; a clone. Its tracked files are the invocation's commit whichever it
+was. A command whose definition says `keep_build: [0, 1]`, and whose script exits on its own with
+one of those statuses, leaves its tree as the next command's copy: this note used to say a
+command promotes nothing, so that a failing run cannot poison the next, and that is no longer
+so. What keeps it safe is that the copy never leaves its ticket (nothing is shared with another
+ticket, an agent job or a conversation), that a timeout, a cancel or a kill never keeps one, and
+that a person's **Clear** makes every copy unusable. A command declaring no `keep_build` — every
+command until a workflow says so — keeps nothing and starts as it did. The mechanism, its lock,
+its epoch and its sweep are `worker-tier.md` § The command copy, which is the standard.
 
 **A command worker is warm or it is not worth having.** The fetch is a delta against a checkout it
 already has, on a snapshot of a seed it already holds. `docs/measurements.md` § M1 variant (c) is
@@ -461,6 +484,15 @@ job's own key and recorded, when the command declares `produces`, as a `blob` ve
 artifact on the ticket, served by the addressable-version route like any other
 (`docs/design/ui.md` § Addressable artifact versions).
 
+**A command's log has two lines the script did not write.** The worker writes the first before the
+script's output — where the tree came from: `forge: started from this ticket's warm build, left by
+job <id>`, or from the ticket's volume, the project's seed or a fresh clone — and the last after
+it: `forge: kept this build as the ticket's warm build`, or `forge: did not keep this build as the
+ticket's warm build: <why>`, the why being the command keeps nothing, its exit status is not one
+it keeps, its timeout, a cancel, a kill, or keeping failed on the machine. A command off a
+`ticket/<n>` branch, a conversation's, neither starts from a copy nor keeps one. Its last line says it is not a ticket's command when
+its definition lists `keep_build`, and that the command keeps nothing when it does not.
+
 The argv is on the event because with freeform arguments it is no longer derivable from the
 workflow file. That is the cost of dropping the parameter schema, and it is cheap: one field, and
 "what actually ran" stays answerable for ever.
@@ -477,7 +509,10 @@ the gate a quarter of an hour, and a job the clock stops is recorded as out of b
 spend lost. `agents/implement.md`, `implement-bug.md`, `rebase.md` and `deps.md` therefore forbid
 running the gate or a suite in the checkout and send the agent to these three, in one batch where
 it can. `bin/look` is still run in the checkout, because its steps arrive on standard input and a
-command takes only arguments. **Not verified here:** the two scripts have been linted and not run
+command takes only arguments. **They keep nothing yet.** None of the three declares `keep_build`, so a project's own commands
+run as they did; opting them in, with every exit status kept, is a later change of its own
+(proposal `forge-commands-keep-their-build`), and until it merges the cold build each `static` and
+`test` pays is still there. **Not verified here:** the two scripts have been linted and not run
 on a command machine, and `static`/`test` change what a ticket's agents do only once this merges,
 since a script is read at the ticket's pinned base (`workflow-grammar.md` § Commands).
 

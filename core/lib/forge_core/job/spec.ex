@@ -70,8 +70,9 @@ defmodule ForgeCore.Job.Spec do
     # command state: the batch of commands that state last ran to a decision.
     :entered,
     # A command job's whole description, string keys: `name`, `args`, `run`, `script` (the text of
-    # `run` at the pinned commit), `at` (the commit to run against), `timeout_ms`, `produces` and
-    # `batch`, and `concurrent` when its invoker's grant limits it (`docs/design/commands.md`).
+    # `run` at the pinned commit), `at` (the commit to run against), `timeout_ms`, `produces`,
+    # `batch`, `keep_build` and `warm_start`, and `concurrent` when its invoker's grant limits it
+    # (`docs/design/commands.md`).
     :command,
     kind: :workflow,
     inputs: [],

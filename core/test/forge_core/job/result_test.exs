@@ -239,6 +239,16 @@ defmodule ForgeCore.Job.ResultTest do
              command |> Result.to_map() |> Jason.encode!() |> Jason.decode!() |> Result.from_map()
   end
 
+  test "carries a command's warm build through the wire, and a worker that sends none leaves nil" do
+    warm = %{"source" => "copy", "from" => "job-1", "kept" => true, "unkept" => nil, "size" => 12}
+    result = %Result{status: :finished, outcome: :converged, warm: warm}
+
+    assert ^result =
+             result |> Result.to_map() |> Jason.encode!() |> Jason.decode!() |> Result.from_map()
+
+    assert %Result{warm: nil} = Result.from_map(%{"status" => "finished", "outcome" => "error"})
+  end
+
   test "refuses a status or an outcome it does not know" do
     assert_raise ArgumentError, fn -> Result.from_map(%{"status" => "sideways"}) end
 

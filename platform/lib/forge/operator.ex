@@ -588,6 +588,19 @@ defmodule Forge.Operator do
     end
   end
 
+  @doc """
+  Clears the ticket's warm build (`Forge.WarmBuilds.clear/2`): no command of the ticket starts from
+  a copy kept before it, wherever it runs. Any member of the ticket's project may, and so may a
+  project token that may write; a job's own token is refused before it gets here.
+  """
+  @spec clear_warm_build(Ticket.t(), actor()) :: {:ok, Ticket.t()} | {:error, term()}
+  def clear_warm_build(%Ticket{} = ticket, actor) do
+    with :ok <- allow(ticket, actor, :use),
+         {:ok, cleared} <- Forge.WarmBuilds.clear(ticket, Actor.of(actor)) do
+      notify(cleared)
+    end
+  end
+
   @doc "Changes a ticket's title (`Forge.Tickets.retitle/3`); a release's is refused."
   @spec retitle(Ticket.t(), actor(), String.t()) :: {:ok, Ticket.t()} | {:error, term()}
   def retitle(%Ticket{} = ticket, actor, title) when is_binary(title) do

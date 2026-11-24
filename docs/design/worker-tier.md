@@ -711,9 +711,10 @@ job's `HOME` is its own and goes with the job directory, so a Gradle, npm or car
 default place under `HOME` is fetched again by every job on every machine. Pointed at an ignored
 directory inside the checkout instead — `GRADLE_USER_HOME="$PWD/.gradle-home"` — it is carried
 exactly as the build directory is: in the seed when the seed was published with it warm, and in the
-ticket's volume from one of its agent jobs to the next on the same machine. A command job snapshots
-the ticket's volume where there is one and promotes nothing, since its tree is a commit. There is
-no shared cache between jobs beyond these, and no key that declares one: the first project to hit
+ticket's volume from one of its agent jobs to the next on the same machine. A command job
+snapshots the ticket's command copy when it has one and the ticket's volume otherwise, and leaves
+a copy only when its command declares `keep_build` (§ The command copy). There is no shared cache
+between jobs beyond these, and no key that declares one: the first project to hit
 this measured 343 MB fetched per job. Pointing the cache at a
 directory outside the checkout, which is the obvious fix, is the one that loses it — nothing
 outside the checkout and the Nix store survives a job.
@@ -760,6 +761,125 @@ decides whether local warmth is worth keeping at all.
 forge.seed.publish PROJECT DIRECTORY`, which archives the directory, names it by the archive's own
 hash and uploads it. The store has no listing and is not getting one (`docs/design/storage.md` §
 The behaviour), so nothing can discover the current seed by looking.
+
+### The command copy: warmth between a ticket's commands
+
+The ticket volume above is filled by agent jobs, and `implement.md` forbids an agent to compile or
+test in its own checkout, so what it promotes holds sources and no build. A command job started
+from it and from the seed had nothing compiled to start from: every `static` and `test` of a
+ticket began at `==> hex` and compiled every dependency again, and a ticket whose agent used them
+as its edit loop ran dozens. (Ticket 76 has the counts, from ticket 66's logs.) **So a ticket's
+commands pass a build to one another themselves, in a copy of their own.** This reverses what this
+note said before — that a command promotes nothing, so a failing or killed run cannot poison the
+next — and the reversal is bounded by the rules below.
+
+**The shape.** A command whose definition says `keep_build: [0, 1]`, and whose script exits *on
+its own* with one of those statuses, leaves its tree on the machine as the ticket's **command
+copy**: `volumes/command/<ticket id>`, and beside it a marker, `volumes/command/<ticket id>.json`,
+holding `epoch`, `job_id`, `command` and `commit`. The ticket's next command on that machine
+snapshots the copy instead of the ticket's volume, so what the earlier one compiled is there. A
+command that declares no `keep_build` keeps nothing, which is every command in every workflow
+written before this existed: nothing changes for a project until its workflow says so. Forge's own
+three commands declare none yet (`forge-commands-keep-their-build` is the proposal).
+
+**What a command starts from, in order:** the ticket's command copy, unless the command says
+`warm_start: false` or there is none usable; then the ticket's volume; then the project's seed;
+then a clone. Whichever it was, its tracked files are exactly the commit it was invoked at
+(`Checkout.detach/3`). A copy's untracked files are removed (`git clean -fd`, no `-x`), so what a
+script left lying about is not inherited and what an ignored directory holds — `_build/`, `deps/`,
+`.mix-home/` — is. This is the opposite of the ticket volume's rule, and for the opposite reason:
+the ticket volume is promoted only after a push has committed every untracked file, and nothing
+pushes a command's tree.
+
+**Keyed by the ticket's id, not its branch.** Ticket numbers are per project and one machine can
+serve several projects, so a path built from `ticket/<n>` would hand project A's copy to project
+B's ticket of the same number (the ticket volume has exactly that fault, proposed separately as
+`ticket-volume-shared-across-projects`, and is otherwise left alone). The platform sends the
+ticket's id in the assignment's `warm` and the worker matches it as a UUID before it becomes a
+path; the branch is still matched against `\Aticket/\d+\z` to decide whether a command keeps or
+uses a copy at all. **A conversation's command (`chat/…`) neither keeps nor uses one**, and neither
+does an agent job or a conversation: `Workspace.prepare/3` never looks at `volumes/command`.
+
+**Nothing is checked on a copy, and nothing crosses a ticket.** The copy is used without a key on
+lock files or on the toolchain, because it never leaves its ticket: what moves under it is the
+ticket's own commits and what a refresh or a rebase takes in from `main`, and the build tool
+notices those as it does in any checkout (Mix records the locked version of a dependency and the
+Elixir and OTP release it was built with, and recompiles what differs). *What a cache from another
+ticket may share* is nothing. **The accepted gap:** a change in the Nix environment that the build
+tool cannot see — a C library a native dependency links against — is not caught, and only a ticket
+that edits its own Nix files can hit it. `warm_start: false` on a command is how a project keeps
+its gate from reading what other commands left, and **Clear** (below) is how a person does.
+
+**Which endings keep.** Only a script that exited on its own with a status the command lists. A
+timeout, a cancel, a kill at the memory ceiling (which reads as status 255 — `commands.md`, § What
+the row holds) and a script that never ran keep nothing, whatever `keep_build` lists, and the
+ticket keeps the copy it had. `ForgeCore.WarmBuild` names the reasons a build was not kept —
+`keeps_nothing`, `status`, `timeout`, `cancelled`, `killed`, `failed`, `not_run`, `not_a_ticket` —
+and the sentence for each, which the log's last line, the command's page and the API all use. The
+command runner tells the link how the script ended; the link does not infer it from the text of a
+reason.
+
+**One lock per ticket, and a keep that cannot be half-done.** The worker is one BEAM, so
+`:global.trans/4` on `{CommandCopy, ticket id}` covers reading the marker and snapshotting the
+copy, keeping, and sweeping. A keep runs in this order: snapshot the worktree to a sibling
+(`<id>.keeping.<random>`); delete the marker; delete the old copy; rename the sibling into place;
+write the marker (a temporary file, then a rename); touch the copy. A copy without a marker is
+unusable, so a crash at any step leaves the old copy or none. When two of a ticket's commands run
+at once on one machine both start from the same copy and the one that finishes last replaces it;
+the other one's build is discarded and built again by a later command.
+
+**Clear is an epoch, not a deletion.** `tickets.warm_epoch` starts at 0 and **Clear** adds one, in
+the same transaction as its Activity event. The assignment carries the epoch, the worker writes it
+into the marker when it keeps, and uses a copy only when the marker's epoch equals the assignment's.
+So a clear makes every copy of the ticket on every machine unusable, an offline machine's
+included, with no message sent and no clock compared; a command assigned before the clear keeps its
+copy under the old epoch, which is unusable too. The space is freed when a later command's keep
+replaces the copy or by the sweep.
+
+**The scheduler prefers the machine holding the copy.** § Scheduling's `offer/3` sends a command
+that would start from a copy to the machine of the ticket's latest usable one — kept, not cleared,
+not past its two days, on a machine not destroyed — when that machine takes the command. When it
+has no room *now* the command waits up to two minutes (`:warm_wait_ms`), with the `warm` wait code
+and the sentence `ForgeCore.WarmBuild.wait_sentence/0`, and no machine is created for it; after
+that it goes wherever it would have gone. It does not wait when the machine is gone, disconnected,
+set not to take commands or not serving the project, when the ticket has no usable copy, or when
+the command says `warm_start: false`; and a preference never widens the gate:
+`docs/design/provisioning.md` § Affinity on resume. Two minutes is about what a cold build of one
+project's tests costs.
+
+**Sweeping, and who sweeps.** A copy is deleted two days after the ticket's last command *on that
+machine* (the platform's `:warm_retention_ms`, and the worker's sweep at the same two days),
+whether or not that command used or kept it: any command of the ticket touches the copy, so the platform can read "two days after the last command there"
+from its own rows. It goes in the same sweep as the ticket volumes (§ What a machine that never
+dies accumulates). **A command job now runs the end-of-job sweeps**, job directories, ticket
+volumes and command copies, when it runs to its end, as an agent job does (one that fails before its script runs sweeps
+nothing); before this a command swept nothing, so a machine
+that takes only commands had never swept anything, and that is where copies live. A command also
+discards a worktree it finds already there before it prepares one: a command never resumes, it
+runs again from the start.
+
+**Failing is a colder next command, never a failed one.** A copy that cannot be taken falls back to
+the next source with a `copy.unused` warning in the worker's log; one that cannot be kept ends the
+command as it ended, with the last line of its log saying why (`failed`) and a `copy.unkept`
+warning (`docs/design/worker-log.md`). The old copy is left intact by either.
+
+**What stays cold, and nothing here measures it.** The first command of a ticket on a machine is
+cold, and a command on another machine than the copy's is too. A command that starts warm still
+recompiles the project's own sources, since Mix's manifest key holds the absolute path and a job's
+worktree is a new path every job (§ The ticket volume has the figure for `platform`, 13 seconds
+against 122 from fetched dependencies, measured for a carried `_build`). **No saving from the copy
+has been measured**: no job of the ticket that built it ran on the worker that has it, and this
+note claims no figure.
+
+**What a copy may hold.** A command given project secrets keeps its tree like any other, so what
+its script wrote into the tree, a secret included, can be on disk for the ticket's later commands
+on that machine (`docs/design/secrets.md`). Nothing of a copy is uploaded: the store, the platform
+and the API see only the facts: where a command's tree came from, and whether its build was kept.
+
+**Not built here:** a base shared across tickets, built once per lock file, so a ticket's first
+command starts warm; uploading a copy so a command on another machine starts warm; deleting a copy
+at a clear; a stable worktree path per ticket, which is what would stop the project's own sources
+recompiling.
 
 ## Git
 
@@ -1241,7 +1361,7 @@ Hetzner machine once a release ships it**, and this is the first thing a first r
 
 ## What a machine that never dies accumulates
 
-Four things grow without bound, because until a worker could be permanent the machine's own
+Five things grow without bound, because until a worker could be permanent the machine's own
 destruction collected them. Each has a rule, and the rules are retention rather than lifecycle on
 purpose: a worker cannot always tell whether a job will be resumed, and a sweep that only has to
 know an age is a sweep that cannot get that wrong.
@@ -1262,6 +1382,12 @@ know an age is a sweep that cannot get that wrong.
   a volume is a warm build directory rather than a few files. The exclusive bytes are what that
   ticket's builds wrote, which is the figure M2 measured and the one that matters on a real host.
   Nothing tells this machine that a ticket merged, so there is no lifecycle here to use instead.
+- **Command copies.** `<root>/volumes/command/<ticket id>`, with its marker beside it, one per
+  ticket this machine has run a *keeping* command for (§ The command copy). Swept with the ticket
+  volumes, at two days, counted from the ticket's last command on
+  the machine. The disk report's `volumes` line counts them with the ticket volumes. **A command job
+  now runs these end-of-job sweeps too**: a machine that takes only commands never ran a sweep
+  before, and its copies would have grown for ever.
 - **Seeds.** A worker keeps one seed per project and fetches a new one when the project's
   `seed_id` moves; the old one used to stay for ever at a few hundred megabytes a time. Fetching
   a seed now removes the others under `seed/<project>/`. A running job holding a snapshot of the
@@ -1282,7 +1408,7 @@ the directory it is about to remove, once that directory is stale (`ForgeWorker.
 
 **None of this is per-job hygiene, and it should not become it.** A job's *worktree* is deleted
 the moment the job ends, because that is a snapshot whose whole cost is what the job wrote into
-it. These four are shared or resumable, and deleting them eagerly would either break a resume
+it. These are shared or resumable, and deleting them eagerly would either break a resume
 or throw away the warm start the seed exists to provide.
 
 ## Hibernation and resume
@@ -1799,6 +1925,17 @@ from the unit's last reading rather than from that result, which it no longer pr
 - **What a job leaves in `/dev/shm` outlives it.** Nothing at a job's end removes it, and its owner
   is a uid `useradd` may hand to the next job (`docs/measurements.md` § The worker at its ceiling,
   on the image). Found while reproducing the forgery; not otherwise looked at.
+- **The command copy is unmeasured and has only run against a fake.** Not verified here: the saving
+  on a real command pool (none is claimed); a keep and a take on a real btrfs volume, where the
+  tests use a strict fake that refuses what btrfs refuses; what `chown -R` costs on a large copy,
+  which `Slice.own/2` pays on every command and the ticket volume already pays; the copy's
+  disk growth on a long-lived machine under the two-day sweep; and a worker configured with a
+  different retention from the platform's, which makes the preference or the page's block wrong
+  until the ticket's next command and never makes a command wrong. The worker's test of two
+  commands in a row does run a real Mix build, offline: a local git dependency, no Hex, no network
+  (`LinkTest`, "a real Mix build's dependency is not compiled again"). It showed that **an untracked
+  `mix.lock` is cleaned away with the other debris** and the dependency is then fetched and compiled
+  again, so a project that does not track its lock file gets no saving.
 - **The model a job asks for is not part of what makes a worker assignable.** It cannot bite
   while `max_workers` is 1, which is the item above that gates it: this matters only once the
   fleet is large enough to be heterogeneous. Stated once, in

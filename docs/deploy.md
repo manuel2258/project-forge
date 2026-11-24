@@ -635,6 +635,21 @@ which are best-effort.
 What changes for a node that is already running, where the change is in what the platform does
 with rows it already has. Newest first.
 
+- **A command can keep its build for its ticket's next command, which is a migration and no bump**
+  (`design/worker-tier.md` § The command copy, ticket 76). `tickets.warm_epoch` and six `warm_*`
+  columns on `jobs`, with a partial index (`design/data-model.md` § A ticket's warm build). The
+  migration runs with the release. **The worker protocol does not move**
+  (`design/worker-channel.md` § Versions, *The warm build is an addition*): a machine on an older
+  release still takes commands and runs them cold, exactly as before, and its commands show no
+  warm or cold facts. **Nothing changes until a workflow declares `keep_build` on a command**, and
+  this project's own `.forge/` does not yet, so `static`, `test` and `check` still build cold.
+  A project that declares it may also set `warm_start: false` on a command that must not read what
+  the others left. Two settings the node may set in its application config (`config :forge, Forge.Jobs, …`; there is
+  no environment variable for either): `warm_wait_ms` (two minutes: how long a command
+  waits for the machine holding its ticket's copy) and `warm_retention_ms` (two days: how long a
+  copy counts after its ticket's last command there). The migration is the breaking part: a
+  rollback past it drops those columns.
+
 - **A conversation needs protocol 15** (`design/worker-channel.md` § Protocol 15, ticket 71). Nothing is
   refused and there is no migration. Workflow jobs and commands still run on a protocol 14 machine,
   but **no chat is given to one**, so build a snapshot from this release or `bin/worker-update` each

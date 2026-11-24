@@ -1267,7 +1267,14 @@ defmodule ForgeWorker.LinkTest do
       assert is_integer(result["duration_ms"])
 
       path = "/store/" <> log_key
-      assert_receive {:uploaded, ^path, ["Bearer log-token"], _query, "# Game\nargs: --all\n"}
+      assert_receive {:uploaded, ^path, ["Bearer log-token"], _query, log}
+
+      # The worker's own lines bracket the script's output: where its tree came from, and what
+      # became of its build (`docs/design/commands.md` § Events and the timeline).
+      assert log ==
+               "forge: started from a fresh clone\n# Game\nargs: --all\n" <>
+                 "forge: did not keep this build as the ticket's warm build: " <>
+                 "the command keeps nothing\n"
 
       # A command writes its log, not the branch.
       assert git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) == before
@@ -1289,7 +1296,9 @@ defmodule ForgeWorker.LinkTest do
       {%{"result" => %{"exit_status" => 0}}, _before} = take_push("result")
 
       path = "/store/" <> job["store"]["log_key"]
-      assert_receive {:uploaded, ^path, _auth, _query, "token: [secret CARGO_REGISTRY_TOKEN]\n"}
+      assert_receive {:uploaded, ^path, _auth, _query, log}
+      assert log =~ "token: [secret CARGO_REGISTRY_TOKEN]\n"
+      refute log =~ "cio_printed-by-a-build"
     end
 
     # A packaging command's build, uploaded as a workflow job's groups are: without the upload the
@@ -1481,6 +1490,396 @@ defmodule ForgeWorker.LinkTest do
 
       {%{"job_id" => ^job_id, "result" => result}, _before} = take_push("result")
       assert %{"outcome" => "cancelled", "exit_status" => nil} = result
+    end
+  end
+
+  # `docs/design/worker-tier.md` § The command copy: a command whose definition says its exit status
+  # keeps its build leaves the ticket's tree on this machine, and the ticket's next command starts
+  # from it.
+  describe "a command's warm build" do
+    @warm_ticket "5f0a6d1e-0000-4000-8000-000000000001"
+
+    defp warm(job, opts \\ []) do
+      job
+      |> put_in(["spec", "command", "keep_build"], Keyword.get(opts, :keep, [0]))
+      |> Map.put("warm", %{
+        "ticket" => Keyword.get(opts, :ticket, @warm_ticket),
+        "epoch" => Keyword.get(opts, :epoch, 0)
+      })
+    end
+
+    defp run_command(client, job) do
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"job_id" => ^job_id, "result" => result}, _before} = take_push("result")
+      path = "/store/" <> job["store"]["log_key"]
+      assert_receive {:uploaded, ^path, _auth, _query, log}
+      {result, log}
+    end
+
+    # Writes a build into an ignored directory, an untracked file and a change to a tracked one.
+    @leaves "#!/bin/sh\necho '_build/' >> .git/info/exclude\nmkdir -p _build\necho built > _build/x\n" <>
+              "echo debris > stray.txt\necho edited > README.md\n"
+
+    # Fails unless the tree is the one a warm command is to find.
+    @finds "#!/bin/sh\ntest -f _build/x || exit 11\ntest ! -e stray.txt || exit 12\n" <>
+             "test \"$(cat README.md)\" = \"# Game\" || exit 13\n"
+
+    defp ready(context) do
+      connect_and_assert_join(context.client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+    end
+
+    test "the next command finds the build, not the debris, and says where its tree came from",
+         context do
+      %{client: client, origin: origin, root: root} = context
+      ready(context)
+
+      first_job = origin |> command_assignment(@leaves) |> warm()
+      {first, first_log} = run_command(client, first_job)
+
+      assert first["exit_status"] == 0
+      assert first["warm"]["source"] == "clone"
+      assert %{"kept" => true, "unkept" => nil, "size" => size} = first["warm"]
+      assert size > 0
+      assert String.starts_with?(first_log, "forge: started from a fresh clone\n")
+      assert String.ends_with?(first_log, "forge: kept this build as the ticket's warm build\n")
+
+      second_job = origin |> command_assignment(@finds) |> warm()
+      {second, second_log} = run_command(client, second_job)
+
+      assert second["exit_status"] == 0, second_log
+
+      assert second["warm"]["source"] == "copy"
+      assert second["warm"]["from"] == first_job["job_id"]
+
+      assert String.starts_with?(
+               second_log,
+               "forge: started from this ticket's warm build, left by job " <> first_job["job_id"]
+             )
+
+      # The copy is a command's only: the ticket's own volume is untouched and nothing was pushed.
+      refute File.exists?(Path.join([root, "volumes", "ticket", "1"]))
+    end
+
+    test "the marker names the last command that kept, and who left what the next one used",
+         context do
+      %{client: client, origin: origin, root: root} = context
+      ready(context)
+
+      job = origin |> command_assignment(@leaves) |> warm()
+      {_result, _log} = run_command(client, job)
+
+      marker = Path.join([root, "volumes", "command", @warm_ticket <> ".json"])
+
+      assert %{"job_id" => job_id, "command" => "build", "epoch" => 0, "commit" => commit} =
+               marker |> File.read!() |> Jason.decode!()
+
+      assert job_id == job["job_id"]
+      assert commit == job["spec"]["command"]["at"]
+    end
+
+    # Each of these must start cold: the copy is there, and something says it is not this
+    # command's to use.
+    for {name, change} <- [
+          {"a copy kept before a clear", {:epoch, 1}},
+          {"another ticket with the same branch name",
+           {:ticket, "5f0a6d1e-0000-4000-8000-0000000000aa"}},
+          {"a command that turns the copy off", :warm_start_off}
+        ] do
+      test "does not start from the copy for #{name}", context do
+        %{client: client, origin: origin} = context
+        ready(context)
+        {_first, _log} = run_command(client, origin |> command_assignment(@leaves) |> warm())
+
+        second = origin |> command_assignment(@finds) |> warm()
+
+        second =
+          case unquote(Macro.escape(change)) do
+            {:epoch, n} -> put_in(second, ["warm", "epoch"], n)
+            {:ticket, id} -> put_in(second, ["warm", "ticket"], id)
+            :warm_start_off -> put_in(second, ["spec", "command", "warm_start"], false)
+          end
+
+        {result, log} = run_command(client, second)
+
+        assert result["exit_status"] == 11, log
+        assert result["warm"]["source"] == "clone"
+        assert String.starts_with?(log, "forge: started from a fresh clone\n")
+      end
+    end
+
+    # The copy the ticket has stays, whatever happens to the command that would have replaced it.
+    for {name, script, keep, reason} <- [
+          {"an exit status it does not list", "#!/bin/sh\nexit 3\n", [0], "status"},
+          {"a command that keeps nothing", "#!/bin/sh\nexit 0\n", [], "keeps_nothing"}
+        ] do
+      test "does not replace the copy for #{name}", context do
+        %{client: client, origin: origin, root: root} = context
+        ready(context)
+        {_first, _log} = run_command(client, origin |> command_assignment(@leaves) |> warm())
+        marker = Path.join([root, "volumes", "command", @warm_ticket <> ".json"])
+        before = File.read!(marker)
+
+        job = origin |> command_assignment(unquote(script)) |> warm(keep: unquote(keep))
+        {result, log} = run_command(client, job)
+
+        assert %{"kept" => false, "unkept" => unquote(reason)} = result["warm"]
+        assert log =~ "forge: did not keep this build as the ticket's warm build: "
+        assert File.read!(marker) == before
+      end
+    end
+
+    test "a command stopped by its timeout keeps nothing, whatever it listed", context do
+      %{client: client, origin: origin, root: root} = context
+      ready(context)
+
+      job =
+        origin
+        |> command_assignment("#!/bin/sh\nexec sleep 30\n")
+        |> put_in(["spec", "command", "timeout_ms"], 300)
+        |> warm(keep: Enum.to_list(0..255))
+
+      {result, log} = run_command(client, job)
+
+      assert %{"kept" => false, "unkept" => "timeout"} = result["warm"]
+      assert log =~ "it was stopped by its timeout"
+      refute File.exists?(Path.join([root, "volumes", "command", @warm_ticket]))
+    end
+
+    test "a command that is cancelled keeps nothing", context do
+      %{client: client, origin: origin, root: root} = context
+      ready(context)
+
+      job = origin |> command_assignment("#!/bin/sh\nexec sleep 30\n") |> warm(keep: [0, 143])
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      wait_until(fn ->
+        match?(%{runner: pid} when is_pid(pid), :sys.get_state(client).assigns.jobs[job_id])
+      end)
+
+      push(client, @topic, "cancel", %{"job_id" => job_id})
+      {%{"result" => result}, _before} = take_push("result")
+
+      assert %{"kept" => false, "unkept" => "cancelled"} = result["warm"]
+      refute File.exists?(Path.join([root, "volumes", "command", @warm_ticket]))
+    end
+
+    # The unit's last reading says SIGKILL and an OOM kill, so the 255 is not the script's own answer
+    # even though the command lists it: a killed build must never replace the copy.
+    test "a command killed at its memory ceiling keeps nothing, though it lists 255", context do
+      %{client: client, origin: origin, root: root} = context
+      ready(context)
+
+      {:ok, readings} = Agent.start_link(fn -> [nil] end)
+      Application.put_env(:forge_worker, :slice, ForgeWorker.ScriptedSlice)
+      Application.put_env(:forge_worker, :scripted_readings, readings)
+
+      Application.put_env(:forge_worker, :scripted_ending, %{
+        exit: %{code: "killed", status: "KILL", result: "signal"},
+        memory: %{peak: 1_073_741_824, oom_kills: 1}
+      })
+
+      on_exit(fn ->
+        Application.delete_env(:forge_worker, :scripted_readings)
+        Application.delete_env(:forge_worker, :scripted_ending)
+      end)
+
+      job =
+        origin
+        |> command_assignment("#!/bin/sh\nexit 255\n")
+        |> warm(keep: [255])
+        |> Map.put("slice", %{"memory_max" => 1_073_741_824})
+
+      {result, log} = run_command(client, job)
+
+      assert %{"outcome" => "converged", "exit_status" => 255} = result
+      assert %{"kept" => false, "unkept" => "killed"} = result["warm"]
+      assert log =~ "it was killed"
+      refute File.exists?(Path.join([root, "volumes", "command", @warm_ticket]))
+    end
+
+    # Any command of the ticket restarts the copy's two days, kept or not: the platform reads "two
+    # days after the last command there" from its own rows and trusts the worker to say the same.
+    test "a command that keeps nothing still touches the copy the ticket has", context do
+      %{client: client, origin: origin, root: root} = context
+      ready(context)
+      {_first, _log} = run_command(client, origin |> command_assignment(@leaves) |> warm())
+      copy = Path.join([root, "volumes", "command", @warm_ticket])
+      File.touch!(copy, {{2020, 1, 1}, {0, 0, 0}})
+
+      {_result, _log} =
+        run_command(client, origin |> command_assignment("#!/bin/sh\nexit 0\n") |> warm(keep: []))
+
+      assert File.stat!(copy, time: :posix).mtime > System.os_time(:second) - 3_600
+    end
+
+    test "a conversation's command keeps nothing", context do
+      %{client: client, origin: origin, root: root} = context
+      ready(context)
+      git!(nil, ["-C", origin, "branch", "chat/abc", "refs/heads/ticket/1"])
+
+      job =
+        origin
+        |> command_assignment("#!/bin/sh\nexit 0\n")
+        |> warm()
+        |> put_in(["git", "branch"], "chat/abc")
+
+      {result, _log} = run_command(client, job)
+
+      assert %{"kept" => false, "unkept" => "not_a_ticket"} = result["warm"]
+      refute File.exists?(Path.join([root, "volumes", "command"]))
+    end
+
+    test "a command run by a platform that sends no `warm` keeps nothing, and still runs",
+         context do
+      %{client: client, origin: origin} = context
+      ready(context)
+
+      job =
+        origin
+        |> command_assignment("#!/bin/sh\nexit 0\n")
+        |> put_in(["spec", "command", "keep_build"], [0])
+
+      {result, _log} = run_command(client, job)
+
+      assert %{"exit_status" => 0, "warm" => %{"kept" => false, "unkept" => "not_a_ticket"}} =
+               result
+    end
+
+    # Failing to keep or use a copy is a warning and a colder next command, never a failed one.
+    test "a build the machine cannot keep leaves the copy and the command's result as they were",
+         context do
+      %{client: client, origin: origin, root: root} = context
+      ready(context)
+      {_first, _log} = run_command(client, origin |> command_assignment(@leaves) |> warm())
+      marker = Path.join([root, "volumes", "command", @warm_ticket <> ".json"])
+      before = File.read!(marker)
+
+      Application.put_env(:forge_worker, :volume, ForgeWorker.RefusingVolume)
+      Application.put_env(:forge_worker, :refuse_snapshot, "/worktrees/")
+
+      on_exit(fn ->
+        Application.delete_env(:forge_worker, :volume)
+        Application.delete_env(:forge_worker, :refuse_snapshot)
+      end)
+
+      handler = :"log_to_#{System.unique_integer([:positive])}"
+
+      :ok =
+        :logger.add_handler(handler, ForgeWorker.LinkTest.LogToTest, %{config: %{pid: self()}})
+
+      on_exit(fn -> :logger.remove_handler(handler) end)
+
+      job = origin |> command_assignment("#!/bin/sh\nexit 0\n") |> warm()
+      push(client, @topic, "assign", job)
+      {%{"result" => result}, _before} = take_push("result")
+      path = "/store/" <> job["store"]["log_key"]
+      assert_receive {:uploaded, ^path, _auth, _query, log}
+
+      # And the machine's own log says so, so an operator can see why the next command is cold.
+      logged_until("could not keep the build as the ticket's warm build")
+
+      assert %{"outcome" => "converged", "exit_status" => 0} = result
+      assert %{"kept" => false, "unkept" => "failed"} = result["warm"]
+      assert log =~ "keeping it failed on the machine"
+      assert File.read!(marker) == before
+    end
+
+    # The criterion the whole ticket is for: a Mix build that one command made is not redone by the
+    # next, with no network and no Hex. The dependency is a local git repository.
+    test "a real Mix build's dependency is not compiled again", context do
+      %{client: client, origin: origin} = context
+      ready(context)
+
+      dep = tmp_dir("warm-dep")
+      git!(nil, ["init", "--quiet", dep])
+      git!(dep, ["config", "user.name", "dep"])
+      git!(dep, ["config", "user.email", "dep@forge"])
+
+      File.write!(Path.join(dep, "mix.exs"), """
+      defmodule WarmDep.MixProject do
+        use Mix.Project
+        def project, do: [app: :warm_dep, version: "0.1.0", elixir: "~> 1.14"]
+        def application, do: []
+      end
+      """)
+
+      File.mkdir_p!(Path.join(dep, "lib"))
+
+      File.write!(
+        Path.join(dep, "lib/warm_dep.ex"),
+        "defmodule WarmDep do\n  def hi, do: :hi\nend\n"
+      )
+
+      git!(dep, ["add", "."])
+      git!(dep, ["commit", "--quiet", "-m", "dep"])
+
+      project = tmp_dir("warm-project")
+      git!(nil, ["clone", "--quiet", "-b", "ticket/1", origin, project])
+      git!(project, ["config", "user.name", "p"])
+      git!(project, ["config", "user.email", "p@forge"])
+
+      File.write!(Path.join(project, "mix.exs"), """
+      defmodule WarmApp.MixProject do
+        use Mix.Project
+        def project, do: [app: :warm_app, version: "0.1.0", elixir: "~> 1.14", deps: deps()]
+        def application, do: []
+        defp deps, do: [{:warm_dep, git: "file://#{dep}"}]
+      end
+      """)
+
+      File.mkdir_p!(Path.join(project, "lib"))
+      File.write!(Path.join(project, "lib/warm_app.ex"), "defmodule WarmApp do\nend\n")
+      File.write!(Path.join(project, ".gitignore"), "_build/\ndeps/\n.mix-home/\n.hex-home/\n")
+
+      # A project tracks its mix.lock, which is what keeps `mix deps.get` from fetching the
+      # dependency again; an untracked one would be cleaned away with the rest of a command's debris.
+      env = [
+        {"MIX_HOME", Path.join(project, ".mix-home")},
+        {"HEX_HOME", Path.join(project, ".hex-home")}
+      ]
+
+      {_out, 0} = System.cmd("mix", ["deps.get"], cd: project, env: env, stderr_to_stdout: true)
+      File.rm_rf!(Path.join(project, "deps"))
+
+      git!(project, ["add", "."])
+      git!(project, ["commit", "--quiet", "-m", "app"])
+      git!(project, ["push", "--quiet", "origin", "ticket/1"])
+
+      script = """
+      #!/bin/sh
+      export MIX_HOME="$PWD/.mix-home" HEX_HOME="$PWD/.hex-home" MIX_ENV=dev
+      mix deps.get || exit 21
+      mix compile || exit 22
+      """
+
+      {first, first_log} = run_command(client, origin |> command_assignment(script) |> warm())
+      assert first["exit_status"] == 0, first_log
+      assert first_log =~ "==> warm_dep"
+      assert first["warm"]["kept"] == true
+
+      {second, second_log} = run_command(client, origin |> command_assignment(script) |> warm())
+      assert second["exit_status"] == 0, second_log
+      assert second["warm"]["source"] == "copy"
+      refute second_log =~ "==> warm_dep", second_log
+      refute second_log =~ ~r/Compiling \d+ files? \(\.ex\)\n.*warm_dep/s
+    end
+
+    test "a command sweeps what is stale, as an agent job does", context do
+      %{client: client, origin: origin, root: root} = context
+      ready(context)
+      stale = Path.join([root, "volumes", "command", "5f0a6d1e-0000-4000-8000-0000000000bb"])
+      File.mkdir_p!(stale)
+      File.write!(stale <> ".json", ~s({"epoch":0}))
+      File.touch!(stale, {{2020, 1, 1}, {0, 0, 0}})
+
+      {_result, _log} =
+        run_command(client, origin |> command_assignment("#!/bin/sh\nexit 0\n") |> warm())
+
+      refute File.exists?(stale)
+      refute File.exists?(stale <> ".json")
     end
   end
 

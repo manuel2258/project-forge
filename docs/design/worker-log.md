@@ -122,6 +122,8 @@ it was reported in (git's, the store's, the filesystem's):
 | `volume.uncreated` | warning | a worktree it could not make a volume of, so the finished tree cannot be kept as the ticket's template and its next job starts colder |
 | `volume.unused` | warning | a seed or ticket volume that would not become the job's worktree, so it started colder |
 | `volume.unkept` | warning | a finished worktree it could not keep as the ticket's template, so the next job starts colder |
+| `copy.unused` | warning | a ticket's command copy that would not become a command's worktree (it would not snapshot, or its owner or its checkout would not be made right), so the command started from the next source and colder |
+| `copy.unkept` | warning | a command's finished tree it could not keep as the ticket's command copy, so the ticket keeps the copy it had and its next command starts colder; its log's last line says `failed` |
 | `worktree.undeleted` | warning | a finished job's worktree it could not remove |
 | `event.dropped` | warning | an event of the job's it could not hand on — said once per run, since a sink that fails once fails for every event after it |
 

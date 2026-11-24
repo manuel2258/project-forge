@@ -466,6 +466,20 @@ where it came from and on which outcome, as before this existed. A log a state n
 still reaches it, since inputs are inlined. That is less, not wrong, which is what an addition may
 be.
 
+**The warm build is an addition** (`docs/design/worker-tier.md` § The command copy): `warm` in a
+command's assignment (`{"ticket", "epoch"}`: the ticket's id and its clear counter), and `warm` in
+a command's result (`{"source", "from", "kept", "unkept", "size"}`), and the command map of the
+spec gains `keep_build` and `warm_start`. No bump, and every pairing is correct, because a
+warm build is a speed-up and never correctness. A new platform and an older worker: the worker
+ignores `warm` and the two keys, starts a command from the ticket's volume as before, keeps
+nothing and reports no facts, so the platform records none and the command's page shows neither.
+A new worker and an older platform: the assignment has no `warm`, so the worker uses and keeps no
+copy and reports `warm` facts that the older platform ignores. Nothing here adds a value to
+`Result.killed`: an older platform raises on one it does not know, so the command runner tells the
+link how the script ended instead. The worker reads `keep_build` defensively and keeps nothing
+from a list that is malformed. A machine below the protocol that carries a command at all is
+unchanged, and no minimum moves.
+
 **The carried session is an addition** (`docs/design/claude-code-events.md` § Resume): a prefix
 to upload the harness session under, `session` to restore and `fork_session` on `assign`, and a
 `session_blob` and `version` in a result's or a turn's harness summary. An older worker ignores

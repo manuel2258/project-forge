@@ -118,6 +118,31 @@ defmodule Forge.Tickets.DoingTest do
     end
   end
 
+  describe "live, with the reason a pending job waits" do
+    # What the Tickets and queue rows read to draw the warm sentence: the code of the job's
+    # current `job.waiting` event, and only for a pending job.
+    test "carries the code of a pending job's wait, and nil when nothing was said" do
+      ticket = ticket_fixture()
+      command = job_fixture(%{ticket: ticket, kind: :command, state: "check", attempt: 2})
+      assert %{wait: nil} = Doing.live([ticket.id])[ticket.id]
+
+      :ok = Forge.Jobs.record_wait(command, "warm", "Waiting for the warm machine")
+      assert %{wait: "warm"} = Doing.live([ticket.id])[ticket.id]
+
+      :ok = Forge.Jobs.record_wait(command, "at_capacity", "Waiting for room")
+      assert %{wait: "at_capacity"} = Doing.live([ticket.id])[ticket.id]
+    end
+
+    test "carries none for a running job, whatever it waited on before it started" do
+      ticket = ticket_fixture()
+      command = job_fixture(%{ticket: ticket, kind: :command, state: "check", attempt: 2})
+      :ok = Forge.Jobs.record_wait(command, "warm", "Waiting for the warm machine")
+
+      command |> Ecto.Changeset.change(status: :running) |> Repo.update!()
+      assert %{status: :running, wait: nil} = Doing.live([ticket.id])[ticket.id]
+    end
+  end
+
   describe "facts" do
     test "are the live work, the last lines, the pause and the merge queue's places" do
       ticket = ticket_fixture()

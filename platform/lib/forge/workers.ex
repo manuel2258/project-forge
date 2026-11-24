@@ -905,12 +905,8 @@ defmodule Forge.Workers do
     # Idle is the most assignable state there is: it means the machine is up with nothing to
     # do. It is only a step towards destruction if nothing arrives before the period is up.
     candidates =
-      from(w in serving(demand[:project_id]),
-        where:
-          w.status in [:ready, :busy, :idle] and is_nil(w.unhealthy_at) and
-            is_nil(w.updating_at),
-        order_by: [asc: w.inserted_at]
-      )
+      demand
+      |> usable()
       |> Repo.all()
       # One pass, and `and` short-circuits: `fits?/2` asks the database what a worker is
       # holding, and a worker nothing can reach is not worth asking about. A machine held for an
@@ -920,6 +916,37 @@ defmodule Forge.Workers do
       )
 
     Enum.find(candidates, &(&1.id == preferred)) || List.first(candidates)
+  end
+
+  # The machines that may be handed work at all: serving the demand's project, up, healthy and not
+  # being updated. One query for `assignable/3` and `would_take?/3`, so what a preference may wait
+  # for is exactly what a placement may use, and a filter added to one is in the other.
+  defp usable(demand) do
+    from(w in serving(demand[:project_id]),
+      where:
+        w.status in [:ready, :busy, :idle] and is_nil(w.unhealthy_at) and is_nil(w.updating_at),
+      order_by: [asc: w.inserted_at]
+    )
+  end
+
+  @doc """
+  Whether `worker_id` is a machine that would take `demand` **once it had room**: assignable by
+  everything `assignable/3` asks but the room it has left — serving the project, up, healthy, not
+  updating, connected, not held for an older job, and a kind, protocol and harness it takes with the
+  memory and cores to hold it empty. What a command that prefers the machine holding its ticket's
+  warm build may wait for (`docs/design/provisioning.md` § Affinity on resume): a preference never
+  widens the gate, and a machine this answers false for is not waited for.
+  """
+  @spec would_take?(demand(), String.t() | nil, MapSet.t()) :: boolean()
+  def would_take?(demand, worker_id, reserved \\ MapSet.new())
+  def would_take?(_demand, nil, _reserved), do: false
+
+  def would_take?(demand, worker_id, reserved) do
+    not MapSet.member?(reserved, worker_id) and connected?(worker_id) and
+      demand
+      |> usable()
+      |> Repo.all()
+      |> Enum.any?(&(&1.id == worker_id and holds_when_empty?(&1, demand)))
   end
 
   @doc """

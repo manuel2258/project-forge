@@ -159,6 +159,16 @@ defmodule ForgeWorker.Job.CommandTest do
 
   defp log(job_dir), do: File.read!(Command.log_path(job_dir))
 
+  defp run_ending(context, spec, opts \\ []) do
+    {:ok, pid} =
+      Command.start_link(
+        [spec: spec, root: context.root, worktree: context.worktree, grace_ms: 100] ++ opts
+      )
+
+    {:ok, result, ending} = Command.await_ending(pid, 10_000)
+    {result, ending, Path.join(context.root, spec.job_id)}
+  end
+
   # Dead or a zombie: an orphan is reparented to whatever PID 1 is, which in a container may never
   # reap it, and `kill -0` answers for a zombie too.
   defp alive?(os_pid) do
@@ -252,6 +262,75 @@ defmodule ForgeWorker.Job.CommandTest do
       {result, _job_dir} = run(context, spec("#!/bin/sh\nexit 255\n"), opts)
       assert result.reason == nil, inspect(ending)
     end
+  end
+
+  # `ForgeWorker.Link` keeps a build by how the script ended, and not by the words of `reason`:
+  # an exit status of 255 is a script's own answer or a kill at the ceiling, and only the slice's
+  # reading can tell them apart.
+  describe "how the script ended" do
+    test "on its own, whatever its status", context do
+      assert {%Result{exit_status: 3}, :own, _dir} =
+               run_ending(context, spec("#!/bin/sh\nexit 3\n"))
+    end
+
+    test "at its memory ceiling, with the status 255 a kill gives", context do
+      {:ok, readings} = Agent.start_link(fn -> [nil] end)
+
+      ending = %{
+        exit: %{code: "killed", status: "KILL", result: "signal"},
+        memory: %{peak: 1_073_741_824, oom_kills: 1}
+      }
+
+      opts = [
+        slice: ForgeWorker.ScriptedSlice,
+        slice_opts: %{memory_max: 1_073_741_824, readings: readings, ending: ending}
+      ]
+
+      assert {%Result{exit_status: 255, outcome: :converged}, :memory, _dir} =
+               run_ending(context, spec("#!/bin/sh\nexit 255\n"), opts)
+    end
+
+    test "by its timeout", context do
+      assert {%Result{killed: :wall_clock}, :timeout, _dir} =
+               run_ending(context, spec("#!/bin/sh\nexec sleep 30\n", %{timeout_ms: 200}))
+    end
+
+    test "by a cancel", context do
+      {:ok, pid} =
+        Command.start_link(
+          spec: spec("#!/bin/sh\nexec sleep 30\n"),
+          root: context.root,
+          worktree: context.worktree,
+          grace_ms: 100
+        )
+
+      Command.cancel(pid)
+      assert {:ok, %Result{killed: :operator}, :cancelled} = Command.await_ending(pid, 5_000)
+    end
+
+    test "never, when it could not be confined", context do
+      assert {%Result{exit_status: nil}, :never, _dir} =
+               run_ending(context, spec("#!/bin/sh\necho ran\n"), slice: RefusingSlice)
+    end
+
+    test "a caller that asks after the end hears it too", context do
+      {:ok, pid} =
+        Command.start_link(
+          spec: spec("#!/bin/sh\nexit 0\n"),
+          root: context.root,
+          worktree: context.worktree
+        )
+
+      Process.sleep(300)
+      assert {:ok, %Result{exit_status: 0}, :own} = Command.await_ending(pid, 5_000)
+    end
+  end
+
+  test "a head line is written before the script's output, which is appended to it", context do
+    {_result, _ending, job_dir} =
+      run_ending(context, spec("#!/bin/sh\necho from the script\n"), head: "forge: the head")
+
+    assert log(job_dir) == "forge: the head\nfrom the script\n"
   end
 
   # A command whose `systemd-run` could not reach PID 1 never ran: the machine's health hears of it

@@ -101,10 +101,36 @@ defmodule ForgeWeb.JobLive do
       plan: plan(job.id),
       memory: Memory.trouble(job.id),
       held: held(job.id),
+      # Why a command waiting for a machine has not gone out, and the command that left the copy it
+      # started from, when it did (`docs/design/ui.md` § The job page).
+      wait: wait(job),
+      warm_from: warm_from(job),
       failures: Stream.failures(job.id),
       transcripts: WorkScreen.transcript_links(job, project, ticket),
       now: DateTime.utc_now()
     )
+  end
+
+  # The reason a pending job is waiting, in the sentence it is drawn with: the warm build's is
+  # `ForgeCore.WarmBuild.wait_sentence/0`, every other the scheduler's own words
+  # (`Forge.Events.summary/1`).
+  defp wait(job) do
+    case Jobs.current_wait(job) do
+      nil -> nil
+      %{payload: %{"reason" => "warm"}} -> ForgeCore.WarmBuild.wait_sentence()
+      event -> Events.summary(event)
+    end
+  end
+
+  # The command whose warm copy this one started from, by name and short id, for the link beside
+  # "started from this ticket's warm build". Nil for any other start, and when it is gone.
+  defp warm_from(%{warm_from_id: nil}), do: nil
+
+  defp warm_from(%{warm_from_id: id}) do
+    from = Jobs.get!(id)
+    %{id: from.id, command: (Jobs.spec(from).command || %{})["name"]}
+  rescue
+    Ecto.NoResultsError -> nil
   end
 
   # The streams, opened on mount: the transcript's newest page now, the raw log when it is first
@@ -981,6 +1007,16 @@ defmodule ForgeWeb.JobLive do
     """
   end
 
+  defp kept_words(%{warm_kept: true, warm_size: size}) when is_integer(size),
+    do: "kept as this ticket's warm build (#{ForgeWeb.Blob.size_label(size)})"
+
+  defp kept_words(%{warm_kept: true}), do: "kept as this ticket's warm build"
+
+  defp kept_words(%{warm_unkept: reason}) when is_binary(reason),
+    do: "not kept as this ticket's warm build: " <> ForgeCore.WarmBuild.reason_sentence(reason)
+
+  defp kept_words(_job), do: "not kept as this ticket's warm build"
+
   # `docs/design/ui.md` § The job page: a command's page is the job page with what a command has —
   # its exit status, the script as it ran, its argument vector, its commit, its timeout, the job
   # that invoked it and its log — and none of an agent's turns, budget or prompt.
@@ -1002,9 +1038,25 @@ defmodule ForgeWeb.JobLive do
         <div id="job-headline" class="job-headline">
           <.exit_status job={@job} class="job-outcome" />
         </div>
-        <p class="job-figures">
-          {Format.duration(@job)} · timeout {div(@command["timeout_ms"] || 0, 1000)}s
+        <%!-- Beside the duration and timeout, what the worker said of the warm build: stored per
+              command so it survives a log that is unreadable or never came — where its tree came
+              from, and whether its build was kept. A worker that does not report them leaves both
+              nil and neither is drawn. --%>
+        <p id="job-figures" class="job-figures break-words">
+          {Format.duration(@job)} · timeout {div(@command["timeout_ms"] || 0, 1000)}s<span
+            :if={@job.warm_source}
+            id="job-warm-source"
+          > · started from {ForgeCore.WarmBuild.source_phrase(@job.warm_source)}<.link
+            :if={@warm_from}
+            id="job-warm-from"
+            navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/jobs/#{@warm_from.id}"}
+            class="text-link"
+          >, left by {@warm_from.command}</.link></span><span
+            :if={@job.warm_kept != nil}
+            id="job-warm-kept"
+          > · {kept_words(@job)}</span>
         </p>
+        <p :if={@wait} id="job-wait" class="job-caption">{@wait}</p>
         <p class="job-caption">The script's exit status, or the engine's reason it has none.</p>
       </header>
 

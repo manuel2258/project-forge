@@ -108,6 +108,7 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/api/v1/tickets/:project/:number" => :member,
     "/api/v1/tickets/:project/:number/events" => :member,
     "/api/v1/tickets/:project/:number/review" => :member,
+    "/api/v1/tickets/:project/:number/clear-warm-build" => :member,
     "/api/v1/tickets/:project/:number/jobs/:job_id" => :member,
     "/api/v1/tickets/:project/:number/artifacts" => :member,
     "/api/v1/tickets/:project/:number/artifacts/:name" => :member,
@@ -424,6 +425,9 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"operator/actions.ex", "stop-now"} => :member,
     {"operator/actions.ex", "retitle"} => :member,
     {"operator/actions.ex", "set-milestone"} => :member,
+    # The warm build's clear (`Forge.Operator.clear_warm_build/2`), resolving its ticket off the
+    # wire before it asks `:use`.
+    {"operator/actions.ex", "clear-warm-build"} => :member,
 
     # A card's draft is the page's alone, the same as a question form's: nothing is written
     # until the form it sits in is submitted, and that submit carries its own guard.

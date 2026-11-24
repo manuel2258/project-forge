@@ -13,7 +13,8 @@ defmodule ForgeWorker.Job.Command do
   the spec names an environment. Its stdin is `/dev/null` and its stdout and stderr go to one file.
 
   Options: `:spec` (required), `:root` (required, the job directory's parent), `:worktree`
-  (required), `:slice`, `:slice_opts`, `:nix_env` and `:grace_ms`. Its log and the files of its
+  (required), `:slice`, `:slice_opts`, `:nix_env`, `:grace_ms` and `:head`, a line written to the log
+  before the script's output, which the script's output is then appended to. Its log and the files of its
   groups staged for upload are in the worker's own directory (`ForgeWorker.Job.Dir.worker_dir/1`),
   which the script cannot reach.
   """
@@ -31,6 +32,17 @@ defmodule ForgeWorker.Job.Command do
   @doc "Blocks until the command ends, and returns its result. The process exits after replying."
   @spec await(pid(), timeout()) :: {:ok, Result.t()}
   def await(pid, timeout \\ :infinity), do: GenServer.call(pid, :await, timeout)
+
+  @doc """
+  As `await/2`, and also how the script ended: `:own` (it ran to a status), `:memory` (to a status
+  its slice's memory ceiling gave it), `:timeout`, `:cancelled`, or `:never` (it did not run). The
+  link decides whether to keep the build by it, and not by the text of `result.reason`
+  (`docs/design/worker-tier.md` § The command copy).
+  """
+  @spec await_ending(pid(), timeout()) :: {:ok, Result.t(), ending()}
+  def await_ending(pid, timeout \\ :infinity), do: GenServer.call(pid, :await_ending, timeout)
+
+  @type ending :: :own | :memory | :timeout | :cancelled | :never
 
   @doc "Stops the command. Its result then says it was cancelled."
   @spec cancel(pid()) :: :ok
@@ -71,8 +83,12 @@ defmodule ForgeWorker.Job.Command do
       slice_context: nil,
       killed: nil,
       waiters: [],
-      result: nil
+      result: nil,
+      ending: nil
     }
+
+    # The line the worker says before the script does; the script's output is appended to it.
+    if head = Keyword.get(opts, :head), do: File.write!(log_path(job_dir), head <> "\n")
 
     {:ok, state, {:continue, {:spawn, opts, script}}}
   end
@@ -149,7 +165,7 @@ defmodule ForgeWorker.Job.Command do
       {:args,
        [
          "-c",
-         ~s(log="$1"; shift; exec /usr/bin/env -i "$@" </dev/null >"$log" 2>&1),
+         ~s(log="$1"; shift; exec /usr/bin/env -i "$@" </dev/null >>"$log" 2>&1),
          "forge-command",
          log_path(state.job_dir)
        ] ++ assignments ++ [executable | args]},
@@ -167,10 +183,16 @@ defmodule ForgeWorker.Job.Command do
 
   @impl true
   def handle_call(:await, from, %{result: nil} = state),
-    do: {:noreply, %{state | waiters: [from | state.waiters]}}
+    do: {:noreply, %{state | waiters: [{from, :result} | state.waiters]}}
+
+  def handle_call(:await_ending, from, %{result: nil} = state),
+    do: {:noreply, %{state | waiters: [{from, :ending} | state.waiters]}}
 
   def handle_call(:await, _from, %{result: result} = state),
     do: {:stop, :normal, {:ok, result}, state}
+
+  def handle_call(:await_ending, _from, %{result: result, ending: ending} = state),
+    do: {:stop, :normal, {:ok, result, ending}, state}
 
   @impl true
   def handle_cast(:cancel, state), do: {:noreply, kill(state, :operator)}
@@ -225,6 +247,9 @@ defmodule ForgeWorker.Job.Command do
     end
   end
 
+  defp ended(status, nil), do: {:converged, status, nil, :own}
+  defp ended(status, reason), do: {:converged, status, reason, :memory}
+
   # `docs/design/commands.md` § An invocation is a job: `converged` whenever the script ran to a
   # status, whatever the status; `cancelled` when stopped; `error`, with no status, when it
   # outlived its timeout or its slice could not be made — a script that will not start still
@@ -235,12 +260,12 @@ defmodule ForgeWorker.Job.Command do
     if state.slice, do: state.slice.cleanup(state.slice_context)
     ending = ending(state, status)
 
-    {outcome, exit_status, reason} =
+    {outcome, exit_status, reason, how} =
       case {state.killed, status} do
-        {:operator, _status} -> {:cancelled, nil, "cancelled"}
-        {:wall_clock, _status} -> {:error, nil, "outlived its timeout"}
-        {nil, nil} -> {:error, nil, "could not be confined"}
-        {nil, status} -> {:converged, status, killed_for_memory(ending, state)}
+        {:operator, _status} -> {:cancelled, nil, "cancelled", :cancelled}
+        {:wall_clock, _status} -> {:error, nil, "outlived its timeout", :timeout}
+        {nil, nil} -> {:error, nil, "could not be confined", :never}
+        {nil, status} -> ended(status, killed_for_memory(ending, state))
       end
 
     result =
@@ -254,13 +279,16 @@ defmodule ForgeWorker.Job.Command do
       }
       |> stage(state, outcome)
 
-    Enum.each(state.waiters, &GenServer.reply(&1, {:ok, result}))
+    Enum.each(state.waiters, fn
+      {from, :result} -> GenServer.reply(from, {:ok, result})
+      {from, :ending} -> GenServer.reply(from, {:ok, result, how})
+    end)
 
     # A caller that has not asked yet is about to — the link awaits straight after starting — so
     # the result is held briefly for it, as `Runner` holds one.
     if state.waiters == [], do: Process.send_after(self(), :release, :timer.seconds(5))
     if state.waiters != [], do: send(self(), :release)
 
-    %{state | result: result, waiters: []}
+    %{state | result: result, ending: how, waiters: []}
   end
 end

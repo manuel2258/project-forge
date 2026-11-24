@@ -178,7 +178,9 @@ defmodule Forge.Jobs.Commands do
           "produces" => command.produces,
           "outputs" => command.outputs,
           "batch" => invocation.batch,
-          "concurrent" => invocation.concurrent
+          "concurrent" => invocation.concurrent,
+          "keep_build" => command.keep_build,
+          "warm_start" => command.warm_start
         }
       }
 
@@ -329,12 +331,16 @@ defmodule Forge.Jobs.Commands do
     |> Forge.Jobs.Blobs.put(ticket.id, job, spec, result)
     |> Multi.update(
       :job,
-      Job.progress_changeset(job, %{
-        status: :finished,
-        outcome: outcome,
-        exit_status: reported_status(outcome, result),
-        finished_at: now
-      })
+      Job.progress_changeset(
+        job,
+        %{
+          status: :finished,
+          outcome: outcome,
+          exit_status: reported_status(outcome, result),
+          finished_at: now
+        }
+        |> Map.merge(Forge.WarmBuilds.record(job, result.warm))
+      )
     )
     |> Runs.close(job.id, now)
     |> Events.log(:event, "job.finished", {:job, job.id}, %{

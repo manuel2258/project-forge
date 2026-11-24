@@ -4,7 +4,7 @@ defmodule ForgeWorker.ScriptedSlice do
   `readings` is an agent holding the readings `memory/1` hands out in turn, the last one again once
   they run out; `ending` is merged over what `Slice.Direct` says of a process that ended. A caller
   that makes the slice's options itself — the link, a conversation — cannot be handed an agent, so
-  `:scripted_readings` in the application's environment stands in for `readings` there.
+  `:scripted_readings` and `:scripted_ending` in the application's environment stand in for `readings` and `ending` there.
   """
 
   @behaviour ForgeWorker.Slice
@@ -31,7 +31,11 @@ defmodule ForgeWorker.ScriptedSlice do
 
   @impl ForgeWorker.Slice
   def ended(context, output),
-    do: Map.merge(ForgeWorker.Slice.Direct.ended(context, output), context[:ending] || %{})
+    do:
+      Map.merge(
+        ForgeWorker.Slice.Direct.ended(context, output),
+        context[:ending] || Application.get_env(:forge_worker, :scripted_ending, %{})
+      )
 
   @impl ForgeWorker.Slice
   def probe, do: :none

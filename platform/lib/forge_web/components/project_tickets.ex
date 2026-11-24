@@ -74,7 +74,7 @@ defmodule ForgeWeb.ProjectTickets do
     live = facts.live[ticket.id]
     {doing, doing_tone, tone} = doing(ticket, items, live, facts)
     running = is_nil(facts.places[ticket.id]) and match?(%{status: :running}, live)
-    {latest, decision} = latest(items, facts.said[ticket.id], facts[:held][ticket.id])
+    {latest, decision} = latest(items, facts.said[ticket.id], facts[:held][ticket.id], live)
 
     %{
       ticket: ticket,
@@ -165,10 +165,17 @@ defmodule ForgeWeb.ProjectTickets do
 
   # The decision a waiting ticket needs, at full strength; else, for a ticket on hold, what waits
   # on it, quietly; else the agent's last line.
-  defp latest([item | _] = items, _said, _held), do: {decision(item, items), true}
-  defp latest([], _said, [_ | _] = held), do: {QueueItems.waits(held), false}
-  defp latest([], {text, _at}, _held) when text != "", do: {"agent · " <> text, false}
-  defp latest([], _said, _held), do: {nil, false}
+  defp latest([item | _] = items, _said, _held, _live), do: {decision(item, items), true}
+  defp latest([], _said, [_ | _] = held, _live), do: {QueueItems.waits(held), false}
+
+  # A job waiting for the machine that holds its ticket's warm build says so, in the sentence its
+  # own page reads (`docs/design/ui.md` § A job waiting for a machine). Every other wait keeps
+  # *waiting for a machine* as the doing-word and the agent's last line under it.
+  defp latest([], _said, _held, %{status: :pending, wait: "warm"}),
+    do: {ForgeCore.WarmBuild.wait_sentence(), false}
+
+  defp latest([], {text, _at}, _held, _live) when text != "", do: {"agent · " <> text, false}
+  defp latest([], _said, _held, _live), do: {nil, false}
 
   defp decision(%{kind: :approval, detail: detail}, _items) do
     names = Enum.join(detail["approve"] || [], ", ")

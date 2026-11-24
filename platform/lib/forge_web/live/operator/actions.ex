@@ -164,6 +164,13 @@ defmodule ForgeWeb.Operator.Actions do
     end
   end
 
+  # Making every copy of the ticket's warm build unusable, wherever it is: any member's act
+  # (`docs/design/worker-tier.md` § The command copy). The guard is `Operator`'s.
+  defp act("clear-warm-build", %{"ticket" => id}, socket) do
+    with {:ok, _ticket} <- Operator.clear_warm_build(ticket(id), user(socket)),
+         do: {:ok, "Warm build cleared"}
+  end
+
   defp act("repin", %{"ticket" => id}, socket) do
     with {:ok, ticket} <- Operator.repin(ticket(id), user(socket)) do
       {:ok, "Re-pinned at #{String.slice(ticket.workflow_commit, 0, 12)}"}

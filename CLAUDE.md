@@ -17,6 +17,13 @@ the manifest and its shortcuts, the status bar, the icon's badge, the tidying of
 no longer wait, the offline page, what the service worker keeps and the iPhone's message. **It is
 built and headless-checked**; its *Not verified here* is what a first real phone has to confirm.
 
+`docs/design/worker-tier.md` § The command copy is the standard for what a command may keep for its
+ticket's next command: `keep_build` and `warm_start` on a command, a copy of its own on the machine
+that is never shared with another ticket, an agent job or a conversation, the scheduler's two-minute
+wait for the machine holding it, **Clear** as an epoch, and the two lines a command's log gains. **It
+is built** (ticket 76), and **no saving is measured**: no machine that has the new worker has run a
+real ticket's commands (its § Open). Forge's own commands opt in to nothing yet.
+
 `docs/design/conversations.md` is the standard for chats — the work that does not fit a workflow
 state.
 
@@ -263,10 +270,14 @@ It also points `MIX_HOME` and `HEX_HOME` at `.mix-home/` and `.hex-home/` inside
 so that Hex is installed and the registry fetched once per ticket rather than once per job: a
 job's `HOME` is its own and goes with the job, while an ignored directory in the checkout is
 carried in the ticket's volume from one of its **agent** jobs to the next on the same machine
-(`docs/design/worker-tier.md` § The ticket volume). A command job — which is what runs the gate
-automatically — snapshots that volume and promotes nothing, so it reads a warm cache and never
-leaves one; an agent job running the gate by hand is what fills it. Exported for the gate's own
-processes only; your `~/.mix` is not read and not written.
+(`docs/design/worker-tier.md` § The ticket volume). **A command job — which is what runs the gate
+automatically — starts cold today:** the volume holds an agent job's sources, plus a build only if
+that agent ran one by hand, and `implement.md` tells it not to. A command can keep its build for the
+ticket's next command on that machine, but only when its definition in the workflow declares
+`keep_build`, and **forge's own `check`, `static` and `test` declare none yet**
+(`docs/design/worker-tier.md` § The command copy; `forge-commands-keep-their-build` is the
+proposal). Until that merges, each run of them fetches and compiles every dependency. Exported for
+the gate's own processes only; your `~/.mix` is not read and not written.
 
 **Export the same two before running `mix` by hand**, which is also how an agent job leaves the
 caches warm for the next one:

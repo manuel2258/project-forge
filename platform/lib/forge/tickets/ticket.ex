@@ -43,6 +43,11 @@ defmodule Forge.Tickets.Ticket do
     # Extend and Run again forms: kept as an addition so a re-pin that moves the workflow's cap
     # moves it under the raise (`Forge.Spend.ticket_cap/2`, `Forge.Tickets.CapRaise`).
     field :cap_raise, :integer, default: 0
+
+    # How many times the ticket's warm build was cleared. A command copy is usable only when the
+    # epoch it was kept under is this one, so a clear stops every copy on every machine at once
+    # (`docs/design/worker-tier.md` § The command copy).
+    field :warm_epoch, :integer, default: 0
     field :pending_transition, :map
 
     # A hold: set while a person has put the ticket on hold. `held_transition` and `held_entry` are

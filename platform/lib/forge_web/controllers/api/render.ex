@@ -43,12 +43,38 @@ defmodule ForgeWeb.Api.Render do
           left: facts.left,
           restart_need: facts.restart_need,
           retry: Forge.Engine.retryable?(t),
-          extend: Forge.Jobs.Extensions.offer(t)
+          extend: Forge.Jobs.Extensions.offer(t),
+          warm_build: warm_build(t)
         }
 
       {:error, _errors} ->
-        %{cap: nil, cap_raise: t.cap_raise, retry: false, extend: nil}
+        %{cap: nil, cap_raise: t.cap_raise, retry: false, extend: nil, warm_build: nil}
     end
+  end
+
+  # The ticket's warm build, as the ticket page draws it (`Forge.WarmBuilds`): null when no command
+  # of its workflow keeps a build, otherwise `%{copy: null | %{...}}` — the copy the next command is
+  # sent to, which is the latest one only. Nothing of the copy itself leaves its machine.
+  defp warm_build(%Ticket{} = t) do
+    if Forge.WarmBuilds.declared?(t) do
+      %{copy: t |> Forge.WarmBuilds.current() |> warm_copy()}
+    end
+  end
+
+  defp warm_copy(nil), do: nil
+
+  defp warm_copy(%{job: job, worker: worker, size: size, kept_at: kept_at}) do
+    command = job.spec["command"] || %{}
+
+    %{
+      size: size,
+      machine: worker.id,
+      command: command["name"],
+      args: command["args"] || [],
+      commit: command["at"],
+      job_id: job.id,
+      kept_at: kept_at
+    }
   end
 
   defp ticket_fields(%Ticket{} = t, project_name, opts) do
@@ -136,14 +162,49 @@ defmodule ForgeWeb.Api.Render do
       harness_session_id: j.harness_session_id,
       started_at: j.started_at,
       finished_at: j.finished_at,
-      inserted_at: j.inserted_at
+      inserted_at: j.inserted_at,
+      warm: warm(j)
     }
   end
 
-  def job_with_spec(%Job{} = j) do
+  @doc """
+  A command job: a job's fields, and the command it ran, its arguments and its exit status. `warm`
+  is what the worker reported of the ticket's warm build (`docs/design/worker-tier.md` § The
+  command copy).
+  """
+  def command(%Job{} = j) do
+    command = (j.spec || %{})["command"] || %{}
+
     j
     |> job()
     |> Map.merge(%{
+      kind: "command",
+      command: command["name"],
+      args: command["args"] || [],
+      exit_status: j.exit_status
+    })
+  end
+
+  # A command's warm build as it reported it (`docs/design/worker-tier.md` § The command copy), read
+  # from the row with no lookups; null for a job that is not a command and for a command whose
+  # worker reported nothing.
+  defp warm(%Job{warm_source: nil, warm_kept: nil}), do: nil
+
+  defp warm(%Job{} = j) do
+    %{
+      source: j.warm_source,
+      from_job_id: j.warm_from_id,
+      kept: j.warm_kept,
+      unkept: j.warm_unkept,
+      size: j.warm_size
+    }
+  end
+
+  def job_with_spec(%Job{kind: :command} = j), do: j |> command() |> with_spec(j)
+  def job_with_spec(%Job{} = j), do: j |> job() |> with_spec(j)
+
+  defp with_spec(map, %Job{} = j) do
+    Map.merge(map, %{
       spec: j.spec,
       restart: restart(j),
       extensions: Enum.map(Forge.Jobs.Extensions.all(j.id), &extension/1),

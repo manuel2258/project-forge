@@ -808,6 +808,10 @@ defmodule Forge.Jobs do
           )
       },
       "seed" => seed(project),
+      # Which ticket's command copy to look for and the epoch it must have been kept under
+      # (`docs/design/worker-tier.md` § The command copy). The epoch the row was started with, so
+      # the one the platform records and the one the worker is told cannot differ.
+      "warm" => %{"ticket" => ticket.id, "epoch" => job.warm_epoch || ticket.warm_epoch},
       "slice" => %{
         "memory_max" => job.memory_max || Workers.slice_bytes(),
         "cpu_weight" => Workers.config(:cpu_weight, 100)
@@ -2145,15 +2149,16 @@ defmodule Forge.Jobs do
 
     Multi.new()
     |> Multi.run(:row, fn repo, _changes -> still_pending(repo, job) end)
-    |> Multi.update(
-      :job,
+    |> Multi.run(:warm_epoch, fn repo, _changes -> {:ok, warm_epoch(repo, job)} end)
+    |> Multi.update(:job, fn %{warm_epoch: warm_epoch} ->
       Job.progress_changeset(job, %{
         status: :running,
         worker_id: worker.id,
         credential_id: credential && credential.id,
-        started_at: job.started_at || now
+        started_at: job.started_at || now,
+        warm_epoch: warm_epoch
       })
-    )
+    end)
     |> Runs.open(job, worker, credential, now, Extensions.to_tell(job))
     |> put_credential_changed(job, credential)
     |> Events.log(:event, "job.started", :system, %{
@@ -2181,6 +2186,14 @@ defmodule Forge.Jobs do
         {:error, {failed, reason}}
     end
   end
+
+  # The ticket's warm epoch as a command starts, written on its row and told to its worker, so that
+  # a clear that lands later makes the copy this command keeps unusable
+  # (`docs/design/worker-tier.md` § The command copy). Nil for every other kind of job.
+  defp warm_epoch(repo, %Job{kind: :command, ticket_id: ticket_id}),
+    do: repo.one!(from t in Ticket, where: t.id == ^ticket_id, select: t.warm_epoch)
+
+  defp warm_epoch(_repo, %Job{}), do: nil
 
   defp held_harness(%{harness: harness}), do: String.to_existing_atom(harness)
 

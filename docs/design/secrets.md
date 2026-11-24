@@ -50,6 +50,20 @@ install script, a Makefile target. A secret in a build command's environment is 
 of code the agent wrote. This is the lesson CI systems learned with workflows that run a
 contributor's branch beside the repository's secrets.
 
+**And a command that keeps its build may leave a secret on disk for the ticket's next command.** A
+command that declares `keep_build` (`worker-tier.md` § The command copy) leaves its tree as the
+ticket's command copy, and what its script wrote into that tree — a file, a cache, a token a tool
+saved — stays there on that machine for up to two days, for the ticket's later commands to find,
+including ones whose own definition does not name the secret. This changes the sentence below, "a
+job whose state does not name it does not hold it", for *files on disk* and for the ticket's own
+later commands, and only for them: the value is in no environment it was not already in, the
+copy is never uploaded, and it goes to no other ticket, no agent job and no conversation. The
+worker's masking runs on what a job *uploads*, and nothing uploads a copy. It does not widen the
+boundary that matters, which is above: a command runs the agent's own code, so the agent can already
+reach whatever that command holds. A project that wants a secret-holding command not to leave its
+tree to the others declares no `keep_build` on it, and one that wants its gate never to read what
+other commands left declares `warm_start: false` on the gate.
+
 So there is one boundary, and it is decided before the job starts: **which jobs receive the
 secret.** Everything after that — masking, the manifest's instruction — is against accidents, not
 against an agent or a member who means it.

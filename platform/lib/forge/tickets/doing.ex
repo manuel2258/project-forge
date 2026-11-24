@@ -27,7 +27,11 @@ defmodule Forge.Tickets.Doing do
           status: :running | :pending,
           attempt: pos_integer() | nil,
           started_at: DateTime.t() | nil,
-          inserted_at: DateTime.t()
+          inserted_at: DateTime.t(),
+          # Why a pending job has not gone out: the code of its current `job.waiting` event
+          # (`"warm"` while it waits for the machine that holds its ticket's warm build), nil
+          # for a running job and for one nothing has been said about.
+          wait: String.t() | nil
         }
 
   @doc """
@@ -65,6 +69,23 @@ defmodule Forge.Tickets.Doing do
     |> Enum.group_by(& &1.ticket_id)
     |> Map.new(fn {id, jobs} -> {id, pick(jobs)} end)
     |> current_run()
+    |> current_wait()
+  end
+
+  # The code a pending job waits on, from one read for every row (`Jobs.current_waits/1`): what
+  # the Tickets and queue rows draw as their latest line when it is the warm build's.
+  defp current_wait(picked) do
+    waits = Forge.Jobs.current_waits(for {_ticket, %{status: :pending, id: id}} <- picked, do: id)
+
+    Map.new(picked, fn {ticket_id, job} ->
+      reason =
+        case Map.get(waits, job.id) do
+          %Event{payload: %{"reason" => reason}} -> reason
+          _not_waiting -> nil
+        end
+
+      {ticket_id, Map.put(job, :wait, reason)}
+    end)
   end
 
   defp current_run(picked) do

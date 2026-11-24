@@ -14,7 +14,7 @@ defmodule Forge.Jobs.Scheduler do
 
   use GenServer
 
-  alias Forge.{Credentials, Engine, Jobs, Projects, Secrets, Tickets, Workers}
+  alias Forge.{Credentials, Engine, Jobs, Projects, Secrets, Tickets, WarmBuilds, Workers}
   alias Forge.Jobs.Job
 
   require Logger
@@ -109,7 +109,7 @@ defmodule Forge.Jobs.Scheduler do
     with :ok <- its_turn(job),
          {:ok, _credential} <- credential(job),
          :ok <- secrets(job),
-         {:ok, worker} <- Workers.provide(demand, job.worker_id, claims, reserved) do
+         {:ok, worker} <- place(job, demand, claims, reserved) do
       {assigned + assign(job, worker), claims, reserved, yields}
     else
       # A machine is being made that will hold it: this one, or one an earlier pass asked for.
@@ -165,6 +165,38 @@ defmodule Forge.Jobs.Scheduler do
         wait(job, reason)
         {assigned, claims, reserved, yields}
     end
+  end
+
+  # **A command prefers the machine holding its ticket's warm build** (`WarmBuilds.preferred_worker/1`,
+  # `docs/design/provisioning.md` § Affinity on resume). That machine is taken when it has room.
+  # When it has none but would take the command once it had — every other gate passes — the command
+  # waits for it for `:warm_wait_ms` (two minutes) from when it became pending, and asks for no
+  # machine meanwhile, so waiting never makes one. After that, or when the machine is gone, not
+  # connected, not taking commands, no longer serving the project or the ticket has no usable copy,
+  # it is placed as any job is. A preference never widens the gate: every machine here comes from
+  # `Workers.assignable/3` and `Workers.would_take?/3`, which ask what a placement asks.
+  defp place(job, demand, claims, reserved) do
+    case WarmBuilds.preferred_worker(job) do
+      nil -> Workers.provide(demand, job.worker_id, claims, reserved)
+      preferred -> place_preferring(job, preferred, demand, claims, reserved)
+    end
+  end
+
+  defp place_preferring(job, preferred, demand, claims, reserved) do
+    case Workers.assignable(demand, preferred, reserved) do
+      %{id: ^preferred} = worker ->
+        {:ok, worker}
+
+      _another_or_none ->
+        if Workers.would_take?(demand, preferred, reserved) and warm_waiting?(job),
+          do: {:error, :warm},
+          else: Workers.provide(demand, preferred, claims, reserved)
+    end
+  end
+
+  defp warm_waiting?(job) do
+    DateTime.diff(DateTime.utc_now(), job.updated_at, :millisecond) <
+      Jobs.config(:warm_wait_ms, :timer.minutes(2))
   end
 
   defp at_capacity(job, demand, reserved, waited_since) do
@@ -387,6 +419,11 @@ defmodule Forge.Jobs.Scheduler do
   # job, whose chat, is the owner's to see on their own page and nobody else's (criterion 44).
   defp waiting({:held, :codex}),
     do: {"held", "Waiting for a Codex login: all in this project's pool are in use."}
+
+  # The command's ticket has a warm build on a machine that would take it but has no room yet
+  # (`place/4`). Quiet like every wait; the sentence is core's because the queue row and the
+  # command's page say it too.
+  defp waiting(:warm), do: {"warm", ForgeCore.WarmBuild.wait_sentence()}
 
   defp waiting(:reserving),
     do:

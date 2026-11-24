@@ -42,7 +42,7 @@ defmodule ForgeCore.Workflow.Parser do
                 release release_files release_notes)
   @state_keys ~w(prompt env model effort harness inputs produces optional outcomes budget on_enter
                  on_conflict resources invoke exit may_invoke secrets chat opens)
-  @command_keys ~w(run env produces timeout resources secrets)
+  @command_keys ~w(run env produces timeout resources secrets keep_build warm_start)
   @grant_keys ~w(max concurrent)
   @transition_keys ~w(from to when approve max queue)
   @budget_keys ~w(turns tokens cost)
@@ -301,6 +301,8 @@ defmodule ForgeCore.Workflow.Parser do
     {timeout_ms, e4} = duration(definition, "timeout", path)
     {resources, e5} = resources(definition, path)
     {secrets, e6} = string_list(definition, "secrets", path)
+    {keep_build, e7} = keep_build(definition, path)
+    {warm_start, e8} = warm_start(definition, path)
 
     command = %Command{
       name: name,
@@ -310,14 +312,59 @@ defmodule ForgeCore.Workflow.Parser do
       outputs: outputs,
       timeout_ms: timeout_ms,
       resources: resources,
-      secrets: secrets || []
+      secrets: secrets || [],
+      keep_build: keep_build,
+      warm_start: warm_start
     }
 
-    {command, unknown_keys(definition, @command_keys, path) ++ e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6}
+    errors = e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6 ++ e7 ++ e8
+    {command, unknown_keys(definition, @command_keys, path) ++ errors}
   end
 
   defp command(name, _definition) do
     {%Command{name: name}, [Error.new(Error.join("commands", name), "must be a mapping")]}
+  end
+
+  # The exit statuses whose tree is kept: a non-empty list of whole numbers from 0 to 255 (the
+  # range a process's exit status has), written as numbers, not as `"*"` or digits in quotes — a
+  # status the command is not to mistake for another (`docs/design/workflow-grammar-v1.md`
+  # § Commands). Absent keeps nothing.
+  defp keep_build(definition, path) do
+    keep_path = Error.join(path, "keep_build")
+
+    case Map.get(definition, "keep_build") do
+      nil ->
+        {[], []}
+
+      [_ | _] = list ->
+        if Enum.all?(list, &(is_integer(&1) and &1 in 0..255)),
+          do: {Enum.uniq(list), []},
+          else: {[], [Error.new(keep_path, "#{inspect(list)} is not a list of exit statuses")]}
+
+      other ->
+        {[],
+         [
+           Error.new(
+             keep_path,
+             "#{inspect(other)} must be a non-empty list of exit statuses, 0 to 255"
+           )
+         ]}
+    end
+  end
+
+  # Absent starts from the ticket's command copy, which is what every command does by default.
+  defp warm_start(definition, path) do
+    case Map.get(definition, "warm_start") do
+      nil ->
+        {true, []}
+
+      value when is_boolean(value) ->
+        {value, []}
+
+      other ->
+        {true,
+         [Error.new(Error.join(path, "warm_start"), "#{inspect(other)} must be true or false")]}
+    end
   end
 
   # A name — the log — or a list of at most one name and any number of groups of files.

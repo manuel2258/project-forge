@@ -1397,6 +1397,12 @@ wait: nobody has a decision to make. It is drawn only while the job is
 pending, and only the latest reason since the job last started; every change stays in the job's own
 event stream, where it is a line like any other.
 
+**A command waiting for its ticket's warm machine says so, on the Tickets and queue row too.** It is
+the one wait whose sentence replaces *waiting for a machine* there: while the ticket's live job is
+pending on the `warm` wait, the row's latest line is *Waiting for the machine that holds this
+ticket's warm build: up to two minutes, then any machine with room.* Every other wait keeps the
+row's *waiting for a machine*, because only this one resolves itself within a known time.
+
 **It is not amber**, even when the answer is a template nobody has assigned. Amber is the queue's
 mark for a human decision, and neither a job running nor a job not yet on a machine is that: the
 queue draws a ticket resting on either quietly, in **Open tickets** — the same shape § Not waiting
@@ -1619,7 +1625,7 @@ with no earlier release draws nothing there. The platform keeps no git tags to r
 admitted — and, for a ticket a schedule admitted, *Admitted by the schedule `name`, due 2026-11-23, in
 ana@example.com's name*, from its `ticket.admitted` event — jobs and usage in windows, the capacity lines written out for the project's pool —
 § Usage), what it pinned, and its lifecycle actions. Three notices live here, each shown only while
-true:
+true, and a fourth block, the warm build, only when the workflow declares one:
 
 - **A ticket whose pin the default branch has moved past**, under the `workflow` fact: the paths
   under `.forge/` that changed, and **Re-pin at `<sha>`** behind a confirm
@@ -1649,6 +1655,22 @@ true:
   its own*, or *its changeset is not approved, so when the rebase ends done it comes back for your
   approval* (`workflow-grammar-v1.md` § Merging, *What follows the rebase*). Nobody can decide on
   the changeset while the rebase runs, so what it says holds when the rebase ends.
+- **A ticket's warm build** (`worker-tier.md` § The command copy), shown **only when the ticket's
+  pinned workflow has a command that declares `keep_build`**, and nothing at all, not even a
+  heading, when it has none. It shows the copy the ticket's next command will be sent to — the
+  latest one kept, not cleared, not past its two days, on a machine that still exists: its size,
+  its machine (named as a command's page names it), the command that kept it with its arguments as
+  `Command.argv/1` draws them, the short commit, and when, with **Clear** under it, behind a
+  confirm. With no such copy it reads, exactly, *No warm build yet: the first command that keeps
+  its build leaves one.* — which is also what it reads after a clear, and when the only copy is on a
+  machine that is gone or is past its two days. Copies on other machines are not listed. **Clear
+  makes every copy of the ticket unusable and deletes nothing at once**; the confirm says that the
+  next command starts cold. A long machine name or a command with many arguments breaks at any
+  character (`break-all`, `min-w-0`) rather than widening the block on a phone, and the arguments go
+  through the template as text, so markup in them is shown, not read. Whoever may read the ticket
+  sees the block, and a member of its project (`:use`) the **Clear**; the refusal is on the act on
+  the server and not only in the button (`api-and-ui.md`). A clear is a line in the ticket's
+  Activity, naming who did it.
 - **Cancel ticket**, outlined red behind a confirm, on an active or stuck ticket; a cancelled one
   has **Restore** instead, with a line saying where it is hidden and what restoring leaves
   (`workflow-grammar-v1.md` § Cancelling a ticket). It is rare and undoable, so it sits in the
@@ -1919,7 +1941,15 @@ way to end its work, from the ticket's details.
 **A command's page** is the job page with what a command has: its exit status as the largest thing
 on it, the script as it ran, the argument vector as JSON — it reached `exec` as a vector, and
 joined with spaces two arguments would read as one — the commit it ran at, its timeout, the job
-that invoked it, and its log.
+that invoked it, and its log. **Beside its duration and timeout are two facts about its tree**
+(`#job-figures`): where it came from — this ticket's warm build, naming and linking the command
+that left it, the ticket's volume, the project's seed, or a fresh clone — and whether its build was
+kept as the ticket's warm build, with the reason in words when it was not (`ForgeCore.WarmBuild`).
+They are stored per command, so they outlive an unreadable log; a command run by a worker that does
+not report them shows neither, which reads differently from *a fresh clone*. **While it waits for
+the machine holding its ticket's warm build, its page says so** — *Waiting for the machine that
+holds this ticket's warm build: up to two minutes, then any machine with room.* — and so does any
+other wait the scheduler has recorded for it (a command's page showed none before).
 
 ## Chats
 

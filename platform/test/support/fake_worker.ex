@@ -158,7 +158,9 @@ defmodule Forge.FakeWorker do
       outcome: outcome,
       exit_status: status,
       duration_ms: Keyword.get(opts, :duration_ms, 1_500),
-      log: Keyword.get(opts, :log_key, key)
+      log: Keyword.get(opts, :log_key, key),
+      # What the worker reports of the warm build (`ForgeCore.WarmBuild`); nil from one that does not.
+      warm: Keyword.get(opts, :warm)
     })
   end
 

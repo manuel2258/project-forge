@@ -1163,6 +1163,24 @@ and has come back to the queue holds it for one idle period from its return. `ma
 `max` should still be set as a cap on park cycles rather than a generous safety number, because
 every resume reads its context again and context is this system's expensive resource.
 
+**A command has a preference of its own: the machine holding its ticket's warm build.** A command
+that would start from its ticket's command copy (`worker-tier.md` § The command copy) prefers the
+machine of the ticket's latest usable copy — kept, not cleared, not past its two days, on a machine
+that is not destroyed, and with that ticket's last command there inside the same two days. It is
+the same shape as above with one difference, a wait: when that machine would take the command if
+it had room, but has none now, the command stays pending for up to two minutes
+(`Jobs.config(:warm_wait_ms)`) with the wait code `warm` and the sentence (which says "two minutes" whatever `:warm_wait_ms` is set to) *"Waiting for the machine
+that holds this ticket's warm build: up to two minutes, then any machine with room."*, and no
+machine is created for it meanwhile. After the two minutes it goes to any machine with room, or a
+provider's create, as it would have. **It does not wait** when the machine is gone, disconnected,
+or set not to take commands (ticket 74), when it no longer serves the project, when the ticket has
+no usable copy, or when the command says `warm_start: false` — and a project that declares no
+`keep_build` never has a copy, so none of its commands waits. **A preference never widens the
+gate:** "would take it once it had room" is `Workers.assignable/3`'s own filters (serving the
+project, status, health, updating, connected, `takes?`, `holds_when_empty?`) with the room test
+left out, so the two cannot disagree about which machines are allowed. Every other wait still
+reads "waiting for a machine".
+
 ## What this gives up
 
 - **The single number was legible, and a surface said so in words.** `/workers` rendered *"A job

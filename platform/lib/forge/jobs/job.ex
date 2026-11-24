@@ -66,6 +66,18 @@ defmodule Forge.Jobs.Job do
     field :started_at, :utc_datetime
     field :finished_at, :utc_datetime
 
+    # A command's warm build (`docs/design/worker-tier.md` § The command copy): the ticket's epoch
+    # when it was assigned, where its tree came from, whether its build was kept and why not, and
+    # the kept copy's size. Null for any other job and for a command a worker did not report on.
+    field :warm_epoch, :integer
+    field :warm_source, :string
+    field :warm_kept, :boolean
+    field :warm_unkept, :string
+    field :warm_size, :integer
+
+    # The command that left the copy this one started from.
+    belongs_to :warm_from, __MODULE__
+
     belongs_to :ticket, Forge.Tickets.Ticket
     # A workflow job reaches its project through its ticket, but a project chat has no ticket;
     # without this there is nothing to clone and no project to schedule it for.
@@ -190,7 +202,13 @@ defmodule Forge.Jobs.Job do
       :credential_id,
       :started_at,
       :finished_at,
-      :exit_status
+      :exit_status,
+      :warm_epoch,
+      :warm_source,
+      :warm_from_id,
+      :warm_kept,
+      :warm_unkept,
+      :warm_size
     ])
     |> validate_required([:status])
     |> validate_number(:turns, greater_than_or_equal_to: 0)

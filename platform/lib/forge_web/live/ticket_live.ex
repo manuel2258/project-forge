@@ -274,6 +274,7 @@ defmodule ForgeWeb.TicketLive do
       changeset: Artifacts.latest(ticket.id, Workflow.changeset_artifact()),
       release: release(ticket),
       scheduled: scheduled(ticket),
+      warm_build: warm_build(ticket),
       # The hold (`docs/design/workflow-grammar-v1.md` § Holding a ticket): what releasing does, and
       # whether a run is still going that Stop now would stop. The open milestones are what the
       # details' select offers.
@@ -769,6 +770,30 @@ defmodule ForgeWeb.TicketLive do
     titles = Forge.Update.titles(ticket.project_id, numbers)
 
     Enum.map(visits, &Map.put(&1, :titles, titles))
+  end
+
+  # The details' Warm build block: nothing when no command of the pinned workflow keeps its build,
+  # otherwise `%{copy: nil | the copy the ticket's next command will be sent to}` as the block
+  # draws it (`docs/design/ui.md` § The details). The machine is named as a command's page names
+  # it, and the command as `ForgeCore.Workflow.Command.argv/1` shows its arguments.
+  defp warm_build(ticket) do
+    if Forge.WarmBuilds.declared?(ticket),
+      do: %{copy: ticket |> Forge.WarmBuilds.current() |> warm_copy()}
+  end
+
+  defp warm_copy(nil), do: nil
+
+  defp warm_copy(%{job: job, worker: worker, size: size, kept_at: at}) do
+    command = Jobs.spec(job).command || %{}
+
+    %{
+      size: size,
+      machine: "machine " <> String.slice(worker.id, 0, 8),
+      command: command["name"],
+      args: command["args"],
+      commit: Diff.short(command["at"]),
+      at: at
+    }
   end
 
   # Why each pending job has not gone out, in the scheduler's own sentence — only a pending job

@@ -363,3 +363,22 @@ worker tier, which has since arrived. `role` was to carry multi-user; it was dro
 Also built: `jobs.harness` (null for a command), `projects.harness` / `codex_model` /
 `codex_effort`, `workers.harnesses`, and for Codex credentials `account_id`, `plan`, `expires_on`,
 `renewed_at` and `job_runs.exclusive` with a partial unique index on live exclusive runs.
+
+## A ticket's warm build (ticket 76)
+
+`docs/design/worker-tier.md` § The command copy. The rows say only facts; the copy itself is on a
+machine and in no table.
+
+| Column | Is |
+|---|---|
+| `tickets.warm_epoch` | integer, not null, default 0. **Clear** adds one, in the same transaction as the `ticket.warm_cleared` event. A copy is usable only under the epoch it was kept in. |
+| `jobs.warm_epoch` | integer, the ticket's epoch when this command was marked started; what the assignment carried. Null for a job that was not a command and for a command started before this. |
+| `jobs.warm_source` | `copy`, `ticket`, `seed` or `clone`: where the command's tree came from. Null when the worker did not report it. |
+| `jobs.warm_from_id` | the job that left the copy, when `warm_source` is `copy`; references `jobs`, nilified if that job is deleted. Recorded only if it is a command of the same ticket. |
+| `jobs.warm_kept` | boolean: whether the command's build was kept as the ticket's copy. Null when not reported. |
+| `jobs.warm_unkept` | the reason it was not (`ForgeCore.WarmBuild.reasons/0`). |
+| `jobs.warm_size` | bigint, bytes of a kept copy. |
+
+A partial index on `jobs (ticket_id, finished_at) WHERE warm_kept` is what finds a ticket's latest
+copy. Every word is checked against `ForgeCore.WarmBuild` before it is stored, and a value a
+worker sends that is not in its lists is dropped rather than carried.

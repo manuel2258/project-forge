@@ -114,7 +114,9 @@ defmodule ForgeWorker.Disk do
 
     kinds = %{
       "nix_store" => size(store, run),
-      "volumes" => size_each(Path.join([root, "volumes", "ticket"]), run),
+      "volumes" =>
+        size_each(Path.join([root, "volumes", "ticket"]), run) +
+          size_each(Path.join([root, "volumes", "command"]), run),
       "seeds" => size_each(Path.join([root, "volumes", "seed"]), run),
       "jobs" => size(Path.join(root, "jobs"), run)
     }

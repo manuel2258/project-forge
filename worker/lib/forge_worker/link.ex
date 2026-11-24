@@ -17,6 +17,7 @@ defmodule ForgeWorker.Link do
   use Slipstream, restart: :permanent
 
   alias ForgeCore.Job.Result
+  alias ForgeCore.WarmBuild
   alias ForgeCore.WorkerProtocol
   alias ForgeCore.Workflow.Resources
 
@@ -36,6 +37,7 @@ defmodule ForgeWorker.Link do
   alias ForgeWorker.Job.{
     Blobs,
     Command,
+    CommandCopy,
     Conversation,
     Credential,
     Dir,
@@ -950,27 +952,36 @@ defmodule ForgeWorker.Link do
 
   # `docs/design/commands.md`: the checkout at the recorded commit, the script the spec carries,
   # the log to the store under the key the platform minted a token for. Nothing is committed or
-  # pushed — a command's write is its log — and nothing is promoted: its tree is a commit, not a
-  # ticket's work in progress.
+  # pushed — a command's write is its log — and nothing is promoted to the ticket's volume: its
+  # tree is a commit. The one thing a command may leave is the ticket's **command copy**, when its
+  # definition says the script's exit status keeps its build (`settle_warm/7`,
+  # `docs/design/worker-tier.md` § The command copy).
   defp prepare_and_run(link, %{"kind" => "command"} = assignment, root, user) do
     job_id = assignment["job_id"]
     spec = ForgeCore.Job.Spec.from_map(assignment["spec"])
 
-    with {:ok, worktree} <- Workspace.prepare(assignment, root, user),
+    with {:ok, worktree, source} <- Workspace.prepare_command(assignment, root, user),
          :ok <-
            Checkout.detach(worktree, spec.command["at"],
              url: assignment["git"]["url"],
              token: assignment["git"]["token"],
              as: Slice.as_user(user)
            ),
-         {:ok, command} <- start_command(assignment, spec, root, worktree) do
+         head = WarmBuild.source_line(source.source, source.from),
+         {:ok, command} <- start_command(assignment, spec, root, worktree, head) do
       send(link, {:runner, job_id, command})
-      {:ok, result} = Command.await(command)
+      {:ok, result, ending} = Command.await_ending(command)
+      log = Command.log_path(job_dir(root, job_id))
 
-      Secrets.mask_file(
-        Secrets.from_assignment(assignment),
-        Command.log_path(job_dir(root, job_id))
-      )
+      # The script was the last thing to run in the tree, so the files come back to root and the
+      # user goes before a snapshot of it is kept (as `finish/7` does before a template).
+      # Dropping this `leave` (which also releases the archive's mount first, `Slice.leave/2`) changes
+      # nothing under `Slice.Direct`, which every test runs: only a real job user owns the tree, and
+      # only root can make one (`--include root`).
+      Slice.leave(user, job_paths(assignment, root))
+      warm = settle_warm(assignment, spec, root, worktree, source, result, ending)
+      File.write(log, WarmBuild.kept_line(warm["kept"], warm["unkept"]) <> "\n", [:append])
+      Secrets.mask_file(Secrets.from_assignment(assignment), log)
 
       result =
         result
@@ -978,7 +989,8 @@ defmodule ForgeWorker.Link do
         |> Blobs.upload(assignment, Dir.blobs_dir(job_dir(root, job_id)))
 
       Workspace.discard(assignment, root)
-      {:ok, {"result", Result.to_map(result)}}
+      sweep_old(root)
+      {:ok, {"result", Result.to_map(%{result | warm: warm})}}
     end
   end
 
@@ -1098,19 +1110,23 @@ defmodule ForgeWorker.Link do
     # snapshot of the seed and the next attempt takes a fresh one; keeping this one would
     # keep every job this machine ever ran.
     Workspace.discard(assignment, root)
+    sweep_old(root)
 
-    # And the job directories of runs old enough that nobody is going to resume them. A
-    # worker that is never destroyed has nothing else to collect them; the end of a job is
-    # already a moment spent on the filesystem. See docs/design/worker-tier.md § What a
-    # machine that never dies accumulates.
+    terminal
+  end
+
+  # The job directories of runs old enough that nobody is going to resume them. A worker that is
+  # never destroyed has nothing else to collect them; the end of a job is already a moment spent on
+  # the filesystem. See docs/design/worker-tier.md § What a machine that never dies accumulates.
+  # Ticket volumes and command copies go the same way and for the same reason: nothing here is told
+  # that a ticket merged, so age is what there is. **A command sweeps too**, as an agent job does:
+  # a machine that takes only commands has the command copies and would otherwise never sweep
+  # anything.
+  defp sweep_old(root) do
     swept = Dir.sweep(Path.join(root, "jobs"), job_retention_ms())
     if swept > 0, do: Logger.info("swept #{swept} job director(ies) past their retention")
 
-    # Ticket volumes go the same way and for the same reason. Nothing here is told that a
-    # ticket merged, so age is what there is.
     Workspace.sweep(root, ticket_volume_retention_ms())
-
-    terminal
   end
 
   # A job the platform stopped hibernates and resumes from the branch and the manifest. For a
@@ -1136,10 +1152,63 @@ defmodule ForgeWorker.Link do
 
   defp job_dir(root, job_id), do: Path.join([root, "jobs", job_id])
 
-  defp start_command(assignment, spec, root, worktree) do
+  # Whether this command's build is kept as the ticket's command copy, and the facts the platform
+  # stores (`ForgeCore.WarmBuild`). **Which endings keep is the command's to declare**, by exit
+  # status, and only a script that ended on its own qualifies — a timeout, a cancel or a kill never
+  # does, whatever its status, so a killed build cannot poison the next command. A copy that cannot
+  # be kept is a warning, and the copy the ticket had stays.
+  defp settle_warm(assignment, spec, root, worktree, source, result, ending) do
+    key = CommandCopy.key(assignment)
+
+    {kept, unkept, size} =
+      case unkept_reason(CommandCopy.statuses(assignment), key, ending, result.exit_status) do
+        nil -> keep_build(assignment, spec, root, worktree, key)
+        reason -> {false, reason, nil}
+      end
+
+    with {:ok, key} <- key, false <- kept, do: CommandCopy.touch(root, key)
+
+    %{
+      "source" => source.source,
+      "from" => source.from,
+      "kept" => kept,
+      "unkept" => unkept,
+      "size" => size
+    }
+  end
+
+  defp unkept_reason([], _key, _ending, _status), do: "keeps_nothing"
+  defp unkept_reason(_statuses, :none, _ending, _status), do: "not_a_ticket"
+  defp unkept_reason(_statuses, _key, :cancelled, _status), do: "cancelled"
+  defp unkept_reason(_statuses, _key, :timeout, _status), do: "timeout"
+  defp unkept_reason(_statuses, _key, :memory, _status), do: "killed"
+  defp unkept_reason(_statuses, _key, :never, _status), do: "not_run"
+
+  defp unkept_reason(statuses, _key, :own, status),
+    do: if(status in statuses, do: nil, else: "status")
+
+  defp keep_build(assignment, spec, root, worktree, {:ok, key}) do
+    facts = %{
+      "job_id" => assignment["job_id"],
+      "command" => spec.command["name"],
+      "commit" => spec.command["at"]
+    }
+
+    case CommandCopy.keep(root, key, worktree, facts) do
+      {:ok, size} ->
+        {true, nil, size}
+
+      {:error, reason} ->
+        CommandCopy.unkept(assignment, reason)
+        {false, "failed", nil}
+    end
+  end
+
+  defp start_command(assignment, spec, root, worktree, head) do
     slice = assignment["slice"] || %{}
 
     Command.start_link(
+      head: head,
       spec: spec,
       root: Path.join(root, "jobs"),
       worktree: worktree,

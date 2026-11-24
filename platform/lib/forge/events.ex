@@ -653,6 +653,9 @@ defmodule Forge.Events do
   defp describe(%Event{type: "ticket.retitled", payload: %{"from" => from, "to" => to}}, bound),
     do: "title changed from #{bounded(from, 80, bound)} to #{bounded(to, 80, bound)}"
 
+  defp describe(%Event{type: "ticket.warm_cleared"}, _bound),
+    do: "cleared the warm build: the next command starts from a fresh tree"
+
   defp describe(%Event{type: "ticket.milestone_set", payload: p}, _bound),
     do: "milestone #{p["from_name"] || "none"} → #{p["to_name"] || "none"}"
 

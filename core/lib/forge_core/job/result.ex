@@ -43,6 +43,9 @@ defmodule ForgeCore.Job.Result do
     # A command's run: the store key its combined output was uploaded to, and how long it took.
     :log,
     :duration_ms,
+    # A command's warm build, as `ForgeCore.WarmBuild` words it: where its tree came from and
+    # whether its build was kept. Nil from a worker that does not report it.
+    :warm,
     # What a parked run asked to invoke: `%{"command" => name, "args" => [string]}` each.
     invocations: [],
     # A run's groups of files, by artifact name (`package/app.tar.gz`): `%{"key", "size"}` once
@@ -78,6 +81,7 @@ defmodule ForgeCore.Job.Result do
           invocation_error: String.t() | nil,
           log: String.t() | nil,
           duration_ms: non_neg_integer() | nil,
+          warm: %{String.t() => term()} | nil,
           invocations: [%{String.t() => term()}],
           blobs: %{String.t() => %{String.t() => term()}},
           invalid_blobs: %{String.t() => String.t()},
@@ -128,6 +132,7 @@ defmodule ForgeCore.Job.Result do
       "invocations" => result.invocations,
       "log" => result.log,
       "duration_ms" => result.duration_ms,
+      "warm" => result.warm,
       "blobs" => result.blobs,
       "invalid_blobs" => result.invalid_blobs
     }
@@ -164,6 +169,7 @@ defmodule ForgeCore.Job.Result do
       invocations: or_default(get, :invocations, []),
       log: get.(:log),
       duration_ms: get.(:duration_ms),
+      warm: get.(:warm),
       blobs: or_default(get, :blobs, %{}),
       invalid_blobs: or_default(get, :invalid_blobs, %{})
     }

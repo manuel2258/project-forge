@@ -497,8 +497,18 @@ defmodule ForgeWorker.Checkout do
   #
   # **These two download LFS objects** — the smudge runs on every path whose attributes say `lfs` —
   # so they carry the token and the endpoint, as a fetch does.
+  #
+  # **`-f` when cleaning**, because the tree may be a command's copy, which a script has edited: a
+  # plain `checkout -B` refuses to overwrite a tracked file the script changed that the branch has
+  # changed since, or an untracked file the branch now adds, and the whole copy was thrown away for
+  # it. The `reset --hard` and `clean` that follow discard those edits anyway; a caller that keeps
+  # untracked files (`clean: false`) keeps the plain checkout. A worktree a dead run left (`Workspace.prepare/3`)
+  # is forced the same way, where a dirty one used to make the checkout refuse.
   defp reset(dir, branch, clean?, opts) do
-    with {:ok, _out} <- git(dir, ["checkout", "--quiet", "-B", branch, "FETCH_HEAD"], opts),
+    force = if clean?, do: ["-f"], else: []
+
+    with {:ok, _out} <-
+           git(dir, ["checkout", "--quiet"] ++ force ++ ["-B", branch, "FETCH_HEAD"], opts),
          {:ok, _out} <- git(dir, ["reset", "--quiet", "--hard", "FETCH_HEAD"], opts),
          {:ok, _out} <- maybe_clean(dir, clean?, opts) do
       :ok

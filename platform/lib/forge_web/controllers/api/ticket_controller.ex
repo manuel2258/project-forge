@@ -23,6 +23,7 @@ defmodule ForgeWeb.Api.TicketController do
               :hold,
               :release,
               :stop,
+              :clear_warm_build,
               :title,
               :milestone,
               :move,
@@ -185,6 +186,8 @@ defmodule ForgeWeb.Api.TicketController do
     json(conn, %{
       ticket: Render.ticket(ticket, project.name, offers: true),
       jobs: Enum.map(Jobs.for_ticket(ticket.id), &Render.job/1),
+      # The commands the ticket ran, with the warm build each reported (`Render.command/1`).
+      commands: Enum.map(Jobs.commands_for_ticket(ticket.id), &Render.command/1),
       artifacts:
         Enum.map(
           Artifacts.list(ticket.id),
@@ -255,7 +258,10 @@ defmodule ForgeWeb.Api.TicketController do
     ticket = conn.assigns.ticket
 
     with {:ok, paging} <- paging(params) do
-      case Enum.find(Jobs.for_ticket(ticket.id), &(&1.id == job_id)) do
+      case Enum.find(
+             Jobs.for_ticket(ticket.id) ++ Jobs.commands_for_ticket(ticket.id),
+             &(&1.id == job_id)
+           ) do
         nil ->
           {:error, :not_found}
 
@@ -457,6 +463,15 @@ defmodule ForgeWeb.Api.TicketController do
     do: respond(conn, Operator.release(conn.assigns.ticket, actor(conn)))
 
   def stop(conn, _params), do: respond(conn, Operator.stop_now(conn.assigns.ticket, actor(conn)))
+
+  # Makes the ticket's warm build unusable on every machine (`docs/design/worker-tier.md` § The
+  # command copy). `Operator`'s guard, so a person and a project token that may write are one rule;
+  # a job's own token never reaches it (`ApiAuth`).
+  def clear_warm_build(conn, _params) do
+    with {:ok, ticket} <- Operator.clear_warm_build(conn.assigns.ticket, actor(conn)) do
+      json(conn, Render.ticket(ticket, conn.assigns.project.name, offers: true))
+    end
+  end
 
   def title(conn, %{"title" => title}) when is_binary(title),
     do: respond(conn, Operator.retitle(conn.assigns.ticket, actor(conn), title))

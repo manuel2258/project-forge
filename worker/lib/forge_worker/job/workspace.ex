@@ -17,6 +17,7 @@ defmodule ForgeWorker.Job.Workspace do
   """
 
   alias ForgeWorker.{Checkout, Log, Slice, Volume}
+  alias ForgeWorker.Job.CommandCopy
 
   # How long a run that ended while the platform was away waits to push before it gives up: long
   # enough for a deploy, short of the job credential's own lifetime.
@@ -31,7 +32,7 @@ defmodule ForgeWorker.Job.Workspace do
   # repository's `pre-receive` enforces the same shape, but a guard that takes the platform's word
   # for it is not a guard. Conversations are deliberately absent — `chat/<uuid>` keeps one
   # worktree for the whole of its life, so it already holds its own warmth.
-  @ticket_branch ~r{^ticket/\d+$}
+  @ticket_branch ~r{\Aticket/\d+\z}
 
   @doc """
   Prepares the worktree for an assignment and returns its path.
@@ -72,6 +73,63 @@ defmodule ForgeWorker.Job.Workspace do
   end
 
   @doc """
+  Prepares a command job's worktree and says where it came from: `{:ok, dir, %{source, from}}`,
+  `source` one of `ForgeCore.WarmBuild.sources/0` and `from` the job that left the copy, for
+  `"copy"`.
+
+  **A command never resumes** — it runs again from the start — so a worktree already here is a
+  dead attempt's and is discarded, where `prepare/3` would refresh it. Then, in order: the ticket's
+  command copy on this machine (unless the command turns that off, or the assignment is not a
+  ticket's), the ticket's volume, the project's seed, a clone. Only a copy is cleaned of untracked
+  files: it is the one tree a command's script has written into, and nothing pushes a command's tree
+  to have committed them (`docs/design/worker-tier.md` § The command copy).
+
+  `prepare/3`, which agents and conversations use, never looks at the command copies.
+  """
+  @spec prepare_command(assignment(), String.t(), Slice.user()) ::
+          {:ok, String.t(), %{source: String.t(), from: String.t() | nil}} | {:error, term()}
+  def prepare_command(assignment, root, user) do
+    dir = dir(assignment, root)
+
+    if File.exists?(dir), do: Volume.impl().delete(dir)
+
+    from_copy(assignment, root, dir, user) ||
+      tagged(from_template(assignment, root, dir, user), "ticket") ||
+      tagged(from_seed(assignment, root, dir, user), "seed") ||
+      tagged(clone(assignment, dir, user), "clone")
+  end
+
+  defp tagged({:ok, dir}, source), do: {:ok, dir, %{source: source, from: nil}}
+  defp tagged(other, _source), do: other
+
+  # The ticket's command copy, snapshotted and made this branch's. A failure anywhere is a colder
+  # start and not a failed command (`CommandCopy.unused/2`).
+  defp from_copy(assignment, root, dir, user) do
+    with true <- CommandCopy.warm_start?(assignment),
+         {:ok, key} <- CommandCopy.key(assignment),
+         {:ok, marker} <- CommandCopy.take(root, key, dir),
+         :ok <- Slice.own(user, [dir]),
+         :ok <- remote_and_ensure(assignment, dir, user) do
+      {:ok, dir, %{source: "copy", from: marker["job_id"]}}
+    else
+      error when error in [false, :none] ->
+        nil
+
+      {:error, reason} ->
+        CommandCopy.unused(assignment, reason)
+        Volume.impl().delete(dir)
+        nil
+    end
+  end
+
+  defp remote_and_ensure(assignment, dir, user) do
+    opts = checkout_opts(assignment, dir, user, clean: true, resume: false)
+
+    with :ok <- Checkout.remote(dir, assignment["git"]["url"], opts[:as]),
+         do: Checkout.ensure(opts)
+  end
+
+  @doc """
   Keeps the finished worktree as this ticket's template, so the ticket's next job starts where
   this one left off rather than where the project's seed was published.
 
@@ -109,8 +167,10 @@ defmodule ForgeWorker.Job.Workspace do
     |> Enum.map(&remove_if_stale(&1, cutoff))
     |> Enum.reject(&(&1 == false))
     |> then(fn removed ->
-      # What was freed, for the disk report (`ForgeWorker.Disk`).
-      ForgeWorker.Disk.cleaned("volumes", Enum.sum(removed))
+      # What was freed, for the disk report (`ForgeWorker.Disk`): the ticket volumes and the
+      # ticket's command copies together, which the report counts as one line.
+      freed = Enum.sum(removed) + CommandCopy.sweep(root, older_than_ms)
+      ForgeWorker.Disk.cleaned("volumes", freed)
       length(removed)
     end)
   end

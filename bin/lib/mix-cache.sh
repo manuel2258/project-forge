@@ -1,10 +1,11 @@
 # shellcheck shell=bash
 # Where Mix's caches live for every script in this repository that runs `mix`. Sourced, not run.
 #
-# **Inside the checkout, so a ticket's next agent job inherits them.** An *agent* job, because
-# only an agent job's worktree is promoted to the ticket's volume: the gate's automatic caller is
-# the `check` command job, which snapshots that volume and discards its tree, so it reads a warm
-# cache and never leaves one (`ForgeWorker.Link`).
+# **Inside the checkout, so a ticket's next job can inherit them.** Only an *agent* job's worktree
+# is promoted to the ticket's volume, and an agent is told not to build there. The gate's automatic
+# caller is the `check` command job, which snapshots that volume and discards its tree unless its
+# command declares `keep_build`, which forge's own do not yet: so today these start cold on every
+# command (`docs/design/worker-tier.md` § The command copy, `ForgeWorker.Link`).
 #
 # `mix local.hex` installs into MIX_HOME and Hex caches the package registry and the tarballs it
 # downloads in HEX_HOME; both default under $HOME, and a job's HOME is a fresh directory made per

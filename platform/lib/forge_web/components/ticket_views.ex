@@ -40,7 +40,8 @@ defmodule ForgeWeb.TicketViews do
            ticket.stopped ticket.refreshed transition.held ticket.retitled
            ticket.milestone_set ticket.moved ticket.branch_updated ticket.base_moved
            ticket.retried job.extended ticket.cap_raised ticket.admitted attachment.added
-           attachment.withdrawn page.published page.data_changed page.outside_access)
+           attachment.withdrawn ticket.warm_cleared page.published page.data_changed
+           page.outside_access)
 
   @doc """
   Who an event of the ticket's Activity was made by, in the words the product uses: a person by
@@ -1477,6 +1478,8 @@ defmodule ForgeWeb.TicketViews do
         </p>
       </div>
 
+      <.warm_build :if={@warm_build} warm_build={@warm_build} ticket={@ticket} now={@now} />
+
       <div class="flex flex-col gap-2">
         <.link
           :if={@ways != []}
@@ -1492,8 +1495,62 @@ defmodule ForgeWeb.TicketViews do
       <Actions.refused
         id="details-refusal"
         refusal={@refusal}
-        at={~w(repin integrate cancel-ticket restore-ticket hold-ticket retitle set-milestone)}
+        at={
+          ~w(repin integrate cancel-ticket restore-ticket hold-ticket retitle set-milestone clear-warm-build)
+        }
       />
+    </div>
+    """
+  end
+
+  attr :warm_build, :map, required: true
+  attr :ticket, :map, required: true
+  attr :now, :any, required: true
+
+  # The warm build of a ticket whose workflow has a command that keeps one: the copy its next
+  # command will be sent to, or the sentence that there is none, and Clear
+  # (`docs/design/ui.md` § The details). Every value that is not ours is text, cut with an ellipsis at the fact's width
+  # (`.ui-fact-value` does not wrap, so the `break-all` below only holds where it is not that): a machine
+  # and a command's arguments are as long as somebody made them.
+  defp warm_build(assigns) do
+    ~H"""
+    <div id="ticket-warm-build" class="min-w-0">
+      <.eyebrow>Warm build</.eyebrow>
+      <p
+        :if={@warm_build.copy == nil}
+        id="warm-build-none"
+        class="mt-2 text-[12.5px] break-words text-ink-3"
+      >
+        {ForgeCore.WarmBuild.no_copy_sentence()}
+      </p>
+      <div :if={@warm_build.copy} id="warm-build-copy" class="min-w-0">
+        <.fact_list id="warm-build-facts" dense>
+          <:fact label="size">{ForgeWeb.Blob.size_label(@warm_build.copy.size || 0)}</:fact>
+          <:fact label="machine">
+            <span id="warm-build-machine" class="min-w-0 break-all">{@warm_build.copy.machine}</span>
+          </:fact>
+          <:fact label="command">
+            <span id="warm-build-command" class="min-w-0 break-all">
+              {@warm_build.copy.command} {ForgeCore.Workflow.Command.argv(@warm_build.copy.args)}
+            </span>
+          </:fact>
+          <:fact label="commit">
+            <span class="break-all">{@warm_build.copy.commit}</span>
+          </:fact>
+          <:fact label="kept">{Format.ago_phrase(@warm_build.copy.at, @now)}</:fact>
+        </.fact_list>
+        <.confirm
+          id="clear-warm-build"
+          label="Clear"
+          act="Clear it"
+          sentence="Clear this ticket's warm build? Its next command starts from a clean tree and builds everything again."
+          tone="neutral"
+          size="md"
+          class="mt-2 items-start"
+          phx-click="clear-warm-build"
+          phx-value-ticket={@ticket.id}
+        />
+      </div>
     </div>
     """
   end

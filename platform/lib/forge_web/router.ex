@@ -173,6 +173,7 @@ defmodule ForgeWeb.Router do
     post "/tickets/:project/:number/hold", TicketController, :hold
     post "/tickets/:project/:number/release", TicketController, :release
     post "/tickets/:project/:number/stop", TicketController, :stop
+    post "/tickets/:project/:number/clear-warm-build", TicketController, :clear_warm_build
     post "/tickets/:project/:number/title", TicketController, :title
     post "/tickets/:project/:number/milestone", TicketController, :milestone
     post "/tickets/:project/:number/move", TicketController, :move

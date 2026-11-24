@@ -95,6 +95,25 @@ defmodule ForgeWorker.DiskTest do
                Disk.measure(base, %{}, run: run)
     end
 
+    # A ticket's command copy is a volume like the ticket volume it is swept with, and the report
+    # has one line for both (`docs/design/worker-tier.md` § The command copy).
+    test "counts the command copies under volumes, with the ticket volumes", %{base: base} do
+      File.mkdir_p!(Path.join(base, "volumes/ticket/1"))
+      File.mkdir_p!(Path.join(base, "volumes/command/5f0a6d1e-0000-4000-8000-000000000001"))
+
+      run = fn "du", argv, _opts ->
+        path = List.last(argv)
+
+        {"#{cond do
+           path =~ "volumes/ticket/" -> 100
+           path =~ "volumes/command/" -> 7
+           true -> 0
+         end}\t.\n", 0}
+      end
+
+      assert %{"kinds" => %{"volumes" => 107}} = Disk.measure(base, %{}, run: run)
+    end
+
     test "never reports a negative rest, however the two tools count", %{base: base} do
       huge = fn "du", _argv, _opts -> {"#{1_000_000_000_000_000}\t.\n", 0} end
       assert %{"kinds" => %{"rest" => 0}} = Disk.measure(base, %{}, run: huge)

@@ -26,7 +26,10 @@ states:
     model: opus
     effort: high
     inputs: [ticket]
-    produces: [refinement.md]
+    produces: [refinement.md, workbench@]
+    # The page is for when a person should fill in or work through something over time (a form, a
+    # checklist, a mock-up to react to); most refinements write none, so it is excused.
+    optional: [workbench]
 
   # `implementation.md` is here for the same reason `bug.yml`'s `diagnosing` reads it: the ticket
   # comes back on `plan_invalid`, and a re-plan that cannot read why re-derives the same plan. It
@@ -119,6 +122,8 @@ states:
   # rejection only stuck the ticket, and the fixes the person named went nowhere a job could read.
   review_ready:
     produces: [feedback.md]
+    # Leads the queue item with a link to the refinement's page, when it wrote one.
+    opens: workbench
 
   merged:
     extends: merged

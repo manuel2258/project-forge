@@ -23,6 +23,13 @@ commands:
     # `.forge/workflows/release.yml` carries the longer form, found when `release-build` asked for
     # six cores and stuck ticket 8 before a machine.
     resources: { memory: 4GiB, cpu: 2 }
+    # **Keeps its build for the ticket's next command on the same machine** (`docs/design/worker-tier.md`
+    # § The command copy): the gate exports `MIX_HOME` and `HEX_HOME` into `.mix-home/` and `.hex-home/`
+    # and builds `_build/` and `deps/`, all ignored, so the next `check`, `static` or `test` skips fetching
+    # and compiling every dependency. 0 passed and 1 and 3 are the gate saying no (`bin/check`): the build
+    # is as good a start either way. 2 is the machine lacking tools, where nothing was built, and 143 and
+    # 137 are a kill, which is never kept whatever is listed.
+    keep_build: [0, 1, 3]
 
   # **The two pieces of the gate an agent used to run by hand, as commands of their own.** An
   # agent's slice is one core and its job has one hour (`Forge.Jobs.wall_clock_ms/1`); a platform
@@ -40,6 +47,8 @@ commands:
     produces: static.log
     timeout: 20m
     resources: { memory: 4GiB, cpu: 2 }
+    # 0 and 1: every tool here, and `mix` for compile, format and Credo, fails with 1. 2 is the missing machine.
+    keep_build: [0, 1]
 
   test:
     run: .forge/commands/test.sh
@@ -47,6 +56,9 @@ commands:
     produces: test.log
     timeout: 30m
     resources: { memory: 4GiB, cpu: 2 }
+    # 0 passed; `mix test` exits 2 when a test fails, 1 on a compile error, and both leave the build
+    # worth keeping. The script's own 2 (a missing tool, bad usage) keeps an unbuilt tree, which costs nothing.
+    keep_build: [0, 1, 2]
 
 states:
   # `2` is the gate saying it could not run at all, which is not the gate saying no: the machine

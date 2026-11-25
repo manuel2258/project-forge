@@ -10,6 +10,41 @@ until it changes) or **may adopt** (new and optional). A project records the rel
 brought up to in `.forge/forge-release`; `platform.md` § Upgrading to a newer forge says how an
 upgrade goes.
 
+## 0.27.0
+
+- **may adopt** — a job state or a chat step may produce a **page**: an HTML page forge hosts, sandboxed, with a live store of JSON keys that people fill in and a running job reads and writes. A page is declared in `produces` with a trailing `@`, and the job writes its files, flat, into `$FORGE_JOB/out/<name>/` with `index.html` as the entry. A declared page the job did not write ends the job `error`, which `optional: [form]` excuses. A page is never an input and is never approved, and a command produces none. Before and after:
+
+  ```
+  # before: nothing
+  # after, in a job state of .forge/workflows/dev.yml
+  produces: [form@]
+  optional: [form]        # only if the job may finish without it
+  ```
+
+  (`workflow-grammar.md` § Semantics, § Validation; `platform.md` § Pages)
+
+- **may adopt** — a human state may say `opens: form`, naming one page: while the ticket rests there its queue item and page lead with a link to open it. The page must be produced by some state; `opens` is refused on any other kind of state. (`workflow-grammar.md` § Semantics)
+
+- **may adopt** — a chat writes a page the same way, as an undeclared directory in `out/` holding `index.html`; a chat step may also declare pages. The chat preamble says how, including the store a chat reads and writes live with `$FORGE_PAGES_URL` and `$FORGE_GIT_TOKEN`. A page's script reaches nothing outside forge, and nothing in a page or its store is masked for secrets. (`platform.md` § Pages)
+
+- **may adopt** — a command may declare `keep_build` (a non-empty list of exit statuses, written as numbers from 0 to 255) and `warm_start` (`true` or `false`, `true` when absent). A command that exits on its own with a listed status leaves its tree as a copy of its own on that machine, and the ticket's next command starts from it instead of a cold checkout; `warm_start: false` opts a command out. The copy is never shared with another ticket, an agent job or a conversation, and a person can clear it from the ticket page or over the API. Neither key is accepted on a state or under `defaults`. Before and after:
+
+  ```
+  # before
+  commands:
+    build:
+      run: .forge/commands/build.sh
+      timeout: 20m
+  # after
+  commands:
+    build:
+      run: .forge/commands/build.sh
+      timeout: 20m
+      keep_build: [0, 1]
+  ```
+
+  (`workflow-grammar.md` § Commands)
+
 ## 0.26.0
 
 - **may adopt** — in a chat, a message sent while the agent is working now always waits for the turn to end; sending is never an interrupt. The oldest queued message carries an **Interrupt** button, which stops the turn, keeps the partial reply and then sends everything queued. If the agent has already taken that message, the tap stops nothing. Messages queued together reach the agent as one message, their texts joined by a blank line, so a prompt need not expect several turns. A **Stop** keeps what is queued and sends it next. Nothing in a workflow changes. (`platform.md` § Conversations)

@@ -97,24 +97,35 @@ defmodule ForgeWeb.FileType do
 
   @doc """
   A document's content as it is drawn (`docs/design/ui.md` § Documents): `{:html, rendered}` when
-  it is Markdown, and `{:text, content}` when its name says text, a log or code, whose lines
-  Markdown would join into one paragraph. Called by the page that loads the version rather than by
-  a template, which is drawn again on every patch.
+  it is Markdown, `{:typed, rendered}` when it is the ticket's text — Markdown a person typed,
+  rendered the same way but drawn with single newlines kept as breaks, as a chat message's are —
+  and `{:text, content}` when its name says text, a log or code, whose lines Markdown would join
+  into one paragraph. Called by the page that loads the version rather than by a template, which
+  is drawn again on every patch.
   """
   @spec render_document(String.t(), Forge.Artifacts.Version.t(), Forge.References.scope()) ::
-          {:html, Phoenix.HTML.safe()} | {:text, String.t() | nil}
+          {:html | :typed, Phoenix.HTML.safe()} | {:text, String.t() | nil}
   def render_document(name, version, scope) do
-    if of(%{name: name, kind: :document}) == :markdown,
-      do: {:html, ForgeWeb.Markdown.draw(version.content, scope, version)},
-      else: {:text, version.content}
+    cond do
+      of(%{name: name, kind: :document}) != :markdown -> {:text, version.content}
+      name == ForgeCore.Workflow.ticket_artifact() -> {:typed, draw(version, scope)}
+      true -> {:html, draw(version, scope)}
+    end
   end
 
-  @doc "What `render_document/3` made, drawn: Markdown in `.doc`, text in a `pre` that scrolls."
+  defp draw(version, scope), do: ForgeWeb.Markdown.draw(version.content, scope, version)
+
+  @doc """
+  What `render_document/3` made, drawn: Markdown in `.doc`, the ticket's text in `.doc.msg` (single
+  newlines kept, `doc.css`; a schedule's body is drawn as `{:typed, _}` too), text in a `pre` that
+  scrolls.
+  """
   attr :body, :any, required: true
 
   def document_body(assigns) do
     ~H"""
     <div :if={match?({:html, _}, @body)} class="doc">{elem(@body, 1)}</div>
+    <div :if={match?({:typed, _}, @body)} class="doc msg">{elem(@body, 1)}</div>
     <pre
       :if={match?({:text, _}, @body)}
       class="overflow-x-auto font-mono text-[12.5px]/[1.5]"

@@ -307,7 +307,7 @@ defmodule ForgeWeb.ReleaseLiveTest do
                "Not started: the note must be UTF-8 text with no NUL byte"
     end
 
-    test "a very long note is bounded to the page, and markup in it is shown as text", %{
+    test "a very long note is bounded to the page, and markup in it is never markup", %{
       conn: conn,
       project: project,
       user: user
@@ -315,12 +315,34 @@ defmodule ForgeWeb.ReleaseLiveTest do
       note = "<script>alert(1)</script><b>bold</b> " <> String.duplicate("x", 5_000)
       {:ok, ticket} = Operator.start_release(project, user, note)
 
-      {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+      {:ok, view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
 
-      assert html =~ "&lt;script&gt;alert(1)&lt;/script&gt;&lt;b&gt;bold&lt;/b&gt;"
       refute html =~ "<script>alert(1)"
-      # Wrapped rather than stretching the page: the body is the paragraph that carries it.
-      assert html =~ ~r/<p[^>]*whitespace-pre-line[^>]*break-words[^>]*>\s*&lt;script/
+      refute html =~ "<b>bold</b>"
+      # Drawn in the document block, which wraps and scrolls inside itself: the run is in it.
+      assert has_element?(view, "#release-lead #ticket-text .doc", String.duplicate("x", 5_000))
+    end
+
+    test "a Markdown note is drawn as a document, its own first line included", %{
+      conn: conn,
+      project: project,
+      user: user
+    } do
+      {:ok, ticket} = Operator.start_release(project, user, "Ship **the lot**\nand the rest.")
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+
+      assert has_element?(view, "#release-lead .ui-eyebrow", "The note")
+      assert has_element?(view, "#release-lead #ticket-text .doc strong", "the lot")
+      assert has_element?(view, "#release-lead #ticket-text .doc h1", "Release in progress")
+      assert has_element?(view, "#release-lead #ticket-text .doc.msg")
+    end
+
+    test "a release with no note draws no note", %{conn: conn, project: project, user: user} do
+      {:ok, ticket} = Operator.start_release(project, user, "")
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+
+      refute has_element?(view, "#ticket-text")
+      refute render(view) =~ "The note"
     end
 
     test "the per-type table says which type is the release", %{conn: conn, project: project} do

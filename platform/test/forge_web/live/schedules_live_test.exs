@@ -26,8 +26,8 @@ defmodule ForgeWeb.SchedulesLiveTest do
   schedules:
     - name: weekly-cleanup
       cron: "0 6 * * MON"
-      title: Weekly <b>cleanup</b>
-      body: "Tidy <script>alert(1)</script> up."
+      title: Weekly <b>cleanup</b> **now**
+      body: "Tidy <script>alert(1)</script> up.\\nSecond line.\\n\\n- one\\n- two\\n\\n![shot](attachments/shot.png) see [plan](plan.md) or [the site](https://example.com/x)"
     - name: a-name-that-goes-on-and-on-and-on-and-on-and-on-and-on-and-on-and-on-and-on-and-on
       cron: "*/15 0,6,12,18 1-7,15,20-25 JAN,MAR,MAY,JUL,SEP,NOV 1-5"
       title: A title that is long enough that it would run off the side of a phone if it could
@@ -81,15 +81,36 @@ defmodule ForgeWeb.SchedulesLiveTest do
       assert has_element?(view, "##{@weekly} .schedule-state", "off")
     end
 
-    test "markup in a title or a body is text", %{conn: conn, project: project} do
+    # Ticket 80 reverses ticket 61's criterion 29 for the body alone: the name, the title and the
+    # cron line are text (criterion 18).
+    test "markup in a title is text", %{conn: conn, project: project} do
       {:ok, view, html} = open(conn, project)
 
       assert html =~ "Weekly &lt;b&gt;cleanup&lt;/b&gt;"
       refute html =~ "<b>cleanup</b>"
-      refute html =~ "<script>alert(1)</script>"
 
-      assert render(element(view, "##{@weekly} .schedule-body-text")) =~
-               "&lt;script&gt;"
+      # Raw HTML is escaped by Markdown too, so it cannot tell text from Markdown: the asterisks
+      # can. A title drawn through Markdown would be bold and have lost them.
+      assert has_element?(view, "##{@weekly}", "**now**")
+      refute has_element?(view, "##{@weekly} strong")
+    end
+
+    test "a body is Markdown, sanitised, with single newlines kept and nothing resolved", %{
+      conn: conn,
+      project: project
+    } do
+      {:ok, view, html} = open(conn, project)
+      body = "##{@weekly} .schedule-body-text"
+
+      refute html =~ "<script>alert(1)"
+      assert has_element?(view, "#{body} .doc.msg li", "two")
+      assert render(element(view, "#{body} .doc.msg p:first-of-type")) =~ "up.\nSecond line."
+      # A picture is the muted note and is never fetched; an artifact link keeps its words only.
+      assert has_element?(view, "#{body} .ref-note")
+      refute has_element?(view, "#{body} img")
+      assert has_element?(view, "#{body} .doc", "plan")
+      refute has_element?(view, ~s(#{body} a[href*="plan"]))
+      assert has_element?(view, ~s(#{body} a[href="https://example.com/x"]), "the site")
     end
 
     test "a long name and a long cron line wrap and are not cut", %{conn: conn, project: project} do
@@ -355,7 +376,7 @@ defmodule ForgeWeb.SchedulesLiveTest do
       {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{hand.number}?tab=activity")
       refute has_element?(view, "#ticket-events", "admitted")
 
-      assert Tickets.get!(ticket.id).title =~ "Weekly <b>cleanup</b> · "
+      assert Tickets.get!(ticket.id).title =~ "Weekly <b>cleanup</b> **now** · "
     end
   end
 

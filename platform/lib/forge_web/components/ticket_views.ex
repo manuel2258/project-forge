@@ -621,7 +621,8 @@ defmodule ForgeWeb.TicketViews do
   @doc """
   Steps (`ui.md` § Steps, `5g`): a step per visit on the line-and-dot, the current one open with
   what waits there, the done ones folded; then the merge queue's part of the story, what an agent
-  assumed, and the ticket's conversations.
+  assumed, and the ticket's conversations. Above them, **the ticket's text** — the latest `ticket`
+  version as Markdown, cut short (`ticket_text/1`) — and the files that came with it.
   """
   def steps(assigns) do
     assigns =
@@ -631,14 +632,8 @@ defmodule ForgeWeb.TicketViews do
       )
 
     ~H"""
-    <.release_lead :if={@release} ticket={@ticket} release={@release} project={@project} />
-    <p
-      :if={!@release and @ticket.body != ""}
-      id="ticket-body"
-      class="mb-5 text-sm/[1.55] whitespace-pre-line break-words text-ink-2"
-    >
-      {@ticket.body}
-    </p>
+    <.release_lead :if={@release} release={@release} project={@project} text={@ticket_text} />
+    <.ticket_text :if={!@release and @ticket_text} text={@ticket_text} class="mb-5" />
     <ForgeWeb.UI.Attach.names
       :if={!@release}
       files={@ticket_files}
@@ -1123,17 +1118,89 @@ defmodule ForgeWeb.TicketViews do
     """
   end
 
+  @doc """
+  The ticket's text at the head of Steps, and a release's note: the latest `ticket` version drawn as
+  a document (`ForgeWeb.FileType.render_document/3`'s `:typed`) in the block Docs draws a row's
+  body in, **cut to twelve lines with a control to show the rest** (`docs/design/ui.md` § Steps).
+
+  The server draws it cut, every time, and says nothing of whether it is long or open: the
+  `.CutShort` hook measures it and sets `data-long` (offering the control) and the person's press
+  sets `data-open`, both in the browser, and `ignore_attributes` keeps them through a patch. So a
+  reload starts it cut and nothing is stored.
+  """
+  attr :text, :any, required: true, doc: "`render_document/3`'s result for the ticket's text"
+  attr :class, :any, default: nil
+
+  def ticket_text(assigns) do
+    ~H"""
+    <section
+      id="ticket-text"
+      class={["ticket-text", @class]}
+      phx-hook=".CutShort"
+      phx-mounted={JS.ignore_attributes(["data-open", "data-long"])}
+    >
+      <div class="work-doc-body">
+        <FileType.document_body body={@text} />
+        <button type="button" data-cut-toggle class="ticket-text-toggle">
+          <span class="ticket-text-more">Show the whole text</span>
+          <span class="ticket-text-less">Show less</span>
+        </button>
+      </div>
+      <script :type={Phoenix.LiveView.ColocatedHook} name=".CutShort">
+        // Offers the control only when the text is taller than the cut, and opens and closes it. The
+        // cut is the stylesheet's (`max-height` on `.doc`, `12lh`), read from there while the text
+        // is cut, so this keeps no number of its own; a browser that has no `lh` gives NaN, which
+        // is "never long": no control for a cut that is not there. `data-long` and `data-open` are
+        // this hook's alone, and the server never renders them (`ignore_attributes` keeps them
+        // through a patch).
+        export default {
+          mounted() {
+            this.cap = NaN
+            this.measure = () => {
+              const doc = this.el.querySelector(".doc")
+              if (!doc) return
+              const open = this.el.hasAttribute("data-open")
+              if (!open) this.cap = parseFloat(getComputedStyle(doc).maxHeight)
+              if (Number.isNaN(this.cap)) {
+                if (!open) this.el.removeAttribute("data-long")
+                return
+              }
+              this.el.toggleAttribute("data-long", doc.scrollHeight > this.cap + 1)
+            }
+            this.el.addEventListener("click", (event) => {
+              if (!event.target.closest("[data-cut-toggle]")) return
+              this.el.toggleAttribute("data-open")
+              this.measure()
+            })
+            // A new version patched in, a width change, a picture arriving: each changes the height.
+            this.mutations = new MutationObserver(this.measure)
+            this.mutations.observe(this.el, {childList: true, subtree: true, characterData: true})
+            this.resizes = new ResizeObserver(this.measure)
+            this.resizes.observe(this.el.querySelector(".doc"))
+            this.el.addEventListener("load", this.measure, true)
+            this.measure()
+          },
+          destroyed() {
+            this.mutations && this.mutations.disconnect()
+            this.resizes && this.resizes.disconnect()
+          }
+        }
+      </script>
+    </section>
+    """
+  end
+
   # The release's note and what has merged since the last one lead its Steps (`21e`).
-  attr :ticket, :map, required: true
   attr :release, :map, required: true
   attr :project, :map, required: true
+  attr :text, :any, required: true, doc: "the note as `render_document/3` drew it, or nil"
 
   defp release_lead(assigns) do
     ~H"""
     <section id="release-lead" class="mb-6 flex flex-col gap-4">
-      <div :if={@ticket.body != ""}>
+      <div :if={@text}>
         <.eyebrow>The note</.eyebrow>
-        <p class="mt-2 text-[15px]/[1.55] whitespace-pre-line break-words">{@ticket.body}</p>
+        <.ticket_text text={@text} class="mt-2" />
       </div>
       <div :if={@release.since} id="release-since">
         <.eyebrow>Since {@release.since.version}</.eyebrow>

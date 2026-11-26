@@ -1498,6 +1498,31 @@ predates `chat.merged`), at most ten and *and N more*, and under it the re-pin: 
 not run says *brings the branch up to date when released*. Every path, subject and title in it is
 a contributor's and is drawn as text.
 
+**The ticket's text leads Steps** (ticket 80), drawn as Markdown, as a document is (§ Documents):
+the *latest* version of the `ticket` document, not the text the ticket was admitted with (a person
+may have written a new version since, and Docs and the files named under the text already say
+that one), **whole, its leading `# <title>` line included**, so the title is both the page's heading
+and the head of the text. A retitle writes no version, so the line keeps the title the ticket was
+admitted with. The version is read once: the text and the files that came with it
+(§ Attaching files) are one version's. It is the `ticket` row of Docs drawn again, on
+`--surface-1` in the padded, rounded block a Docs row draws its body in (`.work-doc-body`), with single newlines kept as breaks (§ Documents). A text that holds
+nothing but blank lines and at most one `# ` heading line — every ticket admitted with no body
+has `# Title` and nothing else — is drawn as no text: no box (and no *The note* on a release); the
+files that came with it are still named. There is no fallback to `tickets.body`.
+
+**A long text is cut short, with a control to show the rest.** The cut is twelve lines of the
+document's own line height (`12lh` on `.doc`), at every width. A text that fits shows whole and has
+no control; one taller shows its top part and a *Show the whole text* button that opens the rest in
+place, and then reads *Show less*. The server draws every text cut and never says which it is: a
+hook measures the box and offers the control only when the text is taller than the cut, and the
+open state is a browser-side attribute a patch keeps (`phx-mounted` `ignore_attributes`), so it
+stays open through every patch of the page and through a reconnect, and nothing is stored for it.
+A reload, coming back to the ticket, or switching to another of the ticket's views and back starts
+it cut short again, as a Docs row's `<details>` does. A picture below the cut is clipped and lazy,
+so it is not fetched until the text is opened. **Not verified here:** the cut, `lh`,
+`overflow: clip` and the lazy picture under a clip on iPhone Safari; the gate's browser test is
+Chromium.
+
 **Where the Decide tab's contents went:**
 
 | Was on Decide | Is now |
@@ -1617,7 +1642,10 @@ that conflicted, how many more did, and the state that would have merged.
 
 **A release ticket** (`21e`) uses this frame unchanged, with a slim band under the top bar marking
 it as the release: not a decision row, so no button and no amber. The release's note and what
-has merged since the previous release lead its Steps. *Since* is the project's previous release
+has merged since the previous release lead its Steps: the note is the ticket's text drawn as above
+under *The note* — the same block and the same cut — and its first line is the heading the release
+was admitted with (*Release in progress*, the version being set later), which is drawn like any
+ticket's. *Since* is the project's previous release
 ticket that reached its terminal state, by its version, and the tickets merged after it; a project
 with no earlier release draws nothing there. The platform keeps no git tags to read it from.
 
@@ -2108,7 +2136,8 @@ the composer, the now line, the plan band, and any open question's card.
 - **A message keeps the line breaks it was written with.** A chat message is not a document: a
   single newline is a break, where Markdown would join the lines into one paragraph. On a phone,
   Enter is how a line is ended, so a transcript that drops single newlines drops the shape of every
-  message typed there. This is a rule of the transcript's styles; § Documents is unchanged.
+  message typed there. This is a rule of the transcript's styles (`.msg`); § Documents says the one
+document that keeps it too, the ticket's text.
 - **The plan band**, while a turn is open: the agent's latest `TodoWrite` list folded to its current
   item, with a progress track, so where the agent is in its own plan is visible without scrolling;
   it opens to the whole checklist. While it is drawn it is the plan: the open turn's `TodoWrite` is
@@ -2367,15 +2396,17 @@ types, and says it is the release.
 cron line with what it means in words (*every Monday at 06:00 UTC*), its title, **the next time it
 fires in the reader's own time** (a `<time>` the browser's hook rewrites, with the UTC text as the
 fallback and *in 2d 3h* beside it), *on* or *off* and, when on, *Switched on by ana@example.com, 3 days ago*,
-the ticket it last admitted (linked), what it admits as a disclosure, and its problem in the warning
-notice. **A project admin sees the switch** — *Switch on* behind a confirm in the neutral tone (§ The
+the ticket it last admitted (linked), what it admits as a disclosure — **the body drawn as Markdown**
+(§ Documents), single newlines kept, sanitised as a document is and resolving nothing (§ References),
+on `--surface-2`, one step up from the `--surface-1` card it sits in, since on `--surface-1` it could
+not be told apart — and its problem in the warning notice. **A project admin sees the switch** — *Switch on* behind a confirm in the neutral tone (§ The
 confirm), and a plain *Switch off*; a member sees the state and none. A refused switch (no longer an
 admin, the schedule left the file meanwhile) is drawn in place, under the row it was about, and
 nothing changes. **A type whose file declares none says how one is added** — *No schedules. A
 `schedules:` key in `.forge/workflows/chore.yml` would admit a ticket of this type on a clock.* —
 and the release type says nothing of the kind, since it may not have one. **A file that does not
 parse** lists the schedules that are on, by name, with the file's reason in the type's own notice.
-A long name, title or cron line wraps, and markup in any is shown as text. An alert's link carries
+A long name, title or cron line wraps, and markup in any of the three is shown as text. An alert's link carries
 `type=`, so the page opens on the type holding the schedule.
 
 **On a portrait and a wide screen the workflow is a map** (`7g`, `7h`): a box per state with its
@@ -3490,6 +3521,13 @@ inside itself, because Markdown would join its lines into one paragraph. This ho
 document is drawn, because every place that draws one draws it with
 `ForgeWeb.FileType.render_document/3`.
 
+**The ticket's text keeps its single newlines.** The `ticket` document is typed by a person, often on
+a phone where Enter ends a line, so wherever it is drawn — Steps, its row on Docs, the wide
+aside, the queue, Changes — a single newline is a break, as in a chat message (§ Talk). So is a
+schedule's body (§ Workflow). `render_document/3` decides this by the name, `ticket`, and says it
+in what it returns (`{:typed, html}`, drawn in `.doc.msg`); every other document joins its lines as
+Markdown does.
+
 ### References
 
 Markdown that the platform draws can point at the artifacts around it, and **everything that draws
@@ -3511,7 +3549,11 @@ in the same second counts as before. A conversation is one job across many turns
 same job" narrows to the same turn: a version of a later turn never changes what an earlier one
 shows. `@N` is that version whenever it was written. `@latest` follows new versions, in an approved
 document too — the one form whose picture changes after it was written, chosen as such. Another
-ticket's bare names are pinned by the clock alone.
+ticket's bare names are pinned by the clock alone. **A file that came with a text is the text's
+own, whatever the clock says** (ticket 80): a person's text and the files attached with it are one
+act written in two statements, and a second boundary between them made the picture "not on this
+ticket" about one admission in five; the file is visible to the very version it was attached with
+(`attachments.to_version_id`), and to no other version's bare name by that route.
 
 **What is drawn.** An image that resolves to a raster blob (§ Addressable artifact versions: the
 same test serves and draws it) is an `<img>` inside a link to the same numbered address,
@@ -3528,7 +3570,11 @@ that does not keeps its text and loses its target, except `http:`, `https:`, `ma
 **Where a name is searched.** The ticket for a ticket's text and a ticket conversation's; a project
 chat's own documents for a project chat's. A message has no version, so its moment stands in: a
 reply sees up to and including the recording of its own turn, a person's message what was recorded
-before it was sent, a reply still streaming what exists as it is drawn.
+before it was sent, a reply still streaming what exists as it is drawn. **A schedule's body**
+(§ Workflow) resolves nothing, because the ticket its references would resolve in does not exist
+yet: a picture is the note *is not shown*, a link to an artifact keeps its words and loses its
+target. Once the schedule admits a ticket, that ticket's text resolves the same words in its own
+scope.
 
 **Attached files** (`attachments.md`) are `attachments/<file>` in the scope that holds them, so
 `![alt](attachments/shot.png)` is drawn in a ticket's text, its documents and its chats, and in a

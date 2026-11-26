@@ -48,6 +48,13 @@ defmodule Forge.Look.Setups.TicketViews do
         workflow: Map.put(workflow_map(), "release", true)
       })
 
+    # The note is the ticket's text as Steps draws it: a `ticket` version, which `ticket_fixture`
+    # does not write and admission does (`docs/design/ui.md` § Steps).
+    {:ok, _} =
+      Forge.Artifacts.record_version(release.id, "ticket", :document, :system, %{
+        content: "# 0.32.0\n\n" <> release.body
+      })
+
     running!(release, ["git log --oneline 0.31.0..main"])
 
     path = &"/tickets/#{project.name}/#{&1.number}"

@@ -165,6 +165,7 @@ defmodule ForgeWeb.TicketLive do
       opens: nil,
       attached_events: %{},
       ticket_files: [],
+      ticket_text: nil,
       events: Events.newest_for_ticket(ticket.id, 10),
       activity: nil,
       transcripts: [],
@@ -210,6 +211,10 @@ defmodule ForgeWeb.TicketLive do
     step = step_view(ticket)
     {events, attached_events} = ticket_events(ticket)
 
+    # The ticket's text and the files that came with it are read once, so they are one version's
+    # (`docs/design/ui.md` § Steps): a second read could meet a version written in between.
+    text_version = Artifacts.latest(ticket.id, Workflow.ticket_artifact())
+
     # Subscribed before the stream is read, so an event written between the two is heard rather
     # than missing until the next reload; one read and heard both is skipped as seen.
     socket = follow(socket, current)
@@ -245,8 +250,9 @@ defmodule ForgeWeb.TicketLive do
       # What came with the notes and answers listed, by event (`Forge.Attachments`).
       attached_events: attached_events,
       # The files that came with the ticket's text, named under it on Steps.
-      ticket_files:
-        came_with(project, ticket, Artifacts.latest(ticket.id, Workflow.ticket_artifact())),
+      ticket_files: came_with(project, ticket, text_version),
+      # The text itself, drawn as Markdown at the head of Steps and in a release's note.
+      ticket_text: ticket_text(project, ticket, text_version),
       addresses:
         Forge.Accounts.addresses(for %{actor: %{"kind" => "user", "id" => id}} <- events, do: id),
       queue_events: queue_events(ticket),
@@ -574,26 +580,61 @@ defmodule ForgeWeb.TicketLive do
           ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/#{artifact.name}/#{version}"
         end
 
+        # Read once, for the row's body and for the files named under it, so both are one
+        # version's. No test can drive a write between two reads in one process, which is why
+        # this has no test that fails without it.
+        versions = Artifacts.versions(ticket.id, artifact.name)
+
         doc =
           WorkScreen.doc(
             artifact,
-            Artifacts.versions(ticket.id, artifact.name),
+            versions,
             href,
             entry.approvable,
             Forge.References.ticket_scope(project.name, ticket)
           )
 
-        versions = Artifacts.versions(ticket.id, artifact.name)
-
         doc
         |> Map.put(:group, group(doc, latest, waiting))
         |> Map.put(:by, TicketViews.written_by(latest.author, jobs))
         |> WorkScreen.mark_attached(versions, scope, user)
-        |> Map.put(:came_with, came_with(project, ticket, latest))
+        |> Map.put(:came_with, came_with(project, ticket, List.last(versions)))
       end
 
     # What a ticket's jobs wrote, so under *Produced*.
     files ++ Enum.map(ForgeWeb.PageViews.docs(where, jobs), &Map.put(&1, :group, :produced))
+  end
+
+  # The ticket's latest text as it is drawn, or nil when there is none to draw. Every version
+  # admission writes opens with the title as a `# ` line, so a ticket admitted with no body, or a
+  # release with no note, has text that is not empty and says only what the page's heading says:
+  # that is drawn as no text, as an empty body was (`docs/design/ui.md` § Steps). There is no
+  # fallback to `tickets.body`, since every ticket has a `ticket` version from admission on.
+  defp ticket_text(_project, _ticket, nil), do: nil
+
+  defp ticket_text(project, ticket, version) do
+    if title_only?(version.content),
+      do: nil,
+      else:
+        ForgeWeb.FileType.render_document(
+          Workflow.ticket_artifact(),
+          version,
+          Forge.References.ticket_scope(project.name, ticket)
+        )
+  end
+
+  defp title_only?(content) do
+    lines =
+      content
+      |> ForgeCore.Document.body()
+      |> String.split("\n")
+      |> Enum.reject(&(String.trim(&1) == ""))
+
+    case lines do
+      [] -> true
+      [first] -> String.starts_with?(first, "# ")
+      _more -> false
+    end
   end
 
   # The files that came with this version of a document or the ticket's text, named under its row

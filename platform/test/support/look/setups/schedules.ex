@@ -15,7 +15,10 @@ defmodule Forge.Look.Setups.Schedules do
   Workflow view on each type), `queue`, `ticket` (the ticket `weekly-cleanup` admitted) and
   `by_hand` (one a person admitted).
 
-  Made-up data only: nothing here is a secret, and the markup is text.
+  Made-up data only: nothing here is a secret. A name, title and cron line are text, whatever they
+  hold; a body is Markdown with nothing resolved (`weekly-cleanup`'s holds a list, two lines, a
+  picture, a link to an artifact and a link out; `hostile`'s holds markup, a remote picture and a
+  long URL).
   """
 
   @behaviour Forge.Look.Setups
@@ -40,7 +43,7 @@ defmodule Forge.Look.Setups.Schedules do
     - name: weekly-cleanup
       cron: "0 6 * * MON"
       title: Weekly cleanup
-      body: Remove dead code and stale comments from the last week.
+      body: "Remove dead code from the last week:\\n\\n- stale comments\\n- unused functions\\n\\nOne line\\nthen the next. A picture ![shot](attachments/shot.png), the [plan](plan.md) and [the guide](https://example.com/guide)."
     - name: monthly-deps
       cron: "0 6 1 * *"
       title: Check the dependencies
@@ -48,7 +51,7 @@ defmodule Forge.Look.Setups.Schedules do
     - name: hostile
       cron: "*/15 0,6,12,18 1-7,15,20-25 JAN,MAR,MAY,JUL,SEP,NOV 1-5"
       title: "A <b>bold</b> title that is long enough that it would run off the side of a phone"
-      body: "Nothing <script>alert(1)</script> to see."
+      body: "Nothing <script>alert(1)</script> to see. ![x](https://evil.example/x.png) and a very long line https://example.com/a-url-that-goes-on-and-on-and-on-and-on-and-on-and-on-and-on-and-on-and-on-and-on"
     - name: dependencies-by-monday-morning-before-anyone-is-in
       cron: "30 7 * * MON-FRI"
       title: Morning check

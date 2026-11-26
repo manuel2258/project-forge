@@ -112,7 +112,12 @@ project on Codex and its jobs and chats (`codex.md`); `milestones` — a current
 held, in-flight and merged tickets, a second open milestone and a closed one, tickets in none (one
 held), a held ticket with a running job (Stop now) and one with a blocking question, a milestone of
 two hundred tickets for the phone, and a long hostile name, for the Milestones view, the Tickets
-list's *On hold* and the ticket page's band (`ui.md` § Milestones). **Never a project secret's value** in
+list's *On hold* and the ticket page's band (`ui.md` § Milestones). `ticket_text` — tickets admitted
+with real `ticket` versions: a long text (headings, a list, single newlines, a wide code line, table
+and URL, markup, every remote kind of picture, and two real PNGs, one above and one below the cut), a
+short one, one with only a title and a file, one rewritten after admission, and a release whose note is a
+long Markdown text, for Steps' text and its cut (`ui.md` § Steps); `schedules` draws a body as Markdown.
+**Never a project secret's value** in
 a setup: nothing masks a picture (`secrets.md`, which this leaves as written).
 
 ## What it is built on
@@ -237,8 +242,9 @@ each says why in a comment. A heavier page, or a suite run beside it, is not wha
 Time: a nine-step look took 17 s start to finish, almost all of it building the assets, compiling
 and starting the app; a step is a fraction of a second. The gate's browser modules (`bin/check` runs them with the rest of the suite) were timed at
 **about 14 s** when it was five tests and **about 38 s** at eleven; the figures are stale. At ticket
-68 there were two modules and **25 tests** (`browser_test.exs` 19, `installed_app_test.exs` 6), each
-starting a browser and logging in: about **100 s** of wall time alone and about **110 CPU-seconds**
+68 there were two modules and **25 tests** (`browser_test.exs` 19, `installed_app_test.exs` 6) by its count;
+counted again at ticket 80 there are **27** (`browser_test.exs` 20, `installed_app_test.exs` 7), and the figures
+that follow were timed at 25 and not re-timed. Each starts a browser and logs in: about **100 s** of wall time alone and about **110 CPU-seconds**
 run alone (the BEAM 13.5 of it); in the diagnosis's run of the gate (1659 CPU-seconds) Chromium was about 90,
 which is 3.6 a test. Their peak was about **450 MiB**, measured at five tests, one
 browser at a time (Chromium 428 + chromedriver 18), inside the 4 GiB the `check` command asks for.

@@ -52,7 +52,8 @@ defmodule Forge.Look.Setups do
     "steps_order" => Forge.Look.Setups.StepsOrder,
     "paged_streams" => Forge.Look.Setups.PagedStreams,
     "warm_build" => Forge.Look.Setups.WarmBuild,
-    "pages" => Forge.Look.Setups.Pages
+    "pages" => Forge.Look.Setups.Pages,
+    "ticket_text" => Forge.Look.Setups.TicketText
   }
 
   @doc "The registered setups, by name."

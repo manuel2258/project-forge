@@ -171,7 +171,9 @@ server draws UTC and a hook replaces it), whether it is on and by whom, the tick
 and its problem in the warning tone. An admin sees the switch. A type with none says how to add one
 (`ui.md` § Workflow); the release type says nothing of the kind; a file that does not parse lists
 the schedules that are on, by name, with the reason. Every word out of a file is text, wrapped, and
-never markup. A row's element id is a hash of its type and name, because a name may hold `.`, which
+never markup — **but the body**, which is Markdown, sanitised as a document is, with single newlines
+kept and nothing resolved (`ui.md` § Workflow; ticket 80 reverses ticket 61's criterion 29 for the
+body alone, and the name, title and cron line stay text). A row's element id is a hash of its type and name, because a name may hold `.`, which
 the confirmation's selector would read as a class. When the workflow cannot be read at all, the
 schedules that are on are listed on their own, under the notice that says so, and may be switched off. A ticket a schedule admitted says which schedule, when it was due and in whose name,
 on its details and in its Activity.

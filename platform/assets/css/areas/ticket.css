@@ -237,6 +237,18 @@
   .work-doc-version { position: absolute; top: 6px; right: 0; padding-left: 12px; }
   .work-doc-version:hover { color: var(--ink); }
   .work-doc-body { margin-bottom: 12px; padding: 12px 16px; border-radius: 10px; background: var(--surface-1); }
+  /* The ticket's text at the head of Steps: a document's block (`ui.md` § Steps), cut to twelve
+     lines of its own line height at every width. `data-long` and `data-open` are set in the browser
+     by `.CutShort` and never rendered by the server. `clip` and not only `hidden`, so a focus in
+     the part that is cut does not scroll it into the box; `hidden` first is for a browser that
+     does not know `clip`. */
+  .ticket-text .work-doc-body { margin-bottom: 0; }
+  .ticket-text:not([data-open]) .doc { max-height: calc(12 * 1lh); overflow: hidden; overflow: clip; }
+  .ticket-text:not([data-long]) [data-cut-toggle] { display: none; }
+  .ticket-text-toggle { display: flex; min-height: var(--target-min); align-items: center; margin-top: 4px; padding: 0; border: 0; background: none; color: var(--link); cursor: pointer; font-size: 13px; }
+  .ticket-text .ticket-text-less,
+  .ticket-text[data-open] .ticket-text-more { display: none; }
+  .ticket-text[data-open] .ticket-text-less { display: inline; }
   .work-doc-earlier {
     display: flex;
     min-height: 44px;

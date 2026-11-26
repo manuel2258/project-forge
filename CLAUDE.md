@@ -261,8 +261,9 @@ relaxes a check — the suite runs against a real database either way.
 
 The gate drives Chromium from the devshell: `platform/test/forge/look/browser_test.exs` and
 `installed_app_test.exs` go through `Forge.Look`, so a broken browser setup fails here and not on the
-next UI ticket. Their 25 tests start a Chromium each and cost about 100 seconds of wall time alone,
-about 110 CPU-seconds and 450 MiB at the peak (ticket 68; it said "about 40 seconds" at eleven tests).
+next UI ticket. Their 27 tests start a Chromium each (counted at ticket 80, which added one) and cost about 100
+seconds of wall time alone, about 110 CPU-seconds and 450 MiB at the peak (timed at ticket 68's 25 and not
+since; it said "about 40 seconds" at eleven tests).
 The gate builds the assets it loads (`tailwind forge`, `esbuild forge`) first, and needs `FORGE_CHROMIUM` and `FORGE_CHROMEDRIVER`, which
 `nix develop` sets (`docs/design/look.md`).
 

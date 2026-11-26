@@ -10,16 +10,20 @@ defmodule ForgeWeb.SchedulesView do
   Switching on asks first, in words, and says whose name each ticket is admitted in; switching off
   does not ask.
 
-  **Everything a file wrote is text.** A name, a title, a body and a cron line come from a
+  **Everything a file wrote is text, but the body.** A name, a title and a cron line come from a
   repository anyone with a merge may push to, and are drawn escaped and wrapped; none is ever
-  markup, and none reaches an id or a URL but the name and the ticket type (a file's name), whose characters
-  the grammar restricts to the ones an id may hold.
+  markup, and none reaches an id or a URL but the name and the ticket type (a file's name), whose
+  characters the grammar restricts to the ones an id may hold. The body is Markdown
+  (`docs/design/ui.md` § Workflow), sanitised as a document is by `ForgeWeb.Markdown`, with single
+  newlines kept and **nothing resolved** (`%{}`): the ticket a picture or a link would resolve in
+  does not exist yet, so a picture is the muted note and is never fetched, and a link to an artifact
+  keeps its words and loses its target.
   """
 
   use ForgeWeb, :html
 
   alias ForgeCore.Cron
-  alias ForgeWeb.Format
+  alias ForgeWeb.{FileType, Format}
 
   @doc "The Workflow view's address for a schedule: its type, and the schedule itself in the page."
   @spec path(Forge.Projects.Project.t(), %{ticket_type: String.t() | nil, name: String.t()}) ::
@@ -146,7 +150,11 @@ defmodule ForgeWeb.SchedulesView do
 
         <details :if={schedule.body} class="schedule-body">
           <summary>What it admits</summary>
-          <pre class="schedule-body-text">{schedule.body}</pre>
+          <%!-- Markdown, sanitised as a document is, with nothing resolved: the ticket a reference
+                would resolve in does not exist yet (`docs/design/ui.md` § References). --%>
+          <div class="schedule-body-text">
+            <FileType.document_body body={{:typed, ForgeWeb.Markdown.to_html(schedule.body, %{})}} />
+          </div>
         </details>
 
         <div :if={@admin} class="schedule-controls">

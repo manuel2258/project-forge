@@ -74,8 +74,10 @@
 
 /* A chat message is not a document: a single newline is a break, where Markdown would join the
    lines into one paragraph. On a phone Enter is how a line is ended, so a transcript that drops
-   single newlines drops the shape of every message typed there. Only the transcript's boxes
-   carry `msg`; a document is rendered as a document. See docs/design/ui.md § Talk. */
+   single newlines drops the shape of every message typed there. Only the transcript's boxes, the
+   ticket's own text (`FileType.render_document/3`'s `:typed`, a person's typing) and a schedule's
+   body (`SchedulesView`, drawn as `:typed` too) carry `msg`; every other document is rendered as
+   a document. See docs/design/ui.md § Talk, § Documents. */
 .msg p, .msg li { white-space: pre-line; }
 
 /* An image has an edge of its own — a black screenshot on a near-black page had none (UX pass,

@@ -269,7 +269,8 @@
   .schedule-by { font-size: 12px; color: var(--ink-2); }
   .schedule-problem-at { display: block; margin-top: 2px; font-size: 11.5px; opacity: .7; }
   .schedule-body > summary { cursor: pointer; font-size: 12px; color: var(--ink-3); }
-  .schedule-body-text { margin: 4px 0 0; padding: 8px; overflow-wrap: anywhere; white-space: pre-wrap; border-radius: 6px; background: var(--surface-2); font-family: var(--font-mono); font-size: 12px; }
+  /* The body is Markdown (`.doc`), on --surface-2 one step up from the card it sits in. */
+  .schedule-body-text { margin: 4px 0 0; padding: 8px 10px; border-radius: 6px; background: var(--surface-2); }
   .schedule-controls { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 4px; }
   .not-types { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; opacity: .8; }
   .wf-flow { display: flex; flex-direction: column; }

@@ -168,7 +168,9 @@ defmodule Forge.ReferencesTest do
       by_user = version(art, 1, at(-3600))
       by_job = version(art, 2, at(-1800), job(Ecto.UUID.generate()))
 
-      assert References.moment(by_user) == %{at: at(-3600), job: nil, turn_seq: nil}
+      assert References.moment(by_user) ==
+               %{at: at(-3600), job: nil, turn_seq: nil, version_id: by_user.id}
+
       assert %{at: at, job: job, turn_seq: nil} = References.moment(by_job)
       assert at == by_job.inserted_at
       assert is_binary(job)
@@ -407,6 +409,51 @@ defmodule Forge.ReferencesTest do
                ask(References.chat_scope(ctx.project, other.id), now, "attachments/shot.png")
 
       assert {:error, {:missing, :ticket}} = ask(ctx.scope, now, "attachments/shot.png")
+    end
+
+    # The ticket's text and the files attached with it are one act written in two statements, so a
+    # second boundary can fall between them: the file's version is then later than the text's clock.
+    # `artifact_versions` cannot be backdated, so the text's moment is the early one.
+    test "that came with a text are visible to that version whatever the clock says", ctx do
+      text = Forge.Artifacts.latest(ctx.two.id, "ticket")
+      later = version(Repo.get!(Artifact, text.artifact_id), 2, at(0))
+
+      path = Path.join(System.tmp_dir!(), "#{System.pid()}-#{System.unique_integer([:positive])}")
+      File.write!(path, "bytes")
+      {:ok, upload} = Forge.Attachments.stage(ctx.project, ctx.user, {:file, path}, "shot.png")
+      File.rm!(path)
+      batch = %Forge.Attachments.Batch{uploads: [%{id: upload.id, name: "shot.png"}]}
+
+      {:ok, %{added: [_]}} =
+        Forge.Attachments.claim(
+          {:ticket, ctx.two.id},
+          ctx.user,
+          batch,
+          :ticket,
+          {:version, text.id}
+        )
+
+      # The file's version was written after `at(-3600)` by any clock.
+      early = moment(-3600)
+      assert {:error, {:missing, :ticket}} = ask(ctx.scope, early, "attachments/shot.png")
+
+      assert {:ok, %{version: 1, raster?: true}} =
+               ask(ctx.scope, Map.put(early, :version_id, text.id), "attachments/shot.png")
+
+      # Only the version it came with: another version of the text does not see it by this route,
+      # and neither does a moment with no version at all (`nil` is not `nil`).
+      assert {:error, {:missing, :ticket}} =
+               ask(ctx.scope, Map.put(early, :version_id, later.id), "attachments/shot.png")
+
+      assert {:error, {:missing, :ticket}} =
+               ask(ctx.scope, Map.put(early, :version_id, nil), "attachments/shot.png")
+
+      # A file attached to a message has no `to_version_id`: a moment with no version is not equal
+      # to it by both being nil.
+      attach!(ctx, {:ticket, ctx.two.id}, "log.txt")
+
+      assert {:error, {:missing, :ticket}} =
+               ask(ctx.scope, Map.put(early, :version_id, nil), "attachments/log.txt")
     end
 
     test "a withdrawn one is still found, and says so", ctx do

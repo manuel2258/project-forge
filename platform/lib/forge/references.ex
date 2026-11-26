@@ -15,6 +15,11 @@ defmodule Forge.References do
   only by the second — or otherwise when it existed at `at` (`<=`: timestamps are whole seconds, so
   a tie counts as before). Another ticket's versions are cut by the clock alone.
 
+  **A file that came with the text** is visible to it whatever the clock says: a person's text and
+  the files attached with it are one act, written in two statements, and a second boundary between
+  them would otherwise make the file "later" than the text that names it (`moment.version_id`
+  against the attachment's `to_version_id`, `docs/design/ui.md` § References).
+
   `resolve/2` answers any number of references in a number of queries that does not grow with them, and none when
   there are none. The choice itself, `pick/4`, is pure.
   """
@@ -39,7 +44,16 @@ defmodule Forge.References do
           chat: String.t() | nil
         }
 
-  @type moment :: %{at: DateTime.t() | :now, job: String.t() | nil, turn_seq: integer() | nil}
+  @typedoc """
+  `version_id` is present when the moment is a version's (`moment/1`): the files that came with that
+  very version are visible to it. A moment made by hand may leave it out.
+  """
+  @type moment :: %{
+          required(:at) => DateTime.t() | :now,
+          required(:job) => String.t() | nil,
+          required(:turn_seq) => integer() | nil,
+          optional(:version_id) => String.t() | nil
+        }
 
   @type found :: %{
           where: {:ticket, String.t(), pos_integer()} | {:chat, String.t()},
@@ -110,7 +124,7 @@ defmodule Forge.References do
   """
   @spec moment(Version.t()) :: moment()
   def moment(%Version{author: %{"kind" => "job", "id" => job}} = version) when is_binary(job) do
-    base = %{at: version.inserted_at, job: job, turn_seq: nil}
+    base = %{at: version.inserted_at, job: job, turn_seq: nil, version_id: version.id}
 
     with :chat <- Repo.one(from j in Job, where: j.id == ^job, select: j.kind),
          seq when is_integer(seq) <- written_seq(job, version.id),
@@ -128,7 +142,8 @@ defmodule Forge.References do
     end
   end
 
-  def moment(%Version{} = version), do: %{at: version.inserted_at, job: nil, turn_seq: nil}
+  def moment(%Version{} = version),
+    do: %{at: version.inserted_at, job: nil, turn_seq: nil, version_id: version.id}
 
   # Scoped to the job that wrote it, so `events(job_id, seq)` serves it and a chat's history is
   # not a scan of every `version_written` event on the node. (Equivalent mutant: dropping the
@@ -231,6 +246,7 @@ defmodule Forge.References do
             (a.ticket_id in ^ticket_ids or a.job_id in ^job_ids),
         select: %{
           withdrawn?: not is_nil(w.withdrawn_at),
+          to_version_id: w.to_version_id,
           name: a.name,
           ticket_id: a.ticket_id,
           job_id: a.job_id,
@@ -347,15 +363,29 @@ defmodule Forge.References do
     }
   end
 
-  # The cut. A version the text's own job wrote is cut by event order when the moment has one (a
+  # The cut. A file that came with the text is always visible to it (`came_with?/2`). A version the
+  # text's own job wrote is cut by event order when the moment has one (a
   # conversation, whose later turns must not be seen) and always visible otherwise; every other
   # version, and every version of another ticket, by the clock, a tie counting as before.
   defp visible?(row, moment, own?, seqs) do
-    if own? and moment.job != nil and row.author["kind"] == "job" and
-         row.author["id"] == moment.job,
-       do: written_before?(row, moment, seqs),
-       else: existed?(row, moment)
+    cond do
+      came_with?(row, moment) ->
+        true
+
+      own? and moment.job != nil and row.author["kind"] == "job" and
+          row.author["id"] == moment.job ->
+        written_before?(row, moment, seqs)
+
+      true ->
+        existed?(row, moment)
+    end
   end
+
+  # A file attached with this very version of a text (`attachments.to_version_id`). A row with no
+  # claim, or a moment that is not a version's, never matches: the `is_binary` guard is what stops
+  # two nils from being equal.
+  defp came_with?(%{to_version_id: id}, %{version_id: id}) when is_binary(id), do: true
+  defp came_with?(_row, _moment), do: false
 
   defp written_before?(_row, %{turn_seq: nil}, _seqs), do: true
 

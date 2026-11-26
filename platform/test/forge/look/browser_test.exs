@@ -813,4 +813,146 @@ defmodule Forge.Look.BrowserTest do
                )
     end)
   end
+
+  # The steps and the calls in the order given: a string is a step list, a function a call. The
+  # test below must act on the page between its steps, which `run_with/3` (steps, then calls) cannot.
+  defp run_in_order(items, opts) do
+    {steps, _n} =
+      Enum.flat_map_reduce(items, 1, fn
+        source, n when is_binary(source) ->
+          {:ok, parsed} = Steps.parse(source)
+          numbered = Enum.with_index(parsed, n) |> Enum.map(fn {step, i} -> %{step | n: i} end)
+          {numbered, n + length(parsed)}
+
+        fun, n ->
+          {[%{n: n, text: "call #{n}", op: {:call, fun}}], n + 1}
+      end)
+
+    Look.run(steps, opts)
+  end
+
+  # The ticket's text on Steps (`docs/design/ui.md` § Steps, ticket 80): what only a browser can say —
+  # that the text is cut at twelve lines, that the picture below the cut is not fetched, that the
+  # control opens it, and that open it stays through a patch and a reconnect. Over `TicketText`,
+  # as its member. Its pictures are the setup's two PNGs: `top.png` in the first lines, `below.png` past the cut.
+  @cut """
+  const t = document.querySelector('#ticket-text'); const d = t.querySelector('.doc')
+  const toggle = t.querySelector('[data-cut-toggle]')
+  return {
+    long: t.hasAttribute('data-long'), open: t.hasAttribute('data-open'),
+    client: d.clientHeight, scroll: d.scrollHeight,
+    line: parseFloat(getComputedStyle(d).lineHeight),
+    shown: getComputedStyle(toggle).display !== 'none', label: toggle.innerText
+  }
+  """
+  @below "return performance.getEntriesByType('resource').some(e => e.name.includes('below.png'))"
+
+  test "a long ticket text is cut, opens, stays open through a patch and a reconnect", %{
+    opts: opts
+  } do
+    built = Setups.TicketText.build()
+    member = built.users["member"]
+    {login, _} = Forge.AccountsFixtures.generate_user_magic_link_token(member)
+    opts = Keyword.merge(opts, login_token: login, paths: built.paths)
+
+    [_, number] = Regex.run(~r{/tickets/look-text/(\d+)$}, built.paths["long"])
+    {ticket, _project} = Forge.Tickets.fetch!("look-text", number)
+
+    cut? = fn %{"client" => client, "line" => line} -> abs(client - 12 * line) <= 1 end
+
+    capture_io(fn ->
+      assert :ok ==
+               run_in_order(
+                 [
+                   "width phone\nvisit :long\nwait \"#ticket-text[data-long]\"",
+                   fn session ->
+                     seen = Look.script(session, @cut)
+                     assert cut?.(seen)
+                     assert seen["scroll"] > seen["client"]
+                     assert seen["shown"] and seen["label"] == "Show the whole text"
+
+                     # Clipped and lazy: the picture below the cut is not fetched, the one above is.
+                     Process.sleep(300)
+                     refute Look.script(session, @below)
+                   end,
+                   ~s|click "[data-cut-toggle]"|,
+                   fn session ->
+                     seen = Look.script(session, @cut)
+                     assert seen["open"] and seen["scroll"] == seen["client"]
+                     assert seen["label"] == "Show less"
+                     until(session, @below, "the picture below the cut to be fetched")
+                   end,
+                   # A new version patched in: the text is still open.
+                   fn session ->
+                     {:ok, _} =
+                       Forge.Operator.edit(
+                         ticket,
+                         member,
+                         "ticket",
+                         "# Checkout drops the order\n\nPATCHED-IN\n\n" <>
+                           String.duplicate("a line\n\n", 40)
+                       )
+
+                     until(
+                       session,
+                       "return document.querySelector('#ticket-text').innerText.includes('PATCHED-IN')",
+                       "the new version to be drawn"
+                     )
+
+                     assert Look.script(session, @cut)["open"]
+                   end,
+                   # A reconnect: still open.
+                   fn session ->
+                     Look.script(session, "liveSocket.disconnect(); return true")
+
+                     until(
+                       session,
+                       "return document.documentElement.dataset.connection === 'lost'",
+                       "the page to say it is not connected"
+                     )
+
+                     Look.script(session, "liveSocket.connect(); return true")
+
+                     until(
+                       session,
+                       "return document.documentElement.dataset.connection !== 'lost' && " <>
+                         "!document.querySelector('#{@sender}').disabled",
+                       "the page to come back"
+                     )
+
+                     assert Look.script(session, @cut)["open"]
+                   end,
+                   ~s|click "[data-cut-toggle]"|,
+                   fn session ->
+                     seen = Look.script(session, @cut)
+                     refute seen["open"]
+                     assert cut?.(seen) and seen["label"] == "Show the whole text"
+                     # The same twelve lines on a desktop.
+                     Wallaby.Browser.resize_window(session, 1280, 800)
+                     until(session, "return innerWidth > 1200", "the window to be wide")
+                     assert cut?.(Look.script(session, @cut))
+
+                     Look.script(
+                       session,
+                       "location.href = '#{built.paths["short"]}'; return true"
+                     )
+
+                     until(
+                       session,
+                       "return !!document.querySelector('#ticket-text[phx-hook]') && " <>
+                         "document.querySelector('#ticket-text').innerText.includes('Two.')",
+                       "the short text to be drawn"
+                     )
+
+                     # A text that fits shows whole, with no control.
+                     Process.sleep(300)
+                     seen = Look.script(session, @cut)
+                     refute seen["long"] or seen["shown"]
+                     assert seen["scroll"] <= seen["client"]
+                   end
+                 ],
+                 opts
+               )
+    end)
+  end
 end

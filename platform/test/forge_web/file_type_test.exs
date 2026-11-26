@@ -132,6 +132,29 @@ defmodule ForgeWeb.FileTypeTest do
     end
   end
 
+  # The ticket's text is a person's typing, so it alone keeps single newlines (`ui.md` § Documents).
+  describe "the ticket's text" do
+    test "is `:typed`, and no other Markdown is" do
+      assert {:typed, html} = FileType.render_document("ticket", doc("# T\n\na\nb\n"), @scope)
+      assert Phoenix.HTML.safe_to_string(html) =~ "<h1>T</h1>"
+
+      for name <- ~w(plan plan.md ticket.md refinement.md) do
+        assert {:html, _html} = FileType.render_document(name, doc("# T\n"), @scope)
+      end
+    end
+
+    test "is drawn in `.doc.msg`, and other Markdown in `.doc` alone" do
+      draw = fn name ->
+        body = FileType.render_document(name, doc("a\nb\n"), @scope)
+        Floki.parse_fragment!(render_component(&FileType.document_body/1, body: body))
+      end
+
+      assert [_] = Floki.find(draw.("ticket"), "div.doc.msg p")
+      assert [_] = Floki.find(draw.("plan.md"), "div.doc p")
+      assert Floki.find(draw.("plan.md"), ".msg") == []
+    end
+  end
+
   describe "file_icon/1" do
     defp icon(name, kind, size \\ :row) do
       Floki.parse_fragment!(

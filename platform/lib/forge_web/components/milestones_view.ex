@@ -12,7 +12,9 @@ defmodule ForgeWeb.MilestonesView do
   connection drops**, so a drag cut off by a reconnect moves nothing (`docs/design/ui.md` § A
   reconnect is not a reload).
 
-  A ticket on hold shows *on hold* and **Release**, a refusal of which is said on its own row. None
+  A ticket on hold shows *on hold* and **Release**, a refusal of which is said on its own row; one
+  that is taken over shows *taken over* and **Hand back**, which hands it back to the step it rests
+  in with no note (`Forge.Operator.release/3`). None
   of it is drawn in the colour that means waiting on you, because nothing is.
 
   Text a person wrote — a name, a description, a title — is drawn as text and wrapped, never as
@@ -482,7 +484,11 @@ defmodule ForgeWeb.MilestonesView do
           <div class="ms-row-meta">
             <span class="ms-state">{t.state}</span>
             <span :if={t.status == :stuck} class="ms-flag ms-flag--stuck">stuck</span>
-            <span :if={Forge.Tickets.Ticket.held?(t)} class="ms-flag ms-flag--held">on hold</span>
+            <span :if={Forge.Tickets.Ticket.held?(t)} class="ms-flag ms-flag--held">
+              {if Forge.Tickets.Ticket.taken_over?(t),
+                do: "taken over · #{t.holder || "someone"}",
+                else: "on hold"}
+            </span>
             <span :if={waits(t)} class="ms-waits">{waits(t)}</span>
           </div>
           <Actions.refused id={"ms-row-refusal-#{t.id}"} refusal={@refusal} at={[{:row, t.id}]} />
@@ -496,7 +502,7 @@ defmodule ForgeWeb.MilestonesView do
             phx-click="milestones:release"
             phx-value-ticket={t.id}
           >
-            Release
+            {if Forge.Tickets.Ticket.taken_over?(t), do: "Hand back", else: "Release"}
           </.button>
           <.move ticket={t} to="top" label="Move to the top" disabled={index == 0}>Top</.move>
           <.move ticket={t} to="up" label="Move up one" disabled={index == 0}>↑</.move>

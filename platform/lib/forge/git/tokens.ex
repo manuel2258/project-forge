@@ -248,6 +248,13 @@ defmodule Forge.Git.Tokens do
   names it.
   """
   @spec allowed_refs(Token.t(), Project.t()) :: [String.t()]
+  # A job's token also names the ref its own work is kept at when the branch moved under it
+  # (`docs/design/outside-work.md` § A job's push): `refs/forge/kept/<its job id>` and no other
+  # job's, and the hook never lets it be deleted.
+  def allowed_refs(%Token{git_access: :branch, ref: ref, job_id: job_id}, _project)
+      when is_binary(job_id),
+      do: [ref, "refs/forge/kept/" <> job_id]
+
   def allowed_refs(%Token{git_access: :branch, ref: ref}, _project), do: [ref]
   def allowed_refs(%Token{git_access: :developer}, project), do: open_branches(project)
 

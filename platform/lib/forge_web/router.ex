@@ -50,6 +50,14 @@ defmodule ForgeWeb.Router do
     plug ForgeWeb.Plugs.ApiAuth
   end
 
+  # The MCP endpoint (`docs/design/api-and-ui.md` § MCP): the API's bearers, and no `accepts` — an MCP
+  # client asks for `application/json` and `text/event-stream` and is answered the first. A foreign
+  # `Origin` is refused before any credential is read.
+  pipeline :mcp do
+    plug ForgeWeb.Plugs.McpOrigin
+    plug ForgeWeb.Plugs.ApiAuth
+  end
+
   scope "/", ForgeWeb do
     pipe_through :device
 
@@ -139,6 +147,14 @@ defmodule ForgeWeb.Router do
     end
   end
 
+  scope "/mcp", ForgeWeb do
+    pipe_through :mcp
+
+    post "/", McpController, :post
+    get "/", McpController, :not_allowed
+    delete "/", McpController, :not_allowed
+  end
+
   scope "/api/v1", ForgeWeb.Api do
     pipe_through :api
 
@@ -146,6 +162,7 @@ defmodule ForgeWeb.Router do
     get "/queue", TicketController, :queue
     get "/projects", ProjectController, :index
     post "/projects", ProjectController, :create
+    get "/projects/:project", ProjectController, :show
     get "/tickets", TicketController, :index
     post "/projects/:project/tickets", TicketController, :create
     get "/tickets/:project/:number", TicketController, :show
@@ -173,6 +190,9 @@ defmodule ForgeWeb.Router do
     post "/tickets/:project/:number/hold", TicketController, :hold
     post "/tickets/:project/:number/release", TicketController, :release
     post "/tickets/:project/:number/stop", TicketController, :stop
+    post "/tickets/:project/:number/take-over", TicketController, :take_over
+    post "/tickets/:project/:number/hand-back", TicketController, :hand_back
+    post "/tickets/:project/:number/keep-work", TicketController, :keep_work
     post "/tickets/:project/:number/clear-warm-build", TicketController, :clear_warm_build
     post "/tickets/:project/:number/title", TicketController, :title
     post "/tickets/:project/:number/milestone", TicketController, :milestone

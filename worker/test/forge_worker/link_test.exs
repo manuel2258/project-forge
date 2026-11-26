@@ -991,6 +991,36 @@ defmodule ForgeWorker.LinkTest do
     assert result["transcript"] == nil
   end
 
+  # A branch somebody else moved during the run (`docs/design/worker-channel.md` § Protocol 17):
+  # nothing is pushed to it, the run's work is kept under the job's own ref, and the result — a
+  # finished one, with no commit — says where everything is and the outcome the run ended on.
+  test "a branch that moved during the run reports branch_moved and keeps the work", context do
+    %{client: client, origin: origin} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    job = assignment(origin, scenario: "moves_branch")
+    job_id = job["job_id"]
+    push(client, @topic, "assign", job)
+
+    {%{"job_id" => ^job_id, "result" => result}, _before} = take_push("result")
+
+    assert %{"lease" => lease, "kept" => kept, "remote" => remote, "outcome" => "done"} =
+             result["branch_moved"]
+
+    assert result["commit"] == nil
+    assert length(Enum.uniq([lease, kept, remote])) == 3
+
+    {branch, 0} = System.cmd("git", ["-C", origin, "rev-parse", "refs/heads/ticket/1"])
+    {held, 0} = System.cmd("git", ["-C", origin, "rev-parse", "refs/forge/kept/#{job_id}"])
+    # The person's commit is still the branch; the job's work is under its own ref.
+    assert String.trim(branch) == remote
+    assert String.trim(held) == kept
+
+    {message, 0} = System.cmd("git", ["-C", origin, "log", "-1", "--format=%s", remote])
+    assert message =~ "A person's commit"
+  end
+
   # And with nowhere to put it — an assignment with no key — nothing is attempted.
   test "a transcript with no key to go to is not uploaded", context do
     %{client: client, origin: origin} = context

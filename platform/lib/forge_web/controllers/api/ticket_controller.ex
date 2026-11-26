@@ -23,6 +23,9 @@ defmodule ForgeWeb.Api.TicketController do
               :hold,
               :release,
               :stop,
+              :take_over,
+              :hand_back,
+              :keep_work,
               :clear_warm_build,
               :title,
               :milestone,
@@ -158,6 +161,9 @@ defmodule ForgeWeb.Api.TicketController do
       body: params["body"] || "",
       ticket_type: params["ticket_type"],
       on_hold: on_hold(params),
+      outside_work: outside_work(params),
+      start_commit: params["start_commit"],
+      via: :api,
       milestone_id: params["milestone_id"]
     }
 
@@ -172,6 +178,11 @@ defmodule ForgeWeb.Api.TicketController do
   defp on_hold(%{"on_hold" => value}) when value in [true, "true"], do: true
   defp on_hold(%{"on_hold" => value}) when value in [false, "false"], do: false
   defp on_hold(_params), do: nil
+
+  # Outside work is opened in place of a start or a hold (`docs/design/outside-work.md`): `true`
+  # asks for it, and anything else is not asking.
+  defp outside_work(%{"outside_work" => value}) when value in [true, "true"], do: true
+  defp outside_work(_params), do: nil
 
   defp admit(project, actor, attrs) do
     case Operator.admit(project, actor, attrs) do
@@ -460,7 +471,32 @@ defmodule ForgeWeb.Api.TicketController do
   def hold(conn, _params), do: respond(conn, Operator.hold(conn.assigns.ticket, actor(conn)))
 
   def release(conn, _params),
-    do: respond(conn, Operator.release(conn.assigns.ticket, actor(conn)))
+    do: respond(conn, Operator.release(conn.assigns.ticket, actor(conn), via: :api))
+
+  # Taking a ticket over and handing it back (`docs/design/outside-work.md`). `Operator`'s guard
+  # and `via: :api`, so the event says which door it came through.
+  def take_over(conn, params) do
+    respond(
+      conn,
+      Operator.take_over(conn.assigns.ticket, actor(conn),
+        running: params["running"],
+        via: :api
+      )
+    )
+  end
+
+  def hand_back(conn, params) do
+    opts = [note: params["note"], via: :api] ++ if(params["to"], do: [to: params["to"]], else: [])
+
+    respond(conn, Operator.hand_back(conn.assigns.ticket, actor(conn), opts))
+  end
+
+  # Keeps the work a job's moved-branch stop set aside (`docs/design/outside-work.md` § Keeping the
+  # job's work). `job_id` names the stop the press is about, so a second press is refused.
+  def keep_work(conn, %{"job_id" => job_id}) when is_binary(job_id),
+    do: respond(conn, Operator.keep_work(conn.assigns.ticket, actor(conn), job_id, via: :api))
+
+  def keep_work(_conn, _params), do: {:error, {:bad_request, "job_id is the id of the job"}}
 
   def stop(conn, _params), do: respond(conn, Operator.stop_now(conn.assigns.ticket, actor(conn)))
 

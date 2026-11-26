@@ -1183,6 +1183,16 @@ in words if sent. At the end of the pass, the first item to arrive is drawn.
   it is the way-on link below, and the queue refuses it in words if it is sent anyway. The push
   carries the reason after the title. The first ticket stuck on an exhausted `max` read only *needs
   a way forward*, which is true of every stuck ticket and says nothing about this one.
+  **A ticket stopped because the branch moved during a job** (`outside-work.md` § A job's push) is an
+  ordinary stuck item whose reason says so, and it adds to the past what arrived: the commits that
+  came while the job ran (short id and subject, at most twenty; the rest are not counted), who pushed them
+  when the git door recorded it, and **where the job's work is kept** as a line to copy,
+  `git fetch <url> refs/forge/kept/<job>`, with no token in it. Its three ways out sit with the
+  rows, none preselected: **Run `<state>` again** on the new commits (the kept work stays kept),
+  **Take over** (the ticket becomes held by the person, to combine both by hand) and **Keep the
+  job's work**, which merges it onto the new commits and carries on as the job's own outcome
+  would have. A merge that clashes is refused in place naming the paths, and the other two stay.
+  The ticket page's stuck item says the same, in the same words.
   **A job that ran out of budget offers two more words** in the same rows, *Extend `<state>`* above
   *Run `<state>` again* — the same two forms as on the ticket page (§ Steps, *Ways forward*), in
   `ways-<id>`, with what was typed kept per ticket across a reconnect.
@@ -1446,6 +1456,20 @@ command is still going. None of it is amber, because nothing waits on you. **Put
 details beside Cancel, the **title is editable there** by any member in any state — a release's
 never, because it is its version and the next release computes what shipped from it — and so is
 the ticket's **milestone**. A refusal is said where it was pressed.
+
+**A taken-over ticket** (`outside-work.md`) draws the same band with other words: *taken over by Manu · 2 h
+ago* (the person named as Activity names one — *you* for the viewer — and a token as `API · <name>`),
+the commits on `ticket/<n>` since it was taken over, said as *3 commits pushed since; they are
+recorded when it is handed back*, a **line to copy** that fetches the branch (`git fetch <git address>
+ticket/<n>`, **no token in it**), **Hand back** in place of Release, and **Stop now** while a run of its
+state is going. **Hand back opens a picker in the band**: every state of the ticket's pinned workflow,
+preset to the one it rests in, each row marked *transition* when a declared edge from the current state
+reaches it and *jump* when it does not, and naming the document a step needs and does not have; an
+optional **note** (a draft that survives a reconnect, § A reconnect is not a reload; at most 2,000
+characters, a longer one refused *where it was pressed* with the limit stated and never cut; drawn as text,
+never as markup). A refusal is said in the band and the ticket stays taken over. **Take over** is in the
+details beside *Put on hold*; with a run going it asks in place, *Stop it now* or *Let it finish*, neither
+preselected.
 
 A ticket and a conversation are both *one piece of work*: a branch, a
 record, a cost, and something that may be waiting on you. They are drawn in the same frame from
@@ -1893,6 +1917,12 @@ its own between the visits either side of it, which a jump breaks into two steps
 returns to the same state. **That row is a sentence, not a visit**: set in the body face, since it
 carries the comment a person wrote (mono is never for that, § Type), and with no chevron, because
 it opens nothing.
+**A take-over, a hand-back and a kept job's work are said in words too**: *took it over in planning to work
+outside forge (via page)*, *handed it back to implementing (from planning, via api), 3 commits pushed
+meanwhile: the short sha and subject of the first three — and the note after a dash* (the note is text, cut
+only where the summary is bounded), and *kept the work of a job whose branch had moved*. Never the payload's
+keys. **A push to a ticket's branch is recorded (`branch.pushed`) and not drawn in Activity**; the stuck
+item of a moved branch names who pushed.
 **Read a page at a time** (`ForgeWeb.JobStream`, `Forge.Events.Stream`): the newest 50 entries when the
 view is opened, and the next 50 when the reader reaches the old end — the bottom here — which loads
 on its own, without a press, under a quiet *Loading earlier…* line until it has arrived. *Load 50
@@ -2309,7 +2339,8 @@ the bottom of the no-milestone list, keeps its merged and cancelled ones, and un
 current; reopening brings nothing back. At most one open milestone is *current*, marked by a
 person and independent of the order; a closed one cannot be.
 
-**Every row of a ticket on hold has Release**, so the routine — open the current milestone, release
+**A taken-over ticket's row says *taken over · Manu* where it said *on hold*, and its Release reads
+Hand back**: the same step, no note (`outside-work.md`). **Every row of a ticket on hold has Release**, so the routine — open the current milestone, release
 its top ticket — is one tap from the list. It does what releasing from the ticket does, is refused
 the same way, and says why on the row. **Order is changed both ways, wherever order is drawn** — the Milestones view: by dragging
 a row by its handle, and by the move buttons on it — to the top, up one, down one — and each does
@@ -2585,13 +2616,19 @@ list (a release).
 
 ## Creating things
 
-**Every way of admitting a ticket asks the same two things, and chooses neither for the person**:
-*Start now* or *Put on hold*, as two buttons side by side with neither primary — on the ticket
-form, on a proposal in the reader and on the bulk bar — and an optional **milestone**, an open one of
-the project. The API and `mix forge.admit` take them as an explicit parameter and refuse without the
-first. **Enter in the title does not start the ticket**: a browser clicks a form's first submit
-button for it, and the first is *Start now*, so the ticket form begins with a hidden submit button
-that sends neither choice, which is refused with the sentence that says to choose. A ticket
+**Every way of admitting a ticket asks the same two things, and the person's forms answer the first
+for them**: *Start now* or *Put on hold*, as **one split submit button** whose face is *Start now*
+and whose menu offers *Put on hold* — on the ticket form, on a proposal in the reader and on the
+bulk bar — and an optional **milestone**, an open one of the project. (Ticket 79 reversed an earlier
+rule that chose neither for the person: a person who opens a ticket almost always wants it to run,
+and two equal buttons made every admission a decision.) **The ticket form alone also offers *Outside
+work*** in that menu (`outside-work.md` § Outside work): it admits the ticket already taken over by
+the person, and shows an optional **commit to start from** field, a full commit id. The proposal
+reader and the bulk bar do not offer it — a start commit for N tickets means nothing. The API, MCP
+and `mix forge.admit` still take the choice as an explicit parameter and refuse without it. **Enter
+in the title does not start the ticket**: a browser clicks a form's first submit button for it, and
+the first would be *Start now*, so the ticket form begins with a hidden submit button that sends no
+choice, which is refused with the sentence that says to use the button. A ticket
 admitted on hold has run nothing and asked nothing until it is released. A release
 started from the project page's release block starts at once.
 
@@ -2900,7 +2937,10 @@ click makes one token.
 
 **Issued** (`9d`) is the one moment the secret exists on screen — never in a flash, a toast or the
 URL: an amber band, because the person has to act on it; each value with a Copy; the `curl` line
-only when the API is not off, and the clone URL only when git is not nothing. It takes the form's
+only when the API is not off, **the connect command beside it** (ticket 79: `claude mcp add
+--transport http forge <base>/mcp --header "Authorization: Bearer <secret>"`, with a Copy, drawn
+exactly when the `curl` line is and so only for a token with API access), and the clone URL only
+when git is not nothing. It takes the form's
 place — the whole screen on a phone, the form's column on a desktop — and the dock's button, *I
 have copied it*, which says what it confirms, is the only way out.
 

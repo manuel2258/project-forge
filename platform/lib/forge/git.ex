@@ -722,6 +722,25 @@ defmodule Forge.Git do
     end
   end
 
+  @doc """
+  Whether some ref of the repository contains the commit `sha` (`git for-each-ref --contains`):
+  that the repository *holds* it as part of a branch, a tag or one of forge's own refs, and not
+  merely that an object of that name sits unreferenced in it. False for an object that is not a
+  commit or is not there. The asking is the caller's to make after it has checked the shape of
+  `sha`; a leading dash is refused here regardless (`{:data, _}`).
+  """
+  @spec reachable?(repo(), String.t()) :: boolean()
+  def reachable?(repo, sha) do
+    case run(
+           repo,
+           ["for-each-ref", "--count=1", "--format=%(refname)", "--contains", {:data, sha}],
+           stderr: :separate
+         ) do
+      {:ok, out} -> String.trim(out) != ""
+      {:error, _reason} -> false
+    end
+  end
+
   @doc "Whether `ancestor` is reachable from `descendant`."
   @spec ancestor?(repo(), String.t(), String.t()) :: boolean()
   def ancestor?(repo, ancestor, descendant),

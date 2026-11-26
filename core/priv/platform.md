@@ -204,6 +204,14 @@ a ticket's branch up to date between jobs, and the platform then writes a merge 
 (authored by the platform) or moves the branch forward. The manifest's *Base* line names the
 ticket's base: `git diff <base>..HEAD` is the ticket's own change, whatever the branch has taken in.
 
+**The ticket may have been worked on outside forge.** A person, or an agent on their own machine,
+can take a ticket over, push to its branch and hand it back to a step of their choosing; what was
+pushed is then the ticket's recorded change. Every job placed after a hand-back is told in its
+manifest, under *Worked on outside forge*: who, when, the commits pushed meanwhile and the note, if
+there was one. Read it before you read the code as the earlier jobs left it — some of what you find
+was not written by a job. A ticket may also have been opened from another ticket's unmerged work; its
+*Base* is then where that work meets the default branch.
+
 **Nothing pushes to the default branch except the platform's own merge.** A credential is scoped
 to exactly one ref, and the repository refuses everything else. Work reaches the default branch by
 a person approving it and the platform merging it — never by a push from here.

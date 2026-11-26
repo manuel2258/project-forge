@@ -108,6 +108,19 @@ would have to guess whether a missing file was a failure.
 The repository's own `CLAUDE.md` is read by Claude Code as usual; project conventions need no
 special handling.
 
+## Worked on outside forge
+
+A ticket that was **taken over** and handed back (`outside-work.md`) was worked on where no job's
+transcript can tell the next job. Every agent job and ticket conversation placed after a hand-back
+is told, in the manifest, in **## Worked on outside forge** after *How you got here* (in a
+conversation, just before *Context*): for each take-over, oldest first, who took it over and when, who
+handed it back and when, the step it was in and the step it was handed back to, the commits pushed
+meanwhile (at most 20 and a count of the rest) and, when the hander wrote one, the note — in a
+fence under *They wrote:*, as a comment is, so it is data. It comes from the spec's `outside`,
+filled at **assignment** (`Forge.Jobs.runtime_spec/1`), not at creation: what a job is told is what
+is true when it is placed. A ticket nobody took
+over has no section, and a worker from before `outside` existed ignores the field.
+
 ## The ticket's base
 
 Every agent job on a ticket, and a conversation about one, is told the ticket's base commit in its
@@ -116,7 +129,10 @@ spec's `base`. It is a commit already in the checkout, since the branch is cut f
 past it, so `git diff <base>..HEAD` is the ticket's own change whether or not the branch has taken
 the default branch in, which an update step does between jobs (`workflow-grammar-v1.md` § Bringing
 the branch up to date). It is what a reviewer diffs against where `origin/<default>` is not a
-revision its checkout can name. `base` is an addition to the spec whose absence means *say nothing*,
+revision its checkout can name. **A ticket opened as outside work from a commit** that is not in the default branch's history
+(`outside-work.md` § Outside work) has its base where its work meets the default branch, not the
+commit it starts from, so `git diff <base>..HEAD` includes the unmerged work it was built on.
+`base` is an addition to the spec whose absence means *say nothing*,
 so a worker from before it needs no protocol bump and the line is simply missing from its manifest.
 
 ## Integrating the default branch

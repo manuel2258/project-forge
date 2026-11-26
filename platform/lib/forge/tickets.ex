@@ -25,12 +25,15 @@ defmodule Forge.Tickets do
   """
   @spec admit(Project.t(), map(), Events.actor()) :: {:ok, Ticket.t()} | {:error, term()}
   def admit(%Project{} = project, attrs, actor \\ :system) do
-    with {:ok, prepared} <- prepare_admission(project, Map.get(attrs, :ticket_type)) do
+    with {:ok, prepared} <- prepare_for(project, attrs) do
       Multi.new()
       |> put_admit(prepared, project, attrs, actor)
       |> Repo.transaction()
       |> case do
-        {:ok, %{ticket: ticket}} ->
+        # A ticket admitted as outside work was updated with its take-over after it was inserted,
+        # and the one returned is the one that says so.
+        {:ok, changes} ->
+          ticket = Map.get(changes, :taken, changes.ticket)
           Events.notify(ticket.id)
           {:ok, ticket}
 
@@ -40,6 +43,70 @@ defmodule Forge.Tickets do
         {:error, step, reason, _changes} ->
           {:error, {step, reason}}
       end
+    end
+  end
+
+  # An outside admission names its commit; every other reads the default branch's head.
+  defp prepare_for(project, %{outside_work: true} = attrs),
+    do: prepare_outside(project, Map.get(attrs, :ticket_type), Map.get(attrs, :start_commit))
+
+  defp prepare_for(project, attrs), do: prepare_admission(project, Map.get(attrs, :ticket_type))
+
+  # A full commit id, sha-1 or sha-256, in lower-case hex and nothing else. Not a name, which a
+  # branch of that spelling could shadow; not an abbreviation; and nothing with a dash in front.
+  @start_commit ~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/
+
+  @doc """
+  What `put_admit/5` needs to admit a ticket **as outside work from `start`**
+  (`docs/design/outside-work.md` § Outside work): `prepare_admission/3` read at that commit, and
+  the base the change is measured from, which is where the start meets the default branch.
+
+  `start` is checked in this order, and the first failure is the answer: it is a full commit id
+  (`@start_commit`); it resolves to a commit in the project's repository (`Forge.Git.resolve/2`,
+  the same lookup that cuts the branch below); some ref contains it (`Forge.Git.reachable?/2`); it
+  shares history with the default branch. `start` nil is the default branch's head, which is an
+  ordinary admission with the name taken over on it. Refused as `{:bad_start_commit, reason}` with
+  `:not_a_commit_id`, `:unknown` or `:no_common_history`, and a workflow that is missing,
+  unparsed or typeless at it as any admission refuses.
+  """
+  @spec prepare_outside(Project.t(), term(), term()) :: {:ok, map()} | {:error, term()}
+  def prepare_outside(%Project{} = project, ticket_type, nil),
+    do: prepare_admission(project, ticket_type)
+
+  def prepare_outside(%Project{} = project, ticket_type, start) do
+    repo = Projects.repo_path(project)
+
+    with {:ok, sha} <- start_commit(repo, start),
+         {:ok, prepared} <- prepare_admission(project, ticket_type, at: sha),
+         {:ok, base} <- meeting(repo, project, sha) do
+      {:ok, Map.put(prepared, :base_commit, base)}
+    end
+  end
+
+  defp start_commit(repo, start) when is_binary(start) do
+    if Regex.match?(@start_commit, start) do
+      with {:ok, sha} <- Git.resolve(repo, start),
+           true <- Git.reachable?(repo, sha) do
+        {:ok, sha}
+      else
+        _unknown -> {:error, {:bad_start_commit, :unknown}}
+      end
+    else
+      {:error, {:bad_start_commit, :not_a_commit_id}}
+    end
+  end
+
+  defp start_commit(_repo, _start), do: {:error, {:bad_start_commit, :not_a_commit_id}}
+
+  # Where the start meets the default branch: the commit the change is measured from, so that
+  # work under the start that the default branch has not taken in is part of it.
+  defp meeting(repo, project, start) do
+    with {:ok, head} <- Git.resolve(repo, project.default_branch),
+         {:ok, base} <- Git.merge_base(repo, head, start) do
+      {:ok, base}
+    else
+      {:error, {:unknown_ref, _ref}} = error -> error
+      {:error, _no_base} -> {:error, {:bad_start_commit, :no_common_history}}
     end
   end
 
@@ -54,19 +121,25 @@ defmodule Forge.Tickets do
   transaction so `admit/3`'s error shape is unchanged: a workflow that does not parse still
   comes back as `{:error, [%ForgeCore.Error{}]}` rather than as a failed Multi step.
   """
-  @spec prepare_admission(Project.t(), term()) :: {:ok, map()} | {:error, term()}
-  def prepare_admission(project, ticket_type \\ nil)
+  @spec prepare_admission(Project.t(), term(), keyword()) :: {:ok, map()} | {:error, term()}
+  def prepare_admission(project, ticket_type \\ nil, opts \\ [])
 
   # A form sends an empty string for a select left alone; that is no type named, not a type
   # called "". Anything but a string is not a type's name at all — refused here, once, rather
   # than reaching a sentence that interpolates it.
-  def prepare_admission(%Project{} = project, ""), do: prepare_admission(project, nil)
+  def prepare_admission(%Project{} = project, "", opts),
+    do: prepare_admission(project, nil, opts)
 
-  def prepare_admission(%Project{} = project, ticket_type)
+  def prepare_admission(%Project{} = project, ticket_type, opts)
       when is_nil(ticket_type) or is_binary(ticket_type),
-      do: prepare(project, &TicketTypes.for_admission(&1, ticket_type, &2))
+      do:
+        prepare(
+          project,
+          &TicketTypes.for_admission(&1, ticket_type, &2),
+          Keyword.get(opts, :at)
+        )
 
-  def prepare_admission(%Project{}, _ticket_type),
+  def prepare_admission(%Project{}, _ticket_type, _opts),
     do: {:error, {:invalid_ticket_type, :not_a_name}}
 
   @doc """
@@ -346,14 +419,19 @@ defmodule Forge.Tickets do
             number: number,
             title: Map.fetch!(attrs, :title),
             body: Map.get(attrs, :body, ""),
-            base_commit: base,
+            base_commit: Map.get(prepared, :base_commit, base),
             branch: "ticket/#{number}",
             workflow: yaml_map,
             workflow_commit: base,
             ticket_type: prepared.ticket_type,
             state: workflow.initial
           },
-          place_attrs(project, milestone, attrs[:on_hold] == true, workflow.initial)
+          place_attrs(
+            project,
+            milestone,
+            attrs[:on_hold] == true or attrs[:outside_work] == true,
+            workflow.initial
+          )
         )
       )
     end)
@@ -364,12 +442,14 @@ defmodule Forge.Tickets do
           %{
             "number" => ticket.number,
             "state" => workflow.initial,
-            "base_commit" => base,
+            "base_commit" => ticket.base_commit,
             "ticket_type" => ticket.ticket_type
           }
           |> put_schedule(attrs[:schedule])
+          |> put_outside(attrs, base)
       }
     end)
+    |> put_admit_takeover(attrs, actor)
     |> Multi.merge(fn %{ticket: ticket} ->
       body = "# #{ticket.title}\n\n#{ticket.body}"
       name = Workflow.ticket_artifact()
@@ -405,6 +485,56 @@ defmodule Forge.Tickets do
         else: Multi.new()
     end)
   end
+
+  # An outside admission says so, and the commit it started from — which is not `base_commit` when
+  # the start is not in the default branch's history.
+  defp put_outside(payload, %{outside_work: true}, start),
+    do: Map.merge(payload, %{"outside" => true, "start_commit" => start})
+
+  defp put_outside(payload, _attrs, _start), do: payload
+
+  # What makes a held ticket a taken-over one: the row naming who, through which door and where
+  # the branch will be, then the ticket pointing at it, then the event. Last of the three because
+  # the row needs the ticket's id and the ticket the row's. The branch is cut after these, and the
+  # take-over's `head` is the commit it will be cut at.
+  defp put_admit_takeover(multi, %{outside_work: true} = attrs, actor) do
+    multi
+    |> Multi.insert(:takeover, fn %{ticket: ticket} ->
+      Forge.Tickets.Takeover.take_changeset(
+        %Forge.Tickets.Takeover{},
+        Map.merge(Forge.Actor.columns(actor), %{
+          ticket_id: ticket.id,
+          via: admission_via(attrs[:via], actor),
+          state: ticket.state,
+          head: ticket.workflow_commit,
+          taken_at: ticket.held_at
+        })
+      )
+    end)
+    |> Multi.update(:taken, fn %{ticket: ticket, takeover: takeover} ->
+      Ticket.takeover_changeset(ticket, %{takeover_id: takeover.id})
+    end)
+    |> Events.log(:taken_over, "ticket.taken_over", actor, fn %{ticket: ticket, takeover: row} ->
+      %{
+        ticket_id: ticket.id,
+        payload: %{
+          "state" => ticket.state,
+          "via" => row.via,
+          "running" => nil,
+          "jobs" => [],
+          "head" => row.head
+        }
+      }
+    end)
+  end
+
+  defp put_admit_takeover(multi, _attrs, _actor), do: multi
+
+  # The door's name; one that says nothing is a page for a person and the API for a token.
+  defp admission_via(via, _actor) when via in [:page, :api, :mcp], do: Atom.to_string(via)
+  defp admission_via(via, _actor) when via in ["page", "api", "mcp"], do: via
+  defp admission_via(_unsaid, {:api, _id, _name}), do: "api"
+  defp admission_via(_unsaid, _actor), do: "page"
 
   # A ticket a schedule admitted says which, and the time it was due (`docs/design/schedules.md`).
   defp put_schedule(payload, nil), do: payload
@@ -594,7 +724,7 @@ defmodule Forge.Tickets do
   def project_of(%Ticket{project_id: id}), do: Projects.get!(id)
 
   @doc """
-  Whether anything has ever run for the ticket: a workflow job or a command handed to a machine
+  Whether anything has ever run for the ticket, or it was ever taken over: a workflow job or a command handed to a machine
   (`started_at` is set), or a chat step's conversation opened (it has a `state`). A derived read
   and not a column, so there is no second source of truth to keep in step.
 
@@ -610,15 +740,28 @@ defmodule Forge.Tickets do
   def started_ids([]), do: []
 
   def started_ids(ticket_ids) do
-    Repo.all(
-      from j in Job,
-        where: j.ticket_id in ^ticket_ids,
-        where:
-          (j.kind in [:workflow, :command] and not is_nil(j.started_at)) or
-            (j.kind == :chat and not is_nil(j.state)),
-        distinct: true,
-        select: j.ticket_id
-    )
+    ran =
+      Repo.all(
+        from j in Job,
+          where: j.ticket_id in ^ticket_ids,
+          where:
+            (j.kind in [:workflow, :command] and not is_nil(j.started_at)) or
+              (j.kind == :chat and not is_nil(j.state)),
+          distinct: true,
+          select: j.ticket_id
+      )
+
+    # **A take-over is a start**: work was begun outside, so a release must not re-pin the ticket
+    # at the default branch's head and move its branch (`docs/design/outside-work.md`).
+    taken =
+      Repo.all(
+        from k in Forge.Tickets.Takeover,
+          where: k.ticket_id in ^ticket_ids,
+          distinct: true,
+          select: k.ticket_id
+      )
+
+    Enum.uniq(ran ++ taken)
   end
 
   @doc """

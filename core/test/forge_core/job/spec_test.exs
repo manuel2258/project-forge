@@ -31,6 +31,16 @@ defmodule ForgeCore.Job.SpecTest do
     assert spec().attachments == nil
   end
 
+  test "the work done outside forge round-trips, and a spec without it has none" do
+    outside = [%{"by" => "ada", "note" => "fixed the build", "commits" => ["abc123"]}]
+
+    assert {:ok, %Spec{outside: ^outside}} =
+             %{spec() | outside: outside} |> Spec.to_json() |> Spec.from_json()
+
+    assert Spec.from_map(%{"job_id" => "j", "branch" => "b"}).outside == []
+    assert spec().outside == []
+  end
+
   test "knows its groups of files, an agent's and a command's" do
     spec = %{spec() | produces: ["plan.md", "shots/*", "changeset", "pkg/*"]}
     assert Spec.group_outputs(spec) == ["shots", "pkg"]

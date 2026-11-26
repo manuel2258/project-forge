@@ -586,8 +586,9 @@ defmodule ForgeWeb.ProjectLive do
     end
   end
 
-  # Admitting is one of two buttons, `admit` = `start` or `hold`; declining is `decision`. Neither
-  # admission is the default: a submit that names neither (Enter in a box) does nothing.
+  # Admitting is `admit` = `start` or `hold`, the face of the split button and its one menu item
+  # (`docs/design/ui.md` § Creating things); declining is `decision`. A submit that names neither
+  # (Enter in a box) does nothing.
   def handle_event("decide_proposal", %{"version_id" => id, "admit" => how} = params, socket)
       when how in ["start", "hold"] do
     decide_proposal(socket, id, params, fn user ->

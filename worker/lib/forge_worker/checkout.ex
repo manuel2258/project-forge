@@ -87,6 +87,9 @@ defmodule ForgeWorker.Checkout do
   `.gitignore` would otherwise be deleted by the one command meant to protect the run from a
   predecessor it never had.
 
+  **It also takes the run's lease** (`lease/3`): the commit it fetched, kept in a ref of the
+  checkout. A resume that already has one keeps it; a clone and every other start take the fetch.
+
   `as` runs git in a checkout that is already there, and the checkout must already be the job's
   user's. A clone is the worker's own — into an empty directory nothing of a job has touched,
   whether the caller made it or git does — and the caller gives it to the user afterwards.
@@ -129,6 +132,10 @@ defmodule ForgeWorker.Checkout do
   @doc """
   Stages everything the run did as one change on top of `base` and commits it, saying whether
   there was anything to commit.
+
+  **`base` is the run's lease** (`lease/3`), the commit it fetched or last pushed, and not
+  `origin/<branch>`, which an agent's own `git fetch` moves: staged onto that, the squash would
+  revert whatever the fetch brought.
 
   The reset is what makes this a squash rather than an append, and it is not optional: an agent
   that used git itself — which Claude Code does — leaves its work in commits, so `git add -A`
@@ -407,23 +414,128 @@ defmodule ForgeWorker.Checkout do
   end
 
   @doc """
-  Pushes the checkout's current commit onto its branch. Force, because a job may squash.
+  The sha this run holds the branch at: what it fetched and reset to, or its own last successful
+  push (`push/1`) — the commit `squash/5` stages onto, and what a push expects the platform's
+  branch still to be (`docs/design/worker-channel.md` § Protocol 17).
+
+  **Kept in a ref of the checkout's own**, `refs/forge/lease/<branch>`, so that a resume on the same
+  worktree has the one it started with, and a fresh clone has the one it fetched. It is not
+  `origin/<branch>`, which the agent's own `git fetch` moves: a squash reset onto that would
+  silently revert whatever the fetch brought. A checkout from before the ref existed falls back to
+  `origin/<branch>`.
+  """
+  @spec lease(String.t(), String.t(), ForgeWorker.Slice.as()) ::
+          {:ok, String.t()} | {:error, term()}
+  def lease(dir, branch, as) do
+    case held(dir, branch, as) do
+      {:ok, sha} -> {:ok, sha}
+      :none -> rev(dir, "refs/remotes/origin/" <> branch, as)
+    end
+  end
+
+  defp held(dir, branch, as) do
+    args = ["rev-parse", "--verify", "--quiet", lease_ref(branch) <> "^{commit}"]
+
+    case git(dir, args, as: as) do
+      {:ok, out} -> {:ok, String.trim(out)}
+      {:error, _none} -> :none
+    end
+  end
+
+  defp lease_ref(branch), do: "refs/forge/lease/" <> branch
+
+  defp set_lease(dir, branch, rev, opts) do
+    with {:ok, sha} <- rev(dir, rev, Keyword.fetch!(opts, :as)),
+         {:ok, _out} <- git(dir, ["update-ref", lease_ref(branch), sha], opts),
+         do: :ok
+  end
+
+  @doc """
+  Pushes the checkout's current commit onto its branch, **if the branch is still where this run
+  holds it** (`lease/3`): `--force-with-lease` with the lease named, so a job may squash and still
+  never overwrite a commit somebody else put there.
+
+  A push that went through moves the lease to what was pushed, and returns `:ok`. One the platform
+  refused, whose branch is no longer at the lease (`git ls-remote` says so — a refusal for any
+  other reason is returned as the error it is), writes nothing to the branch: the run's commit is
+  pushed to `refs/forge/kept/<job_id>` instead, where the platform holds it, and
+  `{:moved, %{"lease" => sha, "kept" => sha, "remote" => sha | nil}}` says where everything is —
+  `remote` being the branch as it stands now.
 
   **The LFS objects go first**, by `git lfs push origin HEAD` — not by the `pre-push` hook, which an
   agent may have removed — so the platform's guard finds every object a commit names
-  (`docs/design/git-hosting.md` § `pre-receive`).
+  (`docs/design/git-hosting.md` § `pre-receive`). `opts` takes `:job_id`, which names the kept ref.
   """
-  @spec push(opts()) :: :ok | {:error, term()}
+  @spec push(opts()) :: :ok | {:moved, %{String.t() => String.t() | nil}} | {:error, term()}
   def push(opts) do
     dir = Keyword.fetch!(opts, :dir)
     branch = Keyword.fetch!(opts, :branch)
+    as = Keyword.fetch!(opts, :as)
+    target = "HEAD:refs/heads/" <> branch
 
-    with {:ok, _out} <- git(dir, ["lfs", "push", "origin", "HEAD"], opts),
-         {:ok, _out} <-
-           git(dir, ["push", "--force", "origin", "HEAD:refs/heads/" <> branch], opts) do
-      :ok
+    with {:ok, lease} <- lease(dir, branch, as),
+         {:ok, head} <- head(dir, as),
+         {:ok, _out} <- git(dir, ["lfs", "push", "origin", "HEAD"], opts) do
+      args = ["push", "--porcelain", "--force-with-lease=refs/heads/#{branch}:#{lease}"]
+
+      case git(dir, args ++ ["origin", target], opts) do
+        {:ok, _out} -> set_lease(dir, branch, head, opts)
+        {:error, reason} -> refused(dir, branch, {lease, head}, reason, opts)
+      end
     end
   end
+
+  # Whether the platform's branch has left the lease, which `--porcelain` says as `[rejected]` and
+  # `ls-remote` confirms: a rejection for another reason (a hook, a token) leaves the branch where
+  # it was, and that error is returned as it came. `[rejected]` is git's own word in porcelain
+  # output, not a translated sentence.
+  defp refused(dir, branch, {lease, head}, {_code, out} = reason, opts) when is_binary(out) do
+    with true <- String.contains?(out, "[rejected]"),
+         {:ok, remote} <- remote_head(dir, branch, opts),
+         true <- remote != lease do
+      keep(dir, {lease, head, remote}, opts)
+    else
+      _not_moved -> {:error, reason}
+    end
+  end
+
+  defp refused(_dir, _branch, _shas, reason, _opts), do: {:error, reason}
+
+  # The line for exactly this ref: git folds its own chatter into the same output, and a bare
+  # `ls-remote` pattern matches by suffix.
+  defp remote_head(dir, branch, opts) do
+    ref = "refs/heads/" <> branch
+
+    with {:ok, out} <- git(dir, ["ls-remote", "origin", ref], opts) do
+      {:ok,
+       out
+       |> String.split("\n", trim: true)
+       |> Enum.find_value(fn line ->
+         case String.split(line, "\t") do
+           [sha, ^ref] -> sha
+           _other -> nil
+         end
+       end)}
+    end
+  end
+
+  # The job's work, under a name of its own and never the branch's. Forced, because a resumed run
+  # that moved again keeps what it has now over what it kept before. The id is a name in a refspec,
+  # so it is matched rather than trusted.
+  defp keep(dir, {lease, head, remote}, opts) do
+    job_id = Keyword.get(opts, :job_id)
+
+    if is_binary(job_id) and Regex.match?(~r/\A[0-9A-Za-z-]+\z/, job_id) do
+      with {:ok, _out} <-
+             git(dir, ["push", "--porcelain", "--force", "origin", kept_target(job_id)], opts) do
+        {:moved, %{"lease" => lease, "kept" => head, "remote" => remote}}
+      end
+    else
+      {:error, {:not_a_job, job_id}}
+    end
+  end
+
+  defp kept_target(job_id), do: "HEAD:refs/forge/kept/" <> job_id
 
   @doc """
   Puts the checkout on `sha`, detached, with the working tree reset to it and the untracked files
@@ -469,7 +581,8 @@ defmodule ForgeWorker.Checkout do
 
     with {:ok, _out} <- git(Path.dirname(dir), args, opts),
          :ok <- identity(dir, opts),
-         :ok <- configure(dir, opts) do
+         :ok <- configure(dir, opts),
+         :ok <- set_lease(dir, branch, "HEAD", opts) do
       fetch_default(dir, opts)
     end
   end
@@ -480,7 +593,8 @@ defmodule ForgeWorker.Checkout do
     with {:ok, _out} <- git(dir, ["fetch", "--quiet", "origin", branch], opts),
          :ok <- identity(dir, opts),
          :ok <- configure(dir, opts),
-         :ok <- reset_unless_resuming(dir, branch, opts) do
+         :ok <- reset_unless_resuming(dir, branch, opts),
+         :ok <- lease_fetched(dir, branch, opts) do
       # Last, because it writes FETCH_HEAD too, and the reset is to the branch's.
       fetch_default(dir, opts)
     end
@@ -490,6 +604,17 @@ defmodule ForgeWorker.Checkout do
     if Keyword.get(opts, :resume, false),
       do: :ok,
       else: reset(dir, branch, Keyword.get(opts, :clean, true), opts)
+  end
+
+  # **What the run starts from, kept**: a resume that has a lease of its own keeps it — it is the
+  # commit that run's own push left, or fetched, and a branch that has moved since is exactly what
+  # the push must notice. Anything else takes what was just fetched, which is also what the reset
+  # put the tree on. Before `fetch_default/2`, which overwrites FETCH_HEAD.
+  defp lease_fetched(dir, branch, opts) do
+    if Keyword.get(opts, :resume, false) and
+         match?({:ok, _sha}, held(dir, branch, Keyword.fetch!(opts, :as))),
+       do: :ok,
+       else: set_lease(dir, branch, "FETCH_HEAD", opts)
   end
 
   # `-B` rather than a bare reset: a snapshot of a seed is on whatever commit the seed was

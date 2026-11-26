@@ -37,7 +37,8 @@ defmodule ForgeWeb.TicketViews do
            chat.transition_refused merge_queue.entered merge_queue.returned merge_queue.taken_out
            merge_queue.left ticket.merged ticket.renamed approval.approved approval.rejected
            ticket.cancelled ticket.restored ticket.repinned ticket.held ticket.released
-           ticket.stopped ticket.refreshed transition.held ticket.retitled
+           ticket.stopped ticket.taken_over ticket.handed_back ticket.work_kept
+           ticket.refreshed transition.held ticket.retitled
            ticket.milestone_set ticket.moved ticket.branch_updated ticket.base_moved
            ticket.retried job.extended ticket.cap_raised ticket.admitted attachment.added
            attachment.withdrawn ticket.warm_cleared page.published page.data_changed
@@ -982,6 +983,15 @@ defmodule ForgeWeb.TicketViews do
           else: "Stuck, and waiting for you to choose."}
       </p>
 
+      <ForgeWeb.Components.TakeoverBand.moved_branch
+        :if={@ticket.status == :stuck and @moved}
+        moved={@moved}
+        ticket={@ticket}
+        refusal={@refusal}
+        me={@current_scope.user.id}
+        addresses={@addresses}
+      />
+
       <%!-- A chat step: this step is a conversation, and Accept is how it ends. --%>
       <div :if={@step} id="step-card" class="flex flex-col gap-3">
         <p class="min-w-0 break-words text-sm">
@@ -1557,6 +1567,11 @@ defmodule ForgeWeb.TicketViews do
           {ways_label(@ways)}
         </.link>
         <.lifecycle ticket={@ticket} />
+        <ForgeWeb.Components.TakeoverBand.take_over
+          ticket={@ticket}
+          running={@running}
+          refusal={@refusal}
+        />
       </div>
       <%!-- What the details' own buttons were refused, in the panel they were pressed in. --%>
       <Actions.refused

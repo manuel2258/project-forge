@@ -298,6 +298,82 @@ defmodule ForgeWeb.UI.Forms do
   end
 
   @doc """
+  One submit button with a menu beside it (`docs/design/ui.md` § Creating things): the **face** is
+  the choice that is made when the button is pressed — *Start now* — and the menu holds the others.
+
+  `face` is `%{label, name, value}`: a submit button sending `name=value`. Each of `items` is
+  `%{id, label, name, value}` and, with `click` set, `%{id, label, value, click}`: without `click`
+  it is a submit button of its own, so that choosing it admits at once (the proposal reader, the
+  bulk bar); with `click` it is a plain button that sends that event with `phx-value-how`, which
+  changes what the face says and sends (the ticket form, whose *Outside work* adds a field). The
+  menu is a native `<details>`, so it needs no script, and a patch closes it, which is what
+  choosing wants. `up` opens it above the button, for one that sits at the foot of the screen.
+  """
+  attr :id, :string, required: true
+  attr :face, :map, required: true
+  attr :items, :list, required: true
+  attr :up, :boolean, default: false
+  attr :size, :string, default: "xl"
+  attr :disabled, :boolean, default: false
+  attr :busy, :string, default: nil, doc: "phx-disable-with on the face and the submit items"
+
+  def split_submit(assigns) do
+    ~H"""
+    <div id={@id} class={["ui-split", @up && "ui-split--up"]}>
+      <button
+        id={"#{@id}-face"}
+        type="submit"
+        name={@face.name}
+        value={@face.value}
+        disabled={@disabled}
+        phx-disable-with={@busy}
+        class={["ui-btn", "ui-btn--outline", "ui-btn--#{@size}", "ui-split-face"]}
+      >
+        <span>{@face.label}</span>
+      </button>
+      <details class="ui-split-more">
+        <summary
+          id={"#{@id}-more"}
+          class={["ui-btn", "ui-btn--outline", "ui-btn--#{@size}", "ui-split-toggle"]}
+          aria-label="Other ways to admit"
+          aria-disabled={to_string(@disabled)}
+        >
+          <span aria-hidden="true">▾</span>
+        </summary>
+        <div class="ui-split-menu" role="menu">
+          <%= for item <- @items do %>
+            <button
+              :if={item[:click]}
+              id={item.id}
+              type="button"
+              role="menuitem"
+              class="ui-split-item"
+              phx-click={item.click}
+              phx-value-how={item.value}
+            >
+              {item.label}
+            </button>
+            <button
+              :if={!item[:click]}
+              id={item.id}
+              type="submit"
+              role="menuitem"
+              name={item.name}
+              value={item.value}
+              disabled={@disabled}
+              phx-disable-with={@busy}
+              class="ui-split-item"
+            >
+              {item.label}
+            </button>
+          <% end %>
+        </div>
+      </details>
+    </div>
+    """
+  end
+
+  @doc """
   The media query under which Enter ends a line rather than sending: a coarse pointer (a phone)
   for `:send`, always for `:newline`. Read by the composer's hook from `data-newline-on`.
   """

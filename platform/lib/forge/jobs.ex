@@ -83,6 +83,9 @@ defmodule Forge.Jobs do
   # `FORGE_PAGES_URL`, which a worker from before drops without a word, and a ticket can gain a page
   # after a job is scheduled (`docs/design/worker-channel.md` § Protocol 16).
   @pages_protocol 16
+  # A job pushes with a lease and reports a branch that moved under it (`docs/design/worker-channel.md`
+  # § Protocol 17): an older worker would force-push over what someone else pushed.
+  @lease_protocol 17
 
   # How many of the merges that landed on the default branch since a ticket's base an integrating
   # job is told about by name; the rest are counted (`docs/design/job-prompt.md` § Integrating the
@@ -1009,6 +1012,7 @@ defmodule Forge.Jobs do
       lfs: @lfs_protocol,
       chat: chat_protocol(job),
       pages: pages_protocol(job),
+      lease: lease_protocol(job),
       jump: jump_protocol(job),
       extension: extension_protocol(job),
       usage: @usage_protocol
@@ -1053,6 +1057,12 @@ defmodule Forge.Jobs do
     do: @attachments_protocol
 
   defp attachments_protocol(%Job{}), do: 0
+
+  # Every workflow job and chat pushes with a lease and reports a branch that moved under it: an
+  # older worker would force-push over what someone else pushed (`docs/design/worker-channel.md`
+  # § Protocol 17).
+  defp lease_protocol(%Job{kind: kind}) when kind in [:workflow, :chat], do: @lease_protocol
+  defp lease_protocol(%Job{}), do: 0
 
   # Every workflow job and chat, as attachments: a ticket can gain a page after the job is
   # scheduled, and a worker that dropped it would run on without a word. A command stays where it
@@ -1550,6 +1560,7 @@ defmodule Forge.Jobs do
       ticket: ticket && %{number: ticket.number, title: ticket.title},
       commit: ticket && ticket.base_commit,
       base: ticket && ticket.base_commit,
+      outside: if(ticket, do: outside_of(ticket.id), else: []),
       attachments: Attachments.manifest(Conversations.pool(job), files),
       pages: Pages.manifest(Pages.scope_of_job(job)),
       prompt: opening.prompt,
@@ -1602,6 +1613,7 @@ defmodule Forge.Jobs do
         attachments: Attachments.manifest({:ticket, ticket_id}, files),
         pages: Pages.manifest({:ticket, ticket_id}),
         base: ticket.base_commit,
+        outside: outside_of(ticket_id),
         integration: integration_now(spec.integration, spec.entered, ticket)
     }
 
@@ -1618,6 +1630,51 @@ defmodule Forge.Jobs do
 
         %{spec | inputs: spec.inputs ++ [answers]}
     end
+  end
+
+  # **What the ticket was told about work done outside forge** (`docs/design/outside-work.md` § What
+  # later jobs are told): every take-over of the ticket that was handed back, oldest first, as the
+  # string-keyed maps the manifest draws. Read at assignment, so a job made before a take-over and
+  # placed after its hand-back is told, and one still open is not in it — the ticket is held, and
+  # nothing is placed. `by` and `back_by` are event actors with the person's email or the token's
+  # name as `name`, so the manifest need not look anyone up.
+  @doc false
+  @spec outside_of(String.t()) :: [map()]
+  def outside_of(ticket_id) do
+    from(t in Forge.Tickets.Takeover,
+      where: t.ticket_id == ^ticket_id and not is_nil(t.handed_back_at),
+      order_by: [asc: fragment("seq")],
+      preload: [:user, :back_user, :token, :back_token]
+    )
+    |> Repo.all()
+    |> Enum.map(&outside_entry/1)
+  end
+
+  defp outside_entry(%Forge.Tickets.Takeover{} = takeover) do
+    commits = takeover.commits || %{}
+
+    %{
+      "by" => named(Forge.Tickets.Takeover.taker(takeover), takeover.user),
+      "at" => DateTime.to_iso8601(takeover.taken_at),
+      "via" => takeover.via,
+      "state" => takeover.state,
+      "back_by" => named(Forge.Tickets.Takeover.returner(takeover), takeover.back_user),
+      "back_at" => DateTime.to_iso8601(takeover.handed_back_at),
+      "back_via" => takeover.back_via,
+      "to" => takeover.to_state,
+      "commits" => commits["list"] || [],
+      "more" => commits["more"] || 0,
+      "note" => takeover.note
+    }
+  end
+
+  defp named(nil, _user),
+    do: %{"kind" => "unknown", "id" => nil, "name" => "someone since removed"}
+
+  defp named(actor, user) do
+    actor
+    |> Forge.Events.encode_actor()
+    |> Map.put_new("name", user && user.email)
   end
 
   # What a ticket conversation may ask the engine for (`docs/design/conversations.md` § Taking a
@@ -2383,6 +2440,11 @@ defmodule Forge.Jobs do
   # mid-run): it ended in error, nobody killed it, and the last window report it saw blocks —
   # read by `Forge.Credentials`' rule for every other report. The report is the result's own and
   # not the timeline's, which is unacked.
+  # **Never one whose branch moved under it**: that run pushed nothing and kept its work at
+  # `refs/forge/kept/<job>`, and a requeue would resume the session and push over what arrived — the
+  # stop is how a person learns where the work is (`docs/design/outside-work.md` § A job's push).
+  defp stopped_by_limit(%Result{branch_moved: %{}}), do: nil
+
   defp stopped_by_limit(%Result{status: :finished, killed: nil, outcome: :error} = result),
     do: Credentials.blocks_until(result.harness["rate_limit"], DateTime.utc_now())
 
@@ -2710,6 +2772,82 @@ defmodule Forge.Jobs do
     ) || 0
   end
 
+  defp arrived_commits(repo, lease, head) when is_binary(lease) and is_binary(head) do
+    case Git.log(repo, lease, head) do
+      {:ok, commits} ->
+        commits |> Enum.take(20) |> Enum.map(&%{"sha" => &1.sha, "subject" => &1.subject})
+
+      {:error, _unreadable} ->
+        []
+    end
+  end
+
+  defp arrived_commits(_repo, _lease, _head), do: []
+
+  # The commit the run fetched and pushed from, which is what *arrived* is counted from. A result
+  # carries it; a pause for an update (`kept_result/2`) carries only the kept commit, which
+  # descends from it, so where the kept commit and the branch last met is the same commit — the
+  # run's own work is on one side and what arrived on the other.
+  defp lease_of(_repo, %{"lease" => lease}, _head) when is_binary(lease), do: lease
+
+  defp lease_of(repo, %{"kept" => kept}, head) when is_binary(kept) and is_binary(head) do
+    case Git.merge_base(repo, kept, head) do
+      {:ok, base} -> base
+      {:error, _unreadable} -> nil
+    end
+  end
+
+  defp lease_of(_repo, _moved, _head), do: nil
+
+  # Who pushed to the ticket's branch while the run went: the distinct actors of its `branch.pushed`
+  # events since the job started, less the job's own (`docs/design/outside-work.md` § A job's push).
+  # Another job's push on the same ticket is listed, as a `job` actor.
+  defp pushers(%Ticket{id: ticket_id}, %Job{id: job_id} = job) do
+    since = job.started_at || job.inserted_at
+    own = %{"kind" => "job", "id" => job_id}
+
+    from(e in Forge.Events.Event,
+      where: e.ticket_id == ^ticket_id and e.type == "branch.pushed" and e.inserted_at >= ^since,
+      order_by: [asc: e.seq],
+      select: e.actor
+    )
+    |> Repo.all()
+    |> Enum.reject(&(&1 == own))
+    |> Enum.uniq()
+  end
+
+  # The branch moved while the run went (`docs/design/outside-work.md` § A job's push): nothing was
+  # pushed, so there is nothing to continue from. The ticket sticks and says what arrived and where
+  # the job's work is kept; a person decides.
+  defp follow_up(ticket, job, %Result{branch_moved: %{} = moved}) do
+    repo = ticket |> Tickets.project_of() |> Projects.repo_path()
+
+    head =
+      case Git.resolve(repo, "refs/heads/" <> ticket.branch) do
+        {:ok, sha} -> sha
+        {:error, _gone} -> nil
+      end
+
+    lease = lease_of(repo, moved, head)
+    arrived = arrived_commits(repo, lease, head)
+
+    extra = %{
+      "job_id" => job.id,
+      "outcome" => moved["outcome"],
+      "lease" => lease,
+      "kept" => moved["kept"],
+      "head" => head,
+      "arrived" => arrived,
+      "pushers" => pushers(ticket, job)
+    }
+
+    Engine.stick(
+      ticket,
+      "the branch moved while #{job.state} ran; its work is kept aside",
+      {:branch_moved, extra}
+    )
+  end
+
   defp follow_up(ticket, job, %Result{} = result) do
     outcome =
       if result.outcome == :converged,
@@ -2883,6 +3021,10 @@ defmodule Forge.Jobs do
 
   # A finished job that produces the changeset gets the branch head recorded as a version,
   # so an approval of `changeset` attaches to an exact commit.
+  # **A run whose branch moved under it records no changeset**: the head is someone else's, and the
+  # job's own work is kept aside (`follow_up/3` sticks the ticket and says where).
+  defp put_changeset(multi, _ticket, _job, %Result{branch_moved: %{}}), do: multi
+
   defp put_changeset(multi, ticket, job, %Result{status: :finished}) do
     spec = spec(job)
 
@@ -3064,9 +3206,9 @@ defmodule Forge.Jobs do
   conversation (`docs/decisions.md`). A workflow job is put back to `pending` to be resumed; a
   conversation, which a person resumes, goes `hibernated`.
   """
-  @spec hibernate(String.t(), String.t() | nil, String.t() | nil, map() | nil) ::
+  @spec hibernate(String.t(), String.t() | nil, String.t() | nil, map() | nil, String.t() | nil) ::
           {:ok, Job.t()} | {:error, term()}
-  def hibernate(job_id, commit, reason, result \\ nil) do
+  def hibernate(job_id, commit, reason, result \\ nil, kept \\ nil) do
     job = get!(job_id)
 
     cond do
@@ -3084,9 +3226,31 @@ defmodule Forge.Jobs do
         settled(job, (result || %{})["harness"])
         {:ok, job}
 
+      # **A pause that kept the run's work is the end of the run**: the branch had moved under it,
+      # so the resume would believe edits are in a tree that does not hold them and end `done`
+      # without them. It is recorded as the stop a result makes — the ticket sticks, naming where
+      # the work is kept — and a person decides (`docs/design/outside-work.md` § A job's push).
+      is_binary(kept) and job.kind == :workflow ->
+        complete(job_id, kept_result(result, kept))
+
       true ->
         hibernate_running(job, commit, reason, result)
     end
+  end
+
+  # What the pause would have reported had it ended: the run's own figures, no outcome of its own
+  # (it was stopped from outside, which is what `:cancelled` says) and nothing pushed.
+  defp kept_result(result, kept) do
+    base = Result.from_map(Map.put(result || %{}, "status", "finished"))
+
+    %{
+      base
+      | status: :finished,
+        outcome: :cancelled,
+        killed: nil,
+        commit: nil,
+        branch_moved: %{"lease" => nil, "kept" => kept, "remote" => nil, "outcome" => nil}
+    }
   end
 
   # **A workflow job that hibernated goes back to the queue, to resume from its commit**; a

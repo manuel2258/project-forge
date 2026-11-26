@@ -156,8 +156,8 @@ Worker → platform:
 | `event` | `job_id`, normalised harness event | no |
 | `turn` | `job_id`, turn index, commit, `uncommitted` (why there is no commit, when there is none), the turn's proposals and documents, any `transition.json` it wrote (`conversations.md` § Taking a transition), and a harness summary carrying its cost | yes |
 | `delivered` | `job_id`, `message_id`: a chat's message written to its harness (protocol 15; `conversations.md` § The wire) | yes |
-| `result` | `job_id`, `ForgeCore.Job.Result` as JSON — `status` `parked` for an agent that invoked commands, with the invocations and the commit it pushed; a command's with its exit status, duration and log key; either's `blobs` (name → key and size) and `invalid_blobs` (name → why) for its groups of files | yes |
-| `hibernated` | `job_id`, commit sha, reason, the result as far as it got; a chat adds its turn count | yes |
+| `result` | `job_id`, `ForgeCore.Job.Result` as JSON — `status` `parked` for an agent that invoked commands, with the invocations and the commit it pushed; a command's with its exit status, duration and log key; either's `blobs` (name → key and size) and `invalid_blobs` (name → why) for its groups of files; since protocol 17, `branch_moved` for a run whose push found the branch moved (§ Protocol 17) | yes |
+| `hibernated` | `job_id`, commit sha, reason, the result as far as it got; a chat adds its turn count; a cancelled run whose push found the branch moved adds `kept` (§ Protocol 17) | yes |
 | `failed` | `job_id`, reason | yes |
 | `unhealthy` | reason; the reply says `reboot` (true or false) and `why` | yes |
 | `update` | the update's state: `step` (`downloading`, `installing`, `pausing`, `restarting`, `trying`, `failed`, `fell_back`, `gave_up`, `kept`), `target_build`, `target_version`, `reason`, `failed_step`, `attempt`, `next_at` and `at` (ms, the machine's own clock when it spoke, by which the platform dates `next_at` by its own), `unable` (a code: `layout`, `not_an_image`) and for `pausing` the `jobs` and `chats` it is hibernating (ids) | no |
@@ -917,6 +917,47 @@ every visit); every other job is as it was. **A ticket
 chat is not gated**: its `moving` field gains `jumps`, which an older worker drops, and the
 request is made and applied by the platform, so it works unchanged. The scheduler's *Waiting for a
 newer worker image* reason and the workers page say so as they do for the other numbers.
+
+## Protocol 17 (ticket 79)
+
+Protocol 16 → 17, a breaking change: **a job's push no longer overwrites a branch somebody else moved**,
+and a worker below 17 would force-push over a commit a person pushed from their own machine while the
+job ran. `Forge.Jobs.protocol_needs/1` asks 17 of every workflow
+and chat job, as `pages: 16` does and for the same reason: a ticket can be taken over after a job is
+scheduled. A command pushes nothing, so `minimum` stays 4 and a worker at 14 to 16 still takes commands.
+
+**The lease.** A run holds the branch at one commit: what it fetched and reset to, or its own last
+successful push. It is kept in a ref of the checkout's own, `refs/forge/lease/<branch>`, so a resume on
+the same worktree keeps the lease it started with (a branch that moved meanwhile is what the push has to
+notice) and a fresh clone or a cold start takes what it just fetched. It is not `origin/<branch>`, which
+an agent's own `git fetch` moves: the squash resets onto the lease, so a fetch no longer makes it
+silently revert what the fetch brought.
+
+**The push** is `git push --porcelain --force-with-lease=refs/heads/<branch>:<lease>`. A push that goes
+through moves the lease to what was pushed. One that is rejected is confirmed with `git ls-remote`: if
+the branch is at the lease the rejection was for something else (a hook, a token) and fails the run as
+before; if it is not, **nothing is written to the branch**. The worker pushes the run's commit, forced,
+to `refs/forge/kept/<job id>` (a ref the job's branch token may write, and that nothing may delete),
+and reports the move. A platform that is not there is waited for as a push is
+(`Workspace.patiently/3`); a move is not an error and is not retried.
+
+**What is reported.** Any terminal message of a run that met a moved branch is a `result` with `status`
+`finished` and a `branch_moved` map, whatever the run was — a finished one, a park or a question — and
+no `commit`:
+
+| key | |
+| --- | --- |
+| `lease` | the branch as the run held it |
+| `kept` | the run's commit, under `refs/forge/kept/<job id>` |
+| `remote` | the branch as the platform has it now (null if it was deleted) |
+| `outcome` | the outcome the run ended on (the declared outcome of a run that converged, else the outcome's own name: `did_not_converge`, `budget_exhausted`, `error`); null for a park or a question, which had none yet |
+
+A cancelled run's `hibernated` carries `"kept"` (the sha) and no `branch_moved`: its `commit` is null and its `result` is
+unchanged, because the platform records only what a cancelled run spent. A chat turn's report carries the same three shas in its
+`uncommitted`, with `"reason": "branch_moved"`, and no `commit`; the next turn squashes onto the same
+lease, so the work accumulates under the one kept ref. `ForgeCore.Job.Result` gains `branch_moved`
+(null from a worker below 17), and `ForgeCore.Job.Spec` gains `outside`, the work done outside forge
+that the manifest tells the job of (filled at assignment, `[]` by default).
 
 ## Protocol 16 (ticket 66)
 

@@ -228,6 +228,35 @@ defmodule ForgeWeb.Operator.Actions do
          do: {:ok, "Stopped; it runs again when released"}
   end
 
+  # Taking a ticket over and handing it back (`docs/design/outside-work.md`). Each is guarded in
+  # `Forge.Operator`, as the hold is. `running` is `stop` or `finish` and is never defaulted here:
+  # a press that names neither is refused by the operation while a run of the state is going.
+  defp act("take-over", %{"ticket" => id} = params, socket) do
+    with {:ok, _ticket} <-
+           Operator.take_over(ticket(id), user(socket), running: params["running"], via: :page),
+         do: {:ok, "Taken over"}
+  end
+
+  # The job's work a moved-branch stop set aside, merged onto the new commits
+  # (`Forge.Engine.keep_work/4`). `job` names the stop the press is about, so a second press — or one
+  # on a stop since left — is refused as stale and does nothing.
+  defp act("keep-work", %{"ticket" => id, "job" => job_id}, socket) when is_binary(job_id) do
+    with {:ok, _ticket} <- Operator.keep_work(ticket(id), user(socket), job_id, via: :page),
+         do: {:ok, "Kept the job's work"}
+  end
+
+  # The step is the form's pick and the note its text, as typed: `Forge.Operator` refuses a note
+  # over the limit and never cuts it. A hand-back that is refused leaves the ticket taken over.
+  defp act("hand-back", %{"ticket" => id, "to" => to} = params, socket) when is_binary(to) do
+    with {:ok, _ticket} <-
+           Operator.hand_back(ticket(id), user(socket),
+             to: to,
+             note: params["note"],
+             via: :page
+           ),
+         do: {:ok, "Handed back to #{to}"}
+  end
+
   defp act("retitle", %{"ticket" => id, "title" => title}, socket) when is_binary(title) do
     with {:ok, _ticket} <- Operator.retitle(ticket(id), user(socket), title),
          do: {:ok, "Title changed"}
@@ -291,6 +320,32 @@ defmodule ForgeWeb.Operator.Actions do
   def describe(:not_on_hold), do: "it is not on hold"
   def describe({:not_holdable, status}), do: "a #{status} ticket cannot be put on hold"
   def describe({:not_releasable, status}), do: "a #{status} ticket cannot be released"
+
+  def describe(:running_choice),
+    do: "a run of its state is going: choose to stop it now or let it finish"
+
+  def describe(:bad_running), do: "the choice is to stop the run now or let it finish"
+
+  def describe({:already_taken_over, _who, since}),
+    do: "it is already taken over, since #{Calendar.strftime(since, "%Y-%m-%d %H:%M")} UTC"
+
+  def describe(:not_taken_over), do: "it is not taken over"
+  def describe(:stale_stop), do: "it is no longer stopped for that job's moved branch"
+
+  def describe(:keep_push_failed),
+    do: "the branch moved again or refused the merge; nothing was written, look again and retry"
+
+  def describe(:nothing_kept), do: "no work of that job was kept"
+
+  def describe({:kept_work_conflicts, paths}),
+    do: "the job's work clashes with the commits that arrived in " <> Enum.join(paths, ", ")
+
+  def describe(:bad_step), do: "the step is a name from the workflow"
+  def describe(:bad_note), do: "the note is not valid text"
+
+  def describe({:handback_note_too_long, limit}),
+    do: "the note is longer than #{limit} characters"
+
   def describe(:nothing_running), do: "no run of its state is going, so there is nothing to stop"
 
   def describe(:branch_moved),
@@ -312,6 +367,15 @@ defmodule ForgeWeb.Operator.Actions do
   def describe(:not_closed), do: "that milestone is not closed"
   def describe(:not_found), do: "that does not exist any more"
   def describe(:start_or_hold), do: "choose whether to start it now or put it on hold"
+
+  def describe(:outside_work_starts),
+    do: "outside work is admitted already taken over, so it cannot also be started now"
+
+  def describe(:start_commit_without_outside_work),
+    do: "a commit to start from belongs to outside work only"
+
+  def describe(:outside_work_needs_a_name),
+    do: "outside work is taken over by someone, not by the platform"
 
   def describe({:no_workflow_file, path}),
     do: "#{path} is not on the default branch any more, so it cannot be brought up to date"

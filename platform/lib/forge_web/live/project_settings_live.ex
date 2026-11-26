@@ -1116,6 +1116,15 @@ defmodule ForgeWeb.ProjectSettingsLive do
           value={"curl -H \"Authorization: Bearer #{@issued.secret}\" #{ForgeWeb.Endpoint.url()}/api/v1/tickets"}
           label="Use it on the API"
         />
+        <%!-- The MCP endpoint takes the same bearer as the API, so it is offered where the curl line
+              is: for a token with API access, and here, the one moment the secret is on screen
+              (`docs/design/ui.md` § Tokens). --%>
+        <.copyable
+          :if={@issued.token.api_access != :none}
+          id="issued-mcp"
+          value={"claude mcp add --transport http forge #{ForgeWeb.Endpoint.url()}/mcp --header \"Authorization: Bearer #{@issued.secret}\""}
+          label="Connect an agent over MCP"
+        />
         <.copyable
           :if={@issued.token.git_access != :none}
           id="issued-url"

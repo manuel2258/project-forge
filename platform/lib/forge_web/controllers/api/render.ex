@@ -19,6 +19,41 @@ defmodule ForgeWeb.Api.Render do
   end
 
   @doc """
+  A project with where its repository is (`git_url`, never with a token in it) and the types it
+  admits tickets as: `types` is `Forge.Tickets.types/2`'s answer, each type with whether its
+  workflow reads (`ready`) and why not (`error`, the sentence the ticket form says it in).
+  """
+  def project_detail(%Project{} = p, types) do
+    Map.merge(project(p), %{git_url: Forge.Git.Url.for(p), ticket_types: ticket_types(types)})
+  end
+
+  defp ticket_types({:ok, %{form: form, types: types, not_types: not_types}}) do
+    %{
+      form: Atom.to_string(form),
+      types: Enum.map(types, &ticket_type/1),
+      not_types: Enum.map(not_types, &%{path: &1.path, why: &1.why})
+    }
+  end
+
+  defp ticket_types({:error, reason}),
+    do: %{form: nil, types: [], not_types: [], error: ForgeWeb.Operator.Admission.explain(reason)}
+
+  defp ticket_type(%{name: name, workflow: workflow, release: release}) do
+    case workflow do
+      {:ok, _workflow} ->
+        %{name: name, ready: true, error: nil, release: release}
+
+      {:error, reason} ->
+        %{
+          name: name,
+          ready: false,
+          error: ForgeWeb.Operator.Admission.explain(reason),
+          release: release
+        }
+    end
+  end
+
+  @doc """
   A ticket as the API shows it. `opts` carries what a list has already read for all its tickets,
   so that a list does not ask once per row: `:started` (a boolean) and `:milestones` (a map of
   milestone id to name).
@@ -44,11 +79,42 @@ defmodule ForgeWeb.Api.Render do
           restart_need: facts.restart_need,
           retry: Forge.Engine.retryable?(t),
           extend: Forge.Jobs.Extensions.offer(t),
-          warm_build: warm_build(t)
+          warm_build: warm_build(t),
+          steps: steps(t, workflow),
+          moved_branch: Forge.Engine.branch_moved_stop(t)
         }
 
       {:error, _errors} ->
-        %{cap: nil, cap_raise: t.cap_raise, retry: false, extend: nil, warm_build: nil}
+        %{
+          cap: nil,
+          cap_raise: t.cap_raise,
+          retry: false,
+          extend: nil,
+          warm_build: nil,
+          steps: nil,
+          moved_branch: Forge.Engine.branch_moved_stop(t)
+        }
+    end
+  end
+
+  # Where a taken-over ticket may be handed back to: every state of the pin, each with `edge` — the
+  # outcome of the transition that leads there from the state it rests in, null where it is a jump
+  # (`docs/design/workflow-grammar-v1.md` § Jumping) — and `missing`, the documents a job there
+  # would need that have no version yet, which a hand-back there is refused for. Null for a ticket
+  # that is not taken over, which has nobody to choose.
+  defp steps(%Ticket{takeover_id: nil}, _workflow), do: nil
+
+  defp steps(%Ticket{} = t, workflow) do
+    offered = Forge.Engine.offered_edges(t, workflow)
+
+    for name <- ForgeCore.Workflow.state_names(workflow) do
+      edge =
+        case ForgeCore.Engine.route(workflow, t.state, name, offered) do
+          {:edge, transition} -> ForgeCore.Workflow.Transition.outcome(transition)
+          _jump -> nil
+        end
+
+      %{state: name, edge: edge, missing: Forge.Jobs.missing_inputs(t, workflow, name)}
     end
   end
 
@@ -95,6 +161,7 @@ defmodule ForgeWeb.Api.Render do
       pending_transition: t.pending_transition,
       on_hold: Ticket.held?(t),
       held_at: t.held_at,
+      taken_over: taken_over(t),
       started: Keyword.get_lazy(opts, :started, fn -> Forge.Tickets.started?(t) end),
       stoppable: Forge.Engine.stoppable?(t),
       waiting_on_release: waiting_on_release(t),
@@ -102,6 +169,22 @@ defmodule ForgeWeb.Api.Render do
       position: t.position,
       inserted_at: t.inserted_at,
       updated_at: t.updated_at
+    }
+  end
+
+  # Who took the ticket over, when, through which door and from which state; nil when it is not
+  # taken over. `by` is an event's actor (`Forge.Events.encode_actor/1`).
+  defp taken_over(%Ticket{takeover_id: nil}), do: nil
+
+  defp taken_over(%Ticket{takeover_id: id}) do
+    takeover = Forge.Tickets.Takeover |> Forge.Repo.get!(id) |> Forge.Repo.preload(:token)
+    who = Forge.Tickets.Takeover.taker(takeover)
+
+    %{
+      by: who && Forge.Events.encode_actor(who),
+      at: takeover.taken_at,
+      via: takeover.via,
+      state: takeover.state
     }
   end
 

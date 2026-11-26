@@ -345,6 +345,25 @@ client prints. **It does not become an event.** That relay is embedded in the CG
 which reads that capture, sees nothing here. See § What the mirrors say about themselves for the
 same gap on the mirror side.
 
+### A job pushes with a lease, and the door records who pushed (ticket 79)
+
+The paragraphs above say a job's token may rewrite its ticket's branch. **It may rewrite its own
+run's commits and never another's**: the worker pushes with `--force-with-lease` on the commit it
+fetched or last pushed, and when the branch moved it pushes its work to `refs/forge/kept/<job id>`
+instead (`worker-channel.md` § Protocol 17, `outside-work.md` § A job's push). A job's branch token
+may therefore also write exactly that one ref, which `pre-receive` admits when it is listed in
+`FORGE_ALLOWED_REFS` and never deletes.
+
+**The door records pushes to ticket branches.** `Forge.Git.Http` reads the ref commands (`old new
+ref`, the first pkt-lines of a `git-receive-pack` request body, up to the flush) from the body it
+already captured to a file, and after `http-backend` has answered it logs `branch.pushed` for each
+`refs/heads/ticket/<n>` command whose ref **now resolves to its `new`** — a push a hook refused, or
+a ref some later write moved, logs nothing. The event is the ticket's, its actor is the token (`api`
+with the token's name, or `job` for a job's own token), and the payload is `ref`, `from` (nil for a
+new ref) and `to`. It is what the stuck item of a moved branch names pushers from
+(`outside-work.md` § Keeping the job's work). A body that cannot be read as pkt-lines records
+nothing: the push itself is unaffected.
+
 ### `post-receive` — the mirrors
 
 Enumerates `forge.mirror.<name>.url`, and for each one pushes the refs matching that mirror's

@@ -608,6 +608,11 @@ What that comes to (taking a ticket out of the merge queue is `member`, as appro
   by a token write, or never for a token (`/projects` registration, `/queue`). The inventory test
   fails on an unclassified route (the table is `test/support/token_routes.ex`), and
   `ForgeWeb.Api.ProjectTokenTest` drives each class against a token that must be refused.
+- **`/mcp`** is `member`, and the same door as the JSON API's tickets: `ApiAuth` (a job's token is
+  refused, 401), an `Origin` the platform does not own refused (403), then per tool the API's own
+  rule — a write needs a token with API write, a ticket of another project is a 404 — and
+  `Forge.Operator` for every write (`api-and-ui.md` § MCP). It is not a route of the API's token
+  table (`test/support/token_routes.ex` lists `/api/v1`); `ForgeWeb.McpTest` drives each class.
 - **`token`** is five: `/git`, `/store/*key`, `/archive` and `/job/pages` — the last two authorised
   by the per-job git token (`Git.Tokens.authorise_job/1`), `/job/pages` refusing a command's job and
   taking its scope from the token's job row and never from the path (`pages.md`) — and the worker socket. None of them carries a

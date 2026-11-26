@@ -22,7 +22,8 @@ defmodule ForgeWeb.Operator.Admission do
     :unknown_ticket_type,
     :invalid_ticket_type,
     :release_ticket_type,
-    :only_release_types
+    :only_release_types,
+    :bad_start_commit
   ]
 
   @doc "Whether `reason` is one of the refusals about a ticket's type, for a guard."
@@ -97,6 +98,16 @@ defmodule ForgeWeb.Operator.Admission do
     do: "a release is already open: ##{number}"
 
   def explain({:invalid_note, why}), do: "the note #{why}"
+
+  # Outside work's start commit (`docs/design/outside-work.md` § Outside work).
+  def explain({:bad_start_commit, :not_a_commit_id}),
+    do: "the commit to start from is a full commit id of 40 hexadecimal digits, not a name"
+
+  def explain({:bad_start_commit, :unknown}),
+    do: "the commit to start from is not one the project's repository holds on any branch or tag"
+
+  def explain({:bad_start_commit, :no_common_history}),
+    do: "the commit to start from shares no history with the default branch"
 
   def explain({:no_ticket_type_in, dir, not_types}) do
     reasons = Enum.map_join(not_types, "; ", &"#{&1.path} is #{&1.why}")

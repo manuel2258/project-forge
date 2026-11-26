@@ -659,6 +659,47 @@ defmodule Forge.Events do
   defp describe(%Event{type: "ticket.held"}, _bound), do: "put on hold"
   defp describe(%Event{type: "ticket.released"}, _bound), do: "released from hold"
 
+  # A take-over is a hold with a name on it; the actor is the event's, so the sentence says only
+  # what was done (`docs/design/outside-work.md`). A note is text a person wrote: the page draws it.
+  defp describe(%Event{type: "ticket.taken_over", payload: p}, _bound),
+    do: "took it over in #{p["state"]} to work outside forge (via #{p["via"]})"
+
+  # Who handed it back is the event's actor; what is said is the step it went to, the commits
+  # pushed meanwhile (a few by subject, the rest counted) and the note, which is text a person
+  # wrote and is cut only where the summary is bounded.
+  defp describe(%Event{type: "ticket.handed_back", payload: p}, bound) do
+    commits = get_in(p, ["commits", "list"]) |> List.wrap()
+    count = length(commits) + (get_in(p, ["commits", "more"]) || 0)
+
+    pushed =
+      case commits do
+        [] ->
+          "no commits pushed meanwhile"
+
+        _some ->
+          shown =
+            commits
+            |> Enum.take(3)
+            |> Enum.map_join("; ", &"#{short(&1["sha"])} #{bounded(&1["subject"], 60, bound)}")
+
+          "#{count} commit(s) pushed meanwhile: #{shown}#{if count > 3, do: "; …"}"
+      end
+
+    note =
+      if is_binary(p["note"]) and p["note"] != "", do: " — " <> bounded(p["note"], 200, bound)
+
+    "handed it back to #{p["to"]} (from #{p["from"]}, via #{p["via"]}), #{pushed}#{note}"
+  end
+
+  defp describe(%Event{type: "ticket.work_kept", payload: p}, _bound) do
+    how =
+      if p["merged"],
+        do: "merged onto the commits that arrived, #{short(p["from"])} → #{short(p["to"])}",
+        else: "already on the branch"
+
+    "kept the work of a job whose branch had moved: #{how} (via #{p["via"]})"
+  end
+
   defp describe(%Event{type: "ticket.stopped", payload: %{"state" => state}}, _bound),
     do: "stopped the run in #{state} while on hold; it runs again when released"
 

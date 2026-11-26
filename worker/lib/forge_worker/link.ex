@@ -1013,6 +1013,7 @@ defmodule ForgeWorker.Link do
 
       case keep(changeset?, assignment, worktree, user) do
         {:ok, head} -> finish(assignment, root, worktree, result, head, changeset?, user)
+        {:moved, _moved} = moved -> finish(assignment, root, worktree, result, moved, true, user)
         {:error, reason} -> unpushed(result, reason, changeset?)
       end
     end
@@ -1104,7 +1105,11 @@ defmodule ForgeWorker.Link do
     # accepted — which that job's own `add -A` would then commit, putting on the branch by the
     # long way exactly what the guard above refused by the short one. The template is a cache: the
     # ticket keeps the one it had, and the next job starts colder.
-    if changeset?, do: Workspace.promote(assignment, root, worktree)
+    #
+    # **Nor when the branch moved**: the tree holds a commit that is on no branch, only under the
+    # kept ref, and a template carrying it would be the next job's start.
+    if changeset? and not match?({:moved, _moved}, head),
+      do: Workspace.promote(assignment, root, worktree)
 
     # Only once everything that had to leave the machine has left it. A worktree is a
     # snapshot of the seed and the next attempt takes a fresh one; keeping this one would
@@ -1136,6 +1141,42 @@ defmodule ForgeWorker.Link do
   # branch) and what its continuation prompt tells it. A job the wall clock stopped is over, and
   # reports a result like any other ending — the difference is whether anyone intends to
   # continue it.
+  #
+  # **A branch that moved reports as a finished result of its own, whatever the run was.** Nothing
+  # reached the branch, so there is no commit to hand a parked run's commands or a changeset to
+  # record: what the platform is told is where the run's work was kept (`Checkout.push/1`) and the
+  # outcome the run would have ended on — nil for a park or a question, which had none yet. A
+  # cancelled run's hibernate carries the kept commit and nothing more, which is all a person
+  # who cancelled is owed (`docs/design/worker-channel.md` § Protocol 17).
+  defp terminal(%Result{killed: :operator} = result, {:moved, moved}),
+    do:
+      {"hibernated",
+       %{
+         "commit" => nil,
+         "kept" => moved["kept"],
+         "reason" => "cancelled",
+         "result" => Result.to_map(result)
+       }}
+
+  defp terminal(%Result{} = result, {:moved, moved}) do
+    # What the platform would route on (`Forge.Jobs.follow_up/3`): the declared outcome of a run
+    # that converged, the outcome's own name for one that did not.
+    outcome =
+      cond do
+        result.status != :finished or is_nil(result.outcome) -> nil
+        result.outcome == :converged -> result.declared_outcome
+        true -> Atom.to_string(result.outcome)
+      end
+
+    {"result",
+     Result.to_map(%{
+       result
+       | status: :finished,
+         commit: nil,
+         branch_moved: Map.put(moved, "outcome", outcome)
+     })}
+  end
+
   defp terminal(%Result{killed: :operator} = result, head),
     do:
       {"hibernated",

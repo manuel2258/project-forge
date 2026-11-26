@@ -481,7 +481,12 @@ defmodule Forge.Operator do
   **`attrs[:on_hold]` must be given, true or false**: a person admitting a ticket chooses between
   starting it now and putting it on hold, and there is no default at any person's door
   (`docs/design/ui.md` § Creating things). Missing, or anything but a boolean, is
-  `{:error, :start_or_hold}`, and nothing is written. `attrs[:milestone_id]` is optional: the
+  `{:error, :start_or_hold}`, and nothing is written. **`outside_work: true` is given in its
+  place**: the ticket is admitted taken over by the actor (never `:system`) and runs nothing, and
+  `start_commit` names the commit to start from (`Forge.Tickets.prepare_outside/3`); `on_hold:
+  false` with it is `:outside_work_starts`, and a `start_commit` without it
+  `:start_commit_without_outside_work`. `attrs[:via]` is the door (`:page`, `:api`, `:mcp`) the
+  take-over is recorded under. `attrs[:milestone_id]` is optional: the
   ticket goes to the bottom of that open milestone of this project (`{:error, :milestone}` for
   any other), or of the no-milestone order.
   """
@@ -490,7 +495,7 @@ defmodule Forge.Operator do
     {files, attrs} = Map.pop(attrs, :attachments)
 
     with :ok <- allow(project, actor, :use),
-         :ok <- start_or_hold(attrs),
+         {:ok, attrs} <- start_or_hold(attrs, actor),
          {:ok, ticket} <-
            attach(
              [attachments: files],
@@ -511,8 +516,37 @@ defmodule Forge.Operator do
   defp ticket_version(%Ticket{id: id}),
     do: Artifacts.latest(id, ForgeCore.Workflow.ticket_artifact()).id
 
-  defp start_or_hold(%{on_hold: on_hold}) when is_boolean(on_hold), do: :ok
-  defp start_or_hold(_attrs), do: {:error, :start_or_hold}
+  # What the admission is: outside work (`docs/design/outside-work.md` § Outside work), which is
+  # taken over by the one who opens it and so needs someone to name — never `:system` — and is
+  # on hold by being that, or a start or a hold the caller said. `start_commit` belongs to outside
+  # work alone; an empty field of a form is none.
+  defp start_or_hold(%{outside_work: true} = attrs, actor) do
+    cond do
+      Actor.of(actor) == :system -> {:error, :outside_work_needs_a_name}
+      Map.get(attrs, :on_hold) == false -> {:error, :outside_work_starts}
+      true -> {:ok, Map.merge(attrs, %{on_hold: true, start_commit: start_commit(attrs)})}
+    end
+  end
+
+  defp start_or_hold(attrs, _actor) do
+    cond do
+      start_commit(attrs) != nil -> {:error, :start_commit_without_outside_work}
+      is_boolean(Map.get(attrs, :on_hold)) -> {:ok, Map.delete(attrs, :outside_work)}
+      true -> {:error, :start_or_hold}
+    end
+  end
+
+  # A proposal is accepted started or on hold, and never as outside work: a start commit for a
+  # proposal the reader may bulk-accept means nothing (`docs/design/outside-work.md`).
+  defp proposal_start_or_hold(%{on_hold: on_hold}) when is_boolean(on_hold), do: :ok
+  defp proposal_start_or_hold(_opts), do: {:error, :start_or_hold}
+
+  defp start_commit(attrs) do
+    case Map.get(attrs, :start_commit) do
+      "" -> nil
+      other -> other
+    end
+  end
 
   ## Schedules
 
@@ -570,14 +604,132 @@ defmodule Forge.Operator do
     end
   end
 
-  @doc "Releases a ticket on hold (`Forge.Engine.release/2`)."
-  @spec release(Ticket.t(), actor()) :: {:ok, Ticket.t()} | {:error, term()}
-  def release(%Ticket{} = ticket, actor) do
+  @doc """
+  Releases a ticket on hold (`Forge.Engine.release/2`). **A taken-over ticket is handed back**, to
+  the step it rests in and with no note. `opts` are `:via` only.
+  """
+  @spec release(Ticket.t(), actor(), keyword()) :: {:ok, Ticket.t()} | {:error, term()}
+  def release(%Ticket{} = ticket, actor, opts \\ []) do
     with :ok <- allow(ticket, actor, :use),
-         {:ok, released} <- Engine.release(ticket, Actor.of(actor)) do
+         {:ok, released} <-
+           Engine.release(
+             ticket,
+             Actor.of(actor),
+             Keyword.put(Keyword.take(opts, [:via]), :allow, fn -> allow(ticket, actor, :use) end)
+           ) do
       notify(released)
     end
   end
+
+  @doc """
+  Takes an open ticket over to work on outside forge (`Forge.Engine.take_over/3`,
+  `docs/design/outside-work.md`): a hold with the taker's name on it. A member's write, and a
+  write-enabled project token's; asked here and again inside the transaction that acts.
+
+  Options: `:running` — `:stop` or `:finish` (`"stop"` and `"finish"` too), required while a run of
+  the ticket's state is going and refused as missing otherwise, never defaulted — and `:via`.
+  """
+  @spec take_over(Ticket.t(), actor(), keyword()) :: {:ok, Ticket.t()} | {:error, term()}
+  def take_over(%Ticket{} = ticket, actor, opts \\ []) do
+    with :ok <- allow(ticket, actor, :use),
+         {:ok, running} <- running_choice(Keyword.get(opts, :running)),
+         {:ok, taken} <-
+           Engine.take_over(
+             ticket,
+             Actor.of(actor),
+             opts
+             |> Keyword.take([:via])
+             |> Keyword.put(:running, running)
+             |> Keyword.put(:allow, fn -> allow(ticket, actor, :use) end)
+           ) do
+      notify(taken)
+    end
+  end
+
+  defp running_choice(nil), do: {:ok, nil}
+  defp running_choice(choice) when choice in [:stop, :finish], do: {:ok, choice}
+  defp running_choice("stop"), do: {:ok, :stop}
+  defp running_choice("finish"), do: {:ok, :finish}
+  defp running_choice(_other), do: {:error, :bad_running}
+
+  @doc """
+  Hands a taken-over ticket back (`Forge.Engine.hand_back/3`): any member of the project, or a
+  project token that may write, whoever took it over; who did it is recorded.
+
+  Options: `:to` — the step to continue from, default the one it rests in — `:note` and `:via`. The
+  note is at most `Forge.Tickets.Takeover.note_limit/0` codepoints of valid UTF-8 without NUL, **and
+  is refused with `{:handback_note_too_long, limit}` or `:bad_note`, never cut**.
+  """
+  @spec hand_back(Ticket.t(), actor(), keyword()) :: {:ok, Ticket.t()} | {:error, term()}
+  def hand_back(%Ticket{} = ticket, actor, opts \\ []) do
+    with :ok <- allow(ticket, actor, :use),
+         {:ok, note} <- clean_note(Keyword.get(opts, :note)),
+         :ok <- clean_step(Keyword.get(opts, :to)),
+         {:ok, back} <-
+           Engine.hand_back(
+             ticket,
+             Actor.of(actor),
+             opts
+             |> Keyword.take([:via, :to])
+             |> Keyword.put(:note, note)
+             |> Keyword.put(:allow, fn -> allow(ticket, actor, :use) end)
+           ) do
+      notify(back)
+    end
+  end
+
+  @doc """
+  Keeps the work of the job a moved-branch stop names (`Forge.Engine.keep_work/4`): merges what the
+  job kept onto the branch and carries on as the job's own outcome would have. A member's write and
+  a write-enabled token's. **The guard is asked first** — a refused actor merges nothing — and
+  again inside the transaction that records it.
+  """
+  @spec keep_work(Ticket.t(), actor(), String.t(), keyword()) ::
+          {:ok, Ticket.t()} | {:error, term()}
+  def keep_work(%Ticket{} = ticket, actor, job_id, opts \\ []) when is_binary(job_id) do
+    with :ok <- allow(ticket, actor, :use),
+         {:ok, kept} <-
+           Engine.keep_work(
+             ticket,
+             Actor.of(actor),
+             job_id,
+             opts
+             |> Keyword.take([:via])
+             |> Keyword.put(:allow, fn -> allow(ticket, actor, :use) end)
+           ) do
+      notify(kept)
+    end
+  end
+
+  # The step to continue from is a name, or nothing for the one the ticket rests in: anything else
+  # is refused before a thing is written, where the database would refuse it after phase one had.
+  defp clean_step(nil), do: :ok
+
+  defp clean_step(step) when is_binary(step),
+    do:
+      if(String.valid?(step) and not String.contains?(step, <<0>>),
+        do: :ok,
+        else: {:error, :bad_step}
+      )
+
+  defp clean_step(_other), do: {:error, :bad_step}
+
+  # A blank note is no note. Anything over the limit is refused with the limit, and what is not
+  # text (invalid UTF-8, a NUL) is refused: the database refuses both, and a note is never cut.
+  defp clean_note(nil), do: {:ok, nil}
+
+  defp clean_note(note) when is_binary(note) do
+    limit = Forge.Tickets.Takeover.note_limit()
+
+    cond do
+      not String.valid?(note) or String.contains?(note, <<0>>) -> {:error, :bad_note}
+      length(String.to_charlist(note)) > limit -> {:error, {:handback_note_too_long, limit}}
+      String.trim(note) == "" -> {:ok, nil}
+      true -> {:ok, note}
+    end
+  end
+
+  defp clean_note(_other), do: {:error, :bad_note}
 
   @doc "Stops the run a held ticket is still finishing (`Forge.Engine.stop_now/2`)."
   @spec stop_now(Ticket.t(), actor()) :: {:ok, Ticket.t()} | {:error, term()}
@@ -970,7 +1122,8 @@ defmodule Forge.Operator do
     {files, opts} = Keyword.split(opts, [:attachments])
 
     with :ok <- allow_proposal(version_id, actor),
-         :ok <- if(Proposals.get(version_id), do: start_or_hold(Map.new(opts)), else: :ok),
+         :ok <-
+           if(Proposals.get(version_id), do: proposal_start_or_hold(Map.new(opts)), else: :ok),
          {:ok, %Ticket{} = ticket} <-
            attach(
              files,

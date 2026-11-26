@@ -366,7 +366,7 @@ defmodule ForgeCore.Prompt do
     - Job directory: `#{job_dir}`
     - Branch: `#{spec.branch}`
     #{base(spec)}
-    ## Context (read-only)
+    #{outside(spec)}## Context (read-only)
 
     #{inputs(spec, job_dir)}
     #{history(spec, job_dir)}
@@ -621,6 +621,43 @@ defmodule ForgeCore.Prompt do
 
   defp base(%Spec{}), do: ""
 
+  # `docs/design/job-prompt.md` § Worked on outside forge: what people did to the ticket where no
+  # job's transcript can say, one paragraph per take-over that was handed back, oldest first. The
+  # note is theirs and goes in a fence under *They wrote:*, as a comment does, so it is data. Nothing
+  # at all for a ticket nobody took over (the empty string, with no blank lines of its own), and for
+  # a spec made before `outside` existed.
+  defp outside(%Spec{outside: []}), do: ""
+
+  defp outside(%Spec{outside: takeovers}) do
+    "## Worked on outside forge\n\n" <>
+      "People worked on this ticket outside forge's machines, and no job's transcript says what " <>
+      "they did. Their commits are on the branch and in the change.\n\n" <>
+      Enum.map_join(takeovers, "\n\n", &outside_entry/1) <> "\n\n"
+  end
+
+  defp outside_entry(entry) do
+    "- #{outside_who(entry["by"])} took it over at `#{entry["state"]}` on #{entry["at"]}" <>
+      " (#{entry["via"]}) and #{outside_who(entry["back_by"])} handed it back on " <>
+      "#{entry["back_at"]} (#{entry["back_via"]}), to `#{entry["to"]}`." <>
+      outside_commits(entry["commits"] || [], entry["more"] || 0) <> comment(entry["note"])
+  end
+
+  defp outside_who(%{"kind" => "api", "name" => name}), do: "the token `#{name}`"
+  defp outside_who(%{"name" => name}) when is_binary(name), do: name
+  defp outside_who(_unknown), do: "someone"
+
+  defp outside_commits([], _more), do: " No commits were pushed meanwhile."
+
+  defp outside_commits(commits, more) do
+    listed =
+      Enum.map_join(commits, "\n", fn commit ->
+        "  - `#{short(commit["sha"])}` #{String.replace(commit["subject"] || "", "\n", " ")}"
+      end)
+
+    rest = if more > 0, do: "\n  - and #{more} more", else: ""
+    " Commits pushed meanwhile:\n\n#{listed}#{rest}"
+  end
+
   # The ticket's type, when the project has types: information, not a switch — a prompt shared by
   # two types that behaves differently by type is a branch the workflow file cannot see
   # (`docs/design/ticket-types.md` § What a job is told).
@@ -642,7 +679,7 @@ defmodule ForgeCore.Prompt do
 
     #{arrival(spec.entered)}#{entered_commands(spec, job_dir)}#{integration(spec)}
 
-    ## Inputs (read-only)
+    #{outside(spec)}## Inputs (read-only)
 
     #{inputs(spec, job_dir)}#{absent(spec)}
 

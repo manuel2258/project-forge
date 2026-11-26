@@ -37,7 +37,7 @@ tips=()
 
 while read -r old new ref; do
   [ "$new" = "$zero" ] && deny "refs are never deleted here ($ref)"
-  case "$ref" in refs/heads/*) tips+=("$new") ;; esac
+  case "$ref" in refs/heads/* | refs/forge/kept/*) tips+=("$new") ;; esac
 
   # A tag is the platform's alone: a release's, made when it concludes. Created and never moved,
   # and only on a commit that is already in the default branch's history, so it names something
@@ -51,6 +51,16 @@ while read -r old new ref; do
       [ "$old" = "$zero" ] || deny "a tag is never moved ($ref)"
       git merge-base --is-ancestor "$new^{commit}" "refs/heads/$default" ||
         deny "a tag names a commit in the history of $default ($ref)"
+      continue
+      ;;
+  esac
+
+  # A job's own work, kept aside when the branch moved under it (`docs/design/outside-work.md`):
+  # exactly the ref the credential lists, which is its own job's and no other's. It may be moved
+  # (a resume keeps the work again) but never deleted, which the first line refuses.
+  case "$ref" in
+    refs/forge/kept/*)
+      may_write "$ref" || deny "this credential may not write $ref"
       continue
       ;;
   esac

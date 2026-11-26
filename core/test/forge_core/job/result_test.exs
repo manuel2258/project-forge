@@ -249,6 +249,16 @@ defmodule ForgeCore.Job.ResultTest do
     assert %Result{warm: nil} = Result.from_map(%{"status" => "finished", "outcome" => "error"})
   end
 
+  test "carries the moved branch a push found through the wire; a worker that sends none leaves nil" do
+    moved = %{"lease" => "a1", "kept" => "b2", "remote" => "c3", "outcome" => nil}
+    result = %Result{status: :finished, branch_moved: moved}
+
+    assert ^result =
+             result |> Result.to_map() |> Jason.encode!() |> Jason.decode!() |> Result.from_map()
+
+    assert %Result{branch_moved: nil} = Result.from_map(%{"status" => "finished"})
+  end
+
   test "refuses a status or an outcome it does not know" do
     assert_raise ArgumentError, fn -> Result.from_map(%{"status" => "sideways"}) end
 

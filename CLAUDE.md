@@ -24,6 +24,14 @@ wait for the machine holding it, **Clear** as an epoch, and the two lines a comm
 is built** (ticket 76), and **no saving is measured**: no machine that has the new worker has run a
 real ticket's commands (its § Open). Forge's own commands opt in to nothing yet.
 
+`docs/design/outside-work.md` is the standard for work done outside forge's machines: **taking a ticket
+over** (a hold with a person's or a token's name on it, which a release counts as handing back), **handing it
+back** to a step of the hander's choosing with what was pushed recorded as the ticket's `changeset`, and the
+rest of ticket 79 (outside work opened from a start commit, what later jobs are told, a job's push that never
+removes a commit someone else pushed, an MCP endpoint, the screens). **It is built** (ticket 79), and **none
+of it has run with a real agent on a real PC**: its § Not built, and not verified says what the suite could
+not. It is a migration and a worker protocol bump (17).
+
 `docs/design/conversations.md` is the standard for chats — the work that does not fit a workflow
 state.
 

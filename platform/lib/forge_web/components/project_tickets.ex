@@ -120,6 +120,13 @@ defmodule ForgeWeb.ProjectTickets do
   # and nothing is moving. A held ticket's decision is not an item, whether it is stuck or resting
   # in a human state, so this comes before *stuck*. A run it started before the hold is still
   # finishing, and says so.
+  # A taken-over ticket says who holds it, and whatever waits on it is drawn as for any hold.
+  defp doing(%Ticket{held_at: held_at, takeover_id: taken, id: id}, [], live, facts)
+       when held_at != nil and taken != nil do
+    finishing = if match?(%{status: :running}, live), do: " · its run is finishing", else: ""
+    {"taken over · #{facts[:takers][id] || "someone"}" <> finishing, nil, :held}
+  end
+
   defp doing(%Ticket{held_at: held_at}, [], live, _facts) when held_at != nil do
     finishing = if match?(%{status: :running}, live), do: " · its run is finishing", else: ""
     {"on hold" <> finishing, nil, :held}

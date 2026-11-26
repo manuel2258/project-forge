@@ -677,8 +677,8 @@ defmodule ForgeWorker.Job.Conversation do
 
   # -- the work -------------------------------------------------------------------------------
 
-  # One commit per turn, and they accumulate: `Checkout.squash/5` resets to `origin/<branch>`,
-  # and pushing moves that remote-tracking ref, so turn two is built on turn one rather than
+  # One commit per turn, and they accumulate: `Checkout.squash/5` resets to the run's lease
+  # (`Checkout.lease/3`), and a push moves it, so turn two is built on turn one rather than
   # replacing it. That was measured before it was relied on, because the opposite reading —
   # every turn rewriting the last into a single amended commit — is equally plausible from the
   # code and would silently lose each turn's history.
@@ -692,6 +692,19 @@ defmodule ForgeWorker.Job.Conversation do
     case Workspace.commit_and_push(state.assignment, state.worktree, message, state.user) do
       {:ok, head} ->
         {head, nil}
+
+      # Somebody else moved the branch while the turn ran, so nothing was written to it: the turn's
+      # work is kept under `refs/forge/kept/<job id>` and reported as one that did not reach the
+      # branch, with where the three commits are (`docs/design/worker-channel.md` § Protocol 17).
+      {:moved, moved} ->
+        Log.line(
+          "turn.uncommitted",
+          :error,
+          "turn #{index} not on the branch, which moved under it; kept as #{moved["kept"]}",
+          job_id: state.job_id
+        )
+
+        {nil, Map.put(moved, "reason", "branch_moved")}
 
       # The turn is still reported, with no commit: its reply and its cost happened whether or
       # not its work reached the branch. What went wrong is a line in the machine's log, and —

@@ -327,32 +327,18 @@ defmodule ForgeWeb.ProposalsView do
           >
             Decline
           </.button>
-          <%!-- Two ways to admit, side by side, neither chosen for the person and neither primary
-                (`docs/design/ui.md` § Proposals). --%>
-          <.button
+          <%!-- One button, *Start now*, with *Put on hold* in its menu (`docs/design/ui.md`
+                § Creating things). No *Outside work* here: a start commit is one ticket's. --%>
+          <.split_submit
             :if={@item.readable}
-            id="proposal-admit-hold"
-            type="submit"
-            name="admit"
-            value="hold"
-            variant="outline"
+            id="proposal-admit"
+            face={%{label: "Start now", name: "admit", value: "start"}}
+            items={[%{id: "proposal-admit-hold", label: "Put on hold", name: "admit", value: "hold"}]}
+            size="lg"
+            up
             disabled={@typeless}
-            phx-disable-with="Admitting…"
-          >
-            Put on hold
-          </.button>
-          <.button
-            :if={@item.readable}
-            id="proposal-admit-start"
-            type="submit"
-            name="admit"
-            value="start"
-            variant="outline"
-            disabled={@typeless}
-            phx-disable-with="Admitting…"
-          >
-            Start now
-          </.button>
+            busy="Admitting…"
+          />
         </div>
       </form>
 
@@ -467,26 +453,22 @@ defmodule ForgeWeb.ProposalsView do
         <.button type="submit" name="bulk" value="decline" variant="secondary">
           Decline {@count}
         </.button>
-        <.button
-          type="submit"
-          name="bulk"
-          value="admit_hold"
-          variant="outline"
+        <%!-- The same one button as the reader's: *Start N now*, *Put N on hold* in the menu. --%>
+        <.split_submit
+          id="proposal-bulk-admit"
+          face={%{label: "Start #{@count} now", name: "bulk", value: "admit_start"}}
+          items={[
+            %{
+              id: "proposal-bulk-admit-hold",
+              label: "Put #{@count} on hold",
+              name: "bulk",
+              value: "admit_hold"
+            }
+          ]}
+          size="lg"
+          up
           disabled={@typeless}
-          title={@typeless && "Choose a type to admit them"}
-        >
-          Put {@count} on hold
-        </.button>
-        <.button
-          type="submit"
-          name="bulk"
-          value="admit_start"
-          variant="outline"
-          disabled={@typeless}
-          title={@typeless && "Choose a type to admit them"}
-        >
-          Start {@count} now
-        </.button>
+        />
       </div>
     </form>
     """

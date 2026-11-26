@@ -59,6 +59,14 @@ defmodule Forge.Tickets.Ticket do
     field :held_entry, :map
     field :position, :integer, default: 0
 
+    # The open take-over, while the ticket is being worked on outside forge: a hold with a name on
+    # it (`docs/design/outside-work.md`). Always with `held_at`, which the database checks.
+    belongs_to :takeover, Forge.Tickets.Takeover
+
+    # Who holds the ticket, as a list names them (`Forge.Tickets.Doing.takers/1`): set by a read
+    # that draws rows, never stored.
+    field :holder, :string, virtual: true
+
     belongs_to :project, Forge.Projects.Project
     belongs_to :milestone, Forge.Milestones.Milestone
     has_many :jobs, Forge.Jobs.Job
@@ -137,6 +145,19 @@ defmodule Forge.Tickets.Ticket do
   def hold_changeset(ticket, attrs) do
     cast(ticket, attrs, [:held_at, :held_transition, :held_entry])
   end
+
+  @doc "Changeset for the hold a take-over is: `held_at`, what waits on it, the take-over, and nothing else."
+  def takeover_changeset(ticket, attrs) do
+    ticket
+    |> cast(attrs, [:held_at, :held_transition, :held_entry, :takeover_id])
+    |> foreign_key_constraint(:takeover_id)
+    |> check_constraint(:takeover_id, name: :tickets_takeover_is_a_hold)
+  end
+
+  @doc "Whether the ticket is taken over: on hold with a person's or a token's name on it."
+  @spec taken_over?(%__MODULE__{}) :: boolean()
+  def taken_over?(%__MODULE__{takeover_id: nil}), do: false
+  def taken_over?(%__MODULE__{}), do: true
 
   @doc "Changeset for a ticket's milestone and its place in that milestone's order, and nothing else."
   def place_changeset(ticket, attrs) do

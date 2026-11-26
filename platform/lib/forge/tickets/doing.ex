@@ -119,6 +119,7 @@ defmodule Forge.Tickets.Doing do
           live: map(),
           said: map(),
           paused: boolean(),
+          takers: %{String.t() => String.t()},
           places: map(),
           milestones: map()
         }
@@ -130,10 +131,42 @@ defmodule Forge.Tickets.Doing do
       live: live(ids),
       said: said(ids),
       paused: Forge.Spend.paused?(),
+      takers: takers(tickets),
       places: Keyword.get_lazy(opts, :places, fn -> places(projects) end),
       milestones:
         projects |> Enum.map(&Forge.Milestones.names/1) |> Enum.reduce(%{}, &Map.merge/2)
     }
+  end
+
+  # Who holds each taken-over ticket, as a row names them (`docs/design/ui.md` § Tickets): a
+  # person by address, a token as *API · name*, in two queries however many rows. A ticket nobody
+  # took over is not in the map.
+  @doc false
+  @spec takers([Ticket.t()]) :: %{String.t() => String.t()}
+  def takers(tickets) do
+    ids = for %Ticket{takeover_id: id} <- tickets, is_binary(id), do: id
+
+    rows =
+      Repo.all(
+        from k in Forge.Tickets.Takeover,
+          left_join: t in assoc(k, :token),
+          where: k.id in ^ids,
+          select: {k.ticket_id, k.user_id, t.name}
+      )
+
+    addresses =
+      rows
+      |> Enum.flat_map(fn {_t, user, _n} -> List.wrap(user) end)
+      |> Forge.Accounts.addresses()
+
+    for {ticket_id, user_id, token_name} <- rows, into: %{} do
+      {ticket_id,
+       cond do
+         user_id -> Map.get(addresses, user_id, "a member")
+         token_name -> "API · #{token_name}"
+         true -> "someone since removed"
+       end}
+    end
   end
 
   defp places(project_ids) do

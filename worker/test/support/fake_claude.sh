@@ -351,6 +351,25 @@ case "${FAKE_SCENARIO:-success}" in
     printf 'edited by the agent\n' > CHANGED.md
     emit "$result_success"
     ;;
+  # Somebody else pushes to the ticket's branch while the run goes (ticket 79): the run's own push
+  # then finds the branch moved from the commit it fetched, and must not overwrite it.
+  moves_branch)
+    origin_url=$(git remote get-url origin)
+    other=$(mktemp -d)
+    git clone --quiet "$origin_url" "$other/clone" >&2
+    (
+      cd "$other/clone" &&
+        git checkout --quiet ticket/1 &&
+        printf 'from a person\n' > THEIRS.md &&
+        git add THEIRS.md &&
+        git -c user.name=person -c user.email=person@example.org commit --quiet -m "A person's commit" &&
+        git push --quiet origin HEAD:ticket/1
+    ) >&2
+    rm -rf "$other"
+    printf -- '---\noutcome: done\n---\n# Plan\n\nDo the thing.\n' > "$doc"
+    printf 'edited by the agent\n' > CHANGED.md
+    emit "$result_success"
+    ;;
   # A run told to integrate that merges and stops with the conflict open: the ending that used to
   # die on `reset --soft` and leave the ticket in `error` with a bare git error (ticket 11).
   conflicted_merge)

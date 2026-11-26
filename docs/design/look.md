@@ -112,7 +112,9 @@ project on Codex and its jobs and chats (`codex.md`); `milestones` — a current
 held, in-flight and merged tickets, a second open milestone and a closed one, tickets in none (one
 held), a held ticket with a running job (Stop now) and one with a blocking question, a milestone of
 two hundred tickets for the phone, and a long hostile name, for the Milestones view, the Tickets
-list's *On hold* and the ticket page's band (`ui.md` § Milestones). `ticket_text` — tickets admitted
+list's *On hold* and the ticket page's band (`ui.md` § Milestones); `takeover` — tickets worked on
+outside forge: one open, one taken over by the member, one by a token, one stuck for a moved branch
+(`outside-work.md`). `ticket_text` — tickets admitted
 with real `ticket` versions: a long text (headings, a list, single newlines, a wide code line, table
 and URL, markup, every remote kind of picture, and two real PNGs, one above and one below the cut), a
 short one, one with only a title and a file, one rewritten after admission, and a release whose note is a

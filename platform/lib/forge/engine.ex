@@ -7,12 +7,12 @@ defmodule Forge.Engine do
   import Ecto.Query, only: [from: 2]
 
   alias Ecto.Multi
-  alias Forge.{Artifacts, Events, Jobs, Merge, MergeQueue, ReleaseRecords, Repo, Tickets}
+  alias Forge.{Actor, Artifacts, Events, Jobs, Merge, MergeQueue, ReleaseRecords, Repo, Tickets}
   alias Forge.Events.Event
   alias Forge.Jobs.{Extension, Extensions, Job}
   alias Forge.MergeQueue.Entry
   alias Forge.Spend
-  alias Forge.Tickets.{CapRaise, Restart, Ticket}
+  alias Forge.Tickets.{CapRaise, Restart, Takeover, Ticket}
   require Forge.Tickets.Ticket
   alias ForgeCore.Engine, as: Core
   alias ForgeCore.Workflow
@@ -51,7 +51,8 @@ defmodule Forge.Engine do
   `resume_placement/2` can find the tickets that an arrival — an assignment, a template enabled or
   edited, a machine offering more — may have unblocked.
   """
-  @spec stick(Ticket.t(), String.t(), :placement | nil) :: {:ok, Ticket.t()} | {:error, term()}
+  @spec stick(Ticket.t(), String.t(), :placement | {:branch_moved, map()} | nil) ::
+          {:ok, Ticket.t()} | {:error, term()}
   def stick(%Ticket{} = ticket, reason, cause \\ nil) do
     # Locked and re-read: the scheduler decides to stick from a ticket it read earlier, and one
     # cancelled since must stay cancelled rather than come back as stuck. Only cancelled is
@@ -599,6 +600,11 @@ defmodule Forge.Engine do
   end
 
   defp stuck_payload(reason, nil), do: %{"reason" => reason}
+
+  # A cause may carry facts of its own (`{:branch_moved, %{...}}`): they sit beside it in the payload.
+  defp stuck_payload(reason, {cause, %{} = extra}),
+    do: Map.merge(extra, %{"reason" => reason, "cause" => to_string(cause)})
+
   defp stuck_payload(reason, cause), do: %{"reason" => reason, "cause" => to_string(cause)}
 
   @doc """
@@ -1616,8 +1622,22 @@ defmodule Forge.Engine do
   lock, so of two people releasing at once one releases and the other is refused with
   `:not_on_hold`.
   """
-  @spec release(Ticket.t(), term()) :: {:ok, Ticket.t()} | {:error, term()}
-  def release(%Ticket{} = ticket, actor) do
+  @spec release(Ticket.t(), term(), keyword()) :: {:ok, Ticket.t()} | {:error, term()}
+  def release(ticket, actor, opts \\ [])
+
+  # **A taken-over ticket is released by handing it back**, to the state it rests in and with no
+  # note (`docs/design/outside-work.md` § Handing back): what was pushed meanwhile is recorded first.
+  def release(%Ticket{id: id} = ticket, actor, opts) do
+    case Repo.get(Ticket, id) do
+      %Ticket{takeover_id: taken} when is_binary(taken) ->
+        hand_back(ticket, actor, Keyword.take(opts, [:via, :allow]))
+
+      _not_taken_over ->
+        release_hold(ticket, actor)
+    end
+  end
+
+  defp release_hold(%Ticket{} = ticket, actor) do
     with {:ok, fresh} <- fresh_held(ticket),
          {:ok, prepared} <- prepare_release(fresh) do
       Multi.new()
@@ -1859,8 +1879,15 @@ defmodule Forge.Engine do
   """
   @spec stoppable?(Ticket.t()) :: boolean()
   def stoppable?(%Ticket{held_at: nil}), do: false
+  def stoppable?(%Ticket{} = ticket), do: running?(ticket)
 
-  def stoppable?(%Ticket{id: id, state: state}) do
+  @doc """
+  Whether a workflow job or command of the ticket's state is running now, held or not: what a
+  take-over asks a choice about (`take_over/3`'s `:running`), so a page draws the choice only when
+  there is a run to choose about.
+  """
+  @spec running?(Ticket.t()) :: boolean()
+  def running?(%Ticket{id: id, state: state}) do
     Repo.exists?(
       from j in Job,
         where:
@@ -1880,42 +1907,16 @@ defmodule Forge.Engine do
   """
   @spec stop_now(Ticket.t(), term()) :: {:ok, Ticket.t()} | {:error, term()}
   def stop_now(%Ticket{} = ticket, actor) do
-    now = DateTime.utc_now(:second)
-
     Multi.new()
     |> Multi.run(:locked, fn repo, _changes -> lock_held(repo, ticket.id) end)
     |> Multi.run(:live, fn repo, %{locked: locked} ->
-      live =
-        repo.all(
-          from j in Job,
-            where:
-              j.ticket_id == ^ticket.id and j.state == ^locked.state and
-                j.kind in [:workflow, :command] and j.status in @live_job_statuses,
-            lock: "FOR UPDATE"
-        )
+      live = live_runs(repo, locked)
 
       if Enum.any?(live, &(&1.status == :running)),
         do: {:ok, live},
         else: {:error, :nothing_running}
     end)
-    |> Multi.merge(fn %{locked: locked, live: live} ->
-      ids = Enum.map(live, & &1.id)
-      entry = %{"state" => locked.state, "entered" => again(locked), "came_back" => false}
-
-      Multi.new()
-      |> Multi.update(
-        :ticket,
-        Ticket.hold_changeset(locked, %{held_transition: nil, held_entry: entry})
-      )
-      |> Multi.update_all(:ended, from(j in Job, where: j.id in ^ids),
-        set: [status: :finished, outcome: :cancelled, finished_at: now, updated_at: now]
-      )
-      |> Jobs.Runs.close_all(ids, now)
-      |> Events.log(:stop_event, "ticket.stopped", actor(actor), %{
-        ticket_id: ticket.id,
-        payload: %{"state" => locked.state, "jobs" => ids}
-      })
-    end)
+    |> Multi.merge(fn %{locked: locked, live: live} -> put_stop(locked, live, actor(actor)) end)
     |> Repo.transaction()
     |> case do
       {:ok, %{ticket: stopped, live: live}} ->
@@ -1929,6 +1930,584 @@ defmodule Forge.Engine do
       {:error, step, reason, _changes} ->
         {:error, {step, reason}}
     end
+  end
+
+  # The live jobs and commands of the ticket's state, locked.
+  defp live_runs(repo, %Ticket{id: id, state: state}) do
+    repo.all(
+      from j in Job,
+        where:
+          j.ticket_id == ^id and j.state == ^state and j.kind in [:workflow, :command] and
+            j.status in @live_job_statuses,
+        lock: "FOR UPDATE"
+    )
+  end
+
+  # The stop itself, shared by `stop_now/2` and a take-over that stops the run: every live job of
+  # the state finished as cancelled, the state's entry kept to run again on release, and what the
+  # engine had waiting dropped with the run.
+  defp put_stop(%Ticket{} = locked, live, actor) do
+    now = DateTime.utc_now(:second)
+    ids = Enum.map(live, & &1.id)
+    entry = %{"state" => locked.state, "entered" => again(locked), "came_back" => false}
+
+    Multi.new()
+    |> Multi.update(
+      :ticket,
+      Ticket.hold_changeset(locked, %{held_transition: nil, held_entry: entry})
+    )
+    |> Multi.update_all(:ended, from(j in Job, where: j.id in ^ids),
+      set: [status: :finished, outcome: :cancelled, finished_at: now, updated_at: now]
+    )
+    |> Jobs.Runs.close_all(ids, now)
+    |> Events.log(:stop_event, "ticket.stopped", actor, %{
+      ticket_id: locked.id,
+      payload: %{"state" => locked.state, "jobs" => ids}
+    })
+  end
+
+  # -- taking over and handing back -----------------------------------------------------------
+
+  @doc """
+  Takes an open ticket over to work on outside forge (`docs/design/outside-work.md`): a hold with
+  a name on it. The ticket is held as `hold/2` holds it — nothing starts, no transition is taken,
+  the merge queue skips it — and a ticket already on hold keeps its `held_at` and gains the name.
+
+  Options: `:running` is `:stop` or `:finish` and is **required when a job or command of the state
+  is running** (`{:error, :running_choice}` without it, nothing written): `:stop` cancels the run
+  as `stop_now/2` does and the state runs again on hand-back, `:finish` leaves it to end and its
+  outcome waits. With nothing running it is ignored. `:via` is `page`, `api` or `mcp`, `:allow` the
+  guard of the act, asked in the transaction (`retry/3`).
+
+  Refused with `{:not_holdable, status}` for a done or cancelled ticket and
+  `{:already_taken_over, who, since}` for one that is, **the same person included**. The row is
+  locked, so of two at once one takes it and the other is refused by name.
+  """
+  @spec take_over(Ticket.t(), term(), keyword()) :: {:ok, Ticket.t()} | {:error, term()}
+  def take_over(%Ticket{id: id} = ticket, who, opts \\ []) do
+    actor = actor(who)
+    via = via(opts, actor)
+    running = Keyword.get(opts, :running)
+    allow = Keyword.get(opts, :allow, fn -> :ok end)
+    head = branch_head(ticket)
+    now = DateTime.utc_now(:second)
+
+    Multi.new()
+    |> Multi.run(:locked, fn repo, _changes -> lock_open(repo, id, :not_holdable) end)
+    |> Multi.run(:allowed, fn _repo, _changes -> allowed(allow) end)
+    |> Multi.run(:free, fn repo, %{locked: locked} -> free_of_takeover(repo, locked) end)
+    |> Multi.run(:live, fn repo, %{locked: locked} -> takeover_live(repo, locked, running) end)
+    |> Multi.merge(fn %{locked: locked, live: live} ->
+      put_takeover(locked, live, %{actor: actor, via: via, running: running, head: head, now: now})
+    end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{taken: taken, live: live} = changes} ->
+        # `:ended` is there only when the stop was part of it.
+        if Map.has_key?(changes, :ended), do: stop_runs(live)
+        Events.notify(taken.id)
+        {:ok, taken}
+
+      {:error, step, reason, _changes} when step in [:locked, :allowed, :free, :live] ->
+        {:error, reason}
+
+      {:error, step, reason, _changes} ->
+        {:error, {step, reason}}
+    end
+  end
+
+  defp takeover_live(repo, locked, running) do
+    live = live_runs(repo, locked)
+
+    if Enum.any?(live, &(&1.status == :running)) and running not in [:stop, :finish],
+      do: {:error, :running_choice},
+      else: {:ok, live}
+  end
+
+  defp put_takeover(%Ticket{id: id} = locked, live, ctx) do
+    running? = Enum.any?(live, &(&1.status == :running))
+
+    # A run going stops only when asked. What is live but not running — a job made and not yet
+    # placed, one parked on a question — is withdrawn either way: a hand-back to another step is
+    # refused while one is live (`no_live_job/1`), and the state runs again on a hand-back to it.
+    stopping = if running?, do: ctx.running == :stop, else: live != []
+
+    Multi.new()
+    |> Multi.insert(
+      :takeover,
+      Takeover.take_changeset(
+        %Takeover{},
+        Map.merge(Actor.columns(ctx.actor), %{
+          ticket_id: id,
+          via: ctx.via,
+          state: locked.state,
+          head: ctx.head,
+          taken_at: ctx.now
+        })
+      )
+    )
+    |> Multi.append(if stopping, do: put_stop(locked, live, ctx.actor), else: Multi.new())
+    |> Multi.update(:taken, fn changes ->
+      base = Map.get(changes, :ticket, locked)
+
+      Ticket.takeover_changeset(base, %{
+        held_at: base.held_at || ctx.now,
+        takeover_id: changes.takeover.id
+      })
+    end)
+    |> Events.log(:takeover_event, "ticket.taken_over", ctx.actor, %{
+      ticket_id: id,
+      payload: %{
+        "state" => locked.state,
+        "via" => ctx.via,
+        "running" => if(running?, do: Atom.to_string(ctx.running)),
+        "jobs" => if(stopping, do: Enum.map(live, & &1.id), else: []),
+        "head" => ctx.head
+      }
+    })
+  end
+
+  # `via` is a door's name; a caller that says nothing is a page for a person and the API for a
+  # token, which is what they are when nothing else was said.
+  defp via(opts, actor) do
+    case Keyword.get(opts, :via) do
+      via when via in ["page", "api", "mcp"] -> via
+      via when via in [:page, :api, :mcp] -> Atom.to_string(via)
+      _unsaid -> if match?({:api, _id, _name}, actor), do: "api", else: "page"
+    end
+  end
+
+  # The branch head now, or nil where it cannot be read (a take-over does not depend on it: the
+  # hand-back counts commits from it and counts none without).
+  defp branch_head(%Ticket{branch: branch} = ticket) do
+    repo = ticket |> Tickets.project_of() |> Forge.Projects.repo_path()
+
+    case Forge.Git.resolve(repo, "refs/heads/" <> branch) do
+      {:ok, sha} -> sha
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp free_of_takeover(_repo, %Ticket{takeover_id: nil} = locked), do: {:ok, locked}
+
+  defp free_of_takeover(repo, %Ticket{takeover_id: id}) do
+    takeover = Takeover |> repo.get!(id) |> repo.preload(:token)
+    {:error, {:already_taken_over, Takeover.taker(takeover), takeover.taken_at}}
+  end
+
+  @doc """
+  Hands a taken-over ticket back (`docs/design/outside-work.md` § Handing back), in two phases.
+
+  **First, in a transaction of its own, what was pushed is recorded**: when the branch head is not
+  the commit of the ticket's latest `changeset` version (or, with none, not its base) it is
+  written as a new version authored by whoever hands back, and the base follows as it does for a
+  job's result. It goes first so that every later check — the merge check, the approval a
+  transition or a jump records, a pending approval — reads the pushed commits. **A hand-back
+  refused after it leaves that version recorded and the ticket taken over**; a second try records
+  nothing new.
+
+  **Then, in one transaction, the take-over is closed and the move made**: the hand-back's half is
+  written (who, door, step, note, head, the commits pushed meanwhile, the version), the hold is
+  cleared and `ticket.handed_back` logged; then the ticket continues from `:to`, default the state
+  it rests in:
+
+  - another state: `choose/4` — the declared transition when one leads there, a jump otherwise,
+    with the refusals each has; a refusal rolls the whole of it back;
+  - the same state of a stuck ticket that `retryable?/1` accepts: `retry/3`;
+  - the same state otherwise: the hold is released as `release/2` releases it, replaying what
+    waited.
+
+  Options: `:to`, `:note` (text, at most `Forge.Tickets.Takeover.note_limit/0` codepoints, the
+  caller's to check), `:via`, `:allow`.
+  """
+  @spec hand_back(Ticket.t(), term(), keyword()) :: {:ok, Ticket.t()} | {:error, term()}
+  def hand_back(%Ticket{id: id} = ticket, who, opts \\ []) do
+    actor = actor(who)
+
+    with {:ok, fresh} <- fresh_taken(ticket),
+         {:ok, pushed} <- record_push(fresh, actor) do
+      Repo.transaction(fn -> close_and_move(id, actor, opts, pushed) end)
+      |> case do
+        {:ok, moved} ->
+          MergeQueue.kick(moved.project_id)
+          Events.notify(moved.id)
+          {:ok, moved}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  # Phase two, inside one transaction: a refusal anywhere rolls the whole of it back.
+  defp close_and_move(id, actor, opts, pushed) do
+    allow = Keyword.get(opts, :allow, fn -> :ok end)
+
+    with {:ok, locked} <- lock_taken(Repo, id),
+         {:ok, :allowed} <- allowed(allow),
+         to = Keyword.get(opts, :to) || locked.state,
+         {:ok, cleared} <- close_takeover(locked, actor, to, pushed, opts),
+         {:ok, moved} <- move_back(cleared, locked, to, actor, opts) do
+      moved
+    else
+      {:error, reason} -> Repo.rollback(reason)
+    end
+  end
+
+  defp fresh_taken(%Ticket{id: id}) do
+    case Repo.get(Ticket, id) do
+      %Ticket{takeover_id: taken, status: status} = ticket
+      when is_binary(taken) and status in [:active, :stuck] ->
+        {:ok, ticket}
+
+      %Ticket{takeover_id: nil} ->
+        {:error, :not_taken_over}
+
+      %Ticket{status: status} ->
+        {:error, {:not_releasable, status}}
+
+      nil ->
+        {:error, :not_found}
+    end
+  end
+
+  defp lock_taken(repo, ticket_id) do
+    case repo.one!(from t in Ticket, where: t.id == ^ticket_id, lock: "FOR UPDATE") do
+      %Ticket{takeover_id: nil} -> {:error, :not_taken_over}
+      %Ticket{status: status} = ticket when Ticket.open?(status) -> {:ok, ticket}
+      %Ticket{status: status} -> {:error, {:not_releasable, status}}
+    end
+  end
+
+  # Phase one. What is read of git is read before any lock, and what is written is a version of the
+  # `changeset` and the base that follows it, as a finished job's result writes them.
+  defp record_push(%Ticket{} = ticket, actor) do
+    repo = ticket |> Tickets.project_of() |> Forge.Projects.repo_path()
+    takeover = Repo.get!(Takeover, ticket.takeover_id)
+
+    with {:ok, head} <- Forge.Git.resolve(repo, "refs/heads/" <> ticket.branch) do
+      latest =
+        case Merge.changeset(ticket) do
+          {:ok, %{sha: sha}} -> sha
+          {:error, _no_version} -> nil
+        end
+
+      commits = pushed_commits(repo, takeover, jobs_changeset(ticket), head)
+      moved? = if latest, do: head != latest, else: head != ticket.base_commit
+
+      if moved?,
+        do: write_push(ticket, repo, actor, head, commits),
+        else: {:ok, %{head: head, commits: commits, version_id: nil}}
+    end
+  end
+
+  defp write_push(ticket, repo, actor, head, commits) do
+    Multi.new()
+    |> Artifacts.put_changeset(:changeset, ticket.id, actor, head)
+    |> Jobs.put_base(ticket, repo, head)
+    |> Repo.transaction()
+    |> case do
+      {:ok, changes} ->
+        {:ok, %{head: head, commits: commits, version_id: changes[{:changeset, :version}].id}}
+
+      {:error, _step, reason, _changes} ->
+        {:error, reason}
+    end
+  end
+
+  # The commit of the ticket's latest `changeset` **when a job recorded it**, else nil: the one version
+  # whose commits are not the hand-back's to count. A version a hand-back itself wrote — refused
+  # after it, and tried again — covers the person's own commits, and counting from it would read the
+  # empty range `head..head`.
+  @doc false
+  @spec jobs_changeset(Ticket.t()) :: String.t() | nil
+  def jobs_changeset(%Ticket{} = ticket) do
+    case Merge.changeset(ticket) do
+      {:ok, %{sha: sha, row: %{author: %{"kind" => "job"}}}} -> sha
+      _someone_elses_or_none -> nil
+    end
+  end
+
+  # What was pushed while it was taken over: from the latest `changeset`'s commit when that
+  # descends from the head the take-over saw (so a run let finish is not counted as the person's),
+  # else from that head. At most 20 are kept and `more` counts the rest.
+  @doc false
+  @spec pushed_commits(Path.t(), Takeover.t(), String.t() | nil, String.t()) :: map()
+  def pushed_commits(repo, %Takeover{head: taken}, latest, head) do
+    from =
+      if latest && taken && Forge.Git.ancestor?(repo, taken, latest), do: latest, else: taken
+
+    case from && Forge.Git.log(repo, from, head) do
+      {:ok, commits} ->
+        {shown, rest} = Enum.split(commits, 20)
+
+        %{
+          "list" => Enum.map(shown, &%{"sha" => &1.sha, "subject" => &1.subject}),
+          "more" => length(rest)
+        }
+
+      _unreadable ->
+        %{"list" => [], "more" => 0}
+    end
+  end
+
+  # Phase two's first half: the hand-back's half of the row, the hold cleared (kept for a release,
+  # which replays what waited under it) and the event.
+  defp close_takeover(%Ticket{} = locked, actor, to, pushed, opts) do
+    keep_hold? = to == locked.state and not (locked.status == :stuck and retryable?(locked))
+    back = Actor.columns(actor)
+
+    attrs = %{
+      back_user_id: back.user_id,
+      back_token_id: back.token_id,
+      back_via: via(opts, actor),
+      to_state: to,
+      note: Keyword.get(opts, :note),
+      back_head: pushed.head,
+      commits: pushed.commits,
+      changeset_version_id: pushed.version_id,
+      handed_back_at: DateTime.utc_now(:second)
+    }
+
+    cleared =
+      if keep_hold?,
+        do: %{takeover_id: nil},
+        else: %{takeover_id: nil, held_at: nil, held_transition: nil, held_entry: nil}
+
+    Multi.new()
+    |> Multi.update(:takeover, fn _ ->
+      Takeover.back_changeset(Repo.get!(Takeover, locked.takeover_id), attrs)
+    end)
+    |> Multi.update(:ticket, Ticket.takeover_changeset(locked, cleared))
+    |> Events.log(:handed_back_event, "ticket.handed_back", actor, %{
+      ticket_id: locked.id,
+      payload: %{
+        "from" => locked.state,
+        "to" => to,
+        "via" => attrs.back_via,
+        "note" => attrs.note,
+        "head" => pushed.head,
+        "commits" => pushed.commits,
+        "version_id" => pushed.version_id
+      }
+    })
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{ticket: cleared}} -> {:ok, cleared}
+      {:error, _step, %Ecto.Changeset{} = changeset, _changes} -> {:error, {:invalid, changeset}}
+      {:error, _step, reason, _changes} -> {:error, reason}
+    end
+  end
+
+  defp move_back(%Ticket{} = cleared, %Ticket{state: state}, to, actor, _opts) when to == state do
+    if cleared.held_at == nil, do: retry(cleared, actor), else: release_hold(cleared, actor)
+  end
+
+  defp move_back(%Ticket{} = cleared, _locked, to, actor, _opts), do: choose(cleared, actor, to)
+
+  # -- keeping a job's work after the branch moved ---------------------------------------------
+
+  @doc """
+  The ticket's current moved-branch stop: the payload of its latest `ticket.stuck` when the ticket
+  is stuck and that event's cause is `branch_moved` (`job_id`, `outcome`, `lease`, `kept`, `head`,
+  `arrived`, `pushers`), else nil. What the pages and the queue draw the three ways out from, and
+  what `keep_work/4` checks a press against.
+  """
+  @spec branch_moved_stop(Ticket.t()) :: map() | nil
+  def branch_moved_stop(%Ticket{status: :stuck} = ticket) do
+    case latest_stick(ticket) do
+      %{"cause" => "branch_moved"} = payload -> payload
+      _other -> nil
+    end
+  end
+
+  def branch_moved_stop(%Ticket{}), do: nil
+
+  @doc """
+  Keeps the work of the job a moved-branch stop names (`docs/design/outside-work.md` § Keeping the
+  job's work): the commit the worker kept at `refs/forge/kept/<job id>` is merged onto the head the
+  branch has now, and the ticket carries on as the job's own outcome would have.
+
+  **Git first, then the record.** With the kept commit already an ancestor of the head nothing is
+  merged; otherwise the head and the kept commit are merged in memory (`Merge.merge_tree/3`), one
+  merge commit is made (parents head, kept) and pushed by the platform's own push with a lease on
+  the head that was read — the update step's pattern. A clash is `{:kept_work_conflicts, paths}`
+  and a push the platform could not make (the branch moved again, or a hook refused) `:keep_push_failed`; both leave the ticket stuck and
+  write nothing. **Then one transaction**: a `changeset` version at the new head authored by
+  whoever kept it, the base following, `ticket.work_kept`, and then `put_after_job/4` with the
+  job's declared outcome when the run had one (a held or taken-over ticket defers the transition
+  as any hold does) — otherwise the state runs again, as `retry/3` runs it.
+
+  `job_id` must be the job the ticket's latest stop names and the ticket must still be stuck for
+  it, so a press on a stop since left (by *Run again*, by keeping, by a hand-back) is
+  `{:error, :stale_stop}` and does nothing. A stop with no kept commit is `{:error, :nothing_kept}`.
+  Options: `:via`, `:allow` (asked first, so a refused actor merges nothing, and again in the
+  transaction).
+  """
+  @spec keep_work(Ticket.t(), term(), String.t(), keyword()) ::
+          {:ok, Ticket.t()} | {:error, term()}
+  def keep_work(%Ticket{id: id}, who, job_id, opts \\ []) do
+    actor = actor(who)
+    allow = Keyword.get(opts, :allow, fn -> :ok end)
+
+    with {:ok, :allowed} <- allowed(allow),
+         %Ticket{} = fresh <- Repo.get(Ticket, id) || {:error, :not_found},
+         {:ok, stop} <- stop_for(fresh, job_id),
+         {:ok, kept} <- kept_commit(fresh, stop, job_id),
+         {:ok, merged} <- merge_kept(fresh, kept, job_id) do
+      record_kept(fresh, {actor, allow, via(opts, actor)}, {stop, job_id, merged})
+    end
+  end
+
+  # The record, once the git work is done: one transaction that re-reads the stop under the lock.
+  defp record_kept(%Ticket{id: id} = fresh, {actor, allow, via}, {stop, job_id, merged}) do
+    Multi.new()
+    |> Multi.run(:locked, fn repo, _changes -> lock_stuck(repo, id) end)
+    |> Multi.run(:allowed, fn _repo, _changes -> allowed(allow) end)
+    |> Multi.run(:still, fn _repo, %{locked: locked} ->
+      if match?(%{"job_id" => ^job_id}, branch_moved_stop(locked)),
+        do: {:ok, :still},
+        else: {:error, :stale_stop}
+    end)
+    |> Multi.merge(fn %{locked: locked} ->
+      put_kept(locked, actor, stop, job_id, merged, via)
+    end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, changes} ->
+        after_keep(changes, fresh)
+
+      {:error, :locked, {:not_stuck, _status}, _changes} ->
+        {:error, :stale_stop}
+
+      {:error, step, reason, _changes}
+      when step in [:locked, :allowed, :still, :retryable, :figures, :cap] ->
+        {:error, reason}
+
+      {:error, step, reason, _changes} ->
+        {:error, {step, reason}}
+    end
+  end
+
+  defp stop_for(%Ticket{status: :stuck} = ticket, job_id) do
+    case branch_moved_stop(ticket) do
+      %{"job_id" => ^job_id} = stop -> {:ok, stop}
+      _stale -> {:error, :stale_stop}
+    end
+  end
+
+  defp stop_for(%Ticket{}, _job_id), do: {:error, :stale_stop}
+
+  # The commit the job's token pushed to its own ref, read from the repository and not from the
+  # event: the event says where the worker meant to keep it, the ref says it is there.
+  defp kept_commit(%Ticket{} = ticket, %{"kept" => kept}, job_id) when is_binary(kept) do
+    repo = ticket |> Tickets.project_of() |> Forge.Projects.repo_path()
+
+    case Forge.Git.resolve(repo, "refs/forge/kept/" <> job_id) do
+      {:ok, sha} -> {:ok, sha}
+      {:error, _gone} -> {:error, :nothing_kept}
+    end
+  end
+
+  defp kept_commit(_ticket, _stop, _job_id), do: {:error, :nothing_kept}
+
+  defp merge_kept(%Ticket{} = ticket, kept, job_id) do
+    repo = ticket |> Tickets.project_of() |> Forge.Projects.repo_path()
+    ref = "refs/heads/" <> ticket.branch
+
+    with {:ok, head} <- Forge.Git.resolve(repo, ref) do
+      if Forge.Git.ancestor?(repo, kept, head) do
+        {:ok, %{repo: repo, from: head, to: head, kept: kept, merged: false}}
+      else
+        merge_kept_onto(repo, ref, head, kept, job_id)
+      end
+    end
+  end
+
+  defp merge_kept_onto(repo, ref, head, kept, job_id) do
+    message =
+      "Keep the work of job #{job_id} on #{String.replace_prefix(ref, "refs/heads/", "")}\n"
+
+    with {:ok, tree} <- merge_tree_result(Merge.merge_tree(repo, head, kept)),
+         {:ok, sha} <- Merge.commit_tree(repo, tree, [head, kept], message, nil),
+         :ok <- push_kept(repo, ref, sha, head) do
+      {:ok, %{repo: repo, from: head, to: sha, kept: kept, merged: true}}
+    end
+  end
+
+  defp merge_tree_result({:ok, tree}), do: {:ok, tree}
+  defp merge_tree_result({:conflict, paths}), do: {:error, {:kept_work_conflicts, paths}}
+  defp merge_tree_result({:error, reason}), do: {:error, {:merge_failed, reason}}
+
+  defp push_kept(repo, ref, sha, head) do
+    case Forge.Git.push_internal(repo, "#{sha}:#{ref}", lease: {ref, head}) do
+      :ok -> :ok
+      {:error, _refused} -> {:error, :keep_push_failed}
+    end
+  end
+
+  defp put_kept(%Ticket{} = locked, actor, stop, job_id, merged, via) do
+    job = Repo.get!(Job, job_id)
+    outcome = stop["outcome"]
+
+    Multi.new()
+    |> Artifacts.put_changeset(:changeset, locked.id, actor, merged.to)
+    |> Jobs.put_base(locked, merged.repo, merged.to)
+    |> Events.log(:kept_event, "ticket.work_kept", actor, %{
+      ticket_id: locked.id,
+      payload: %{
+        "job_id" => job_id,
+        "kept" => merged.kept,
+        "from" => merged.from,
+        "to" => merged.to,
+        "merged" => merged.merged,
+        "via" => via
+      }
+    })
+    # **The ticket the next step reads is the one whose base moved**: a job made next is handed a
+    # `changeset` diffed from `base_commit` of the struct it is built from, and `put_base/5` above
+    # wrote the new base to the row only (`Forge.Jobs` does the same with `moved_base/2`).
+    |> Multi.merge(fn changes ->
+      put_kept_next(base_moved(locked, changes[:base]), actor, job, outcome)
+    end)
+  end
+
+  defp base_moved(%Ticket{} = ticket, nil), do: ticket
+
+  defp base_moved(%Ticket{} = ticket, %Ticket{base_commit: base}),
+    do: %{ticket | base_commit: base}
+
+  # What follows a kept job's work: its own outcome, as `put_after_job/4` takes it from an active
+  # ticket, or — a run with no outcome — the state again. `put_after_job/4` and `put_retry/3` each
+  # write the ticket row themselves.
+  defp put_kept_next(%Ticket{} = ticket, actor, job, outcome) when is_binary(outcome) do
+    active = %{ticket | status: :active, pending_transition: nil}
+
+    Multi.new()
+    |> Tickets.put_progress(:unstuck, ticket, %{
+      state: ticket.state,
+      status: :active,
+      usage: ticket.usage,
+      pending_transition: nil
+    })
+    |> Events.log(:unstuck_event, "ticket.unstuck", actor, %{
+      ticket_id: ticket.id,
+      payload: %{"reason" => "the job's work was kept"}
+    })
+    |> put_after_job(active, job, outcome)
+  end
+
+  defp put_kept_next(%Ticket{} = ticket, actor, _job, _no_outcome),
+    do: put_retry(ticket, actor, [])
+
+  defp after_keep(changes, %Ticket{} = before) do
+    moved = changes[:ticket] || changes[:unstuck] || Repo.get!(Ticket, before.id)
+    MergeQueue.kick(moved.project_id)
+    Events.notify(moved.id)
+
+    if Map.has_key?(changes, :unstuck),
+      do: {:ok, entered(changes.unstuck, moved)},
+      else: {:ok, moved}
   end
 
   # -- running a state again ------------------------------------------------------------------
@@ -2012,7 +2591,7 @@ defmodule Forge.Engine do
     |> Multi.insert(:restart, fn %{figures: figures} ->
       Restart.changeset(
         %Restart{},
-        Map.merge(Forge.Actor.columns(actor), %{
+        Map.merge(Actor.columns(actor), %{
           ticket_id: locked.id,
           state: locked.state,
           note: figures.note

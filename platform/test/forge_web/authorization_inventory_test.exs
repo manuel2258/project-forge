@@ -104,6 +104,7 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/api/v1/queue" => :member,
     "/api/v1/projects" => :approved,
     "/api/v1/tickets" => :member,
+    "/api/v1/projects/:project" => :member,
     "/api/v1/projects/:project/tickets" => :member,
     "/api/v1/tickets/:project/:number" => :member,
     "/api/v1/tickets/:project/:number/events" => :member,
@@ -136,6 +137,9 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/api/v1/tickets/:project/:number/hold" => :member,
     "/api/v1/tickets/:project/:number/release" => :member,
     "/api/v1/tickets/:project/:number/stop" => :member,
+    "/api/v1/tickets/:project/:number/take-over" => :member,
+    "/api/v1/tickets/:project/:number/hand-back" => :member,
+    "/api/v1/tickets/:project/:number/keep-work" => :member,
     "/api/v1/tickets/:project/:number/title" => :member,
     "/api/v1/tickets/:project/:number/milestone" => :member,
     "/api/v1/tickets/:project/:number/move" => :member,
@@ -154,6 +158,11 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/api/v1/projects/:project/proposals" => :member,
     "/api/v1/proposals/:version_id/accept" => :member,
     "/api/v1/proposals/:version_id/decline" => :member,
+
+    # The MCP endpoint: the API's bearers (`ApiAuth`, a job's token refused), a foreign `Origin` refused,
+    # and per tool the API's own rule — a write needs a token with API write, a ticket of another
+    # project is a 404 — over `Forge.Operator` (`docs/design/api-and-ui.md` § MCP).
+    "/mcp" => :member,
 
     # No session at all: a credential that names one key and one verb, or one ref of one repo.
     "/store/*key" => :token,
@@ -327,6 +336,8 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"queue_live.ex", "transition"} => :member,
     {"ticket_new_live.ex", "create"} => :member,
     {"ticket_new_live.ex", "validate"} => :local,
+    # Which of the form's three submits is the face of the button: a choice in the page's own state.
+    {"ticket_new_live.ex", "how"} => :local,
     {"workers_live.ex", "toggle-destroyed"} => :local,
     {"workers_live.ex", "new-machine"} => :local,
     {"workers_live.ex", "cancel-new"} => :local,
@@ -417,12 +428,17 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"operator/actions.ex", "repin"} => :member,
     {"operator/actions.ex", "integrate"} => :member,
     {"operator/actions.ex", "take-out"} => :member,
+    {"operator/actions.ex", "keep-work"} => :member,
     {"operator/actions.ex", "write_document"} => :member,
     # The hold and its words (`Forge.Operator.hold/2`, `release/2`, `stop_now/2`, `retitle/3`,
     # `set_milestone/3`), each resolving its ticket off the wire before it asks `:use`.
     {"operator/actions.ex", "hold-ticket"} => :member,
     {"operator/actions.ex", "release-ticket"} => :member,
     {"operator/actions.ex", "stop-now"} => :member,
+    # Taking over and handing back (`Forge.Operator.take_over/3`, `hand_back/3`), each resolving
+    # its ticket off the wire before it asks `:use`.
+    {"operator/actions.ex", "take-over"} => :member,
+    {"operator/actions.ex", "hand-back"} => :member,
     {"operator/actions.ex", "retitle"} => :member,
     {"operator/actions.ex", "set-milestone"} => :member,
     # The warm build's clear (`Forge.Operator.clear_warm_build/2`), resolving its ticket off the

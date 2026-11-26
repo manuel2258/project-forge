@@ -1123,4 +1123,145 @@ defmodule ForgeWorker.Job.WorkspaceTest do
              )
     end
   end
+
+  # `docs/design/worker-channel.md` § Protocol 17: a job's push expects the branch to be where the
+  # run last held it (its lease), and a branch somebody else moved is never overwritten.
+  describe "a branch somebody else moved" do
+    defp as, do: ForgeWorker.Slice.as_user(@direct)
+
+    defp lease(dir), do: ForgeWorker.Checkout.lease(dir, "ticket/1", as())
+
+    # A commit another clone pushes to the ticket branch, as a person's own machine would.
+    defp foreign_push(origin, file) do
+      work = tmp_dir("foreign")
+      git!(nil, ["clone", "--quiet", "--branch", "ticket/1", origin, work])
+      File.write!(Path.join(work, file), "from elsewhere\n")
+      git!(work, ["add", "."])
+
+      git!(
+        work,
+        ["-c", "user.name=t", "-c", "user.email=t@forge", "-c", "commit.gpgsign=false"] ++
+          ["commit", "--quiet", "-m", "elsewhere"]
+      )
+
+      git!(work, ["push", "--quiet", "origin", "ticket/1"])
+      rev(work, "HEAD")
+    end
+
+    defp agent_commit(dir, file, message) do
+      git!(dir, ["config", "user.name", "agent"])
+      git!(dir, ["config", "user.email", "agent@forge"])
+      git!(dir, ["config", "commit.gpgsign", "false"])
+      File.write!(Path.join(dir, file), message <> "\n")
+      git!(dir, ["add", file])
+      git!(dir, ["commit", "--quiet", "-m", message])
+    end
+
+    test "the lease is the commit the run fetched", %{origin: origin, root: root} do
+      {:ok, dir} = Workspace.prepare(assignment(origin), root, @direct)
+
+      assert lease(dir) == {:ok, rev(origin, "refs/heads/ticket/1")}
+    end
+
+    # `--force-with-lease` is compared against the lease and not against what the run's own commits
+    # look like, so rewriting them — squashing, amending — still pushes.
+    test "a run that amended its own commits still pushes", %{origin: origin, root: root} do
+      job = assignment(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      agent_commit(dir, "one.md", "first")
+      git!(dir, ["commit", "--quiet", "--amend", "-m", "amended"])
+
+      assert {:ok, head} = Workspace.commit_and_push(job, dir, "planning: attempt 1", @direct)
+      assert rev(origin, "refs/heads/ticket/1") == head
+      assert lease(dir) == {:ok, head}
+    end
+
+    test "a second push in the same run leases on the first", %{origin: origin, root: root} do
+      job = assignment(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      File.write!(Path.join(dir, "a.md"), "a")
+      {:ok, first} = Workspace.commit_and_push(job, dir, "turn 1", @direct)
+      File.write!(Path.join(dir, "b.md"), "b")
+
+      assert {:ok, second} = Workspace.commit_and_push(job, dir, "turn 2", @direct)
+      assert rev(origin, "refs/heads/ticket/1") == second
+      assert rev(origin, second <> "^") == first
+    end
+
+    test "a foreign commit is not overwritten: the work is kept and the move reported", context do
+      %{origin: origin, root: root} = context
+      job = assignment(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      {:ok, lease} = lease(dir)
+      File.write!(Path.join(dir, "NOTES.md"), "the run's work\n")
+      foreign = foreign_push(origin, "ELSEWHERE.md")
+
+      assert {:moved, %{"lease" => ^lease, "kept" => kept, "remote" => ^foreign}} =
+               Workspace.commit_and_push(job, dir, "planning: attempt 1", @direct)
+
+      # Nothing was written to the branch.
+      assert rev(origin, "refs/heads/ticket/1") == foreign
+      refute kept == foreign
+
+      # The work is where the platform keeps it, one commit on the lease.
+      assert rev(origin, "refs/forge/kept/" <> job["job_id"]) == kept
+      assert rev(origin, kept <> "^") == lease
+      assert git!(nil, ["-C", origin, "show", kept <> ":NOTES.md"]) == "the run's work\n"
+
+      # The lease stays: a run that tries again is still compared with what it started from.
+      assert lease(dir) == {:ok, lease}
+    end
+
+    # The agent's own `git fetch` moves `origin/ticket/1` to the foreign commit. The squash used to
+    # reset onto that, so the commit it made reverted what the fetch had brought.
+    test "after the agent fetches, the squash still sits on the lease", context do
+      %{origin: origin, root: root} = context
+      job = assignment(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      {:ok, lease} = lease(dir)
+      foreign = foreign_push(origin, "ELSEWHERE.md")
+      git!(dir, ["fetch", "--quiet", "origin"])
+      assert rev(dir, "refs/remotes/origin/ticket/1") == foreign
+      File.write!(Path.join(dir, "NOTES.md"), "the run's work\n")
+
+      assert {:moved, %{"lease" => ^lease, "kept" => kept}} =
+               Workspace.commit_and_push(job, dir, "planning: attempt 1", @direct)
+
+      assert rev(dir, kept <> "^") == lease
+      assert Workspace.base(job, dir, @direct) == {:ok, lease}
+    end
+
+    test "a resume keeps the lease it started with, a cold start takes the new one", context do
+      %{origin: origin, root: root} = context
+      job = assignment(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      {:ok, lease} = lease(dir)
+      foreign = foreign_push(origin, "ELSEWHERE.md")
+
+      resumed = %{job | "resume_session" => "sess-1"}
+      assert {:ok, ^dir} = Workspace.prepare(resumed, root, @direct)
+      assert lease(dir) == {:ok, lease}
+      assert rev(dir, "refs/remotes/origin/ticket/1") == foreign
+
+      assert {:ok, ^dir} = Workspace.prepare(job, root, @direct)
+      assert lease(dir) == {:ok, foreign}
+    end
+
+    test "a refusal that is not a moved branch is the error it is", context do
+      %{origin: origin, root: root} = context
+      job = assignment(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      File.write!(Path.join(dir, "NOTES.md"), "work\n")
+      hook = Path.join([origin, "hooks", "pre-receive"])
+      File.mkdir_p!(Path.dirname(hook))
+      File.write!(hook, "#!/bin/sh\necho declined >&2\nexit 1\n")
+      File.chmod!(hook, 0o755)
+
+      assert {:error, {_code, out}} =
+               Workspace.commit_and_push(job, dir, "planning: attempt 1", @direct)
+
+      assert out =~ "declined"
+      assert git!(nil, ["-C", origin, "for-each-ref", "refs/forge/kept"]) == ""
+    end
+  end
 end

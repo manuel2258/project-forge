@@ -54,6 +54,17 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
     refute has_element?(view, "#tab-workflow")
   end
 
+  test "a token with no API access gets no line to connect an agent with", ctx do
+    %{conn: conn, project: project} = ctx
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
+
+    issue(view, %{"name" => "git-only", "api" => "none"})
+
+    assert has_element?(view, "#issued-secret")
+    refute has_element?(view, "#issued-mcp")
+    refute has_element?(view, "#issued-curl")
+  end
+
   test "issues a read token and shows it once, with the line that uses it", ctx do
     %{conn: conn, project: project} = ctx
     {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings?section=tokens")
@@ -68,6 +79,12 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
     assert html =~ ~s(id="issued-curl")
     assert html =~ "Authorization: Bearer"
     assert html =~ "/api/v1/tickets"
+
+    # The connect command for an agent: the endpoint and the bearer, copyable, here and nowhere else.
+    assert html =~ ~s(id="issued-mcp")
+    assert has_element?(view, "#issued-mcp", "claude mcp add")
+    assert has_element?(view, "#issued-mcp", "/mcp")
+    assert has_element?(view, "#issued-mcp", "Authorization: Bearer")
 
     assert html =~ ~s(id="issued-url")
     assert html =~ ~s(data-target="issued-url")
@@ -98,6 +115,7 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
 
     refute html =~ ~s(id="issued-url")
     assert html =~ ~s(id="issued-curl")
+    assert html =~ ~s(id="issued-mcp")
     assert [token] = Tokens.list(project)
     assert token.issued_by_id == user.id
     assert html =~ "issued by #{user.email}"

@@ -68,6 +68,7 @@ defmodule Forge.Git.Http do
         report(err_path, project, token)
 
         if status == 0 do
+          record_pushes(conn, project, tail, token, repo_path, in_path)
           reply(conn, out_path)
         else
           Logger.error("git http-backend exited #{status} for #{project.name}")
@@ -260,4 +261,113 @@ defmodule Forge.Git.Http do
 
   defp actor(%Token{job_id: nil}), do: :system
   defp actor(%Token{job_id: job_id}), do: {:job, job_id}
+
+  # -- what a push did to a ticket's branch -------------------------------------------------------
+
+  @zeros String.duplicate("0", 40)
+  # The ref commands of a push are its first pkt-lines, a few hundred bytes each; a megabyte holds
+  # any push a branch token or a developer can make, and the rest of the body is the pack, which
+  # is never read here.
+  @commands_probe 1_000_000
+  # Nine digits at most: a ticket number is a 32-bit integer in the database, and a longer one is
+  # no ticket's.
+  @ticket_ref ~r|\Arefs/heads/ticket/([1-9][0-9]{0,8})\z|
+
+  # **`branch.pushed` for every ticket branch a push moved** (`docs/design/git-hosting.md` § A job
+  # pushes with a lease): the event a moved-branch stop names its pushers from. It is read from the
+  # request body already on disk, and recorded only for a ref that **now resolves to the commit the
+  # push named** — a push a hook refused leaves the ref where it was and `http-backend` still answers
+  # 200 with the refusal in its report, so the status says nothing and the ref is the witness. A
+  # body that is not a receive-pack request, or cannot be read as pkt-lines, records nothing and
+  # never fails the push.
+  defp record_pushes(%{method: "POST"}, project, ["git-receive-pack"], token, repo_path, in_path) do
+    for {old, new, ref} <- ref_commands(in_path),
+        number = ticket_number(ref),
+        old != new,
+        {:ok, ^new} <- [Forge.Git.resolve(repo_path, ref)],
+        %{id: ticket_id} <- [
+          Forge.Repo.get_by(Forge.Tickets.Ticket, project_id: project.id, number: number)
+        ] do
+      Forge.Events.append("branch.pushed", pusher(token), %{
+        ticket_id: ticket_id,
+        payload: %{"ref" => ref, "from" => if(old == @zeros, do: nil, else: old), "to" => new}
+      })
+
+      # A job's own push is the run's business; a person's or a token's is what a page watching the
+      # ticket wants to see.
+      if token.job_id == nil, do: Forge.Events.notify(ticket_id)
+    end
+
+    :ok
+  end
+
+  defp record_pushes(_conn, _project, _tail, _token, _repo_path, _in_path), do: :ok
+
+  defp ticket_number(ref) do
+    case Regex.run(@ticket_ref, ref) do
+      [_whole, digits] -> String.to_integer(digits)
+      nil -> nil
+    end
+  end
+
+  # A project token is named, so the event says which; a job's own token is the job.
+  defp pusher(%Token{job_id: job_id}) when is_binary(job_id), do: {:job, job_id}
+  defp pusher(%Token{id: id, name: name}), do: {:api, id, name || "token"}
+
+  @doc """
+  The ref commands `{old, new, ref}` at the start of a receive-pack request body in the file `path`,
+  in order, or `[]` when it does not read as them. `shallow` lines and a push certificate are not
+  commands and are skipped past or end the list.
+  """
+  @spec ref_commands(Path.t()) :: [{String.t(), String.t(), String.t()}]
+  def ref_commands(path) do
+    case File.open(path, [:read, :binary]) do
+      {:ok, file} ->
+        try do
+          case IO.binread(file, @commands_probe) do
+            data when is_binary(data) -> parse_commands(data, [])
+            _eof_or_error -> []
+          end
+        after
+          File.close(file)
+        end
+
+      {:error, _reason} ->
+        []
+    end
+  end
+
+  # pkt-line: four hex digits, the length including themselves; `0000` is the flush that ends the
+  # commands. The first command carries the capabilities after a NUL.
+  defp parse_commands(<<"0000", _pack::binary>>, acc), do: Enum.reverse(acc)
+
+  defp parse_commands(<<len::binary-size(4), rest::binary>>, acc) do
+    with {n, ""} when n >= 4 <- Integer.parse(len, 16),
+         size = n - 4,
+         <<line::binary-size(size), more::binary>> <- rest do
+      case command(line) do
+        {:command, command} -> parse_commands(more, [command | acc])
+        :skip -> parse_commands(more, acc)
+        :stop -> Enum.reverse(acc)
+      end
+    else
+      _unreadable -> []
+    end
+  end
+
+  defp parse_commands(_short, _acc), do: []
+
+  defp command("shallow " <> _sha), do: :skip
+
+  defp command(line) do
+    [text | _caps] = String.split(line, <<0>>, parts: 2)
+
+    case String.split(String.trim_trailing(text, "\n"), " ", parts: 3) do
+      [old, new, ref] when byte_size(old) in [40, 64] and byte_size(new) in [40, 64] ->
+        {:command, {old, new, ref}}
+
+      _not_a_command ->
+        :stop
+    end
+  end
 end

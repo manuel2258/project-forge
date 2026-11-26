@@ -53,7 +53,8 @@ defmodule Forge.Look.Setups do
     "paged_streams" => Forge.Look.Setups.PagedStreams,
     "warm_build" => Forge.Look.Setups.WarmBuild,
     "pages" => Forge.Look.Setups.Pages,
-    "ticket_text" => Forge.Look.Setups.TicketText
+    "ticket_text" => Forge.Look.Setups.TicketText,
+    "takeover" => Forge.Look.Setups.Takeover
   }
 
   @doc "The registered setups, by name."

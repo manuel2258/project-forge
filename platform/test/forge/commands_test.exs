@@ -877,11 +877,15 @@ defmodule Forge.CommandsTest do
         # a command.
         assert Jobs.protocol_needs(each)[:chat] == if(each.kind == :chat, do: 15, else: 0)
         assert Jobs.protocol_needs(each)[:pages] == if(each.kind == :command, do: 0, else: 16)
-        assert Jobs.protocol(each) == if(each.kind == :command, do: 14, else: 16)
+        # Protocol 17: an agent's push is made with a lease, so that it never removes what someone
+        # else pushed meanwhile (`worker-channel.md` § Protocol 17). A command pushes nothing.
+        assert Jobs.protocol_needs(each)[:lease] == if(each.kind == :command, do: 0, else: 17)
+        assert Jobs.protocol(each) == if(each.kind == :command, do: 14, else: 17)
       end
 
       old = Workers.get!(FakeWorker.connect(protocol: 2, project: context.project).id)
-      new = Workers.get!(FakeWorker.connect(protocol: 16, project: context.project).id)
+      new = Workers.get!(FakeWorker.connect(protocol: 17, project: context.project).id)
+      before_lease = Workers.get!(FakeWorker.connect(protocol: 16, project: context.project).id)
       before_pages = Workers.get!(FakeWorker.connect(protocol: 15, project: context.project).id)
       before_lfs = Workers.get!(FakeWorker.connect(protocol: 13, project: context.project).id)
       before_files = Workers.get!(FakeWorker.connect(protocol: 12, project: context.project).id)
@@ -891,6 +895,8 @@ defmodule Forge.CommandsTest do
       command = %{agent | kind: :command, protocol: Jobs.protocol(%Job{kind: :command})}
 
       refute Workers.fits?(old, agent)
+      refute Workers.fits?(before_lease, agent)
+      assert Workers.fits?(before_lease, command)
       refute Workers.fits?(before_files, agent)
       # A worker of 13 takes an agent job and a command of every earlier release, and none now.
       refute Workers.fits?(before_lfs, agent)

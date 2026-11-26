@@ -260,6 +260,23 @@ defmodule ForgeWeb.Api.FallbackController do
         "say whether to start the ticket now or put it on hold: on_hold is true or false"
       )
 
+  # Outside work (`docs/design/outside-work.md` § Outside work): what the request says that cannot
+  # go together. A start commit that is no good is `bad_start_commit`, with the ticket types'
+  # refusals (`Admission`).
+  def call(conn, {:error, reason})
+      when reason in [
+             :outside_work_starts,
+             :start_commit_without_outside_work,
+             :outside_work_needs_a_name
+           ],
+      do:
+        error(
+          conn,
+          :unprocessable_entity,
+          Atom.to_string(reason),
+          ForgeWeb.Operator.Actions.describe(reason)
+        )
+
   def call(conn, {:error, :milestone}),
     do:
       error(
@@ -280,6 +297,86 @@ defmodule ForgeWeb.Api.FallbackController do
 
   def call(conn, {:error, {:not_releasable, status}}),
     do: error(conn, :conflict, "not_releasable", "a #{status} ticket cannot be released")
+
+  def call(conn, {:error, :running_choice}),
+    do:
+      error(
+        conn,
+        :unprocessable_entity,
+        "running_choice",
+        "a run of the ticket's state is going: send running as \"stop\" or \"finish\""
+      )
+
+  def call(conn, {:error, :bad_running}),
+    do:
+      error(
+        conn,
+        :unprocessable_entity,
+        "bad_running",
+        "running is \"stop\" or \"finish\""
+      )
+
+  # Names the holder (a token by its name, a person by id) and since when, so a person or an agent
+  # knows whom to ask.
+  def call(conn, {:error, {:already_taken_over, who, since}}),
+    do:
+      error(
+        conn,
+        :conflict,
+        "already_taken_over",
+        "the ticket is already taken over by #{holder(who)} since " <> DateTime.to_iso8601(since)
+      )
+
+  # The three refusals of keeping a job's work (`Forge.Engine.keep_work/4`): the stop was left,
+  # nothing was kept, or the two sets of commits clash — which names the paths, and leaves the
+  # ticket stuck with its other ways out.
+  def call(conn, {:error, :stale_stop}),
+    do:
+      error(
+        conn,
+        :conflict,
+        "stale_stop",
+        "the ticket is no longer stopped for that job's moved branch"
+      )
+
+  def call(conn, {:error, :keep_push_failed}),
+    do:
+      error(
+        conn,
+        :conflict,
+        "keep_push_failed",
+        "the branch moved again or refused the merge; nothing was written, look again and retry"
+      )
+
+  def call(conn, {:error, :nothing_kept}),
+    do: error(conn, :conflict, "nothing_kept", "no work of that job was kept")
+
+  def call(conn, {:error, {:kept_work_conflicts, paths}}),
+    do:
+      error(
+        conn,
+        :conflict,
+        "kept_work_conflicts",
+        "the job's work clashes with the commits that arrived in " <> Enum.join(paths, ", ")
+      )
+
+  def call(conn, {:error, :not_taken_over}),
+    do: error(conn, :conflict, "not_taken_over", "the ticket is not taken over")
+
+  def call(conn, {:error, :bad_step}),
+    do: error(conn, :unprocessable_entity, "bad_step", "to is the name of a workflow step")
+
+  def call(conn, {:error, :bad_note}),
+    do: error(conn, :unprocessable_entity, "bad_note", "the note is not valid text")
+
+  def call(conn, {:error, {:handback_note_too_long, limit}}),
+    do:
+      error(
+        conn,
+        :unprocessable_entity,
+        "note_too_long",
+        "the note is longer than #{limit} characters"
+      )
 
   def call(conn, {:error, :nothing_running}),
     do: error(conn, :conflict, "nothing_running", "no run of the ticket's state is going")
@@ -354,6 +451,10 @@ defmodule ForgeWeb.Api.FallbackController do
     Logger.error("api request failed: #{inspect(reason)}")
     error(conn, :internal_server_error, "internal", nil)
   end
+
+  defp holder({:api, _id, name}), do: "the token #{name}"
+  defp holder({:user, id}), do: "user #{id}"
+  defp holder(_gone), do: "someone no longer here"
 
   defp limit_words(limit) when limit in [:file_bytes, :per_act, :pool_files, :pool_bytes],
     do: Forge.Attachments.limit_text(limit)

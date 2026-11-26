@@ -390,6 +390,119 @@ defmodule ForgeWeb.GitHttpTest do
     end
   end
 
+  # A job whose branch moved keeps its work at its own ref, and the git door records who moved a
+  # ticket's branch (`docs/design/outside-work.md` § A job's push).
+  describe "a job's kept work and who pushed (ticket 79)" do
+    setup %{project: project} do
+      ticket = ticket_fixture(%{project: project, number: 1, branch: "ticket/1"})
+      job = job_fixture(%{ticket: ticket})
+      other = job_fixture(%{ticket: ticket, attempt: 2})
+
+      {:ok, token, _row} =
+        Tokens.issue(project,
+          name: "job",
+          ref: "refs/heads/ticket/1",
+          job_id: job.id,
+          ticket_id: ticket.id
+        )
+
+      %{ticket: ticket, job: job, other: other, token: token}
+    end
+
+    test "a job's token writes its own kept ref, and no other job's", ctx do
+      %{project: project, bare: bare, token: token, job: job, other: other} = ctx
+      dir = clone!(project, token, "ticket/1")
+      sha = commit!(dir, "kept.txt", "the job's work")
+
+      assert {_out, 0} = push(dir, project, token, "HEAD:refs/forge/kept/#{job.id}")
+      assert {:ok, ^sha} = Git.resolve(bare, "refs/forge/kept/#{job.id}")
+
+      assert {out, code} = push(dir, project, token, "HEAD:refs/forge/kept/#{other.id}")
+      assert code != 0
+      assert out =~ "this credential may not write refs/forge/kept/#{other.id}"
+      assert {:error, _} = Git.resolve(bare, "refs/forge/kept/#{other.id}")
+    end
+
+    test "the kept ref is never deleted, even by its own job", ctx do
+      %{project: project, bare: bare, token: token, job: job} = ctx
+      dir = clone!(project, token, "ticket/1")
+      sha = commit!(dir, "kept.txt", "the job's work")
+      assert {_out, 0} = push(dir, project, token, "HEAD:refs/forge/kept/#{job.id}")
+
+      assert {out, code} = push(dir, project, token, ":refs/forge/kept/#{job.id}")
+      assert code != 0
+      assert out =~ "refs are never deleted here"
+      assert {:ok, ^sha} = Git.resolve(bare, "refs/forge/kept/#{job.id}")
+    end
+
+    test "no one else's credential writes a kept ref", ctx do
+      %{project: project, bare: bare, job: job} = ctx
+      {:ok, dev, _row} = Tokens.issue(project, name: "dev", git: :developer)
+      {:ok, branch, _row} = Tokens.issue(project, name: "plain", ref: "refs/heads/ticket/1")
+      dir = clone!(project, dev, "ticket/1")
+      commit!(dir, "kept.txt", "not the job's")
+
+      for token <- [dev, branch] do
+        assert {_out, code} = push(dir, project, token, "HEAD:refs/forge/kept/#{job.id}")
+        assert code != 0
+      end
+
+      assert {:error, _} = Git.resolve(bare, "refs/forge/kept/#{job.id}")
+    end
+
+    test "a push to a ticket's branch is recorded with the token that made it", ctx do
+      %{project: project, ticket: ticket, main: main} = ctx
+      {:ok, dev, row} = Tokens.issue(project, name: "my-pc", git: :developer)
+      dir = clone!(project, dev, "ticket/1")
+      sha = commit!(dir, "work.txt", "from my pc")
+
+      assert {_out, 0} = push(dir, project, dev, "HEAD:refs/heads/ticket/1")
+
+      assert [%{actor: %{"kind" => "api", "id" => id, "name" => "my-pc"}, payload: payload}] =
+               pushed(ticket)
+
+      assert id == row.id
+      # `from` is the commit the branch was at, which is what the stop's pushers are read against.
+      assert %{"ref" => "refs/heads/ticket/1", "from" => ^main, "to" => ^sha} = payload
+    end
+
+    test "a push the hook refuses to a ticket that exists records nothing", ctx do
+      %{project: project, ticket: ticket} = ctx
+      {:ok, dev, _row} = Tokens.issue(project, name: "my-pc", git: :developer)
+      dir = clone!(project, dev, "ticket/1")
+      commit!(dir, "work.txt", "first")
+      assert {_out, 0} = push(dir, project, dev, "HEAD:refs/heads/ticket/1")
+      assert [_one] = pushed(ticket)
+
+      # A developer may not rewrite a ticket branch: the hook refuses, the ref stays where it was,
+      # and the status git answers with does not say so.
+      {:ok, _out} = Git.run(dir, ["reset", "--quiet", "--hard", "HEAD~1"])
+      commit!(dir, "work.txt", "rewritten")
+      assert {_out, code} = force_push(dir, project, dev, "HEAD:refs/heads/ticket/1")
+      assert code != 0
+      assert [_one] = pushed(ticket)
+    end
+
+    test "a refused push records nothing, and neither does one that moves no ticket's branch",
+         ctx do
+      %{project: project, ticket: ticket, token: token, job: job} = ctx
+      {:ok, dev, _row} = Tokens.issue(project, name: "my-pc", git: :developer)
+      dir = clone!(project, dev, "ticket/1")
+      commit!(dir, "work.txt", "from my pc")
+
+      # The default branch is the platform's alone.
+      assert {_out, code} = push(dir, project, dev, "HEAD:refs/heads/main")
+      assert code != 0
+      # Another ticket's branch is not this token's.
+      assert {_out, code} = push(dir, project, token, "HEAD:refs/heads/ticket/2")
+      assert code != 0
+      # A kept ref is no ticket's branch.
+      assert {_out, 0} = push(dir, project, token, "HEAD:refs/forge/kept/#{job.id}")
+
+      assert pushed(ticket) == []
+    end
+  end
+
   # Mirrored over the platform's own git endpoint rather than to a path on disk: a local path
   # exercised neither the transport, the credential, nor `receive-pack` on the far side, and a
   # local path is now refused anyway.
@@ -815,6 +928,9 @@ defmodule ForgeWeb.GitHttpTest do
   defp force_push(dir, project, token, refspec) do
     git(dir, ["push", "--quiet", "--force", Url.with_token(project, token), refspec])
   end
+
+  defp pushed(ticket),
+    do: ticket.id |> Forge.Events.for_ticket() |> Enum.filter(&(&1.type == "branch.pushed"))
 
   defp curl(url) do
     System.cmd("curl", ["-sS", "--fail-with-body", url], stderr_to_stdout: true)

@@ -539,6 +539,7 @@ defmodule Forge.Milestones do
     :held_at,
     :held_transition,
     :held_entry,
+    :takeover_id,
     :pending_transition,
     :milestone_id,
     :position
@@ -576,6 +577,9 @@ defmodule Forge.Milestones do
           order_by: [asc: t.position, asc: t.number],
           select: struct(t, ^@ticket_fields)
       )
+
+    takers = Forge.Tickets.Doing.takers(tickets)
+    tickets = Enum.map(tickets, &%{&1 | holder: takers[&1.id]})
 
     merged = merged_ids(project_id, for(t <- tickets, t.status == :done, do: t.id))
     by_milestone = Enum.group_by(tickets, & &1.milestone_id)

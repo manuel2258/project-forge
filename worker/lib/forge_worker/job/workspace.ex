@@ -192,22 +192,28 @@ defmodule ForgeWorker.Job.Workspace do
   Commits everything in the worktree and pushes it to the ticket branch, returning the head.
   One commit per run. A run that changed nothing pushes nothing and reports the head it
   started from. As `user`, whose tree it is and whose hooks it would run.
+
+  **The commit sits on the run's lease and the push expects the branch to be there**
+  (`Checkout.lease/3`, `Checkout.push/1`). Where somebody else has moved the branch since, nothing
+  is written to it: the commit is kept under `refs/forge/kept/<job id>` and the answer is
+  `{:moved, %{"lease", "kept", "remote"}}` (`docs/design/worker-channel.md` § Protocol 17).
   """
   @spec commit_and_push(assignment(), String.t(), String.t(), Slice.user()) ::
-          {:ok, String.t() | nil} | {:error, term()}
+          {:ok, String.t() | nil} | {:moved, %{String.t() => String.t() | nil}} | {:error, term()}
   def commit_and_push(assignment, dir, message, user) do
     git = assignment["git"]
     as = Slice.as_user(user)
 
-    with {:ok, committed?} <- Checkout.squash(dir, remote(git), message, as, keep: merged(git)),
-         :ok <- maybe_push(git, dir, committed?, as) do
+    with {:ok, lease} <- Checkout.lease(dir, git["branch"], as),
+         {:ok, committed?} <- Checkout.squash(dir, lease, message, as, keep: merged(git)),
+         :ok <- maybe_push(assignment, dir, committed?, as) do
       Checkout.head(dir, as)
     end
   end
 
   @doc """
-  The ticket branch head this run started from: the `origin/<branch>` its checkout fetched, read
-  as `user`.
+  The ticket branch head this run started from: the lease its checkout took when it fetched
+  (`Checkout.lease/3`), read as `user`.
 
   Not the worktree's own `HEAD`, which an agent that used git itself has already moved past —
   onto commits that were never pushed and, for a state that produces no changeset, never will
@@ -215,7 +221,7 @@ defmodule ForgeWorker.Job.Workspace do
   """
   @spec base(assignment(), String.t(), Slice.user()) :: {:ok, String.t()} | {:error, term()}
   def base(assignment, dir, user),
-    do: Checkout.rev(dir, remote(assignment["git"]), Slice.as_user(user))
+    do: Checkout.lease(dir, assignment["git"]["branch"], Slice.as_user(user))
 
   @doc "The commit the worktree is on, read as `user`."
   @spec head(String.t(), Slice.user()) :: {:ok, String.t()} | {:error, term()}
@@ -415,11 +421,18 @@ defmodule ForgeWorker.Job.Workspace do
     )
   end
 
-  defp maybe_push(_git, _dir, false, _as), do: :ok
+  defp maybe_push(_assignment, _dir, false, _as), do: :ok
 
-  defp maybe_push(git, dir, true, as) do
+  defp maybe_push(%{"git" => git} = assignment, dir, true, as) do
     push = fn ->
-      Checkout.push(dir: dir, branch: git["branch"], url: git["url"], token: git["token"], as: as)
+      Checkout.push(
+        dir: dir,
+        branch: git["branch"],
+        url: git["url"],
+        token: git["token"],
+        job_id: assignment["job_id"],
+        as: as
+      )
     end
 
     patiently(push, Application.get_env(:forge_worker, :push_patience_ms, @push_patience_ms))
@@ -433,8 +446,11 @@ defmodule ForgeWorker.Job.Workspace do
   # until `patience` milliseconds have been waited; anything else — a credential refused, a ref
   # rejected — fails at once, because waiting does not change it. Public, with the push and the
   # sleep handed in, for its test.
-  @spec patiently((-> :ok | {:error, term()}), non_neg_integer(), (pos_integer() -> any())) ::
-          :ok | {:error, term()}
+  @spec patiently(
+          (-> :ok | {:moved, map()} | {:error, term()}),
+          non_neg_integer(),
+          (pos_integer() -> any())
+        ) :: :ok | {:moved, map()} | {:error, term()}
   def patiently(push, patience, sleep \\ &Process.sleep/1),
     do: patiently(push, patience, sleep, 0, 1_000)
 
@@ -474,8 +490,6 @@ defmodule ForgeWorker.Job.Workspace do
   @doc false
   @spec unreachable?(String.t()) :: boolean()
   def unreachable?(out), do: String.contains?(String.downcase(out), @unreachable)
-
-  defp remote(git), do: "origin/" <> git["branch"]
 
   # The default branch an integrating job or a conversation was given, as its checkout fetched it:
   # what the squash keeps as a second parent when the run merged it (`Checkout.squash/5`). Kind is

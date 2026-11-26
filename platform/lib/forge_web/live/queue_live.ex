@@ -406,7 +406,10 @@ defmodule ForgeWeb.QueueLive do
   defp kind_detail(%{kind: :stuck}, ctx) do
     %{
       attempt: attempt(Enum.find(ctx.past, & &1.current), ctx.ticket),
-      budget: budget(ctx.workflow, ctx.ticket)
+      budget: budget(ctx.workflow, ctx.ticket),
+      # A branch that moved under a job: what arrived and the three ways out
+      # (`docs/design/outside-work.md` § Keeping the job's work).
+      moved: ForgeWeb.Components.TakeoverBand.moved(ctx.ticket, ctx.project)
     }
   end
 
@@ -877,7 +880,7 @@ defmodule ForgeWeb.QueueLive do
       <QueuePast.past :if={@item.ticket} item={@item} detail={@detail} />
 
       <.approval :if={@item.kind in [:approval, :review]} item={@item} detail={@detail} />
-      <.stuck :if={@item.kind == :stuck} item={@item} detail={@detail} />
+      <.stuck :if={@item.kind == :stuck} item={@item} detail={@detail} me={@me} />
       <.ways
         :if={@item.kind in [:stuck, :review]}
         item={@item}
@@ -1104,12 +1107,20 @@ defmodule ForgeWeb.QueueLive do
 
   attr :item, :map, required: true
   attr :detail, :map, required: true
+  attr :me, :string, required: true
 
   # 13c: why, in words; the last attempt by the kind of step it stuck in — an agent's job with its
   # error and closing words, a command step's batch, a conversation's reply — and how much of the
   # step's allowance it had. A human step has no attempt to show.
   defp stuck(assigns) do
     ~H"""
+    <ForgeWeb.Components.TakeoverBand.moved_branch
+      :if={@detail[:moved]}
+      moved={@detail.moved}
+      ticket={@item.ticket}
+      me={@me}
+      addresses={%{}}
+    />
     <section :if={@detail[:attempt] || @detail[:budget]} id="queue-attempt" class="queue-block">
       <.eyebrow :if={@detail[:attempt]}>Last attempt</.eyebrow>
       <.attempt :if={@detail[:attempt]} item={@item} attempt={@detail.attempt} />
@@ -1489,7 +1500,11 @@ defmodule ForgeWeb.QueueLive do
       )
 
     ~H"""
-    <Actions.refused id="queue-refusal" refusal={@refusal} at={~w(retry extend transition)} />
+    <Actions.refused
+      id="queue-refusal"
+      refusal={@refusal}
+      at={~w(retry extend transition keep-work take-over)}
+    />
     <div id="queue-dock" class="queue-dock">
       <%!-- A link to the page a human state asks to be opened, first and never a decision
             (`docs/design/ui.md` § The queue). --%>

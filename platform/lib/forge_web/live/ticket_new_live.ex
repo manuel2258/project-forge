@@ -34,6 +34,10 @@ defmodule ForgeWeb.TicketNewLive do
        page_title: "New ticket",
        projects: projects,
        error: nil,
+       # What the split button's face does: `"start"`, `"hold"` or `"outside"`. Start now is the
+       # default (`docs/design/ui.md` § Creating things); the menu changes it, and the form's own
+       # hidden `ticket[how]` carries it across a reconnect.
+       how: "start",
        # Named in the address and real: then it is stated rather than asked.
        fixed: is_binary(named) and Enum.any?(projects, &(&1.name == named))
      )
@@ -45,7 +49,8 @@ defmodule ForgeWeb.TicketNewLive do
              "ticket_type" => "",
              "title" => "",
              "body" => "",
-             "milestone_id" => ""
+             "milestone_id" => "",
+             "start_commit" => ""
            },
            as: :ticket
          )
@@ -123,7 +128,8 @@ defmodule ForgeWeb.TicketNewLive do
 
   @impl true
   def handle_event("validate", %{"ticket" => params}, socket) do
-    socket = assign(socket, form: to_form(params, as: :ticket), error: nil)
+    socket =
+      assign(socket, form: to_form(params, as: :ticket), error: nil, how: how(params["how"]))
 
     if params["project"] == (socket.assigns.project && socket.assigns.project.name) do
       {:noreply, assign_chosen(socket)}
@@ -132,13 +138,22 @@ defmodule ForgeWeb.TicketNewLive do
     end
   end
 
+  # The menu's choice. It only changes what the face says and sends; nothing is admitted.
+  def handle_event("how", %{"how" => how}, socket) when how in ~w(start hold outside),
+    do: {:noreply, assign(socket, how: how)}
+
+  def handle_event("how", _params, socket), do: {:noreply, socket}
+
   # Which button was pressed is the form's `on_hold`, sent as the submitter's own name and value:
-  # `false` for *Start now*, `true` for *Put on hold*. Neither is the default — a submit with
-  # neither (Enter in the title, say, which clicks the hidden first button in the form) says
-  # nothing and is refused (`docs/design/ui.md` § Creating
-  # things).
+  # `false` for *Start now*, `true` for *Put on hold*; *Outside work* sends `outside_work` in its
+  # place. A submit with none of them (Enter in the title, say, which clicks the hidden first
+  # button in the form) says nothing and is refused (`docs/design/ui.md` § Creating things).
   def handle_event("create", %{"ticket" => params} = sent, socket) do
-    params = Map.put(params, "on_hold", sent["on_hold"])
+    params =
+      params
+      |> Map.put("on_hold", sent["on_hold"])
+      |> Map.put("outside_work", sent["outside_work"])
+
     title = String.trim(params["title"] || "")
 
     cond do
@@ -165,6 +180,8 @@ defmodule ForgeWeb.TicketNewLive do
       milestone_id: if(params["milestone_id"] in [nil, ""], do: nil, else: params["milestone_id"])
     }
 
+    attrs = attrs |> Map.merge(outside(params)) |> Map.put(:via, :page)
+
     # The files that came with the form ride on the admission and are attached to the ticket's text.
     attrs = Map.merge(attrs, Map.new(ForgeWeb.Attaching.opts(sent)))
 
@@ -188,14 +205,51 @@ defmodule ForgeWeb.TicketNewLive do
 
   # The refusals of the choices this form adds are sentences of their own; the rest are the
   # project's, which `Admission` words.
-  defp refusal(reason) when reason in [:start_or_hold, :milestone, :release_title, :blank],
-    do: ForgeWeb.Operator.Actions.describe(reason)
+  defp refusal(reason)
+       when reason in [
+              :start_or_hold,
+              :milestone,
+              :release_title,
+              :blank,
+              :outside_work_starts,
+              :start_commit_without_outside_work,
+              :outside_work_needs_a_name
+            ],
+       do: ForgeWeb.Operator.Actions.describe(reason)
 
   defp refusal(reason), do: Admission.explain(reason)
 
   defp on_hold("true"), do: true
   defp on_hold("false"), do: false
   defp on_hold(_neither), do: nil
+
+  # *Outside work* is its own submit (`outside_work=true`) and is admitted in place of a start or a
+  # hold: `Operator.admit/3` refuses both together. The commit is optional, and a blank is none.
+  defp outside(%{"outside_work" => "true"} = params) do
+    commit = String.trim(params["start_commit"] || "")
+    %{outside_work: true, start_commit: if(commit == "", do: nil, else: commit)}
+  end
+
+  defp outside(_params), do: %{}
+
+  defp how(how) when how in ~w(start hold outside), do: how
+  defp how(_other), do: "start"
+
+  # What the split button's face is and sends for a choice, and the menu's other choices.
+  defp face("start"), do: %{label: "Start now", name: "on_hold", value: "false"}
+  defp face("hold"), do: %{label: "Put on hold", name: "on_hold", value: "true"}
+  defp face("outside"), do: %{label: "Outside work", name: "outside_work", value: "true"}
+
+  defp menu(how) do
+    for {value, label} <- [
+          {"start", "Start now"},
+          {"hold", "Put on hold"},
+          {"outside", "Outside work"}
+        ],
+        value != how do
+      %{id: "admit-#{value}", label: label, value: value, click: "how"}
+    end
+  end
 
   @impl true
   def render(assigns) do
@@ -246,6 +300,7 @@ defmodule ForgeWeb.TicketNewLive do
           </.link>
         </div>
         <input :if={@fixed} type="hidden" name="ticket[project]" value={@project.name} />
+        <input type="hidden" name="ticket[how]" value={@how} />
 
         <.input
           :if={not @fixed}
@@ -352,35 +407,35 @@ defmodule ForgeWeb.TicketNewLive do
           options={Enum.map(@milestones, &{&1.name, &1.id})}
         />
 
+        <%!-- Outside work is admitted already taken over, and may start from any commit forge holds
+              (`docs/design/outside-work.md` § Outside work). A full commit id, never a name. --%>
+        <.input
+          :if={@how == "outside"}
+          field={@form[:start_commit]}
+          id="ticket-start-commit"
+          type="text"
+          label="Commit to start from (optional)"
+          mono
+          placeholder="a full commit id; blank starts from the default branch"
+          autocomplete="off"
+          spellcheck="false"
+          disabled={blocked?(@project, @workflow)}
+        />
+        <p :if={@how == "outside"} id="ticket-outside-note" class="text-[12.5px]/[1.5] text-ink-2">
+          Nothing runs on it. You push to its branch and hand it back to a step when it is ready.
+        </p>
+
         <.error_note :if={@error} id="ticket-new-error">{@error}</.error_note>
 
-        <%!-- Two actions side by side and neither chosen for the person (`docs/design/ui.md`
-              § Creating things): neither is primary. --%>
+        <%!-- One button with a menu (`docs/design/ui.md` § Creating things): the face starts the
+              ticket unless the menu has chosen another way. --%>
         <div class="ticket-new-actions">
-          <.button
-            id="admit-start"
-            type="submit"
-            name="on_hold"
-            value="false"
-            variant="outline"
-            size="xl"
-            fill
+          <.split_submit
+            id="admit"
+            face={face(@how)}
+            items={menu(@how)}
             disabled={not Admission.ready?(@workflow)}
-          >
-            Start now
-          </.button>
-          <.button
-            id="admit-hold"
-            type="submit"
-            name="on_hold"
-            value="true"
-            variant="outline"
-            size="xl"
-            fill
-            disabled={not Admission.ready?(@workflow)}
-          >
-            Put on hold
-          </.button>
+          />
         </div>
       </.form>
     </Layouts.app>

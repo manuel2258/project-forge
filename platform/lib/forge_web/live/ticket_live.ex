@@ -28,6 +28,7 @@ defmodule ForgeWeb.TicketLive do
   alias Forge.Tickets.Views
   alias ForgeCore.Workflow
   alias ForgeWeb.{Changes, Diff, Format, JobStream, TicketViews, WorkScreen}
+  alias ForgeWeb.Components.TakeoverBand
   alias ForgeWeb.Operator.{Actions, Decision, Drafts, QuestionForm}
 
   @views ~w(steps changes docs activity)
@@ -286,6 +287,14 @@ defmodule ForgeWeb.TicketLive do
       # details' select offers.
       on_release: Engine.waiting_on_release_or_job(ticket),
       stoppable: Engine.stoppable?(ticket),
+      # A taken-over ticket's band: who, since when, what was pushed, and the steps a hand-back
+      # may continue from (`ForgeWeb.Components.TakeoverBand`). A run going is what *Take over*
+      # asks a choice about.
+      takeover: TakeoverBand.facts(ticket, project),
+      moved: TakeoverBand.moved(ticket, project),
+      hand_steps: if(ticket.takeover_id, do: TakeoverBand.steps(ticket, workflow), else: []),
+      running: Engine.running?(ticket),
+      taker_addresses: taker_addresses(ticket),
       milestones:
         Forge.Milestones.list(project.id) |> Enum.filter(&Forge.Milestones.Milestone.open?/1),
       paused: paused?(ticket, jobs),
@@ -503,6 +512,17 @@ defmodule ForgeWeb.TicketLive do
         merges: Workflow.merges_on_enter?(workflow, to),
         missing: Forge.Jobs.missing_inputs(ticket, workflow, to)
       }
+    end
+  end
+
+  # The address of the person who took the ticket over, for the band (Activity names a person by
+  # address too). A token is named by the row itself.
+  defp taker_addresses(%{takeover_id: nil}), do: %{}
+
+  defp taker_addresses(%{takeover_id: id}) do
+    case Forge.Repo.get(Forge.Tickets.Takeover, id) do
+      %{user_id: user_id} when is_binary(user_id) -> Forge.Accounts.addresses([user_id])
+      _token_or_gone -> %{}
     end
   end
 
@@ -1117,7 +1137,8 @@ defmodule ForgeWeb.TicketLive do
     [
       "##{assigns.ticket.number} · #{ForgeWeb.Topology.mark(topology)} #{assigns.ticket.state}",
       assigns.ticket.status != :active && to_string(assigns.ticket.status),
-      Forge.Tickets.Ticket.held?(assigns.ticket) && "on hold",
+      Forge.Tickets.Ticket.held?(assigns.ticket) &&
+        if(Forge.Tickets.Ticket.taken_over?(assigns.ticket), do: "taken over", else: "on hold"),
       # No "waiting on you": the decision row says it, in amber, and on a phone it was the part
       # the ellipsis cut (`ui.md` § The ticket).
       assigns.paused && spend_paused(assigns.now)
@@ -1203,8 +1224,20 @@ defmodule ForgeWeb.TicketLive do
     >
       <:decision :if={@decision || @release || @decision_error || @ticket.held_at}>
         <TicketViews.release_band :if={@release} ticket={@ticket} release={@release} />
+        <TakeoverBand.band
+          :if={@takeover}
+          ticket={@ticket}
+          takeover={@takeover}
+          steps={@hand_steps}
+          stoppable={@stoppable}
+          refusal={@refusal}
+          drafts={@drafts}
+          me={@current_scope.user.id}
+          addresses={Map.merge(@addresses, @taker_addresses)}
+          now={@now}
+        />
         <TicketViews.hold_band
-          :if={@ticket.held_at}
+          :if={@ticket.held_at && !@takeover}
           ticket={@ticket}
           on_release={@on_release}
           stoppable={@stoppable}

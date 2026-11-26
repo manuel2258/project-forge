@@ -107,6 +107,12 @@ defmodule ForgeCore.Job.Spec do
     # and for a spec made before the key existed, whose manifest then says nothing
     # (`docs/design/job-prompt.md` § The ticket's base).
     base: nil,
+    # The work people did on this ticket outside forge, filled at assignment: every take-over of
+    # the ticket that was handed back, oldest first, string keys —
+    # who took it, from when to when, who handed it back, the states, the commits and the note —
+    # for the manifest's *Worked on outside forge*. Empty for a ticket nobody took over, and for
+    # a spec made before the key existed, whose manifest then says nothing.
+    outside: [],
     # An integrating job's (`docs/design/job-prompt.md` § Integrating the default branch), string
     # keys: `default_branch` when it is made, and at run time `head`, `base`, `paths`,
     # `changeset`, `cause` (`"update"` when an update step's conflict sent the job, else nil), `merges`
@@ -198,6 +204,7 @@ defmodule ForgeCore.Job.Spec do
           entered_commands: [%{String.t() => term()}],
           previous_changeset: String.t() | nil,
           base: String.t() | nil,
+          outside: [%{String.t() => term()}],
           integration: %{String.t() => term()} | nil,
           secrets: [String.t()],
           secrets_gone: [String.t()],
@@ -374,6 +381,7 @@ defmodule ForgeCore.Job.Spec do
       entered_commands: or_default(get, :entered_commands, []),
       previous_changeset: get.(:previous_changeset),
       base: get.(:base),
+      outside: or_default(get, :outside, []),
       integration: get.(:integration),
       produces: or_default(get, :produces, []),
       optional: or_default(get, :optional, []),

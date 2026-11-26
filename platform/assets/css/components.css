@@ -77,6 +77,47 @@
   .ui-btn--decision[aria-disabled="true"] { background: var(--surface-3); color: var(--ink-4); opacity: 1; }
   .ui-btn-diamond { font-size: 9px; }
 
+  /* forms/SplitSubmit: a face that submits and a menu of the other ways to. One control, so the
+     two share an outline and the toggle is a target of its own (--target-min). */
+  .ui-split { position: relative; display: flex; flex: 0 1 auto; min-width: 0; }
+  .ticket-new-actions > .ui-split { flex: 1 1 0%; }
+  .ui-split-face { flex: 1 1 auto; border-radius: var(--radius) 0 0 var(--radius); }
+  .ui-split-more { display: flex; }
+  .ui-split-toggle {
+    min-width: var(--target-min);
+    padding: 0 12px;
+    border-left-width: 0;
+    border-radius: 0 var(--radius) var(--radius) 0;
+    cursor: pointer;
+    list-style: none;
+  }
+  .ui-split-toggle::-webkit-details-marker { display: none; }
+  .ui-split-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: var(--z-panel);
+    display: flex;
+    min-width: 12rem;
+    flex-direction: column;
+    padding: 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-panel);
+    background: var(--surface-1);
+    box-shadow: var(--shadow-panel);
+  }
+  .ui-split--up .ui-split-menu { top: auto; bottom: calc(100% + 6px); }
+  .ui-split-item {
+    min-height: var(--target-min);
+    padding: 0 12px;
+    border-radius: var(--radius-sm);
+    text-align: left;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .ui-split-item:disabled { opacity: .45; cursor: default; }
+  @media (hover: hover) { .ui-split-item:not(:disabled):hover { background: var(--surface-2); } }
+
   @media (hover: hover) {
     .ui-btn--outline:not(:disabled):hover,
     .ui-btn--secondary:not(:disabled):hover,

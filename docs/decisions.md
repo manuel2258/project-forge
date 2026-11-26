@@ -188,6 +188,7 @@ These decisions are settled. They are not to be reopened.
   secret is readable by every member. Delivered values are masked in what the worker uploads where
   that is easy — the exact value and its JSON-escaped form — and nothing more is claimed. See
   `design/secrets.md`.
+- *MCP is a second door with the API's permissions (ticket 79).* `POST /mcp` takes the JSON API's bearers and asks `Forge.Operator` for every write, so a write token writes, a read token reads, a user token is its user and a job's token is refused, as at the API; a foreign `Origin` is refused. Its tools are the ticket operations only, and a token is never in an answer. See `design/api-and-ui.md` § MCP.
 
 See `design/identity.md`.
 

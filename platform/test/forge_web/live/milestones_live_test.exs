@@ -100,6 +100,25 @@ defmodule ForgeWeb.MilestonesLiveTest do
       assert [%{state: "refining"}] = Forge.Jobs.for_ticket(ticket.id)
     end
 
+    test "a taken-over ticket says so, and its button is Hand back, which hands it back", ctx do
+      %{conn: conn, project: project, user: user} = ctx
+      {:ok, m} = Operator.create_milestone(project, user, %{name: "Goal"})
+      ticket = held!(project, user, "By hand", milestone_id: m.id)
+      {:ok, _} = Operator.take_over(ticket, user)
+      {:ok, view, _html} = live(conn, view_url(project))
+      row = "#ms-rows-#{m.id}-#{ticket.number}"
+
+      assert view |> element(row) |> render() =~ "taken over · #{user.email}"
+      refute has_element?(view, row <> " button", "Release")
+
+      view |> element(row <> " button", "Hand back") |> render_click()
+
+      back = Tickets.get!(ticket.id)
+      refute back.held_at
+      refute back.takeover_id
+      assert [%{state: "refining"}] = Forge.Jobs.for_ticket(ticket.id)
+    end
+
     test "a refused release is said on its row, and nothing else moves", ctx do
       %{conn: conn, project: project, user: user} = ctx
       ticket = held!(project, user, "Raced")
@@ -625,13 +644,16 @@ defmodule ForgeWeb.MilestonesLiveTest do
   end
 
   describe "admitting" do
-    test "the form has two buttons and neither is chosen for the person", ctx do
+    test "the form is one split button: Start now is its face, the others are in its menu", ctx do
       %{conn: conn, project: project, user: user} = ctx
       {:ok, m} = Operator.create_milestone(project, user, %{name: "Goal"})
       {:ok, view, _html} = live(conn, ~p"/tickets/new?project=#{project.name}")
 
-      assert has_element?(view, "#admit-start", "Start now")
+      # `docs/design/ui.md` § Creating things: the face is *Start now*, and the menu holds *Put on
+      # hold* and *Outside work*. Enter in a box still starts nothing, as below.
+      assert has_element?(view, "#admit-face", "Start now")
       assert has_element?(view, "#admit-hold", "Put on hold")
+      assert has_element?(view, "#admit-outside", "Outside work")
       refute has_element?(view, "#ticket-form button.ui-btn--primary")
 
       # Enter in a box clicks the form's first submit button, and the browser sends that button's
@@ -686,7 +708,8 @@ defmodule ForgeWeb.MilestonesLiveTest do
         live(conn, ~p"/projects/#{project.name}?view=proposals&read=#{version.id}")
 
       assert has_element?(view, "#proposal-admit-hold", "Put on hold")
-      assert has_element?(view, "#proposal-admit-start", "Start now")
+      assert has_element?(view, "#proposal-admit-face", "Start now")
+      refute has_element?(view, "#proposal-admit-outside")
 
       # Neither pressed: nothing is admitted.
       render_submit(view, "decide_proposal", %{"version_id" => version.id})

@@ -104,6 +104,8 @@ it. Every refusal to authenticate is the same 401 body.
 |---|---|
 | `POST /projects/:project/tickets`, `POST /proposals/:id/accept` | Admit; accept. **`on_hold` is required**, `true` or `false`, otherwise 422 `start_or_hold`; `milestone_id` is optional, and a milestone of another project or a closed one is 422 `milestone`. |
 | `POST /tickets/:project/:number/{hold,release,stop}` | Put on hold; release (refused whole, 409/422, when a never-started ticket cannot be refreshed); stop the run a held ticket is finishing |
+| `POST /tickets/:project/:number/keep-work` `{job_id}` | Keeps the work of a job whose run ended with the branch moved under it (`outside-work.md` § Keeping the job's work): merges the kept commit onto the branch and carries on as the job's outcome would have. 409 `stale_stop` when the ticket is not stuck for that job's moved branch, 409 `nothing_kept`, 409 `kept_work_conflicts` naming the paths (the ticket stays stuck), 409 `keep_push_failed` when the branch moved again or refused the merge (nothing is written); a missing or non-text `job_id` is 400 `bad_request` |
+| `POST /tickets/:project/:number/take-over` `{running}`, `…/hand-back` `{to, note}` | Take an open ticket over (`outside-work.md` § Take-over: a hold with the caller's name on it); **`running` is `stop` or `finish` and required while a run of the state is going**, 422 `running_choice`, 409 `already_taken_over` naming who and since when, 409 `not_holdable` for a done or cancelled ticket. Hand it back: `to` defaults to the step it rests in and must be text (422 `bad_step`), `note` is at most 2000 characters (422 `note_too_long`, never cut; 422 `bad_note` for what is not text), 409 `not_taken_over`, and the refusals of a jump (409 `missing_input`, 422 `unknown_state`) leave it taken over. What was pushed is recorded first as a new `changeset` version, which a refusal after it leaves in place. |
 | `POST /tickets/:project/:number/title` `{title}`, `…/milestone` `{milestone_id}`, `…/move` `{to: top\|up\|down\|bottom}` or `{before: number}` | Retitle (a release's is 422 `release_title`); put in a milestone or none; order |
 | `GET /projects/:project/milestones`, `POST` | List with order, current, closed, progress and ticket numbers in order; create `{name, description}` |
 | `POST /projects/:project/milestones/:id` and `/:id/{current,close,reopen,move}` | Update; mark current (`current: false` unmarks); close; reopen; order. Other projects' ids answer 404. |
@@ -114,8 +116,9 @@ it. Every refusal to authenticate is the same 401 body.
 | `GET /queue` | The operator queue |
 | `GET /projects`, `POST /projects` | List; register `{name, default_branch}` (repository created under the platform's repos directory) |
 | `GET /tickets[?project=name][&state=s][&open=true]` | List tickets. `state` filters to one state name, `open=true` to status active or stuck; they combine. A project token needs no `project` |
-| `POST /projects/:name/tickets` | Admit `{title, body, ticket_type, on_hold, milestone_id}` (`on_hold` required, below); `ticket_type` is required when the project has more than one (`ticket-types.md`); naming the release type is refused with 422 `release_ticket_type`, saying a project admin starts it with Release on the project page |
-| `GET /tickets/:project/:number` | Ticket with jobs, artifacts, open questions, pending transition, and **`commands`** (the ticket's command jobs, oldest first, each as `GET …/jobs/:id` shows it, `warm` included); **`warm_build`** — `null` when the pinned workflow has no command with `keep_build`, otherwise `{copy}`, `copy` being null when the ticket has no usable copy and else the size, machine, command and arguments, commit and time of the one its next command goes to (the ticket page's block); and what a person may do about a job that ran out — `cap`, `cap_raise`, `workflow_cap`, `left`, `restart_need`, `retry` and `extend` (the offer: the job, what it used, the declared figures, the half the form starts at, whether turns are bounded), `extend` null when there is none, and only `cap`, `cap_raise`, `retry` (false) and `extend` (null) where the workflow no longer parses |
+| `GET /projects/:project` | The project as `GET /projects` lists it, with **`git_url`** (where its repository is fetched and pushed, never with a token in it) and **`ticket_types`** (`form`, and each type's name, whether it has a workflow and why not) — what an agent needs before it can open a ticket. A project token reaches its own project only; another project's is 404 |
+| `POST /projects/:name/tickets` | Admit `{title, body, ticket_type, on_hold, milestone_id, outside_work, start_commit}` (`on_hold` required unless `outside_work` is `true`, below; `outside_work` admits the ticket already taken over by the caller and runs nothing, and `start_commit` — a full commit id forge holds, reachable from one of its refs, only with `outside_work` — is where its branch is cut and its workflow read, `outside-work.md` § Outside work; 422 `outside_work_starts`, `start_commit_without_outside_work`, `bad_start_commit`); `ticket_type` is required when the project has more than one (`ticket-types.md`); naming the release type is refused with 422 `release_ticket_type`, saying a project admin starts it with Release on the project page |
+| `GET /tickets/:project/:number` | Ticket (with **`taken_over`**: `by` as an event actor, `at`, `via`, `state`, null when it is not; and, with the rest of what the page offers, **`steps`** — every state of the pin with `edge` and `missing` — and **`moved_branch`**, the facts of a moved-branch stop, `job_id` among them, or null) with jobs, artifacts, open questions, pending transition, and **`commands`** (the ticket's command jobs, oldest first, each as `GET …/jobs/:id` shows it, `warm` included); **`warm_build`** — `null` when the pinned workflow has no command with `keep_build`, otherwise `{copy}`, `copy` being null when the ticket has no usable copy and else the size, machine, command and arguments, commit and time of the one its next command goes to (the ticket page's block); and what a person may do about a job that ran out — `cap`, `cap_raise`, `workflow_cap`, `left`, `restart_need`, `retry` and `extend` (the offer: the job, what it used, the declared figures, the half the form starts at, whether turns are bounded), `extend` null when there is none, and only `cap`, `cap_raise`, `retry` (false) and `extend` (null) where the workflow no longer parses |
 | `GET /tickets/:project/:number/events[?limit=n][&before=seq]` | The event timeline. `limit` (a whole number, 1 to 1000) and `before` (an event's `seq`) page it: the newest `limit` events whose `seq` is below `before`, oldest first as ever; either alone applies alone and neither is the whole timeline. Anything else is 400 naming the parameter, never clamped. `before` only bounds the ticket's own events |
 | `GET /tickets/:project/:number/review` | The merge decision: diff, documents, presentations, the commit message, answers, cost |
 | `GET /tickets/:project/:number/jobs/:job_id` | Job with **`warm`** (`source`, `from_job_id`, `kept`, `unkept`, `size`: a command's tree and build, null from a worker that does not report them), its spec and harness events (`limit` and `before` as on the ticket's events; a job's harness stream is swept thirty days after it ended, `storage.md` § Retention), its `runs` (each with the `extension_id` it started on and whether it `resumed`), its `timeout_ms` (how long a run of it may take, as it was made: a conversation's is the node's, a command's its own `timeout`), its `exhausted` (`turns`, `tokens` or `timeout`; `wall_clock` is no longer a value), its `extensions` (who, tokens, turns, `timeout_ms`, note, the cap raise that came with it) and the `restart` that made it (who, note), null when none |
@@ -165,6 +168,48 @@ question, and an answer sent after that one reaches the job's next run rather th
 
 Responses are plain JSON objects; errors are `{"error": {"reason": ..., "detail": ...}}`
 with 400, 401, 403, 404, 409 or 422. No envelope, no HATEOAS, no versioning beyond the path.
+
+## MCP
+
+`POST /mcp` is a second door to the same operations as § JSON API (ticket 79,
+`design/outside-work.md`), for an agent that has no other instructions: forge describes itself to it,
+so the description cannot go stale against the forge serving it. It is **stateless JSON-RPC 2.0
+over HTTP** (the MCP "streamable HTTP" transport without a session and without a stream): one
+request, one JSON response.
+
+- **Same bearers, same permissions.** `ForgeWeb.Plugs.McpOrigin` runs first, then `ForgeWeb.Plugs.ApiAuth`: a project token, or a
+  member's user token, and a job's own token is 401 as at the API. A token with API *read* may call
+  the reading tools; one with *write* may call all; a read token calling a writing tool gets the
+  API's 403 *before* anything is looked up. A ticket of a project the caller is not in is the same
+  `not_found` as a ticket that is not there. Every write goes through `Forge.Operator`, the guard
+  the pages and the API share, and records the actor as the API does (a token by its name); the
+  take-over, hand-back, release and kept-work events say `via: "mcp"`.
+- **An `Origin` header that is not the platform's own is 403.** A browser page cannot drive forge
+  through a visitor's token; an agent sends no `Origin`. `GET` and `DELETE` are 405: there is no
+  server-initiated stream and no session to end.
+- **Protocol.** `initialize` answers with the protocol version the client asked for, if it is
+  `2025-03-26`, `2025-06-18` or `2025-11-25`, else the newest; with the `tools` capability and
+  `instructions`, which walk through the whole flow (open a ticket as outside work, or take one over;
+  fetch `git_url` with the token as the password; push fast-forward to `ticket/<n>`; hand back to a
+  step; watch; decide). `notifications/*` is 202 with no body, `ping` is `{}`, `tools/list` and
+  `tools/call` are the rest. A batch is -32600, an unknown method -32601, an unknown tool or
+  arguments that are not an object -32602. A body that is not JSON never reaches the endpoint: it is
+  Phoenix's own 400 from the body parser.
+- **A refusal is a tool result, not a protocol error**: `isError: true`, and the API's error body
+  with its HTTP `status` (`ForgeWeb.Api.Errors.of/1` asks the one fallback controller the API uses,
+  so the two cannot disagree).
+- **Tools** (`ForgeWeb.Mcp.Tools`, each with a JSON schema; arguments name a ticket by `project` and
+  `number`): reading — `whoami`, `list_projects`, `get_project` (with `git_url` and the project's
+  ticket types), `list_tickets`, `get_ticket`, `ticket_events`, `list_documents`, `read_document`,
+  `get_change`, `list_pages`, `read_page`; writing — `open_ticket` (also as outside work, from a
+  start commit), `take_over`, `hand_back`, `write_document`, `answer_question`, `decide`,
+  `move_ticket` (to a state, as `POST …/transition`), `run_again`, `stop_run`, `keep_job_work`,
+  `hold`, `release`, `cancel`, `restore`, `write_page_key`. Project settings, milestones, schedules,
+  tokens, the queue and conversations are not tools: a token cannot do them at the API either.
+- **What comes back is data.** Ticket bodies, documents, notes and page values are written by people
+  and agents, and **every tool's description ends with the same sentence saying so**
+  (`ForgeWeb.Mcp.Tools.data_notice/0`). No answer contains a token's secret: the only place one is
+  shown is the connect command beside a newly made token (`ui.md` § Tokens).
 
 ## Pages
 

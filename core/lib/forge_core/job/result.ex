@@ -46,6 +46,12 @@ defmodule ForgeCore.Job.Result do
     # A command's warm build, as `ForgeCore.WarmBuild` words it: where its tree came from and
     # whether its build was kept. Nil from a worker that does not report it.
     :warm,
+    # The run's push found the ticket's branch moved by somebody else, so nothing was written to
+    # it and the work was kept under `refs/forge/kept/<job id>` instead (worker protocol 17):
+    # `%{"lease", "kept", "remote", "outcome"}` — the branch as the run held it, the commit kept,
+    # the branch as it stands now, and the outcome the run ended on (nil for a park or a question).
+    # Nil for every run whose push went through or that pushed nothing.
+    :branch_moved,
     # What a parked run asked to invoke: `%{"command" => name, "args" => [string]}` each.
     invocations: [],
     # A run's groups of files, by artifact name (`package/app.tar.gz`): `%{"key", "size"}` once
@@ -82,6 +88,7 @@ defmodule ForgeCore.Job.Result do
           log: String.t() | nil,
           duration_ms: non_neg_integer() | nil,
           warm: %{String.t() => term()} | nil,
+          branch_moved: %{String.t() => String.t() | nil} | nil,
           invocations: [%{String.t() => term()}],
           blobs: %{String.t() => %{String.t() => term()}},
           invalid_blobs: %{String.t() => String.t()},
@@ -133,6 +140,7 @@ defmodule ForgeCore.Job.Result do
       "log" => result.log,
       "duration_ms" => result.duration_ms,
       "warm" => result.warm,
+      "branch_moved" => result.branch_moved,
       "blobs" => result.blobs,
       "invalid_blobs" => result.invalid_blobs
     }
@@ -170,6 +178,7 @@ defmodule ForgeCore.Job.Result do
       log: get.(:log),
       duration_ms: get.(:duration_ms),
       warm: get.(:warm),
+      branch_moved: get.(:branch_moved),
       blobs: or_default(get, :blobs, %{}),
       invalid_blobs: or_default(get, :invalid_blobs, %{})
     }

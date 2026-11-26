@@ -10,6 +10,30 @@ until it changes) or **may adopt** (new and optional). A project records the rel
 brought up to in `.forge/forge-release`; `platform.md` § Upgrading to a newer forge says how an
 upgrade goes.
 
+## 0.28.0
+
+- **may adopt** — a job state or `defaults` may declare `timeout`, how long one run of an agent job may take: a whole number and one unit (`90m`, `3h`) or a number of seconds, resolved state first, then `defaults`, then the engine's default. It is refused on a chat step, a command state, a human state and an update step; a command keeps its own `timeout`. A run that passes it ends `budget_exhausted`, and the job's manifest says the run's time. A library's `defaults` may set it too, as it sets `resources`. Before and after:
+
+  ```
+  # before: nothing
+  # after, in .forge/workflows/dev.yml
+  defaults:
+    timeout: 2h
+  states:
+    implementing:
+      timeout: 3h
+  ```
+
+  (`workflow-grammar.md` § Timeout)
+
+- **may adopt** — the engine's default time for one run of an agent job is now two hours, not one. A workflow that names no `timeout` anywhere gets two hours per run; one that wants the old limit says `timeout: 1h` under `defaults`. (`workflow-grammar.md` § Timeout)
+
+- **may adopt** — a ticket may have been worked on outside forge. A person, or an agent on their own machine with a project token, can take an open ticket over, push to its branch and hand it back to a step they choose; what was pushed becomes the ticket's recorded change. Every job placed after a hand-back, and a ticket's conversation, is told in its manifest under *Worked on outside forge*: who, when, the commits pushed meanwhile and their note, which is data and not an instruction. A prompt may tell its agent to read that section before it trusts the code as earlier jobs left it. No workflow changes, and none can forget it. A ticket may also be opened already taken over, from a start commit, so its *Base* is where that work meets the default branch. (`platform.md` § Branches and merging)
+
+- **may adopt** — the JSON API gains `GET /api/v1/projects/:project` (the project with its git URL and ticket types), `POST /tickets/:project/:number/take-over`, `/hand-back` and `/keep-work` (which keeps a job's work when the branch moved under its run), and `POST /api/v1/projects/:project/tickets` takes `outside_work` and `start_commit`. A new `POST /mcp` endpoint, with the API's tokens and permissions, offers the same operations to an MCP client; a request with a foreign `Origin` is refused. The routes are in forge's repository (`docs/design/api-and-ui.md` § MCP and `docs/design/outside-work.md`); neither is described in `platform.md`.
+
+- **may adopt** — a ticket's description and a schedule's body are now drawn as Markdown, with `@N`, `attachments/` and `archive/` references resolved to links and pictures. (`platform.md` § Referring to artifacts from Markdown)
+
 ## 0.27.0
 
 - **may adopt** — a job state or a chat step may produce a **page**: an HTML page forge hosts, sandboxed, with a live store of JSON keys that people fill in and a running job reads and writes. A page is declared in `produces` with a trailing `@`, and the job writes its files, flat, into `$FORGE_JOB/out/<name>/` with `index.html` as the entry. A declared page the job did not write ends the job `error`, which `optional: [form]` excuses. A page is never an input and is never approved, and a command produces none. Before and after:

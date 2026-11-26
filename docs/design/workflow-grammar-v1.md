@@ -62,6 +62,7 @@ initial: refining
 
 defaults:
   resources: { memory: 2200MiB, cpu: 1 }
+  timeout: 2h                         # optional; how long one run of an agent job may take
 
 commands:
   build:
@@ -86,6 +87,7 @@ states:
     produces: [refinement.md]
     outcomes: [done]                  # default; may be omitted
     budget: { turns: 20, tokens: 100k }
+    timeout: 3h                       # optional; this state's runs, over `defaults`
 
   planning:
     prompt: agents/plan.md
@@ -414,7 +416,9 @@ live; the state is an agent state; and the job kept a session id and a session f
 **on top of what the job has used**, never a new total: the reopened run's token ceiling is the
 extension's tokens, and its turn ceiling the extension's turns where the harness bounds them
 (Claude Code; a Codex run is not bounded by turns, and the form has no turns box for it); the
-wall clock is the per-run default and is not a person's to set. **The ticket cap:** tokens past what the ticket has
+time box is optional (§ Timeout): a run is stopped after the time the person gave, left empty it is
+the state's own limit, and every later run of the job keeps it as it keeps the extension's tokens.
+*Run again* has no time box and runs on the state's own limit. **The ticket cap:** tokens past what the ticket has
 left are refused unless the same submission raises the ticket's cap by at least the shortfall;
 the raise is stored as an addition (`tickets.cap_raise`), so a re-pin that moves the workflow's cap
 moves it under the raise. Each of the extension, the restart and the raise is its own insert-only
@@ -547,8 +551,8 @@ Claude Code run and does not bound a Codex run. A command state
 has neither — there is no inference to bound — and is bounded by each command's `timeout` instead;
 declaring `budget` on one is an error. Reaching
 either ends the job with `budget_exhausted`, and the job row names which ceiling stopped it.
-There are three, not two: the turn budget, the token budget, and the engine's wall-clock limit,
-which is a default of the engine's and has no key here at all
+There are three, not two: the turn budget, the token budget, and the run's `timeout`, a key of its
+own beside `budget` (§ Timeout) with a default of the engine's, two hours
 (`capacity.md` § Four exhaustions, three treatments). `limits.ticket_tokens` (the older `ticket_cost`, refused the same way) is required and caps the
 sum over all jobs of a ticket; reaching it sticks the ticket. Budgets are never modifiable by a
 job. **A person may raise it for one ticket** on the Extend or Run again form
@@ -1382,8 +1386,9 @@ path relative to `.forge/`, read at the same commit as the workflow. A library h
 
 - **Commands are imported whole.** A command name declared by two libraries, or by a library and
   the workflow, is an error: a workflow that needs another build names it differently.
-- **Defaults are imported field by field, and the workflow's own win.** Two libraries setting the
-  same field is an error.
+- **Defaults are imported field by field, and the workflow's own win.** The fields are `resources`
+  (itself imported memory and cpu apart) and `timeout`. Two libraries setting the same field is an
+  error.
 - **A state template is used only by a state that names it**, `extends: <template>`, under any
   name of its own. **The keys the state writes replace the template's whole**: a `budget` in the
   state is the budget, not a patch to the template's.
@@ -1432,6 +1437,52 @@ declared. The figure is chosen, not measured — a floor under which no agent is
 (`worker-tier.md` § A machine whose systemd stops answering). It is one definition, and every
 other place a size enters — the new-chat form, the templates page, the workers page, the job
 row, the worker itself — refuses below the same one.
+
+## Timeout
+
+```yaml
+defaults:
+  timeout: 2h
+
+states:
+  implementing:
+    timeout: 3h
+```
+
+`timeout` is how long **one run** of an agent job may take. It is valid on an agent state and under
+`defaults`, and nowhere else: on a chat step (a conversation's time limit is the node's), a command
+state (each command has its own `timeout`, § Commands), a human state and an update step the
+validator refuses it, naming the state, as it refuses `budget` there. It is written as a command's
+is: a whole number and one unit — `90s`, `20m`, `3h` — or a bare number of seconds, written as a number (`timeout: 7200`) and not as text — the same reading a command's `timeout` has always had, so `"7200"` is refused and the message spells the format out. One unit only
+(`1h30m` is `90m`) and zero is refused.
+
+**It is resolved nearest-first**: the state's, else `defaults`'s, else the engine's default, **two
+hours** (`ForgeCore.Workflow.default_timeout_ms/0`). It was one hour, a node setting no workflow
+could change. A workflow that names no `timeout` anywhere gets two hours per run for every agent
+job.
+
+**It is fixed when the job is created**, as its budget is: the resolved figure is stored in the
+job's spec (`budget.timeout_ms`), so re-pinning the ticket's workflow does not change a job that
+exists, and a job made before the key existed runs on the engine's default. **It is per run**: a run
+that parks for its commands, stops on a question or is resumed after a rate limit starts its next
+run with the full limit again. A run that passes it ends `budget_exhausted` with the ceiling
+recorded as `timeout`.
+
+**There is no maximum by policy**, and a technical bound that is not one: a figure longer than
+`1000000h` (about 114 years, `ForgeCore.Duration.longest_ms/0`) is refused as *longer than forge
+can time*. Without it `99999999999h` would pass the grammar and fail out of sight — the runtime's
+timers raise past about 292 years, and a token's expiry that far out is not a date. A command's
+`timeout` keeps its one-day maximum. Because a job's store tokens would otherwise last as long as
+its limit, they end with the job (`storage.md` § Serving).
+
+**A time is written one way everywhere**: `ForgeCore.Duration` parses it and writes it back as the
+largest unit that divides it exactly, so `1000h` is shown as `1000h` and `90m` as `90m`.
+
+**The job is told.** Its manifest's `## Budget` has a line saying the run's time and that the run
+is stopped when it passes it; an extended run's line is the extension's. The worker already takes a
+run's limit from its assignment, so there is no protocol bump: the assignment keeps its key
+(`wall_clock_ms`) and the worker keeps reporting a run it stopped on its clock as `wall_clock`,
+which the platform records as `timeout` (`worker-channel.md`).
 
 ## Secrets
 
@@ -1549,7 +1600,9 @@ is never produced; `answers.md` is platform-managed and never declared. **`attac
 - `resources`, where present, is a mapping of `memory` (a byte size of at least 512 MiB) and
   `cpu` (a positive integer), each optional and each falling back through the chain on its own.
   Any other key is an error, and `disk` is rejected with a message saying it is *reserved* rather
-  than unknown, so it does not read as a typo. `defaults`, where present, is a mapping whose only key is `resources`.
+  than unknown, so it does not read as a typo. `defaults`, where present, is a mapping whose keys are `resources` and `timeout`.
+- `timeout`, where present on a state or under `defaults`, is a duration (§ Timeout) of at most
+  `1000000h`; on a chat step, a command state, a human state or an update step it is an error.
 - A command's `env`, where present, is subject to the same rule as a state's.
 - `secrets`, on a job state or a command, is a list of names, each matching
   `^[A-Z][A-Z0-9_]{0,63}$`, none reserved (`ForgeCore.Secret`) and none listed twice.

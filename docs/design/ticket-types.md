@@ -147,7 +147,8 @@ section's existing semantics already imply:
   `build` should mean one thing in a project, and a type that needs another build names it
   `build_release`.
 - **`defaults` are imported field by field, and the type's own win**, which is the nearest-first
-  order `resources` already resolve in (`workflow-grammar-v1.md` § Resources). Two libraries
+  order `resources` and `timeout` already resolve in (`workflow-grammar-v1.md` § Resources,
+  § Timeout). The fields are `resources` (memory and cpu apart) and `timeout`. Two libraries
   setting the same field is an error, because neither is nearer.
 - **`states` are never imported implicitly.** A library's states are templates, and a type takes
   one by naming it: `extends: <library state>`. Every state must be reachable from `initial`, and

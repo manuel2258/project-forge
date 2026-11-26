@@ -1403,6 +1403,9 @@ defmodule Forge.ConversationsTest do
   end
 
   describe "history" do
+    # Any id will do where nothing verifies a token; the test below that does makes a real chat.
+    @holder "00000000-0000-0000-0000-000000000001"
+
     # The transcript is fetched by the worker, not inlined: they run past a hundred kilobytes
     # each and a ticket has several, so inlining would put a megabyte through the channel and
     # into the prompt on every turn. What crosses is a key and a token, as the seed does.
@@ -1421,7 +1424,7 @@ defmodule Forge.ConversationsTest do
           %{blob_uri: "store:job/#{job.id}/transcript-1.jsonl"}
         )
 
-      assert [entry] = Conversations.history(ticket)
+      assert [entry] = Conversations.history(ticket, @holder)
 
       # Nested, so a state retried three times reads as three attempts of one thing.
       assert entry["dir"] == "#{job.state}/#{job.attempt}"
@@ -1458,7 +1461,7 @@ defmodule Forge.ConversationsTest do
         payload: %{"invalid" => %{"refinement.md" => "question[1].assumption: not allowed"}}
       })
 
-      assert [%{"metadata" => metadata}] = Conversations.history(ticket)
+      assert [%{"metadata" => metadata}] = Conversations.history(ticket, @holder)
       assert metadata =~ "## What was refused\n\n- `refinement.md`, not kept:\n  question[1]"
 
       assert metadata =~
@@ -1481,15 +1484,47 @@ defmodule Forge.ConversationsTest do
         payload: %{"text" => String.duplicate("x", 4000) <> "BEYOND"}
       })
 
-      assert [%{"metadata" => metadata}] = Conversations.history(ticket)
+      assert [%{"metadata" => metadata}] = Conversations.history(ticket, @holder)
       assert metadata =~ "> " <> String.duplicate("x", 4000)
       refute metadata =~ "BEYOND"
+    end
+
+    # **Tied to the conversation it is handed to, and not to the job whose transcript it reads**
+    # (`docs/design/storage.md` § Serving): the transcripts are of finished jobs, and a token that
+    # named their owner would be refused the moment it was minted.
+    test "a transcript's token names the conversation it was handed to", %{project: project} do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      [job] = Jobs.for_ticket(ticket.id)
+
+      {:ok, finished} =
+        Repo.update(Jobs.Job.progress_changeset(job, %{status: :finished, outcome: :converged}))
+
+      {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+
+      {:ok, _version} =
+        Forge.Artifacts.record_version(
+          ticket.id,
+          "transcript-#{job.state}-1.jsonl",
+          :blob,
+          {:job, job.id},
+          %{blob_uri: "store:job/#{job.id}/transcript-1.jsonl"}
+        )
+
+      assert [%{"transcript" => %{"key" => key, "token" => token}}] =
+               Conversations.history(ticket, chat.id)
+
+      # The job it reads is finished, and the token works: it is not that job's.
+      assert finished.status == :finished
+      assert Forge.Storage.Token.verify(token, :get, key) == :ok
+
+      {:ok, _chat} = Repo.update(Jobs.Job.progress_changeset(chat, %{status: :finished}))
+      assert Forge.Storage.Token.verify(token, :get, key) == {:error, :expired}
     end
 
     test "a job with nothing refused and nothing said has neither section", %{project: project} do
       {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
 
-      assert [%{"metadata" => metadata}] = Conversations.history(ticket)
+      assert [%{"metadata" => metadata}] = Conversations.history(ticket, @holder)
       refute metadata =~ "What was refused"
       refute metadata =~ "What it said last"
     end
@@ -1497,7 +1532,7 @@ defmodule Forge.ConversationsTest do
     test "a job that never uploaded a transcript still gets its metadata", %{project: project} do
       {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
 
-      assert [entry] = Conversations.history(ticket)
+      assert [entry] = Conversations.history(ticket, @holder)
       assert entry["transcript"] == nil
       assert entry["metadata"] =~ "Not kept."
     end
@@ -1506,11 +1541,11 @@ defmodule Forge.ConversationsTest do
       {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
       {:ok, _chat} = Conversations.open(project, "about this", ticket: ticket)
 
-      assert length(Conversations.history(ticket)) == 1
+      assert length(Conversations.history(ticket, @holder)) == 1
     end
 
     test "a project chat has no ticket and so no history" do
-      assert Conversations.history(nil) == []
+      assert Conversations.history(nil, @holder) == []
     end
   end
 

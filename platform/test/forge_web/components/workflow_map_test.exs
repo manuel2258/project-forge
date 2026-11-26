@@ -38,6 +38,87 @@ defmodule ForgeWeb.WorkflowMapTest do
            ]
   end
 
+  describe "the time each run may take" do
+    @timed """
+    version: 1
+    initial: a
+    defaults:
+      timeout: 90m
+    commands:
+      build: { run: .forge/commands/build.sh, timeout: 10m }
+    states:
+      a:
+        prompt: agents/a.md
+        inputs: [ticket]
+        produces: [a.md]
+        budget: { turns: 5, tokens: 20k }
+        timeout: 1000h
+      b:
+        prompt: agents/b.md
+        inputs: [a.md]
+        produces: [b.md]
+        budget: { turns: 7, tokens: 20k }
+      c:
+        chat: true
+        prompt: agents/c.md
+        inputs: [b.md]
+        produces: [c.md]
+      d:
+        invoke: [build]
+        exit: { "0": done, "*": failed }
+      e:
+        on_enter: update
+      f: {}
+    transitions:
+      - { from: a, to: b }
+      - { from: b, to: c }
+      - { from: c, to: d }
+      - { from: d, to: e }
+      - { from: d, to: f, when: failed }
+      - { from: e, to: f }
+    limits: { ticket_tokens: 200k }
+    """
+
+    defp timed do
+      {:ok, workflow} = Parser.parse(@timed)
+      workflow
+    end
+
+    test "an agent state's budget ends with the limit that applies to it, resolved nearest first" do
+      workflow = timed()
+
+      assert WorkflowMap.budget(workflow, workflow.states["a"]) =~ ~r/^5 turns · .+ · 1000h$/
+      assert WorkflowMap.budget(workflow, workflow.states["a"], :short) =~ ~r/^5 t · .+ · 1000h$/
+      # No timeout of its own: the workflow's default.
+      assert WorkflowMap.budget(workflow, workflow.states["b"]) =~ ~r/^7 turns · .+ · 90m$/
+    end
+
+    test "the engine's two hours where the workflow names none" do
+      {:ok, workflow} = Parser.parse(String.replace(@timed, "defaults:\n  timeout: 90m\n", ""))
+
+      assert WorkflowMap.budget(workflow, workflow.states["b"]) =~ ~r/ · 2h$/
+    end
+
+    test "a chat step, a command state, a person's state and an update step show no time" do
+      workflow = timed()
+
+      for name <- ~w(c d e f) do
+        assert WorkflowMap.budget(workflow, workflow.states[name]) == nil, name
+      end
+    end
+
+    test "the flow and the map draw it, 1000h as 1000h and not in days" do
+      flow = render_component(&WorkflowMap.flow/1, id: "flow", workflow: timed())
+      assert flow =~ ~r/5 turns · [^<]+ · 1000h/
+      assert flow =~ ~r/7 turns · [^<]+ · 90m/
+      refute flow =~ ~r/\bdays?\b/
+
+      map = html_of(timed())
+      assert map =~ ~r/5 t · [^<]+ · 1000h/
+      assert map =~ ~r/7 t · [^<]+ · 90m/
+    end
+  end
+
   test "the flow says each state's job, budget and where it goes, approvals in the link colour" do
     html =
       render_component(&WorkflowMap.flow/1,

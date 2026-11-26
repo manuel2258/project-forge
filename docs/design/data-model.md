@@ -48,7 +48,9 @@ most one per project: a partial unique index, and a check that a current one is 
 for a workflow job, per ticket for a command), `parent_job_id` (the job that invoked a command;
 null otherwise),
 `spec` (immutable, JSON: prompt text and path, inputs with name, version and content inlined, `env`,
-`commit`, budgets, permitted children, which is empty in v1; `answers.md` and the answered keys are
+`commit`, budgets (`budget.timeout_ms` among them: how long one run may take, resolved from the
+state, the workflow's `defaults` and the engine's two hours when the job is made; absent from a spec
+stored before it existed, which runs on the default), permitted children, which is empty in v1; `answers.md` and the answered keys are
 added at run time, not stored; a command's is its script, argv, commit, env and timeout),
 `status` (`pending | running | waiting | parked | hibernated | finished` — `parked` is a job waiting
 on commands it invoked, holding no slice: `design/commands.md` § Always park. **`finished` is final
@@ -60,7 +62,7 @@ and `worker_id` are cleared, and `turns`, `usage` and the session are kept; `des
 command's, null for every other kind and for a command that ended without one),
 `outcome` (`converged | did_not_converge | budget_exhausted | error | cancelled`, null until
 finished), `declared_outcome` (the workflow outcome the agent selected, null unless converged),
-`exhausted` (`turns | cost | wall_clock` — which ceiling stopped a `budget_exhausted` job, null
+`exhausted` (`turns | tokens | timeout` — which ceiling stopped a `budget_exhausted` job, null
 for every other and for one whose worker was too old to say; `design/capacity.md` § Four
 exhaustions, three treatments), `turns`, `usage` (what the job has used and what
 its runs have cost between them — a conversation's read from them with `Runs.total/1`, a workflow
@@ -218,7 +220,9 @@ spent (`Forge.Jobs.Runs`).
 **job_extension** — insert-only: what a person gave a job that ran out of budget
 (`design/capacity.md` § Four exhaustions, three treatments). `job_id`, `ticket_id`, who
 (`user_id` or `token_id`, exactly one), `tokens` (what the reopened run may spend, on top of what the
-job has used), `turns` (null when the harness does not bound turns, or the job's own), `note`
+job has used), `turns` (null when the harness does not bound turns, or the job's own), `timeout_ms`
+(how long the reopened run, and each later run of the job, may take: what the person gave, or the
+limit the job's own runs had where they left the box empty — never null), `note`
 (at most 4,000 characters), the stop it extended (`exhausted`, `stopped_at`, `usage_before`,
 `turns_before`, `runs_before`) and `inserted_at`. A job has as many as it was extended.
 

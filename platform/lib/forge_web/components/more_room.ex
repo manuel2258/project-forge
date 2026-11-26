@@ -14,6 +14,9 @@ defmodule ForgeWeb.Components.MoreRoom do
   says and what is typed are the same units, with the exact weighted tokens in a title
   (`ForgeWeb.Format.exact/1`). A note is text: shown as typed, line breaks kept, and wrapped.
 
+  The time box is drawn on every extension, for both harnesses, in the grammar a workflow writes a
+  `timeout` in (`90s`, `20m`, `3h`), and starts filled with the limit each run of the job has.
+
   The fields carry a hidden `draft` naming the form's held draft (`ForgeWeb.Operator.Drafts`), so
   that a rejoin gives back what was typed, and a hidden `job` naming the job the person was shown,
   which is the one the act checks and acts on.
@@ -29,6 +32,7 @@ defmodule ForgeWeb.Components.MoreRoom do
           way: String.t(),
           tokens: String.t(),
           turns: String.t(),
+          timeout: String.t(),
           note: String.t(),
           raise?: boolean(),
           raise: String.t(),
@@ -54,6 +58,7 @@ defmodule ForgeWeb.Components.MoreRoom do
       way: way,
       tokens: tokens,
       turns: Map.get(draft, "turns") || default_turns(offer),
+      timeout: Map.get(draft, "timeout") || default_timeout(offer),
       note: Map.get(draft, "note") || "",
       need: need
     }
@@ -84,6 +89,11 @@ defmodule ForgeWeb.Components.MoreRoom do
 
   defp default_turns(%{default_turns: turns}), do: Integer.to_string(turns)
   defp default_turns(_no_offer), do: ""
+
+  # The state's own limit and not half of it, as the other two boxes start: the limit is per run,
+  # and an extended run is a new one (`docs/design/ui.md` § Extend).
+  defp default_timeout(%{timeout_ms: ms}), do: ForgeCore.Duration.format(ms)
+  defp default_timeout(_no_offer), do: ""
 
   # What the act would spend, which is what the cap is judged against: the tokens typed, or the
   # state's own budget. Nil while what was typed is not an amount, so no raise is drawn for it and
@@ -137,7 +147,9 @@ defmodule ForgeWeb.Components.MoreRoom do
           <span title={ForgeWeb.Format.exact(@offer.declared_tokens)}>
             {Usage.format(@offer.declared_tokens)}
           </span>
-          and {@offer.declared_turns} turns.
+          and {@offer.declared_turns} turns, and each run may take {ForgeCore.Duration.format(
+            @offer.timeout_ms
+          )}.
           <span title={ForgeWeb.Format.exact(@room.left)}>
             The ticket has {Usage.format(@room.left)} of {Usage.format(@room.cap)} left.
           </span>
@@ -157,6 +169,18 @@ defmodule ForgeWeb.Components.MoreRoom do
           inputmode="text"
           phx-debounce="300"
           hint="Such as 800k, 1.5M or 2000000."
+        />
+        <.input
+          id={"#{@prefix}-extend-timeout"}
+          name="timeout"
+          label="Time for this run"
+          value={@m.timeout}
+          mono
+          form={@form}
+          autocomplete="off"
+          inputmode="text"
+          phx-debounce="300"
+          hint="Such as 90s, 20m or 3h."
         />
         <.input
           :if={@offer.bounds_turns}
@@ -232,7 +256,7 @@ defmodule ForgeWeb.Components.MoreRoom do
 
   defp ran_out(%{exhausted: :turns}), do: "It ran out of turns."
   defp ran_out(%{exhausted: :tokens}), do: "It ran out of tokens."
-  defp ran_out(%{exhausted: :wall_clock}), do: "It ran out of time."
+  defp ran_out(%{exhausted: :timeout}), do: "It reached its timeout."
   defp ran_out(_offer), do: "It ran out of budget."
 
   defp note_hint("extend"), do: "The first thing the job reads when it carries on."

@@ -62,11 +62,14 @@ archive/<n>/<page>@data.json     # a page's store as it is now, inline (pages.md
   (documents, files and versions, which counts every version of both) — and says when it was taken. A ticket still in flight shows the
   versions that exist when its folder was last listed; the ticket the job belongs to is in it.
 - `jobs.tsv` columns: `ticket state attempt kind outcome status started_at finished_at turns
-  usage model effort memory_max cores runs extensions extension_tokens restarted`. `runs` counts
-  `job_runs`. The last three are appended after the others, so a reader by position keeps working:
-  `extensions` counts the job's extension records, `extension_tokens` is what they gave in total (0
-  when none) and `restarted` is `true` for an attempt a person's *Run again* started and `false` for
-  every other job. Counts and amounts only: not who, and not the note. Where the platform
+  usage model effort memory_max cores runs extensions extension_tokens restarted
+  extension_seconds`. `runs` counts `job_runs`. The last four are appended after the others, so a
+  reader by position keeps working: `extensions` counts the job's extension records,
+  `extension_tokens` is what they gave in total (0 when none), `restarted` is `true` for an attempt
+  a person's *Run again* started and `false` for every other job, and `extension_seconds` is the
+  time they gave in total, a whole number of seconds (0 when none) — appended after `restarted`
+  rather than set beside `extension_tokens`, because a column inserted there would move `restarted`
+  for a reader by position. Counts and amounts only: not who, and not the note. Where the platform
   recorded nothing (an old row, a job that never started) the field is `n/a`, not omitted. **No
   credential, no machine, no owner**: the file says what ran and not who paid (the person's answer
   on ticket 24).

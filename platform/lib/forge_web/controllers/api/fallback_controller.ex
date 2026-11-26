@@ -131,6 +131,7 @@ defmodule ForgeWeb.Api.FallbackController do
       when elem(reason, 0) in [
              :invalid_tokens,
              :invalid_turns,
+             :invalid_timeout,
              :invalid_note,
              :invalid_raise,
              :note_too_long,

@@ -4,6 +4,7 @@ defmodule ForgeCore.Prompt do
   prompt, and the job manifest rendered from the spec. See `docs/design/job-prompt.md`.
   """
 
+  alias ForgeCore.Duration
   alias ForgeCore.Job.Spec
   alias ForgeCore.Usage
   alias ForgeCore.Workflow
@@ -657,7 +658,7 @@ defmodule ForgeCore.Prompt do
     ## Budget
 
     - Turns: #{spec.budget.turns}
-    - Weighted tokens: #{Usage.format(spec.budget.tokens)}#{lowered(spec)}#{allowance(spec.budget)}
+    - Weighted tokens: #{Usage.format(spec.budget.tokens)}#{lowered(spec)}#{time(spec.budget)}#{allowance(spec.budget)}
     """
   end
 
@@ -670,6 +671,14 @@ defmodule ForgeCore.Prompt do
   end
 
   defp lowered(%Spec{}), do: ""
+
+  # The run's time limit, the extension's when this run is an extended one (the platform puts the
+  # figure in `budget` when it builds the run's spec). Printed only when the spec carries one: a spec
+  # an older platform wrote has none, and a line guessed here would be a limit nobody set.
+  defp time(%{timeout_ms: ms}) when is_integer(ms),
+    do: "\n- Time: #{Duration.format(ms)} per run; the run is stopped when it passes it"
+
+  defp time(_budget), do: ""
 
   defp allowance(%{ticket_left: left, ticket_limit: limit}),
     do:

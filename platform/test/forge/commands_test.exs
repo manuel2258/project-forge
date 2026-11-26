@@ -219,6 +219,10 @@ defmodule Forge.CommandsTest do
 
       assert assignment["kind"] == "command"
       assert assignment["spec"]["command"]["name"] == "build"
+
+      # Its own `timeout: 20m`, which the worker enforces and its tokens are sized to; not an agent's
+      # two hours, which a command that lost its own clause would fall through to.
+      assert assignment["wall_clock_ms"] == 1_200_000
       refute Map.has_key?(assignment, "credential")
       refute Map.has_key?(assignment, "backlog")
       refute Map.has_key?(assignment, "changelog")
@@ -239,6 +243,21 @@ defmodule Forge.CommandsTest do
       assert :error = Tokens.authorise(assignment["git"]["token"], project, :write)
 
       assert %Job{status: :running, credential_id: nil} = Jobs.get!(build.id)
+    end
+
+    # `docs/design/storage.md` § Serving: a store token minted for a job ends with it. The log is
+    # uploaded before the worker's result, which is what records the command as finished, so a log
+    # that arrives is never refused for it.
+    test "its log token works while it runs and is refused once it has finished", context do
+      ticket = implement(context)
+      [build | _] = pending(ticket, :command) |> Enum.sort_by(& &1.attempt)
+
+      assignment = FakeWorker.assign(build, context.worker)
+      %{"log_key" => key, "log_token" => token} = assignment["store"]
+
+      assert Storage.Token.verify(token, :put, key) == :ok
+      {:ok, _job} = FakeWorker.finish_command(assignment, 0, log: "compiled\n")
+      assert Storage.Token.verify(token, :put, key) == {:error, :expired}
     end
 
     test "decides its outcome once the last command is done, first non-zero status first",
@@ -383,6 +402,12 @@ defmodule Forge.CommandsTest do
 
       assert :ok = Storage.Token.verify(token, :get, key)
       assert {:ok, "failed 1\n"} = Storage.get(key)
+
+      # An entered command's log is handed to the job that is entered, not to the command.
+      assert {:ok, %{job: holder}} =
+               Phoenix.Token.verify(ForgeWeb.Endpoint, "forge storage", token)
+
+      assert holder == job.id
     end
 
     # `workflow-grammar-v1.md` § Inputs: a state may name a command's log, and reads the latest
@@ -560,6 +585,20 @@ defmodule Forge.CommandsTest do
       assert :ok = Storage.Token.verify(build_token, :get, build_key)
 
       assert {:ok, "ran " <> _} = Storage.get(build_key)
+
+      # Handed to the resumed job, which is the job that reads it, and ended with it: the logs are
+      # of finished commands, and a token that named their jobs would be refused at once.
+      assert {:ok, %{job: holder}} =
+               Phoenix.Token.verify(ForgeWeb.Endpoint, "forge storage", build_token)
+
+      assert holder == job.id
+
+      {:ok, _} =
+        Repo.update(
+          Job.progress_changeset(Jobs.get!(job.id), %{status: :finished, outcome: :converged})
+        )
+
+      assert Storage.Token.verify(build_token, :get, build_key) == {:error, :expired}
     end
 
     test "with nothing it may run, goes straight back with only the refusals", context do

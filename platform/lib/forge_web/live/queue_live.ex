@@ -489,10 +489,10 @@ defmodule ForgeWeb.QueueLive do
     end
   end
 
-  # The step's allowance in turns and tokens, as the workflow map says it.
+  # The step's allowance in turns, tokens and time, as the workflow map says it.
   defp budget(%Workflow{} = workflow, ticket) do
     case Workflow.state(workflow, ticket.state) do
-      %Workflow.State{} = state -> WorkflowMap.budget(state)
+      %Workflow.State{} = state -> WorkflowMap.budget(workflow, state)
       nil -> nil
     end
   end
@@ -566,7 +566,9 @@ defmodule ForgeWeb.QueueLive do
     do:
       deciding(
         "extend",
-        params |> Map.take(~w(tokens turns note raise job draft)) |> Map.put("ticket", id),
+        params
+        |> Map.take(~w(tokens turns timeout note raise job draft))
+        |> Map.put("ticket", id),
         socket
       )
 

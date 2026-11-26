@@ -423,7 +423,7 @@ defmodule Forge.Archive do
 
   # -- the jobs ledger ----------------------------------------------------------------------------
 
-  @header ~w(ticket state attempt kind outcome status started_at finished_at turns usage model effort memory_max cores runs extensions extension_tokens restarted)
+  @header ~w(ticket state attempt kind outcome status started_at finished_at turns usage model effort memory_max cores runs extensions extension_tokens restarted extension_seconds)
 
   # Every job of the project, or of one ticket (`ticket_id` set). A field the platform did not
   # record is `n/a` and the line is kept: a job that never started is still a job that ran here.
@@ -440,8 +440,8 @@ defmodule Forge.Archive do
         group_by: r.job_id,
         select: %{job_id: r.job_id, n: count(r.id)}
 
-    # What a person gave each job (`Forge.Jobs.Extension`): how many times and how many tokens, and
-    # not who or why — the ledger names no person (`docs/design/archive.md` § Layout).
+    # What a person gave each job (`Forge.Jobs.Extension`): how many times, how many tokens and how
+    # many seconds, and not who or why — the ledger names no person (`docs/design/archive.md` § Layout).
     #
     # The `project_id` filter below is an equivalent mutant: the outer query keeps only this
     # project's jobs and joins on `job_id`, so another project's rows never reach the result. It
@@ -455,7 +455,10 @@ defmodule Forge.Archive do
         select: %{
           job_id: e.job_id,
           n: count(e.id),
-          tokens: type(coalesce(sum(e.tokens), 0), :integer)
+          tokens: type(coalesce(sum(e.tokens), 0), :integer),
+          # Whole seconds, as every integer column of the ledger is, summed per extension rather
+          # than rounded from a sum.
+          seconds: type(fragment("coalesce(sum(? / 1000), 0)", e.timeout_ms), :integer)
         }
 
     query =
@@ -486,7 +489,8 @@ defmodule Forge.Archive do
           coalesce(r.n, 0),
           coalesce(x.n, 0),
           coalesce(x.tokens, 0),
-          not is_nil(j.restart_id)
+          not is_nil(j.restart_id),
+          coalesce(x.seconds, 0)
         ]
 
     query = if ticket_id, do: from([j] in query, where: j.ticket_id == ^ticket_id), else: query

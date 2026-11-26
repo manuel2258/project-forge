@@ -2202,6 +2202,9 @@ defmodule Forge.Engine do
       ticket_id: locked.id,
       tokens: figures.tokens,
       turns: figures.turns,
+      # What the extended run is actually allowed: the box, or the job's own limit where it was
+      # left empty, so no row records "nothing" for a run that had a limit.
+      timeout_ms: figures.timeout || Jobs.own_timeout_ms(job),
       note: figures.note,
       exhausted: job.exhausted,
       stopped_at: job.finished_at,
@@ -2216,6 +2219,7 @@ defmodule Forge.Engine do
       "extension_id" => extension.id,
       "tokens" => extension.tokens,
       "turns" => extension.turns,
+      "timeout_ms" => extension.timeout_ms,
       "note" => extension.note,
       "exhausted" => extension.exhausted && Atom.to_string(extension.exhausted),
       "stopped_at" => extension.stopped_at,

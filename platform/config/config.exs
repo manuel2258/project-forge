@@ -32,7 +32,6 @@ config :forge, Forge.Jobs,
   data_dir: "tmp/forge",
   run_jobs: true,
   poll_ms: 2_000,
-  wall_clock_ms: 3_600_000,
   # The worker starts a job's clock only once its clone and seed are ready, so a store token
   # spent after that — the transcript's, a conversation's history — has to outlive the
   # preparation too. An hour, generously. Not from M4's 35-second cold start, which is mostly boot
@@ -43,7 +42,7 @@ config :forge, Forge.Jobs,
   harness_opts: [],
   # A job reaches its repository over the platform's own git endpoint. The base URL is derived
   # from the endpoint unless something in front rewrites the host; the token outlives the job's
-  # wall clock by a margin. See docs/design/git-hosting.md.
+  # time limit by a margin. See docs/design/git-hosting.md.
   git_base_url: nil,
   git_token_ttl_minutes: 90,
   git_max_body_bytes: 100 * 1024 * 1024

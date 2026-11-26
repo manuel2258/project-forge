@@ -260,8 +260,8 @@ This is why the two are not the same quantity as `spec.budget.turns`, which is o
 ceiling, and why nothing draws them as a ratio (`capacity.md` § Four exhaustions, three
 treatments). The documentation calls the cost a client-side estimate; it is stored as such and
 reconciled against provider billing later if that ever matters. `--max-turns` is the
-harness-side enforcement of turns, forge's token count of usage; the driver additionally enforces a wall-clock limit
-(engine default, not in the workflow grammar) and kills the process with SIGTERM, then SIGKILL
+harness-side enforcement of turns, forge's token count of usage; the driver additionally enforces a time limit
+(the workflow's `timeout`, `workflow-grammar-v1.md` § Timeout; two hours where it names none) and kills the process with SIGTERM, then SIGKILL
 after a grace period. No `finished` event is emitted for that; the run's result records why it
 was killed, and § Outcome mapping reads it as `cancelled` or `budget_exhausted`.
 
@@ -269,7 +269,7 @@ was killed, and § Outcome mapping reads it as `cancelled` or `budget_exhausted`
 
 Decided in this order, first match wins:
 
-1. Process killed by the platform: `cancelled` (operator) or `budget_exhausted` (wall clock).
+1. Process killed by the platform: `cancelled` (operator) or `budget_exhausted` (time limit; the worker reports it as `wall_clock`, the platform records `timeout`).
    A harness that had already produced its result before the signal is not relabelled.
 1. A collected document holds an open blocking question (one whose key was not answered):
    the job becomes `waiting`, and nothing below applies until it resumes and ends again.
@@ -293,7 +293,7 @@ timeline and the queue have to work with. **The reason comes from the result mes
 field — the harness's own last words — in preference to its `subtype`.**
 
 One thing is no longer only in the reason: a `budget_exhausted` job also carries **which ceiling
-stopped it** — `:turns`, `:cost` or `:wall_clock` — structurally, on the job row
+stopped it** — `:turns`, `:tokens` or `:timeout` (the worker's `:wall_clock`, renamed where the platform records it, `Forge.Jobs.Job.from_wire/1`) — structurally, on the job row
 (`ForgeCore.Job.Outcome.exhausted/1`, `jobs.exhausted`, `capacity.md` § Four exhaustions, three
 treatments). `exhausted/1` and § Outcome mapping's rules 1 and 3 read the same facts, so a run
 one calls a budget stop is a run the other names a ceiling for; `ForgeCore.Job.OutcomeTest` holds

@@ -115,7 +115,8 @@ defmodule ForgeCore.Job.Spec do
     integration: nil,
     # What a person gave this job when they extended it after it ran out of budget, string keys:
     # `number` (which extension this is), `tokens`, `turns` (nil where the harness does not bound
-    # them), `note`, `exhausted` (which ceiling ran out: "turns", "tokens", "wall_clock" or nil),
+    # them), `note`, `exhausted` (which ceiling ran out: "turns", "tokens", "wall_clock" or nil;
+    # `"wall_clock"` is the wire's word for the time limit, which the platform records as `timeout`),
     # `used_tokens`, `used_turns` and `runs`, what the job had used before this run, and `later_run`,
     # true when an earlier run has already been given this extension (the run is a resume after a
     # question, a park or a limit): its budget is still the extension's, but a resumed run is not
@@ -221,6 +222,10 @@ defmodule ForgeCore.Job.Spec do
           budget: %{
             required(:turns) => pos_integer(),
             required(:tokens) => non_neg_integer(),
+            # How long one run may take, in milliseconds: resolved when the job is made
+            # (`ForgeCore.Workflow.timeout_ms/2`), and at run time the extension's if the job has
+            # one. Absent from a spec stored before it existed.
+            optional(:timeout_ms) => pos_integer(),
             optional(atom()) => term()
           },
           preamble_hash: String.t() | nil,
@@ -515,14 +520,16 @@ defmodule ForgeCore.Job.Spec do
 
     # `lowered_by` is the *name* of the limit that bound (a string), and `dollars/1` hands a
     # non-number back as it was, so exempting it here is an **equivalent mutant**: removing
-    # `key != :lowered_by` changes nothing observable. Kept so the intent is written down.
+    # `:lowered_by` from the exemption changes nothing observable. Kept so the intent is written
+    # down. `timeout_ms` is milliseconds and a number, so *it* is not equivalent: a spec stored
+    # with dollars and a timeout would have the timeout turned into tokens.
     convert = fn key, value ->
-      if legacy? and key != :lowered_by, do: dollars(value), else: value
+      if legacy? and key not in [:lowered_by, :timeout_ms], do: dollars(value), else: value
     end
 
     tokens = if legacy?, do: dollars(nested(map, :cost)), else: nested(map, :tokens)
 
-    [:ticket_left, :ticket_limit, :declared, :lowered_by]
+    [:ticket_left, :ticket_limit, :declared, :lowered_by, :timeout_ms]
     |> Enum.reduce(%{turns: nested(map, :turns), tokens: tokens}, fn key, budget ->
       case nested(map, key) do
         nil -> budget

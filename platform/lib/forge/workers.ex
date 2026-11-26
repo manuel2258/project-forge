@@ -1953,7 +1953,7 @@ defmodule Forge.Workers do
         where: p.worker_id == ^id and p.status == :parked
       )
       |> Repo.all()
-      |> Enum.map(&DateTime.add(&1.updated_at, Forge.Jobs.wall_clock_ms(&1), :millisecond))
+      |> Enum.map(&DateTime.add(&1.updated_at, Forge.Jobs.timeout_ms(&1), :millisecond))
 
     # A held ticket's job is not coming back to this machine until a person releases it, so it
     # holds no claim on it (`docs/design/workflow-grammar-v1.md` § Holding a ticket).

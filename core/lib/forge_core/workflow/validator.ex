@@ -270,6 +270,8 @@ defmodule ForgeCore.Workflow.Validator do
         optional: command.optional,
         outcomes: command.outcomes,
         budget: command.budget,
+        # Each command has its own `timeout`; the state has no run of its own to time.
+        timeout: command.timeout_ms,
         may_invoke: command.may_invoke,
         # Each command brings its own, as it brings its own `env` (`docs/design/secrets.md`).
         secrets: command.secrets,
@@ -316,6 +318,7 @@ defmodule ForgeCore.Workflow.Validator do
         optional: human.optional,
         outcomes: human.outcomes,
         budget: human.budget,
+        timeout: human.timeout_ms,
         # Nothing runs, so there is nothing to size — and a declaration nothing reads is one the
         # author believes is doing something.
         resources: human.resources,
@@ -348,6 +351,16 @@ defmodule ForgeCore.Workflow.Validator do
           )
         ]
 
+    timeout =
+      if step.timeout_ms == nil,
+        do: [],
+        else: [
+          Error.new(
+            Error.join(path, "timeout"),
+            "not allowed on a chat step: a conversation's time limit is the node's"
+          )
+        ]
+
     may_invoke =
       if step.may_invoke == %{},
         do: [],
@@ -368,7 +381,7 @@ defmodule ForgeCore.Workflow.Validator do
           )
         ]
 
-    budget ++ may_invoke ++ exit ++ chat_produces(path, step)
+    budget ++ timeout ++ may_invoke ++ exit ++ chat_produces(path, step)
   end
 
   defp state_shape(path, %State{} = job) do

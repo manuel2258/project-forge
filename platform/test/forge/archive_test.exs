@@ -153,11 +153,11 @@ defmodule Forge.ArchiveTest do
       [header | rows] = String.split(all, "\n", trim: true)
 
       assert header ==
-               "ticket\tstate\tattempt\tkind\toutcome\tstatus\tstarted_at\tfinished_at\tturns\tusage\tmodel\teffort\tmemory_max\tcores\truns\textensions\textension_tokens\trestarted"
+               "ticket\tstate\tattempt\tkind\toutcome\tstatus\tstarted_at\tfinished_at\tturns\tusage\tmodel\teffort\tmemory_max\tcores\truns\textensions\textension_tokens\trestarted\textension_seconds"
 
       assert length(rows) == 3
       fields = Enum.map(rows, &String.split(&1, "\t"))
-      assert Enum.all?(fields, &(length(&1) == 18))
+      assert Enum.all?(fields, &(length(&1) == 19))
 
       refute all =~ credential.id
       refute all =~ worker.id
@@ -170,7 +170,7 @@ defmodule Forge.ArchiveTest do
       assert Enum.at(never_row, 6) == "n/a"
       assert Enum.at(never_row, 14) == "0"
       # Nobody extended it, and nobody restarted it.
-      assert Enum.slice(never_row, 15, 3) == ["0", "0", "false"]
+      assert Enum.slice(never_row, 15, 4) == ["0", "0", "false", "0"]
 
       [ran_row] = Enum.filter(fields, &(Enum.at(&1, 2) == "2"))
       assert Enum.at(ran_row, 5) == "running"
@@ -190,18 +190,20 @@ defmodule Forge.ArchiveTest do
     end
 
     # `docs/design/archive.md` § Layout: how many times a job was extended and the tokens that gave
-    # in total, and whether a person's *Run again* made the attempt — counts, never who or why.
+    # in total, the seconds they gave, and whether a person's *Run again* made the attempt — counts,
+    # never who or why.
     test "counts a job's extensions and their tokens, and marks an attempt a person restarted",
          %{project: project, ticket: ticket} do
       person = Forge.AccountsFixtures.user_fixture()
       extended = job_fixture(%{ticket: ticket, attempt: 3})
 
-      for tokens <- [6_000_000, 1_500_000] do
+      for {tokens, timeout_ms} <- [{6_000_000, 7_200_000}, {1_500_000, 5_400_000}] do
         Repo.insert!(%Forge.Jobs.Extension{
           job_id: extended.id,
           ticket_id: ticket.id,
           user_id: person.id,
           tokens: tokens,
+          timeout_ms: timeout_ms,
           note: "SECRET-NOTE"
         })
       end
@@ -220,9 +222,10 @@ defmodule Forge.ArchiveTest do
       rows = all |> String.split("\n", trim: true) |> tl() |> Enum.map(&String.split(&1, "\t"))
       row = fn attempt -> Enum.find(rows, &(Enum.at(&1, 2) == to_string(attempt))) end
 
-      assert Enum.slice(row.(extended.attempt), 15, 3) == ["2", "7500000", "false"]
-      assert Enum.slice(row.(restarted.attempt), 15, 3) == ["0", "0", "true"]
-      assert Enum.slice(row.(transitioned.attempt), 15, 3) == ["0", "0", "false"]
+      # The time they gave is in whole seconds: 2h and 90m make 12,600.
+      assert Enum.slice(row.(extended.attempt), 15, 4) == ["2", "7500000", "false", "12600"]
+      assert Enum.slice(row.(restarted.attempt), 15, 4) == ["0", "0", "true", "0"]
+      assert Enum.slice(row.(transitioned.attempt), 15, 4) == ["0", "0", "false", "0"]
 
       # Not who, and not why.
       refute all =~ person.id

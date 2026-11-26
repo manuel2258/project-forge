@@ -82,7 +82,9 @@ defmodule Forge.FlowTest do
     assert spec.prompt == "Refine the ticket into a crisp problem statement.\n"
     assert [%{name: "ticket", version: 1}] = spec.inputs
     assert spec.produces == ["refinement.md"]
-    assert spec.budget == %{turns: 20, tokens: 100_000}
+
+    # The run's time limit is made with the job: the engine's two hours, this workflow naming none.
+    assert spec.budget == %{turns: 20, tokens: 100_000, timeout_ms: 7_200_000}
 
     assert event_types(ticket) == ~w(ticket.admitted artifact.version_written job.created)
   end

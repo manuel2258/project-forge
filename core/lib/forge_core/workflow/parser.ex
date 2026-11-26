@@ -20,6 +20,7 @@ defmodule ForgeCore.Workflow.Parser do
   one back as it was admitted, which the validator's later rules do not reach.
   """
 
+  alias ForgeCore.Duration
   alias ForgeCore.Error
   alias ForgeCore.Usage
   alias ForgeCore.Workflow
@@ -41,13 +42,13 @@ defmodule ForgeCore.Workflow.Parser do
   @top_keys ~w(version description initial states transitions limits defaults commands schedules
                 release release_files release_notes)
   @state_keys ~w(prompt env model effort harness inputs produces optional outcomes budget on_enter
-                 on_conflict resources invoke exit may_invoke secrets chat opens)
+                 on_conflict resources timeout invoke exit may_invoke secrets chat opens)
   @command_keys ~w(run env produces timeout resources secrets keep_build warm_start)
   @grant_keys ~w(max concurrent)
   @transition_keys ~w(from to when approve max queue)
   @budget_keys ~w(turns tokens cost)
   @limit_keys ~w(ticket_tokens ticket_cost)
-  @defaults_keys ~w(resources)
+  @defaults_keys ~w(resources timeout)
   @resources_keys ~w(memory cpu)
 
   # Named here rather than left to `unknown_keys/3`, so the message says *why* the key is not
@@ -419,6 +420,42 @@ defmodule ForgeCore.Workflow.Parser do
     end
   end
 
+  # An agent state's `timeout`, and the workflow's default for it: optional, written as a command's
+  # is, and bounded only by what forge can time (`docs/design/workflow-grammar-v1.md` § Timeout).
+  # Where a state may not have one is the validator's.
+  defp agent_timeout(map, path) do
+    key_path = Error.join(path, "timeout")
+
+    case Map.get(map, "timeout") do
+      nil ->
+        {nil, []}
+
+      value ->
+        case Duration.parse(value, Duration.longest_ms()) do
+          {:ok, ms} ->
+            {ms, []}
+
+          :error ->
+            {nil,
+             [
+               Error.new(
+                 key_path,
+                 "must be a duration: a whole number and one of s, m or h, like 3h"
+               )
+             ]}
+
+          :too_long ->
+            {nil,
+             [
+               Error.new(
+                 key_path,
+                 "is longer than forge can time (at most #{Duration.format(Duration.longest_ms())})"
+               )
+             ]}
+        end
+    end
+  end
+
   defp defaults(map) do
     case Map.get(map, "defaults") do
       nil ->
@@ -426,8 +463,9 @@ defmodule ForgeCore.Workflow.Parser do
 
       defaults when is_map(defaults) ->
         {resources, e1} = resources(defaults, "defaults")
-        errors = unknown_keys(defaults, @defaults_keys, "defaults") ++ e1
-        {if(errors == [], do: %Defaults{resources: resources}), errors}
+        {timeout_ms, e2} = agent_timeout(defaults, "defaults")
+        errors = unknown_keys(defaults, @defaults_keys, "defaults") ++ e1 ++ e2
+        {if(errors == [], do: %Defaults{resources: resources, timeout_ms: timeout_ms}), errors}
 
       _ ->
         {nil, [Error.new("defaults", "must be a mapping")]}
@@ -475,6 +513,7 @@ defmodule ForgeCore.Workflow.Parser do
     {chat, e17} = boolean(definition, "chat", path)
     {harness, e18} = harness(definition, path)
     {opens, e19} = optional_string(definition, "opens", path)
+    {timeout_ms, e20} = agent_timeout(definition, path)
 
     state = %State{
       name: name,
@@ -489,6 +528,7 @@ defmodule ForgeCore.Workflow.Parser do
       outcomes: outcomes,
       budget: budget,
       resources: resources,
+      timeout_ms: timeout_ms,
       on_enter: on_enter,
       invoke: invoke,
       exit: exit,
@@ -506,7 +546,8 @@ defmodule ForgeCore.Workflow.Parser do
        e3 ++
        e4 ++
        e5 ++
-       e6 ++ e7 ++ e8 ++ e9 ++ e10 ++ e11 ++ e12 ++ e13 ++ e14 ++ e15 ++ e16 ++ e17 ++ e18 ++ e19}
+       e6 ++
+       e7 ++ e8 ++ e9 ++ e10 ++ e11 ++ e12 ++ e13 ++ e14 ++ e15 ++ e16 ++ e17 ++ e18 ++ e19 ++ e20}
   end
 
   defp state(name, _definition) do

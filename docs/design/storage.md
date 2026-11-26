@@ -100,31 +100,53 @@ Three properties this must have, and why:
   `job/<job_id>/out-<nonce>/`, and to nothing above or beside it. It cannot read, and it cannot
   overwrite either — a `put` to a key that exists is refused below — and the platform records a
   member only when its key is under the job's own `job/<job_id>/`, whatever the worker reports.
-- **Short-lived, minted per assignment, and sized to their use.** The lifetime is signed into the
-  token (`Forge.Storage.Token.sign/3`), so a verifier does not apply one number to all of them.
-  Most live `token_max_age`, fifteen minutes. The transcript `put` is minted at assignment and
-  used when the job stops, and between the two lie the job's preparation as well as its wall
-  clock: the worker starts the clock only once the clone and the seed are ready
-  (`ForgeWorker.Link`'s `prepare_and_run/3`, and `ForgeWorker.Job.Conversation` for a chat), so
-  a slow first seed fetch is time the clock never sees. So it lives the wall clock, plus a
-  preparation margin — `preparation_margin_ms` under `config :forge, Forge.Jobs`, an hour — plus
-  the ordinary fifteen minutes: two hours and a quarter for a workflow job, twenty-five hours and
-  a quarter for a conversation. At a flat fifteen minutes every transcript of a longer job was
-  refused as `expired_token`, and at the clock alone so was that of any job whose preparation
-  outran the fifteen minutes. A conversation's `history` tokens — a `get` for each earlier
-  transcript on its ticket (`Conversations.history/1`) — are read only once the worktree is
-  prepared, so they carry the same margin over the ordinary fifteen minutes; the seed's `get` is
-  spent as preparation begins and does not. The hour is a generous guess rather than a
-  measurement. M4's 35-second cold start is not the figure for it: most of that is booting the
-  machine and populating its Nix store, and neither is inside the window — a machine is up before
-  it is assigned anything, and the runner enters the project's environment after the clock has
-  started. What is inside it is the seed fetched and unpacked, which M4 put at 3.3 seconds for
-  192 MiB over loopback, and the fetch of the branch into the snapshot, which it did not time. A
-  provider's network makes the seed slower by an amount nobody has measured, and a project with no
-  seed is cloned whole, which nobody has timed either. The per-job git token already had the same
-  room — it outlives the clock by `git_token_ttl_minutes`, ninety minutes
-  (`docs/design/git-hosting.md` § The per-job token). Refreshing tokens over the channel was the
-  first plan and is not built; one key and one verb for the life of one job is a small grant.
+- **Short-lived, minted per assignment, sized to their use, and ended with their job.** The
+  lifetime is signed into the token (`Forge.Storage.Token.sign/3`), so a verifier does not apply one
+  number to all of them. Most live `token_max_age`, fifteen minutes. The transcript `put` is minted
+  at assignment and used when the job stops, and between the two lie the job's preparation as well
+  as its time limit: the worker starts the clock only once the clone and the seed are ready
+  (`ForgeWorker.Link`'s `prepare_and_run/3`, and `ForgeWorker.Job.Conversation` for a chat), so a
+  slow first seed fetch is time the clock never sees. So it lives the run's time limit
+  (`Forge.Jobs.timeout_ms/1`), plus a preparation margin — `preparation_margin_ms` under `config
+  :forge, Forge.Jobs`, an hour — plus the ordinary fifteen minutes: three hours and a quarter for a
+  workflow job on the engine's two hours, twenty-five hours and a quarter for a conversation. At a
+  flat fifteen minutes every transcript of a longer job was refused as `expired_token`, and at the
+  clock alone so was that of any job whose preparation outran the fifteen minutes. A conversation's
+  `history` tokens — a `get` for each earlier transcript on its ticket (`Conversations.history/2`)
+  — are read only once the worktree is prepared, so they carry the same margin over the ordinary
+  fifteen minutes; the seed's `get` is spent as preparation begins and does not. The hour is a
+  generous guess rather than a measurement. M4's 35-second cold start is not the figure for it:
+  most of that is booting the machine and populating its Nix store, and neither is inside the
+  window — a machine is up before it is assigned anything, and the runner enters the project's
+  environment after the clock has started. What is inside it is the seed fetched and unpacked, which
+  M4 put at 3.3 seconds for 192 MiB over loopback, and the fetch of the branch into the snapshot,
+  which it did not time. A provider's network makes the seed slower by an amount nobody has
+  measured, and a project with no seed is cloned whole, which nobody has timed either. The per-job
+  git token already had the same room — it outlives the clock by `git_token_ttl_minutes`, ninety
+  minutes (`docs/design/git-hosting.md` § The per-job token).
+
+  **A time limit has no maximum** (`workflow-grammar-v1.md` § Timeout), and a token as long-lived as
+  a limit of a thousand hours would be a credential nothing could take back. So **a token minted
+  for a job names it** (`job` in the signed payload) **and stops working when the job ends**:
+  `Forge.Storage.Token.verify/3` checks the lifetime, then the key and the verb, then asks
+  `Forge.Jobs.tokens_ended?/1`, and an ended job's token is refused as `expired_token` — as a lapsed
+  one is, so a caller learns nothing about why. The lifetime above stays as the backstop: a token is
+  refused at the earlier of its job's end and its lifetime, so none lasts longer than it did for
+  the same limit. The job a token names is the job it was *handed to*, never the job whose blob it
+  reads: a forked session, an earlier job's transcript and an entered command's log all belong to
+  finished jobs, and naming their owner would refuse them at once. A missing job row counts as
+  ended.
+
+  **What a run uploads as it ends still arrives.** A job has ended when the platform has recorded it
+  `finished`, and for every ending but one that record is the worker's own report, sent after its
+  uploads — the transcript, the session, a command's log and groups of files — so none is refused.
+  The exception is a **cancel**: `Forge.Engine.cancel/2` and the stop of a ticket finish the job and
+  close its run before the machine has stopped, and the worker kills the harness, uploads and only
+  then reports `hibernated` (`ForgeWorker.Link.finish/7`). A cancelled job's tokens therefore work
+  until its `finished_at` plus `token_max_age`, fifteen minutes. A job that parks for its commands
+  or stops on a question has not ended, and its tokens keep working. Tokens not minted for a job —
+  the seed token `mix forge.worker.new` prints, and the page-file token below — are the lifetime
+  alone.
 - **Not a bearer of identity.** The token authorises an operation on a key. It says nothing about
   who the worker is; that is the channel's job, and it happened before any token was minted.
 

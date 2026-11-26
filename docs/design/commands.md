@@ -503,8 +503,8 @@ workflow file. That is the cost of dropping the parameter schema, and it is chea
 `static` (shell lint, compile with warnings as errors, format, Credo and the assets: everything
 before a test, so it fails in seconds) and `test` (`args`: a project, then anything `mix test`
 takes: a file, `file:LINE`, `--stale`; no coverage floor, which is the gate's). The last two exist
-because an agent's slice is one core and its job has one wall-clock hour
-(`Forge.Jobs.wall_clock_ms/1`): a platform test file or a compile run by hand there took minutes,
+because an agent's slice is one core and its job has one time limit — two hours
+by default (`Forge.Jobs.timeout_ms/1`): a platform test file or a compile run by hand there took minutes,
 the gate a quarter of an hour, and a job the clock stops is recorded as out of budget with its
 spend lost. `agents/implement.md`, `implement-bug.md`, `rebase.md` and `deps.md` therefore forbid
 running the gate or a suite in the checkout and send the agent to these three, in one batch where

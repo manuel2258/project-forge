@@ -29,6 +29,7 @@ defmodule ForgeCore.Workflow.State do
     :budget,
     :outcomes,
     :resources,
+    :timeout_ms,
     :exit,
     :on_conflict,
     :opens,
@@ -76,6 +77,10 @@ defmodule ForgeCore.Workflow.State do
           # workflow's defaults, then the platform's — `ForgeCore.Workflow.resources/2` walks
           # the part of that chain this project can see.
           resources: Resources.t() | nil,
+          # A job state's: how long one run may take, in milliseconds. Nil means the workflow's
+          # `defaults`, then `ForgeCore.Workflow.default_timeout_ms/0` — `ForgeCore.Workflow.timeout_ms/2`
+          # walks the chain (`docs/design/workflow-grammar-v1.md` § Timeout).
+          timeout_ms: pos_integer() | nil,
           on_enter: [action()],
           # A merging or updating state's: where a conflict sends the ticket instead of refusing or
           # sticking.

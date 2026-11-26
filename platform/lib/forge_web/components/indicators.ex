@@ -92,7 +92,7 @@ defmodule ForgeWeb.Indicators do
 
   @doc """
   What a `budget_exhausted` job ran out of, demoted beside its outcome: `turns`, `tokens` or
-  `wall clock`.
+  `timeout`.
 
   Drawn nowhere else and for no other outcome, and nothing at all for a job whose ceiling was
   not recorded — a row from before the column, or from a worker too old to send it — because an
@@ -126,7 +126,7 @@ defmodule ForgeWeb.Indicators do
   # says: the ceiling belongs to that outcome and no other.
   defp ceiling_word(%{outcome: :budget_exhausted, exhausted: :turns}), do: "turns"
   defp ceiling_word(%{outcome: :budget_exhausted, exhausted: :tokens}), do: "tokens"
-  defp ceiling_word(%{outcome: :budget_exhausted, exhausted: :wall_clock}), do: "wall clock"
+  defp ceiling_word(%{outcome: :budget_exhausted, exhausted: :timeout}), do: "timeout"
   defp ceiling_word(_job), do: nil
 
   @doc """

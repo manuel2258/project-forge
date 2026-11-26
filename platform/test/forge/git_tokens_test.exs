@@ -157,7 +157,7 @@ defmodule Forge.GitTokensTest do
       chat = chat_fixture(%{project: project})
       {:ok, _secret, token} = Tokens.issue_for_job(chat, nil, project)
 
-      # Against the literal day, not `Forge.Jobs.wall_clock_ms/1`: a test that asks the function
+      # Against the literal day, not `Forge.Jobs.timeout_ms/1`: a test that asks the function
       # it depends on passes however short that function makes a conversation's clock.
       lifetime = DateTime.diff(token.expires_at, DateTime.utc_now(:second))
       assert lifetime > 24 * 3600

@@ -133,7 +133,7 @@ url-safe base64, stored as a sha256 hash, looked up by hash so no secret is ever
 - **A second use.** The same token, held by a job, opens its project's archive
   (`docs/design/archive.md`): `Forge.Git.Tokens.authorise_job/1` accepts a live token that carries
   a `job_id`, and the project is the row's. An operator's token has no job and is refused there.
-- **Lifetime.** Absolute `expires_at`, the job's wall clock plus a margin. Absolute rather than
+- **Lifetime.** Absolute `expires_at`, the job's time limit (`Forge.Jobs.timeout_ms/1`) plus a margin. Absolute rather than
   computed from `inserted_at`, because a waiting job may legitimately need a longer one.
 - **Issuance.** `Forge.Jobs.assign/2`, immediately before the job is handed to a worker — the
   single choke point every invocation passes. This was `start/1` while the platform ran jobs in
@@ -147,7 +147,7 @@ url-safe base64, stored as a sha256 hash, looked up by hash so no secret is ever
   the row forever. The worker holds it for the length of the job and dies with it.
 - **Revocation.** When the job finishes or fails, and when it is requeued because its worker was
   lost, retired or rejoined without it (`Jobs.requeue/2`) — the next run is issued its own, and
-  the old one would otherwise outlive a partitioned machine by the job's whole wall clock. A
+  the old one would otherwise outlive a partitioned machine by the job's whole time limit. A
   waiting job keeps its token; a resumed one is issued a fresh one. Rows are kept rather than deleted: they are the audit trail. (A job's token logs no event of its
   own; `token.issued` and `token.revoked` are logged for the tokens a person issues and revokes.)
 

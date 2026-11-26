@@ -308,8 +308,8 @@ defmodule ForgeWeb.TicketNewLive do
               name={elem(@workflow, 1).initial}
               topology={Topology.of(elem(@workflow, 1), elem(@workflow, 1).initial)}
             />
-            <span :if={WorkflowMap.budget(first_state(elem(@workflow, 1)))}>
-              · {WorkflowMap.budget(first_state(elem(@workflow, 1)))}
+            <span :if={WorkflowMap.budget(elem(@workflow, 1), first_state(elem(@workflow, 1)))}>
+              · {WorkflowMap.budget(elem(@workflow, 1), first_state(elem(@workflow, 1)))}
             </span>
           </p>
           <p class="first-step-job">{WorkflowMap.job(first_state(elem(@workflow, 1)))}</p>

@@ -10,7 +10,7 @@ defmodule ForgeCore.Workflow.Imports do
   - `commands` are imported whole. A name declared twice — by two libraries, or by a library and
     the workflow — is an error naming both: `build` means one thing in a project.
   - `defaults` are imported field by field, and the workflow's own win, which is the
-    nearest-first order `resources` already resolve in. Two libraries setting the same field is an
+    nearest-first order `resources` and `timeout` resolve in. Two libraries setting the same field is an
     error, because neither is nearer.
   - `states` are never imported implicitly: every state must be reachable, and transitions are the
     workflow's, so a state nobody named would be an unreachable one reported from a file its author

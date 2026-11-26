@@ -157,6 +157,10 @@ defmodule ForgeWeb.Api.Render do
       # fact no other client can read — and telling "ran out of money" from "ran out of turns"
       # is the whole of it (`docs/design/capacity.md` § Four exhaustions, three treatments).
       exhausted: j.exhausted,
+      # How long a run of the job may take as it was made — the extension's, where a person gave
+      # one, is on each of `extensions` — in milliseconds (`ForgeCore.Duration` writes it for a
+      # person). A conversation's is the node's, a command's its own.
+      timeout_ms: Forge.Jobs.own_timeout_ms(j),
       turns: j.turns,
       usage: j.usage,
       harness_session_id: j.harness_session_id,
@@ -222,6 +226,7 @@ defmodule ForgeWeb.Api.Render do
       author: Forge.Jobs.Extensions.author(e),
       tokens: e.tokens,
       turns: e.turns,
+      timeout_ms: e.timeout_ms,
       note: e.note,
       exhausted: e.exhausted,
       stopped_at: e.stopped_at,

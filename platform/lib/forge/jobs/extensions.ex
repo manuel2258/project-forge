@@ -22,7 +22,7 @@ defmodule Forge.Jobs.Extensions do
   alias Forge.Spend
   alias Forge.Tickets
   alias Forge.Tickets.Ticket
-  alias ForgeCore.{Harness, Usage}
+  alias ForgeCore.{Duration, Harness, Usage}
   alias ForgeCore.Workflow
   alias ForgeCore.Workflow.State
 
@@ -123,6 +123,11 @@ defmodule Forge.Jobs.Extensions do
         declared_turns: spec.budget.turns,
         default_tokens: half(spec.budget.tokens),
         default_turns: half(spec.budget.turns),
+        # What each run of the job was made with, which an empty time box gives the extended run
+        # too (an earlier extension's time is not carried into it): the state's limit and not half
+        # of it, because the limit is per run and an extended
+        # run is a new one.
+        timeout_ms: Jobs.own_timeout_ms(job),
         bounds_turns: bounded,
         left: Spend.ticket_remaining(ticket, workflow),
         cap: Spend.ticket_cap(ticket, workflow),
@@ -274,6 +279,11 @@ defmodule Forge.Jobs.Extensions do
 
   def explain({:invalid_turns, _raw}), do: "the turns must be a positive whole number"
 
+  def explain({:invalid_timeout, _raw}),
+    do:
+      "the time must be a whole number and one unit, such as 90s, 20m or 3h, " <>
+        "no longer than #{Duration.format(Duration.longest_ms())}, or empty"
+
   def explain({:note_too_long, length}),
     do: "the note is #{length} characters and the longest is #{Extension.note_limit()}"
 
@@ -313,6 +323,8 @@ defmodule Forge.Jobs.Extensions do
   @type figures :: %{
           tokens: pos_integer(),
           turns: pos_integer() | nil,
+          # Nil where the box was left empty: the run gets the job's own limit.
+          timeout: pos_integer() | nil,
           note: String.t() | nil,
           raise: pos_integer() | nil
         }
@@ -322,19 +334,22 @@ defmodule Forge.Jobs.Extensions do
   @doc """
   Parses the Extend form's fields: `tokens` in the grammar `ForgeCore.Usage.parse/1` reads
   (`800k`, `1.5M`, `2000000`), `turns` as a whole number — read only where the harness bounds them
-  (`bounds_turns?`), and blank meaning the job's own — a `note` and a `raise`.
+  (`bounds_turns?`), and blank meaning the job's own — `timeout` as a duration in the grammar a
+  workflow writes it (`90s`, `20m`, `3h`, at most `ForgeCore.Duration.longest_ms/0`), blank meaning
+  the job's own — a `note` and a `raise`.
 
   Errors are named for the field and carry what was typed, so a surface can say which box and keep
-  its text: `{:invalid_tokens, raw}`, `{:invalid_turns, raw}`, `{:note_too_long, length}`,
+  its text: `{:invalid_tokens, raw}`, `{:invalid_turns, raw}`, `{:invalid_timeout, raw}`, `{:note_too_long, length}`,
   `{:invalid_note, raw}`, `{:invalid_raise, raw}`.
   """
   @spec parse(map(), boolean()) :: {:ok, figures()} | {:error, term()}
   def parse(attrs, bounds_turns?) when is_map(attrs) do
     with {:ok, tokens} <- tokens(field(attrs, :tokens)),
          {:ok, turns} <- turns(field(attrs, :turns), bounds_turns?),
+         {:ok, timeout} <- timeout(field(attrs, :timeout)),
          {:ok, note} <- note(field(attrs, :note)),
          {:ok, raise} <- raise_amount(field(attrs, :raise)) do
-      {:ok, %{tokens: tokens, turns: turns, note: note, raise: raise}}
+      {:ok, %{tokens: tokens, turns: turns, timeout: timeout, note: note, raise: raise}}
     end
   end
 
@@ -369,6 +384,15 @@ defmodule Forge.Jobs.Extensions do
   end
 
   defp turns(raw, true), do: {:error, {:invalid_turns, raw}}
+
+  defp timeout(raw) when raw in [nil, ""], do: {:ok, nil}
+
+  defp timeout(raw) do
+    case Duration.parse(raw, Duration.longest_ms()) do
+      {:ok, ms} -> {:ok, ms}
+      _zero_malformed_or_too_long -> {:error, {:invalid_timeout, raw}}
+    end
+  end
 
   defp note(nil), do: {:ok, nil}
 

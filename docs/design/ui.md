@@ -153,7 +153,7 @@ draw one state two ways. The ticket's status beside it is `Indicators.status/1`.
 | job outcome | bare mono, coloured, at type scale | The **declared** outcome is the largest thing on the job page. The engine outcome is demoted to smaller mono beside it, with a caption naming which is which. |
 | worker reachability | a dot and a word, beside the status | Whether the platform is holding a channel to the machine *now*. Orthogonal to `status`, which is what the database last recorded — a `ready` row that is not connected is the interesting case, not a contradiction. |
 
-**`budget_exhausted` is followed by what ran out**: `· turns`, `· tokens` or `· wall clock`,
+**`budget_exhausted` is followed by what ran out**: `· turns`, `· tokens` or `· timeout`,
 beside the outcome and nowhere else, because the three want different responses from whoever
 reads the row (`capacity.md` § Four exhaustions, three treatments). Not a second badge — two
 marks of equal weight read as two outcomes — so it is mono at a lower opacity than any outcome
@@ -1559,7 +1559,7 @@ either row opens its fields inside `#ways-forward`, under the row, so the one bu
 a phone and on a laptop alike. *Extend*: a facts line (which ceiling ran out, what the job has used
 across its runs, the state's declared tokens and turns, what the ticket has left of its cap), a
 **tokens** box and — only for a harness whose runs have a turn ceiling (Claude Code) — a **turns**
-box, each starting at half the state's declared figure, rounded up, and a **note** box. **The
+box, each starting at half the state's declared figure, rounded up, a **time** box (*Time for this run*, offered on every extension and for both harnesses) and a **note** box. **The time box starts at the state's whole limit**, not half of it: the limit is per run, and an extended run is a new one. The facts line ends *…and each run may take 2h.*, and a job a time limit stopped says *It reached its timeout.* The box takes a workflow's grammar (`90s`, `20m`, `3h`, with a unit: a bare number of seconds is a number in a workflow file or in the API's JSON, and text typed in the box is refused with the format spelled out) with no maximum; empty, the extended run gets the state's limit, and what it was allowed is recorded either way. **The
 figures in these fields are in the grammar the boxes take** (`6M`, `800k`, with the exact weighted
 tokens in a title), not in windows: a person types an amount and reads the facts beside it in the
 same units (`ForgeWeb.Components.MoreRoom`); the job page's extensions and Activity's lines for an extension and a cap raise say `+6M` and `5M → 6M` for the same reason, and are the places a token figure is not drawn as windows. It says the
@@ -1568,7 +1568,7 @@ lowers anything. *Run again*: the note box. **A raise box** *raise this ticket's
 when the tokens typed (Extend), or the state's budget (Run again), exceed what the ticket has left; it
 is filled with the shortfall and names the cap's old and new figures. On Run again with something
 left, emptying it says the run will be lowered to what is left. A refusal — a figure that is not a
-positive token amount (`800k`, `1.5M`, `2000000`) or whole number of turns, a note over 4,000
+positive token amount (`800k`, `1.5M`, `2000000`), whole number of turns or time (`90s`, `20m`, `3h`, said in the message), a note over 4,000
 characters, a raise short of the shortfall, a job already live again, a ticket that moved — is
 drawn under the form with what was typed still in it, and the button is disabled until the answer
 arrives. Both forms have an id and a `phx-change`, so a reconnect keeps what was typed
@@ -1946,8 +1946,8 @@ the person reads one that failed.
   it; **its runs** are listed under the plan, each in windows with the exact weighted tokens in its
   title and its tokens by kind beneath (`120k fresh input · 0 cache write · 3M cache read · 90k
   output`) — a converted run has none and says so.
-- **Extensions**, oldest first, only when the job has any — no empty heading: who, when, the tokens
-  and turns given, the cap raise that came with it, and the note drawn as text. Each run in the runs
+- **Extensions**, oldest first, only when the job has any — no empty heading: who, when, the tokens,
+  turns and time given (`+6M, +40 turns, +4h`), the cap raise that came with it, and the note drawn as text. Each run in the runs
   list says `extension N` when one started it and `started without its session` when the worker
   reported that a run an extension reopened ran cold (a job's first run has no session to resume, and
   is never said to have started without one). A restarted attempt's note is its arrival comment, which the
@@ -2382,7 +2382,7 @@ the whole sentence on hover; its conflict edge is drawn as a merging state's is.
 **A vertical flow on the line-and-dot Steps uses**, so the two read alike: each state with its
 topology mark — in ink, not the running blue, since a workflow's states are not live — how many
 open tickets rest there (the phone has nowhere else to see it), its job in words (*runs
-triage.md · writes triage.md*), its budget in turns and windows, and where it goes on
+triage.md · writes triage.md*), its budget in turns, windows and the time each run may take (`240 turns · 1.5M · 2h`, the engine's two hours where the workflow names none; nothing for a chat step, a command state or a person's), and where it goes on
 which outcome, with approvals and queueing in the link colour. **Types are a segmented switch**
 with each type's open tickets counted in it, **showing first the ordinary type with the most open
 tickets** (the first alphabetically drew a map of two dots on a project with six tickets of
@@ -2410,7 +2410,7 @@ A long name, title or cron line wraps, and markup in any of the three is shown a
 `type=`, so the page opens on the type holding the schedule.
 
 **On a portrait and a wide screen the workflow is a map** (`7g`, `7h`): a box per state with its
-job and budget, states joined left to right in declared order, skips and loops drawn as arcs, and
+job and budget (`240 t · 1.5M · 2h`), states joined left to right in declared order, skips and loops drawn as arcs, and
 the open tickets as dots on their states, counted in figures in the box and each dot named on
 hover — which is what the board used to show at a glance.
 Clicking a state filters the tickets table. It is drawn on the server, as SVG, from the parsed

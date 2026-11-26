@@ -462,7 +462,7 @@ defmodule Forge.Conversations do
       "text" => event.payload["text"],
       "files" => files,
       "not_received" => failed,
-      "attachments" => Attachments.deliveries(pool(chat), Jobs.preparation_margin_ms())
+      "attachments" => Attachments.deliveries(pool(chat), chat.id, Jobs.preparation_margin_ms())
     }
   end
 
@@ -3110,20 +3110,22 @@ defmodule Forge.Conversations do
   What the agent gets is therefore a folder it can read when it wants to, which is what an agent
   with file tools wants, rather than a prompt it has to pay for whether it reads it or not.
   """
-  @spec history(Tickets.Ticket.t() | nil) :: [map()]
-  def history(nil), do: []
+  @spec history(Tickets.Ticket.t() | nil, String.t()) :: [map()]
+  def history(nil, _holder_id), do: []
 
-  def history(%Tickets.Ticket{} = ticket) do
+  # `holder_id` is the conversation being assigned: the job each transcript's token is handed to
+  # and ends with, not the job whose transcript it reads (`Forge.Storage.Token`).
+  def history(%Tickets.Ticket{} = ticket, holder_id) when is_binary(holder_id) do
     ticket.id
     |> Jobs.for_ticket()
-    |> Enum.map(&entry(&1, ticket))
+    |> Enum.map(&entry(&1, ticket, holder_id))
   end
 
-  defp entry(job, _ticket) do
+  defp entry(job, _ticket, holder_id) do
     %{
       "dir" => Path.join(job.state, to_string(job.attempt)),
       "metadata" => metadata(job),
-      "transcript" => transcript_ref(job)
+      "transcript" => transcript_ref(job, holder_id)
     }
   end
 
@@ -3198,9 +3200,9 @@ defmodule Forge.Conversations do
   defp quote_lines(text), do: text |> String.split("\n") |> Enum.map_join("\n", &("> " <> &1))
 
   defp transcript_line(job) do
-    case transcript_ref(job) do
+    case transcript_key(job) do
       nil -> "Not kept."
-      _ref -> "`transcript.jsonl`, beside this file. One JSON object per line."
+      _key -> "`transcript.jsonl`, beside this file. One JSON object per line."
     end
   end
 
@@ -3210,11 +3212,26 @@ defmodule Forge.Conversations do
   # The worker fetches it only once the conversation's worktree is prepared, so the token has
   # to outlive the preparation as well as its own fifteen minutes (`docs/design/storage.md`
   # § Serving).
-  defp transcript_ref(job) do
+  defp transcript_ref(job, holder_id) do
+    case transcript_key(job) do
+      nil ->
+        nil
+
+      key ->
+        token =
+          Forge.Storage.Token.sign(:get, key,
+            job: holder_id,
+            outlasting_ms: Jobs.preparation_margin_ms()
+          )
+
+        %{"key" => key, "token" => token}
+    end
+  end
+
+  defp transcript_key(job) do
     with %{blob_uri: uri} when is_binary(uri) <- newest_transcript(job),
          {:ok, key} <- Forge.Storage.key_from_uri(uri) do
-      token = Forge.Storage.Token.sign(:get, key, outlasting_ms: Jobs.preparation_margin_ms())
-      %{"key" => key, "token" => token}
+      key
     else
       _none -> nil
     end

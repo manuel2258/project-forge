@@ -17,7 +17,7 @@ defmodule Forge.Jobs.Job do
   # Which ceiling a `budget_exhausted` job ran out of. Not an outcome of its own: the engine
   # routes on the outcome, and a workflow naming `budget_exhausted` must keep working whichever
   # ceiling bound (`docs/design/capacity.md` § Four exhaustions, three treatments).
-  @ceilings [:turns, :tokens, :wall_clock]
+  @ceilings [:turns, :tokens, :timeout]
   @kinds [:workflow, :chat, :command]
 
   @primary_key {:id, :binary_id, autogenerate: true}
@@ -51,7 +51,7 @@ defmodule Forge.Jobs.Job do
     field :outcome, Ecto.Enum, values: @outcomes
     field :declared_outcome, :string
     # What a `budget_exhausted` job ran out of: its turn ceiling, its token ceiling, or the
-    # driver's wall clock. Null for every other job — and for one recorded before the column
+    # run's `timeout`. Null for every other job — and for one recorded before the column
     # existed, or by a worker too old to send it, where nothing on the row can say.
     field :exhausted, Ecto.Enum, values: @ceilings
     # A command's exit status; nil for every other kind, and for a command that ended without one.
@@ -102,6 +102,23 @@ defmodule Forge.Jobs.Job do
     # of one ticket can be created within the same second.
     timestamps(type: :utc_datetime_usec)
   end
+
+  @doc """
+  The ceiling as the platform records it, from the word the worker reports it in.
+
+  The wire keeps its old word, `wall_clock`: a worker already running reports a run its clock
+  stopped as `killed`/`exhausted: :wall_clock`, and the spec it reads says `wall_clock` too, so
+  that no worker protocol is bumped for a rename. Everything the platform records and shows says
+  `timeout`, and this and `to_wire/1` are the only two places the words meet.
+  """
+  @spec from_wire(atom() | nil) :: atom() | nil
+  def from_wire(:wall_clock), do: :timeout
+  def from_wire(other), do: other
+
+  @doc "The ceiling in the word the worker's side of the wire understands: `from_wire/1` reversed."
+  @spec to_wire(atom() | nil) :: atom() | nil
+  def to_wire(:timeout), do: :wall_clock
+  def to_wire(other), do: other
 
   def statuses, do: @statuses
   def outcomes, do: @outcomes

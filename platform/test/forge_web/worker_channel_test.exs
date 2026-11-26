@@ -1040,10 +1040,25 @@ defmodule ForgeWeb.WorkerChannelTest do
 
     defp token_row(job_id), do: Forge.Repo.get_by!(Forge.Git.Token, job_id: job_id)
 
+    # What a workflow job's limit is made of: the figure in its stored spec, fixed when it was
+    # made (`Forge.Jobs.timeout_ms/1`). Written under it, as a workflow that declared one would
+    # have — nothing is configured any more.
+    defp with_timeout(job, ms) do
+      import Ecto.Query, only: [from: 2]
+      budget = Map.put(job.spec["budget"], "timeout_ms", ms)
+
+      {1, _} =
+        Forge.Repo.update_all(from(j in Jobs.Job, where: j.id == ^job.id),
+          set: [spec: Map.put(job.spec, "budget", budget)]
+        )
+
+      Jobs.get!(job.id)
+    end
+
     defp lifetime(token),
       do: DateTime.diff(token.expires_at, DateTime.utc_now(:second))
 
-    test "a conversation runs for a day and a workflow job for its hour", context do
+    test "a conversation runs for a day and a workflow job for its two hours", context do
       %{worker: worker, job: job, project: project} = context
       chat = chat_fixture(%{project: project})
 
@@ -1052,15 +1067,16 @@ defmodule ForgeWeb.WorkerChannelTest do
 
       job_id = job.id
       chat_id = chat.id
-      assert_receive {:assign, %{"job_id" => ^job_id, "wall_clock_ms" => 3_600_000}}
+      assert_receive {:assign, %{"job_id" => ^job_id, "wall_clock_ms" => 7_200_000}}
       assert_receive {:assign, %{"job_id" => ^chat_id, "wall_clock_ms" => 86_400_000}}
     end
 
     # Each kind by its own clock, set here so that neither is inside the fixed ninety minutes a
-    # token had before: a workflow job's default hour would pass either way.
+    # token had before: a workflow job's default two hours would pass either way.
     test "a job's git token outlives its own clock, whatever its kind", context do
-      %{worker: worker, job: job, project: project} = context
-      configure(Jobs, wall_clock_ms: :timer.hours(3), chat_wall_clock_ms: :timer.hours(30))
+      %{worker: worker, project: project} = context
+      job = with_timeout(context.job, :timer.hours(3))
+      configure(Jobs, chat_wall_clock_ms: :timer.hours(30))
       chat = chat_fixture(%{project: project})
 
       {:ok, _} = Jobs.assign(job, worker)
@@ -1071,8 +1087,8 @@ defmodule ForgeWeb.WorkerChannelTest do
       assert lifetime(token_row(job.id)) < 30 * 3600
     end
 
-    # Against literals, with nothing configured here: `docs/design/storage.md` § Serving says two
-    # hours and a quarter for a workflow job and twenty-five hours and a quarter for a
+    # Against literals, with nothing configured here: `docs/design/storage.md` § Serving says three
+    # hours and a quarter for a workflow job on the engine's two hours and twenty-five hours and a quarter for a
     # conversation — the clock, then the preparation margin, then the store's own fifteen
     # minutes. The worker starts the clock only once the clone and the seed are ready, so a token
     # sized to the clock alone lapsed for any job whose preparation outran its fifteen minutes.
@@ -1088,7 +1104,7 @@ defmodule ForgeWeb.WorkerChannelTest do
       assert_receive {:assign, %{"job_id" => ^job_id, "store" => %{"transcript_token" => j}}}
       assert_receive {:assign, %{"job_id" => ^chat_id, "store" => %{"transcript_token" => c}}}
 
-      assert store_token_lifetime(j) == 2 * 3600 + 15 * 60
+      assert store_token_lifetime(j) == 3 * 3600 + 15 * 60
       assert store_token_lifetime(c) == 25 * 3600 + 15 * 60
     end
 
@@ -1096,7 +1112,8 @@ defmodule ForgeWeb.WorkerChannelTest do
     # after a second. The margin is set to nothing here, so a margin read from anywhere but its
     # configuration would keep the token alive.
     test "the transcript token dies with the job's clock", %{worker: worker, job: job} do
-      configure(Jobs, wall_clock_ms: 1_000, preparation_margin_ms: 0)
+      job = with_timeout(job, 1_000)
+      configure(Jobs, preparation_margin_ms: 0)
       configure(Forge.Storage, token_max_age: 0)
 
       {:ok, _} = Jobs.assign(job, worker)

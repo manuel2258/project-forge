@@ -390,11 +390,11 @@ defmodule ForgeWeb.Api.TicketController do
     end
   end
 
-  # Reopens the job that ran out of budget (`Forge.Engine.extend/5`): `tokens`, `turns`, `note`
+  # Reopens the job that ran out of budget (`Forge.Engine.extend/5`): `tokens`, `turns`, `timeout`, `note`
   # and `raise`. The queue and the ticket serve `extend` — the offer — and a client that can read
   # it can act on it.
   def extend(conn, %{"job_id" => job_id} = params) do
-    attrs = Map.take(params, ~w(tokens turns note raise))
+    attrs = Map.take(params, ~w(tokens turns timeout note raise))
 
     with {:ok, ticket} <-
            Operator.extend(conn.assigns.ticket, actor(conn), job_id, attrs, files(conn)) do

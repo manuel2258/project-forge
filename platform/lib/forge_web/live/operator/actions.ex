@@ -150,7 +150,7 @@ defmodule ForgeWeb.Operator.Actions do
   # Extend: the job the person was shown, and what they typed under it. The operation checks that
   # job against the ticket as it is now (`Forge.Engine.extend/5`).
   defp act("extend", %{"ticket" => id, "job" => job_id} = params, socket) do
-    attrs = Map.take(params, ~w(tokens turns note raise))
+    attrs = Map.take(params, ~w(tokens turns timeout note raise))
 
     with {:ok, ticket} <-
            Operator.extend(

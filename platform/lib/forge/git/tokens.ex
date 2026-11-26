@@ -147,12 +147,12 @@ defmodule Forge.Git.Tokens do
     )
   end
 
-  # **The job's wall clock plus a margin** (`docs/design/git-hosting.md` § The per-job token). A
+  # **The job's time limit plus a margin** (`docs/design/git-hosting.md` § The per-job token). A
   # conversation pushes after every turn for up to a day, and a token of the fixed ninety
   # minutes refused every push after the first hour and a half — each turn's commit lost with
   # nothing but a warning on the worker. The margin is the configured lifetime, which is what
   # every token had before, so a workflow job's is never shorter than it was.
-  defp job_ttl_minutes(job), do: div(Forge.Jobs.wall_clock_ms(job), 60_000) + ttl_minutes()
+  defp job_ttl_minutes(job), do: div(Forge.Jobs.timeout_ms(job), 60_000) + ttl_minutes()
 
   @doc """
   Resolves a presented secret to a live token with at least `needs` on `project`.

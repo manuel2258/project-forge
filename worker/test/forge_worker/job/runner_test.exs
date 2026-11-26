@@ -1435,6 +1435,28 @@ defmodule ForgeWorker.Job.RunnerTest do
     assert result.exhausted == :wall_clock
   end
 
+  # A workflow's `timeout` has no maximum by policy (`docs/design/workflow-grammar-v1.md`
+  # § Timeout), and the platform hands the worker whatever it resolved: up to the longest time
+  # forge will time, which is what the grammar's bound is chosen against. The runtime's timer
+  # raises past about 292 years, so a bound beyond it would crash the run here, at the first
+  # `send_after`, on a machine nobody is watching. An old worker needs nothing new for this.
+  for {label, ms} <- [
+        {"a thousand hours", 3_600_000_000},
+        {"the longest time forge will time", ForgeCore.Duration.longest_ms()}
+      ] do
+    test "a run given #{label} is timed, stays alive, and is stopped by a cancel", context do
+      pid = run(context, "hang", wall_clock_ms: unquote(ms), grace_ms: 200)
+      await_started()
+      assert Process.alive?(pid)
+
+      Runner.cancel(pid)
+      {:ok, result} = Runner.await(pid, 30_000)
+
+      assert result.killed == :operator
+      assert result.outcome == :cancelled
+    end
+  end
+
   test "cancel stops the harness and reports cancelled", context do
     pid = run(context, "hang", grace_ms: 200)
     await_started()

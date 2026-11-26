@@ -141,7 +141,7 @@ Only one of them is the operator's.
 
 | Exhausted | Resolved by | Treatment |
 |---|---|---|
-| A job's own budget | **a human** — **extend it** (the same job runs again on its session with the tokens and turns they give, and a note), **run the state again**, or take an edge by hand (forge's own workflows declare no edge on it) | outcome `budget_exhausted` on the job row with `· turns`, `· tokens` or `· wall clock` beside it, nowhere else |
+| A job's own budget | **a human** — **extend it** (the same job runs again on its session with the tokens, turns and time they give, and a note), **run the state again**, or take an edge by hand (forge's own workflows declare no edge on it) | outcome `budget_exhausted` on the job row with `· turns`, `· tokens` or `· timeout` beside it, nowhere else |
 | Ticket allowance | **a human** — raise it on the Extend or Run again form, where it is short, or reroute | sticks the ticket, enters the queue, drawn in accent |
 | Daily spend cap | **time**, or the operator raising it | `paused · spend 6h 12m` in the ticket's subline, neutral, counting down to midnight UTC; the project's ticket list and the queue's **Open tickets** draw `paused · spend` without the countdown. **Never an item in the queue, never counted, never pushed** |
 | Window capacity | **time** | `PAUSED · CAPACITY 1h 12m`, neutral, on the ticket and the project's ticket list, **never in the queue**. Not built (§ Engine support) |
@@ -162,7 +162,7 @@ kept, because each spent or moved on without anyone deciding to.) Where the work
 sticks and enters the queue, which is the second row's treatment reached by another road.
 
 **`budget_exhausted` names its ceiling.** The outcome says a job ran out; which of the three
-ceilings it ran out of — its turn budget, its cost budget, or the driver's wall clock — is a word
+ceilings it ran out of — its turn budget, its cost budget, or its `timeout`, the workflow's own with a default of two hours — is a word
 beside it on every job row (`jobs.exhausted`, `ForgeWeb.Indicators.ceiling/1`, drawn fainter
 than the outcome it qualifies) and on the job in the API, which the UI is a client of. Before it,
 "ran out of money" and "ran out of turns" were one atom and the distinction survived only in the
@@ -274,7 +274,7 @@ already running on a held ticket still counts, because it is spending.
 
 **Stopping a job already running** is forge's own, during the run, for both harnesses. The driver
 emits a `usage` event per model call; the runner (and a chat's process) keeps the weighted sum and,
-once it passes the effective budget, stops the process through the wall-clock path and the run ends
+once it passes the effective budget, stops the process through the time-limit path and the run ends
 `budget_exhausted`, stopped `:tokens`. The effective token budget of a job is the least of what its
 state declared, what the ticket has left and what the day has left; a conversation's is what is
 left of the day. For a run an extension reopened, what the state declared is replaced by the tokens
@@ -291,8 +291,9 @@ it. The event is the operator's record; the agent could not read it. Without the
 ticket's jobs all finished far under budget — the largest used $6.76 of $30.00 — while reasoning
 that "a fifth edit to this file would cost the ticket a whole implementing cycle", which a visible
 allowance answers at once.
-The wall clock remains the platform's own coarse stop, independent of whether the harness honours
-its flag.
+The time limit (`timeout`, `workflow-grammar-v1.md` § Timeout) remains the platform's own coarse
+stop, independent of whether the harness honours its flag. The worker still calls it the wall clock
+on the wire and the platform records it as `timeout`.
 
 ## Engine support
 

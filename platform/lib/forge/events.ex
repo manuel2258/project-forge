@@ -611,7 +611,8 @@ defmodule Forge.Events do
     given =
       [
         "+" <> ForgeCore.Usage.format(tokens),
-        is_integer(p["turns"]) && "+#{p["turns"]} turns"
+        is_integer(p["turns"]) && "+#{p["turns"]} turns",
+        is_integer(p["timeout_ms"]) && "+" <> ForgeCore.Duration.format(p["timeout_ms"])
       ]
       |> Enum.filter(& &1)
       |> Enum.join(", ")

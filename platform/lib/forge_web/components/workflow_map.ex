@@ -36,10 +36,10 @@ defmodule ForgeWeb.WorkflowMap do
   end
 
   # The line under an update step's job: where a conflict goes, since it has no budget to show.
-  defp box_budget(%State{} = state) do
+  defp box_budget(workflow, %State{} = state) do
     if State.updates?(state),
       do: if(state.on_conflict, do: "conflict → #{state.on_conflict}", else: "conflict sticks"),
-      else: budget(state, :short)
+      else: budget(workflow, state, :short)
   end
 
   defp arrow(prompt, []), do: prompt
@@ -72,14 +72,21 @@ defmodule ForgeWeb.WorkflowMap do
   defp writes(what, []), do: what
   defp writes(what, produces), do: what <> " · writes " <> Enum.join(produces, ", ")
 
-  @doc "A state's budget: `10 turns · 0.2 w`, or nil when it has none."
-  @spec budget(State.t(), :long | :short) :: String.t() | nil
-  def budget(state, length \\ :long)
-  def budget(%State{budget: nil}, _length), do: nil
+  @doc """
+  A state's budget: `240 turns · 1.5M · 2h`, or nil when it has none. The last figure is the time
+  each run of its job may take, resolved as a job's is — the state's `timeout`, else the workflow's
+  `defaults`, else the engine's two hours (`ForgeCore.Workflow.timeout_ms/2`) — and written as the
+  workflow writes it (`ForgeCore.Duration.format/1`). A state with no budget runs no agent that a
+  time could be set on, so it shows none.
+  """
+  @spec budget(Workflow.t(), State.t(), :long | :short) :: String.t() | nil
+  def budget(workflow, state, length \\ :long)
+  def budget(_workflow, %State{budget: nil}, _length), do: nil
 
-  def budget(%State{budget: budget}, length) do
+  def budget(%Workflow{} = workflow, %State{budget: budget} = state, length) do
     turns = if length == :long, do: "#{budget.turns} turns", else: "#{budget.turns} t"
-    Enum.join([turns, Format.windows(budget.tokens) || "—"], " · ")
+    time = ForgeCore.Duration.format(Workflow.timeout_ms(workflow, state.name))
+    Enum.join([turns, Format.windows(budget.tokens) || "—", time], " · ")
   end
 
   @doc """
@@ -131,7 +138,7 @@ defmodule ForgeWeb.WorkflowMap do
         initial: name == workflow.initial,
         topology: ForgeWeb.Topology.of(workflow, name),
         job: job_words(state, default),
-        budget: budget(state),
+        budget: budget(workflow, state),
         out: Workflow.transitions_from(workflow, name)
       }
     end
@@ -356,7 +363,7 @@ defmodule ForgeWeb.WorkflowMap do
       label: label,
       topology: ForgeWeb.Topology.of(workflow, name),
       job: job(state, default),
-      budget: box_budget(state),
+      budget: box_budget(workflow, state),
       dots: dots,
       retries: retried,
       # What hovering a box says that its face does not: a name that was cut, and what it retries on.

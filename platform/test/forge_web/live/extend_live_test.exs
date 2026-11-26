@@ -99,6 +99,10 @@ defmodule ForgeWeb.ExtendLiveTest do
       assert has_element?(view, "#ways-forward #forward-extend-fields")
       assert has_element?(view, ~s(#forward-extend-tokens[value="6M"]))
       assert has_element?(view, ~s(#forward-extend-turns[value="75"]))
+      # The time starts at the state's whole limit, not half of it: it is per run, and an extended
+      # run is a new one. The engine's two hours here, the workflow naming none.
+      assert has_element?(view, ~s(#forward-extend-timeout[value="2h"]))
+      assert has_element?(view, "#forward-extend-facts", "each run may take 2h")
       assert has_element?(view, "#forward-extend-note")
       # The paperclip is inside the note's corner, not a row under it.
       assert has_element?(view, "#ways-forward .ui-field-box .ui-attach-clip")
@@ -120,6 +124,7 @@ defmodule ForgeWeb.ExtendLiveTest do
           "way" => "extend",
           "tokens" => "3M",
           "turns" => "20",
+          "timeout" => "4h",
           "note" => "Finish the review."
         })
         |> render_submit()
@@ -128,7 +133,7 @@ defmodule ForgeWeb.ExtendLiveTest do
       assert %{status: :active} = Tickets.get!(ticket.id)
       assert %{status: :pending} = Jobs.get!(job.id)
 
-      assert [%{tokens: 3_000_000, turns: 20, note: "Finish the review."}] =
+      assert [%{tokens: 3_000_000, turns: 20, timeout_ms: 14_400_000, note: "Finish the review."}] =
                Extensions.all(job.id)
 
       # The pick is let go once it was done.
@@ -201,7 +206,15 @@ defmodule ForgeWeb.ExtendLiveTest do
       for {fields, words} <- [
             {%{"tokens" => "lots"}, "800k, 1.5M or 2000000"},
             {%{"tokens" => "1M", "turns" => "1.5"}, "positive whole number"},
-            {%{"tokens" => "1M", "turns" => "5", "note" => String.duplicate("n", 4_001)}, "4000"}
+            {%{"tokens" => "1M", "turns" => "5", "timeout" => "soon"}, "90s, 20m or 3h"},
+            {%{"tokens" => "1M", "turns" => "5", "timeout" => "0h"}, "90s, 20m or 3h"},
+            {%{"tokens" => "1M", "turns" => "5", "timeout" => "1h30m"}, "90s, 20m or 3h"},
+            {%{
+               "tokens" => "1M",
+               "turns" => "5",
+               "timeout" => "2h",
+               "note" => String.duplicate("n", 4_001)
+             }, "4000"}
           ] do
         view |> form("#ways-forward", Map.put(fields, "way", "extend")) |> render_change()
         html = view |> form("#ways-forward") |> render_submit()
@@ -212,6 +225,24 @@ defmodule ForgeWeb.ExtendLiveTest do
       end
 
       assert has_element?(view, ~s(#forward-extend-turns[value="5"]))
+      assert Tickets.get!(ticket.id).status == :stuck
+    end
+
+    test "a refused time stays in its box, spelled out, and writes nothing", ctx do
+      %{conn: conn, project: project, ticket: ticket, job: job} = ctx
+      {:ok, view, _html} = page(conn, project, ticket)
+      pick(view, "extend")
+
+      view
+      |> form("#ways-forward", %{"way" => "extend", "tokens" => "1M", "timeout" => "1h30m"})
+      |> render_change()
+
+      html = view |> form("#ways-forward") |> render_submit()
+
+      assert html =~ "a whole number and one unit, such as 90s, 20m or 3h"
+      assert has_element?(view, "#forward-refusal[role=alert]")
+      assert has_element?(view, ~s(#forward-extend-timeout[value="1h30m"]))
+      assert Extensions.all(job.id) == []
       assert Tickets.get!(ticket.id).status == :stuck
     end
 
@@ -253,7 +284,7 @@ defmodule ForgeWeb.ExtendLiveTest do
       assert has_element?(view, "#forward-extend-note.\\[overflow-wrap\\:anywhere\\]")
     end
 
-    test "a Codex job has no turns box", ctx do
+    test "a Codex job has no turns box, and has a time box", ctx do
       %{conn: conn, project: project, ticket: ticket, job: job} = ctx
       job |> Ecto.Changeset.change(harness: "codex") |> Repo.update!()
       {:ok, view, _html} = page(conn, project, ticket)
@@ -261,6 +292,7 @@ defmodule ForgeWeb.ExtendLiveTest do
 
       assert has_element?(view, "#forward-extend-tokens")
       refute has_element?(view, "#forward-extend-turns")
+      assert has_element?(view, ~s(#forward-extend-timeout[value="2h"]))
 
       view |> form("#ways-forward", %{"way" => "extend", "tokens" => "1M"}) |> render_submit()
       assert [%{tokens: 1_000_000, turns: nil}] = Extensions.all(job.id)
@@ -379,6 +411,7 @@ defmodule ForgeWeb.ExtendLiveTest do
       queue_pick(view, ticket, "extend")
       assert has_element?(view, ~s(#queue-#{ticket.id}-extend-tokens[value="6M"]))
       assert has_element?(view, ~s(#queue-#{ticket.id}-extend-turns[value="75"]))
+      assert has_element?(view, ~s(#queue-#{ticket.id}-extend-timeout[value="2h"]))
       assert has_element?(view, "#queue-#{ticket.id}-extend-note")
 
       queue_pick(view, ticket, "retry")
@@ -392,11 +425,19 @@ defmodule ForgeWeb.ExtendLiveTest do
       queue_pick(view, ticket, "extend")
 
       view
-      |> form("#ways-#{ticket.id}", %{"way" => "extend", "tokens" => "2M", "note" => "Careful."})
+      |> form("#ways-#{ticket.id}", %{
+        "way" => "extend",
+        "tokens" => "2M",
+        "timeout" => "90m",
+        "note" => "Careful."
+      })
       |> render_submit()
 
       assert %{status: :active} = Tickets.get!(ticket.id)
-      assert [%{tokens: 2_000_000, note: "Careful."}] = Extensions.all(job.id)
+
+      assert [%{tokens: 2_000_000, timeout_ms: 5_400_000, note: "Careful."}] =
+               Extensions.all(job.id)
+
       refute has_element?(view, "#ways-#{ticket.id}")
     end
 
@@ -500,6 +541,7 @@ defmodule ForgeWeb.ExtendLiveTest do
         Forge.Operator.extend(Tickets.get!(ticket.id), user, job.id, %{
           "tokens" => "6M",
           "turns" => "75",
+          "timeout" => "4h",
           "raise" => "2M",
           "note" => "<b>first</b>\nline two"
         })
@@ -512,7 +554,9 @@ defmodule ForgeWeb.ExtendLiveTest do
       assert has_element?(view, "#job-extensions", "Extensions")
       [first, second] = Extensions.all(job.id)
       assert has_element?(view, "#extension-#{first.id}", "extension 1")
-      assert has_element?(view, "#extension-#{first.id}", "+6M, +75 turns")
+      assert has_element?(view, "#extension-#{first.id}", "+6M, +75 turns, +4h")
+      # The second left its box empty: the run was given the state's two hours, and says so.
+      assert has_element?(view, "#extension-#{second.id}", "+2h")
       assert has_element?(view, "#extension-#{first.id}", user.email)
       assert has_element?(view, "#extension-#{first.id}", "cap raised 100M → 102M")
       assert has_element?(view, "#extension-#{second.id}", "extension 2")
@@ -650,6 +694,7 @@ defmodule ForgeWeb.ExtendLiveTest do
       {:ok, _} =
         Forge.Operator.extend(Tickets.get!(ticket.id), user, job.id, %{
           "tokens" => "6M",
+          "timeout" => "4h",
           "raise" => "2M",
           "note" => "Mind the tests."
         })
@@ -657,7 +702,7 @@ defmodule ForgeWeb.ExtendLiveTest do
       {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=activity")
 
       assert has_element?(view, "#ticket-events", "job.extended")
-      assert has_element?(view, "#ticket-events", "+6M")
+      assert has_element?(view, "#ticket-events", "+6M, +4h")
       assert has_element?(view, "#ticket-events", "Mind the tests.")
       assert has_element?(view, "#ticket-events", "ticket.cap_raised")
       assert has_element?(view, "#ticket-events", "cap 100M → 102M")

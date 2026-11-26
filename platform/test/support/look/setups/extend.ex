@@ -27,7 +27,14 @@ defmodule Forge.Look.Setups.Extend do
     member = user_fixture()
     project = project_fixture(%{name: "look-extend"}) |> join!(member)
 
-    roomy = stuck!(project, "Persist the high score table", 2_100_000)
+    # Stopped by its time limit, which its state sets to three hours; the others by tokens, on the
+    # engine's two.
+    roomy =
+      stuck!(project, "Persist the high score table", 2_100_000,
+        exhausted: :timeout,
+        timeout_ms: 10_800_000
+      )
+
     short = stuck!(project, "Score flickers on resize", 4_600_000)
     nosession = stuck!(project, "Keep the table sorted", 2_100_000, session: false)
     {extended, job} = extended!(project, member)
@@ -68,7 +75,12 @@ defmodule Forge.Look.Setups.Extend do
 
   defp finished!(ticket, usage, opts) do
     job =
-      job_fixture(%{ticket: ticket, state: "implementing", harness: "claude_code", spec: spec()})
+      job_fixture(%{
+        ticket: ticket,
+        state: "implementing",
+        harness: "claude_code",
+        spec: spec(Keyword.get(opts, :timeout_ms))
+      })
 
     session = if Keyword.get(opts, :session, true), do: session(job), else: nil
     now = DateTime.utc_now(:second)
@@ -84,7 +96,7 @@ defmodule Forge.Look.Setups.Extend do
     |> Job.progress_changeset(%{
       status: :finished,
       outcome: :budget_exhausted,
-      exhausted: :tokens,
+      exhausted: Keyword.get(opts, :exhausted, :tokens),
       turns: 118,
       usage: min(usage, 2_050_000),
       harness_session_id: session && "sess-look",
@@ -97,12 +109,16 @@ defmodule Forge.Look.Setups.Extend do
 
   defp session(job), do: %{"key" => "job/#{job.id}/session-x/1.jsonl", "version" => "2.1.284"}
 
-  defp spec do
+  # `timeout_ms` nil is a spec with no limit of its own, which runs on the engine's two hours.
+  defp spec(timeout_ms \\ nil) do
+    budget = %{"turns" => 200, "tokens" => 2_000_000}
+    budget = if timeout_ms, do: Map.put(budget, "timeout_ms", timeout_ms), else: budget
+
     %{
       "prompt" => "Implement the plan.",
       "branch" => "ticket/x",
       "commit" => "9f3c1a0b2d4e6f8a",
-      "budget" => %{"turns" => 200, "tokens" => 2_000_000},
+      "budget" => budget,
       "inputs" => [],
       "outcomes" => ["done", "plan_invalid"],
       "produces" => ["implementation.md"]
@@ -123,6 +139,7 @@ defmodule Forge.Look.Setups.Extend do
         member,
         1_000_000,
         100,
+        14_400_000,
         "Finish the review.",
         DateTime.add(now, -500, :second)
       )
@@ -133,6 +150,7 @@ defmodule Forge.Look.Setups.Extend do
         member,
         1_500_000,
         120,
+        5_400_000,
         "<b>Do not</b> re-read the schema:\nthe table is in lib/game/scores.ex.",
         DateTime.add(now, -60, :second)
       )
@@ -219,19 +237,21 @@ defmodule Forge.Look.Setups.Extend do
           "extension_id" => extension.id,
           "tokens" => extension.tokens,
           "turns" => extension.turns,
+          "timeout_ms" => extension.timeout_ms,
           "note" => extension.note,
           "exhausted" => "tokens"
         }
       })
   end
 
-  defp extension!(job, member, tokens, turns, note, at) do
+  defp extension!(job, member, tokens, turns, timeout_ms, note, at) do
     Repo.insert!(%Extension{
       job_id: job.id,
       ticket_id: job.ticket_id,
       user_id: member.id,
       tokens: tokens,
       turns: turns,
+      timeout_ms: timeout_ms,
       note: note,
       exhausted: :tokens,
       stopped_at: DateTime.add(at, -120, :second),

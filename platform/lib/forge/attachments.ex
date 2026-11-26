@@ -923,20 +923,21 @@ defmodule Forge.Attachments do
   @doc """
   The pool as a worker is handed it (`docs/design/attachments.md` § Delivery): each live file's folder
   name, version, key, size, hash and a store `get` token that outlasts `outlasting_ms` — the
-  preparation margin, as every other file a worker fetches before it starts. String keys, as the
+  preparation margin, as every other file a worker fetches before it starts. The token names
+  `job_id`, the job it is handed to, and ends with it (`Forge.Storage.Token`). String keys, as the
   assignment is JSON.
   """
-  @spec deliveries(pool() | [map()], non_neg_integer()) :: [map()]
-  def deliveries(pool, outlasting_ms) when is_tuple(pool),
-    do: deliveries(pool(pool), outlasting_ms)
+  @spec deliveries(pool() | [map()], String.t(), non_neg_integer()) :: [map()]
+  def deliveries(pool, job_id, outlasting_ms) when is_tuple(pool),
+    do: deliveries(pool(pool), job_id, outlasting_ms)
 
-  def deliveries(files, outlasting_ms) when is_list(files) do
+  def deliveries(files, job_id, outlasting_ms) when is_list(files) do
     for f <- files do
       %{
         "file" => f.file,
         "version_id" => f.version_id,
         "key" => f.key,
-        "token" => Storage.Token.sign(:get, f.key, outlasting_ms: outlasting_ms),
+        "token" => Storage.Token.sign(:get, f.key, job: job_id, outlasting_ms: outlasting_ms),
         "size" => f.size,
         "hash" => f.hash
       }

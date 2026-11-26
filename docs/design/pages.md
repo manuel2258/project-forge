@@ -203,7 +203,7 @@ second domain (out of scope 9). `/page-files/:token/:file` serves each file.
   through `ForgeCore.Job.Outcome` unless the page is `optional`. `Jobs.Blobs.outputs/3` and `put/5`
   accept page members, and a chat's assignment gets an outputs prefix with the conversation's
   long-lived prefix token. `Conversations.do_record_turn/4` records a turn's `pages` and
-  `invalid_pages`. `runtime_spec/3` (called by `assignment/4`) fills the spec's `pages` (name, version, per file `{hash, size}`,
+  `invalid_pages`. `runtime_spec/4` (called by `assignment/4`) fills the spec's `pages` (name, version, per file `{hash, size}`,
   keys, read_only, by, at), at run time and never stored. `step_contract/4` keeps pages.
 - **Worker protocol 16** (`worker-channel.md` § Protocol 16): `pages: 16` in `protocol_needs/1` for
   every `:workflow` and `:chat` job; commands stay as they are and `minimum` stays 4.

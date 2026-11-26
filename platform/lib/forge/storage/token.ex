@@ -16,11 +16,12 @@ defmodule Forge.Storage.Token do
   @type op :: :get | :put
 
   @doc """
-  A token for `op` on `key`, good for the store's configured lifetime.
+  A token for `op` on `key`, good for the store's configured lifetime and, with `:job`, until that
+  job ends.
 
   **`:outlasting_ms` extends it by that long**, for a token that is minted at the start of
   something and used at its end: a job's transcript is uploaded when the job stops, which may be
-  its preparation and then its whole wall clock after assignment, and a token that had lapsed by
+  its preparation and then its whole time limit after assignment, and a token that had lapsed by
   then loses the transcript to `expired_token` (`docs/design/storage.md` § Serving). The
   lifetime is signed into the token, so it is decided once, here, by the caller who knows how
   long the holder may need it; `verify/3` reads it back rather than applying one number to
@@ -29,7 +30,10 @@ defmodule Forge.Storage.Token do
   @spec sign(op(), Forge.Storage.key(), keyword()) :: String.t()
   def sign(op, key, opts \\ []) when op in [:get, :put] do
     max_age = max_age() + div(Keyword.get(opts, :outlasting_ms, 0), 1000)
-    Phoenix.Token.sign(ForgeWeb.Endpoint, @salt, %{op: op, key: key}, max_age: max_age)
+
+    Phoenix.Token.sign(ForgeWeb.Endpoint, @salt, with_job(%{op: op, key: key}, opts),
+      max_age: max_age
+    )
   end
 
   @doc """
@@ -42,13 +46,30 @@ defmodule Forge.Storage.Token do
   def sign_prefix(prefix, opts \\ []) when is_binary(prefix) do
     if not String.ends_with?(prefix, "/"), do: raise(ArgumentError, "a prefix ends in /")
     max_age = max_age() + div(Keyword.get(opts, :outlasting_ms, 0), 1000)
-    Phoenix.Token.sign(ForgeWeb.Endpoint, @salt, %{op: :put, prefix: prefix}, max_age: max_age)
+
+    Phoenix.Token.sign(ForgeWeb.Endpoint, @salt, with_job(%{op: :put, prefix: prefix}, opts),
+      max_age: max_age
+    )
+  end
+
+  # **The job a token was handed to**, never the job whose blob it reads: a forked session, an
+  # earlier job's transcript and an entered command's log all belong to finished jobs, and naming
+  # their owner would refuse them at once.
+  defp with_job(payload, opts) do
+    case Keyword.get(opts, :job) do
+      nil -> payload
+      job_id when is_binary(job_id) -> Map.put(payload, :job, job_id)
+    end
   end
 
   @doc """
   The key this token authorises for `op`, if it is still valid. The key travels in the token
   as well as the request path, and the two must agree: a caller cannot present a token for
   one key and ask for another.
+
+  A token that names a job is refused as `{:error, :expired}` once `Forge.Jobs.tokens_ended?/1`
+  says the job's tokens have ended: the same answer a lapsed one gets, so a caller learns nothing
+  about why. The lifetime is checked first, then the key and the verb, then the job.
   """
   @spec verify(String.t(), op(), Forge.Storage.key()) ::
           :ok | {:error, :invalid | :expired | :wrong_key}
@@ -56,8 +77,8 @@ defmodule Forge.Storage.Token do
     # No `:max_age` here: the one `sign/3` put in the token governs, and passing one would
     # override it — which is how every token came to die at fifteen minutes whatever it was for.
     case Phoenix.Token.verify(ForgeWeb.Endpoint, @salt, token) do
-      {:ok, %{op: ^op, key: ^key}} -> :ok
-      {:ok, %{op: :put, prefix: prefix}} when op == :put -> under(key, prefix)
+      {:ok, %{op: ^op, key: ^key} = claims} -> alive(claims)
+      {:ok, %{op: :put, prefix: prefix} = claims} when op == :put -> under(claims, key, prefix)
       {:ok, %{}} -> {:error, :wrong_key}
       {:error, :expired} -> {:error, :expired}
       {:error, _reason} -> {:error, :invalid}
@@ -72,14 +93,20 @@ defmodule Forge.Storage.Token do
   #
   # `key != prefix` is an equivalent mutant: a prefix ends in `/`, and `Key.validate/1` refuses a
   # key that does, so the two are never equal by the time they are compared.
-  defp under(key, prefix) do
+  defp under(claims, key, prefix) do
     with {:ok, ^key} <- Forge.Storage.Key.validate(key),
          true <- String.starts_with?(key, prefix) and key != prefix do
-      :ok
+      alive(claims)
     else
       _outside -> {:error, :wrong_key}
     end
   end
+
+  defp alive(%{job: job_id}) do
+    if Forge.Jobs.tokens_ended?(job_id), do: {:error, :expired}, else: :ok
+  end
+
+  defp alive(%{}), do: :ok
 
   defp max_age, do: Forge.Storage.config(:token_max_age, @default_max_age)
 end

@@ -1278,7 +1278,7 @@ should change this note before it changes the code.
 ## Spend in tokens, and the harness (ticket 43)
 
 A conversation's ceiling is what is left of the day in weighted tokens (`max_tokens`, replacing
-`max_cost_usd`); reaching it stops the process: the worker kills it through the wall-clock path, its result says
+`max_cost_usd`); reaching it stops the process: the worker kills it through the time-limit path, its result says
 `token budget reached`, and the conversation hibernates with that reason (`Conversations.ended/4`, on the platform, from the worker's result)
 like any other that ends, to be reopened the same way. The dollar ceiling ended the *turn* and kept
 the process; a kill does not, and a turn in flight when it lands has no report. **What the

@@ -1045,7 +1045,7 @@ defmodule ForgeWeb.TicketLive do
   end
 
   # Taken by the operation that takes it anywhere — each guarded in `Forge.Operator`. What was
-  # typed under the row rides along: the note and the cap raise of both, the tokens and turns of
+  # typed under the row rides along: the note and the cap raise of both, the tokens, turns and time of
   # Extend, and the job the person was shown, which is the one the act checks.
   defp forward(%{"way" => "again"} = params, ticket),
     do: {"retry", params |> Map.take(~w(note raise draft)) |> Map.put("ticket", ticket.id)}
@@ -1053,7 +1053,9 @@ defmodule ForgeWeb.TicketLive do
   defp forward(%{"way" => "extend"} = params, ticket),
     do:
       {"extend",
-       params |> Map.take(~w(tokens turns note raise job draft)) |> Map.put("ticket", ticket.id)}
+       params
+       |> Map.take(~w(tokens turns timeout note raise job draft))
+       |> Map.put("ticket", ticket.id)}
 
   # Each press says what kind of move it was drawn as, so one drawn before the ticket moved is
   # refused and not taken as the other kind (`Forge.Engine.choose/4`).

@@ -173,6 +173,13 @@ defmodule ForgeWeb.JobLive do
   # What a person gave this job, oldest first, with who (an address, or the token's name) and the
   # cap raise that came with each: none for a job nobody extended, which the page then does not
   # mention (`docs/design/ui.md` § The job page).
+  # A command's `timeout` as the workflow writes it (`20m`, not `1200s`): one writer for every time
+  # on a page (`ForgeCore.Duration.format/1`). A spec with none says `0s`, as it did.
+  defp command_timeout(%{"timeout_ms" => ms}) when is_integer(ms) and ms > 0,
+    do: ForgeCore.Duration.format(ms)
+
+  defp command_timeout(_command), do: "0s"
+
   defp extensions(%{id: job_id}) do
     extensions = job_id |> Forge.Jobs.Extensions.all() |> Forge.Repo.preload([:user, :token])
 
@@ -573,7 +580,9 @@ defmodule ForgeWeb.JobLive do
                 <span class="job-run-head">
                   <span class="job-dim">extension {e.number}</span>
                   <span title={Format.exact(e.record.tokens)}>
-                    +{ForgeCore.Usage.format(e.record.tokens)}<span :if={e.record.turns}>, +{e.record.turns} turns</span>
+                    +{ForgeCore.Usage.format(e.record.tokens)}<span :if={e.record.turns}>, +{e.record.turns} turns</span>, +{ForgeCore.Duration.format(
+                      e.record.timeout_ms
+                    )}
                   </span>
                 </span>
                 <span class="job-run-kinds">
@@ -920,7 +929,9 @@ defmodule ForgeWeb.JobLive do
       <.fact_list dense>
         <:fact label="commit">{Diff.short(@spec.commit)}</:fact>
         <:fact :if={@spec.budget} label="budget">
-          {@spec.budget.turns} turns per run · {Format.windows(@spec.budget.tokens) || "—"}
+          {@spec.budget.turns} turns per run · {Format.windows(@spec.budget.tokens) || "—"} · {ForgeCore.Duration.format(
+            Forge.Jobs.own_timeout_ms(@job)
+          )} per run
         </:fact>
       </.fact_list>
 
@@ -1043,7 +1054,7 @@ defmodule ForgeWeb.JobLive do
               from, and whether its build was kept. A worker that does not report them leaves both
               nil and neither is drawn. --%>
         <p id="job-figures" class="job-figures break-words">
-          {Format.duration(@job)} · timeout {div(@command["timeout_ms"] || 0, 1000)}s<span
+          {Format.duration(@job)} · timeout {command_timeout(@command)}<span
             :if={@job.warm_source}
             id="job-warm-source"
           > · started from {ForgeCore.WarmBuild.source_phrase(@job.warm_source)}<.link

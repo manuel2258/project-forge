@@ -254,6 +254,7 @@ defmodule ForgeWeb.ReconnectTest do
         "way" => "extend",
         "tokens" => "9M",
         "turns" => "40",
+        "timeout" => "5h",
         "note" => "Look at the parser.",
         "raise" => "7M"
       }
@@ -262,6 +263,9 @@ defmodule ForgeWeb.ReconnectTest do
 
       assert html =~ ~s(value="9M")
       assert html =~ ~s(value="40")
+      # The time box is held like the others: a reconnect does not put the state's limit back
+      # over what was typed.
+      assert html =~ ~s(value="5h")
       assert html =~ ~s(value="7M")
       assert html =~ "Look at the parser."
       assert has_element?(view, "#forward-extend-fields")
@@ -274,10 +278,16 @@ defmodule ForgeWeb.ReconnectTest do
 
       html =
         view
-        |> form("#ways-#{ticket.id}", %{"way" => "extend", "tokens" => "3M", "note" => "Careful."})
+        |> form("#ways-#{ticket.id}", %{
+          "way" => "extend",
+          "tokens" => "3M",
+          "timeout" => "5h",
+          "note" => "Careful."
+        })
         |> render_change()
 
       assert html =~ ~s(value="3M")
+      assert html =~ ~s(value="5h")
       assert html =~ "Careful."
     end
   end

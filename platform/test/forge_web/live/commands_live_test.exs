@@ -196,6 +196,9 @@ defmodule ForgeWeb.CommandsLiveTest do
     assert view |> element("#command-script") |> render() =~ "exec make"
     assert view |> element("#command-args") |> render() =~ "[&quot;--release&quot;]"
     assert html =~ "exit 3"
+    # As the workflow writes it, `timeout: 20m`, and not as the 1200 seconds it is stored in.
+    assert view |> element("#job-figures") |> render() =~ "timeout 20m"
+    refute html =~ "timeout 1200s"
     assert html =~ String.slice(Jobs.spec(finished).command["at"], 0, 12)
     assert has_element?(view, ~s(a[href$="/jobs/#{parent.id}"]), "invoked by implementing")
     assert has_element?(view, ~s(a[href$="/artifacts/build.log/1"] [data-file-type="log"]))

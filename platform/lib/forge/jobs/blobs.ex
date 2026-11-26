@@ -33,7 +33,7 @@ defmodule Forge.Jobs.Blobs do
       %{
         "outputs" => %{
           "prefix" => prefix,
-          "token" => Storage.Token.sign_prefix(prefix, outlasting_ms: lifetime_ms)
+          "token" => Storage.Token.sign_prefix(prefix, job: job.id, outlasting_ms: lifetime_ms)
         }
       }
     else

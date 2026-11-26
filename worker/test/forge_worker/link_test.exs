@@ -1030,8 +1030,12 @@ defmodule ForgeWorker.LinkTest do
     assert result["outcome"] == "converged"
     assert result["transcript"] == "job/j1/transcript-1.jsonl"
 
-    # The transcript went to the key the platform minted a token for, and nowhere else.
-    assert_receive {:uploaded, "/store/job/j1/transcript-1.jsonl", authorization, query, body}
+    # The transcript went to the key the platform minted a token for, and nowhere else — and it was
+    # in the store *before* the result that says the run is over was pushed: `assert_received`, not
+    # `assert_receive`, which would wait for it. The platform ends a job's store tokens when it
+    # records the job as ended, which is this result (`docs/design/storage.md` § Serving), so a
+    # worker that reported first and uploaded after would find its token refused.
+    assert_received {:uploaded, "/store/job/j1/transcript-1.jsonl", authorization, query, body}
 
     # In the header, and *not* in the URL: a query string reaches every proxy log between the
     # worker and the platform. docs/design/storage.md § The token is a header.
@@ -5085,9 +5089,10 @@ defmodule ForgeWorker.LinkTest do
 
       assert result["transcript"] == "job/j1/transcript-1.jsonl"
 
-      # And it is really there, under the key the platform minted a token for.
-      assert_receive {:uploaded, "/store/job/j1/transcript-1.jsonl", ["Bearer put-token"], _query,
-                      body}
+      # And it is really there, under the key the platform minted a token for, and there before the
+      # terminal message was pushed (see the workflow job's test above for why that order matters).
+      assert_received {:uploaded, "/store/job/j1/transcript-1.jsonl", ["Bearer put-token"],
+                       _query, body}
 
       assert body =~ "\"type\":"
     end

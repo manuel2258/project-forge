@@ -1084,12 +1084,12 @@ defmodule ForgeWeb.OperatorLiveTest do
     end
   end
 
-  # **The third of the three words, and the only one no harness result produces**: the engine's
-  # wall clock kills the process and the worker reports `killed: :wall_clock` with no subtype to
-  # read. Written to the row directly, which also proves the column's enum accepts it — the two
-  # scenarios above exercise `:turns` and `:cost` and would pass with `:wall_clock` unstorable
-  # and undrawn.
-  test "a job the wall clock stopped says so too", %{conn: conn, user: user, project: project} do
+  # **The third of the three words, and the only one no harness result produces**: the run's time
+  # limit kills the process and the worker reports `killed: :wall_clock` with no subtype to read,
+  # which the platform records as `timeout`. Written to the row directly, which also proves the
+  # column's enum accepts it — the two scenarios above exercise `:turns` and `:cost` and would pass
+  # with `:timeout` unstorable and undrawn.
+  test "a job its time limit stopped says so too", %{conn: conn, user: user, project: project} do
     {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
     scenario("max_turns", "refinement.md")
     job = run_pending(ticket.id)
@@ -1099,18 +1099,18 @@ defmodule ForgeWeb.OperatorLiveTest do
         Forge.Jobs.Job.progress_changeset(Jobs.get!(job.id), %{
           status: :finished,
           outcome: :budget_exhausted,
-          exhausted: :wall_clock
+          exhausted: :timeout
         })
       )
 
-    assert job.exhausted == :wall_clock
+    assert job.exhausted == :timeout
 
     {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
 
     assert html
            |> Floki.parse_document!()
            |> Floki.find("[data-ceiling]")
-           |> Floki.attribute("data-ceiling") == ["wall clock"]
+           |> Floki.attribute("data-ceiling") == ["timeout"]
   end
 
   # Windows are an estimate on a placeholder constant; what was counted is the weighted tokens, and

@@ -96,6 +96,8 @@ defmodule ForgeWeb.ExtendApiTest do
                  "exhausted" => "tokens",
                  "default_tokens" => 6_000_000,
                  "default_turns" => 75,
+                 # The limit each run of the job has, which the time box starts at.
+                 "timeout_ms" => 7_200_000,
                  "bounds_turns" => true
                }
              }
@@ -115,6 +117,7 @@ defmodule ForgeWeb.ExtendApiTest do
              |> post(extend_url(project, ticket, job), %{
                "tokens" => "6M",
                "turns" => "75",
+               "timeout" => "4h",
                "note" => "Finish the review."
              })
              |> json_response(200)
@@ -122,10 +125,14 @@ defmodule ForgeWeb.ExtendApiTest do
     assert %{"job" => %{"status" => "pending", "outcome" => nil} = shown} =
              conn |> get(api(project, ticket, "/jobs/#{job.id}")) |> json_response(200)
 
+    # The limit the job's runs were made with, and the time each extension gave.
+    assert shown["timeout_ms"] == 7_200_000
+
     assert [
              %{
                "tokens" => 6_000_000,
                "turns" => 75,
+               "timeout_ms" => 14_400_000,
                "note" => "Finish the review.",
                "author" => %{"kind" => "user", "id" => id},
                "exhausted" => "tokens"
@@ -134,6 +141,19 @@ defmodule ForgeWeb.ExtendApiTest do
 
     assert id == user.id
     assert [%{"extension_id" => nil, "resumed" => nil}] = shown["runs"]
+  end
+
+  # The recorded word is `timeout`, for a job and for what stopped it, whatever the worker called
+  # it (`docs/design/api-and-ui.md`): `wall_clock` is no longer a value the API returns.
+  test "a job its time limit stopped says timeout", ctx do
+    %{conn: conn, project: project, ticket: ticket, job: job} = ctx
+    job |> Ecto.Changeset.change(exhausted: :timeout) |> Repo.update!()
+
+    assert %{"job" => %{"exhausted" => "timeout", "timeout_ms" => 7_200_000}} =
+             conn |> get(api(project, ticket, "/jobs/#{job.id}")) |> json_response(200)
+
+    assert %{"ticket" => %{"extend" => %{"exhausted" => "timeout"}}} =
+             conn |> get(api(project, ticket)) |> json_response(200)
   end
 
   test "a run again carries a note and a raise, and the job it makes says who", ctx do
@@ -168,6 +188,13 @@ defmodule ForgeWeb.ExtendApiTest do
 
     assert %{"error" => %{"reason" => "invalid_turns"}} =
              conn |> post(path, %{"tokens" => "1M", "turns" => "1.5"}) |> json_response(422)
+
+    for bad <- ["soon", "0", "1h30m", "1000001h", 0, -5] do
+      assert %{"error" => %{"reason" => "invalid_timeout", "detail" => timeout_detail}} =
+               conn |> post(path, %{"tokens" => "1M", "timeout" => bad}) |> json_response(422)
+
+      assert timeout_detail =~ "90s, 20m or 3h"
+    end
 
     assert %{"error" => %{"reason" => "note_too_long"}} =
              conn

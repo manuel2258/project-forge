@@ -589,10 +589,20 @@ defmodule Forge.ExtendTest do
   describe "the record" do
     test "refuses a figure the database would, before it gets there" do
       job_id = Ecto.UUID.generate()
-      valid = %{job_id: job_id, ticket_id: Ecto.UUID.generate(), user_id: Ecto.UUID.generate()}
+
+      valid = %{
+        job_id: job_id,
+        ticket_id: Ecto.UUID.generate(),
+        user_id: Ecto.UUID.generate(),
+        timeout_ms: 1
+      }
 
       assert Extension.changeset(%Extension{}, Map.put(valid, :tokens, 1)).valid?
       refute Extension.changeset(%Extension{}, Map.put(valid, :tokens, 0)).valid?
+
+      refute Extension.changeset(%Extension{}, Map.merge(valid, %{tokens: 1, timeout_ms: 0})).valid?
+
+      refute Extension.changeset(%Extension{}, Map.merge(valid, %{tokens: 1, timeout_ms: nil})).valid?
       refute Extension.changeset(%Extension{}, Map.merge(valid, %{tokens: 1, turns: 0})).valid?
 
       refute Extension.changeset(%Extension{}, Map.merge(valid, %{tokens: 1, user_id: nil})).valid?

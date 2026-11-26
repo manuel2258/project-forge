@@ -349,7 +349,14 @@ defmodule Forge.Jobs do
          effort: state.effort,
          commit: ticket.workflow_commit,
          branch: ticket.branch,
-         budget: %{turns: state.budget.turns, tokens: state.budget.tokens},
+         budget: %{
+           turns: state.budget.turns,
+           tokens: state.budget.tokens,
+           # Fixed here with the rest of the budget, whichever of the state, the workflow's
+           # `defaults` or the engine's default said it: a re-pin moves none of a job that exists
+           # (`docs/design/workflow-grammar-v1.md` § Timeout).
+           timeout_ms: Workflow.timeout_ms(workflow, state_name)
+         },
          preamble_hash: Prompt.preamble_hash(),
          inputs: inputs,
          absent_inputs: absent,
@@ -365,7 +372,7 @@ defmodule Forge.Jobs do
   end
 
   # Only the branch's name is stored: what conflicted and what landed are read when the job runs
-  # (`runtime_spec/2`), so a job that waited reads the state of things then.
+  # (`runtime_spec/4`), so a job that waited reads the state of things then.
   defp integration(workflow, state_name, project) do
     if Workflow.integrating?(workflow, state_name),
       do: %{"default_branch" => project.default_branch}
@@ -789,6 +796,7 @@ defmodule Forge.Jobs do
   @spec command_assignment(Job.t(), Ticket.t(), Forge.Projects.Project.t(), String.t()) :: map()
   def command_assignment(%Job{kind: :command} = job, %Ticket{} = ticket, project, git_token) do
     log = Storage.Key.job(job.id, "log-#{job.attempt}-#{Storage.Key.nonce()}.txt")
+    timeout = timeout_ms(job)
 
     %{
       "job_id" => job.id,
@@ -804,10 +812,11 @@ defmodule Forge.Jobs do
         "log_key" => log,
         "log_token" =>
           Storage.Token.sign(:put, log,
-            outlasting_ms: wall_clock_ms(job) + preparation_margin_ms()
+            job: job.id,
+            outlasting_ms: timeout + preparation_margin_ms()
           )
       },
-      "seed" => seed(project),
+      "seed" => seed(project, job),
       # Which ticket's command copy to look for and the epoch it must have been kept under
       # (`docs/design/worker-tier.md` § The command copy). The epoch the row was started with, so
       # the one the platform records and the one the worker is told cannot differ.
@@ -816,9 +825,9 @@ defmodule Forge.Jobs do
         "memory_max" => job.memory_max || Workers.slice_bytes(),
         "cpu_weight" => Workers.config(:cpu_weight, 100)
       },
-      "wall_clock_ms" => wall_clock_ms(job)
+      "wall_clock_ms" => timeout
     }
-    |> Map.merge(group_outputs(job))
+    |> Map.merge(group_outputs(job, timeout))
   end
 
   # **The job's secrets, resolved again**, as the credential is: the scheduler looked before it went
@@ -1116,6 +1125,10 @@ defmodule Forge.Jobs do
     # refuses to overwrite one that is already there.
     transcript = Storage.Key.job(job.id, "transcript-#{job.attempt}-#{Storage.Key.nonce()}.jsonl")
 
+    # Once, so that the limit the worker enforces, the one the manifest prints and the lifetimes
+    # of the tokens below are one number (`timeout_ms/1`).
+    timeout = timeout_ms(job)
+
     # Read once: the manifest the agent is told and the files the worker fetches are the same
     # pool, whatever is claimed or withdrawn while this is built (`Forge.Attachments.pool/1`).
     files = Attachments.pool(Conversations.pool(job))
@@ -1126,7 +1139,7 @@ defmodule Forge.Jobs do
       # Which driver runs it; nil for a command, which has none. A worker from before a job had a
       # harness reads no such key, and runs its own.
       "harness" => harness(job),
-      "spec" => job |> runtime_spec(ticket, files) |> Spec.to_json() |> Jason.decode!(),
+      "spec" => job |> runtime_spec(ticket, files, timeout) |> Spec.to_json() |> Jason.decode!(),
       "git" =>
         %{
           "url" => Url.for_worker(project),
@@ -1140,17 +1153,19 @@ defmodule Forge.Jobs do
           "transcript_key" => transcript,
           # Used when the job stops, not when it starts, so it lives as long as the job may: its
           # preparation and then its whole clock, which the worker starts only once the clone and
-          # the seed are ready (`docs/design/storage.md` § Serving).
+          # the seed are ready (`docs/design/storage.md` § Serving) — and no longer than the job:
+          # it names it, and is refused once the job has ended.
           "transcript_token" =>
             Storage.Token.sign(:put, transcript,
-              outlasting_ms: wall_clock_ms(job) + preparation_margin_ms()
+              job: job.id,
+              outlasting_ms: timeout + preparation_margin_ms()
             )
         }
-        |> Map.merge(session_upload(job)),
+        |> Map.merge(session_upload(job, timeout)),
       # The files people attached, with a token to fetch each: the pool as it stands now, so a run
       # that waited is handed what was attached while it did (`docs/design/attachments.md`
       # § Delivery). A command has none (`command_assignment/4`).
-      "attachments" => Attachments.deliveries(files, preparation_margin_ms()),
+      "attachments" => Attachments.deliveries(files, job.id, preparation_margin_ms()),
       # Every job, workflow and chat alike, with no grammar key: an unread file costs nothing
       # (`docs/design/ticket-proposals.md` § Reading the backlog).
       "backlog" => Backlog.compose(project),
@@ -1158,7 +1173,7 @@ defmodule Forge.Jobs do
       # compiled into the worker so that it matches the platform that assigns it
       # (`docs/design/changelog.md` § Delivery).
       "changelog" => Forge.Changelog.text(),
-      "seed" => seed(project),
+      "seed" => seed(project, job),
       # The job's own figures, from the row it was admitted with, rather than one number for
       # every job (`docs/design/provisioning.md` § What a job asks for). `cpu_weight` stays a
       # constant and is not `cores`: the slice gets a proportional *share*, never a quota, so a
@@ -1168,26 +1183,28 @@ defmodule Forge.Jobs do
         "memory_max" => job.memory_max || Workers.slice_bytes(),
         "cpu_weight" => Workers.config(:cpu_weight, 100)
       },
-      "wall_clock_ms" => wall_clock_ms(job)
+      # The wire's name for the run's time limit, unchanged so that no worker protocol is bumped.
+      "wall_clock_ms" => timeout
     }
     |> Map.merge(resume_keys(job))
     |> Map.merge(chat_assignment(job))
     |> Map.merge(command_logs(job))
-    |> Map.merge(group_outputs(job))
+    |> Map.merge(group_outputs(job, timeout))
   end
 
   # Where the run's harness session goes, one file per upload under a prefix of its own — a
   # conversation uploads after every turn — with a token that lives as long as the run may
   # (`docs/design/claude-code-events.md` § Resume). A command has no harness, and its
   # assignment is `command_assignment/4`'s, which asks for none.
-  defp session_upload(%Job{} = job) do
+  defp session_upload(%Job{} = job, timeout) do
     prefix = session_prefix(job.id) <> Storage.Key.nonce() <> "/"
 
     %{
       "session_prefix" => prefix,
       "session_token" =>
         Storage.Token.sign_prefix(prefix,
-          outlasting_ms: wall_clock_ms(job) + preparation_margin_ms()
+          job: job.id,
+          outlasting_ms: timeout + preparation_margin_ms()
         )
     }
   end
@@ -1199,18 +1216,19 @@ defmodule Forge.Jobs do
     case resume_source(job) do
       {id, blob, fork} ->
         %{"resume_session" => id, "fork_session" => fork}
-        |> Map.merge(session_ref(id, blob))
+        |> Map.merge(session_ref(id, blob, job.id))
 
       nil ->
         %{"resume_session" => nil}
     end
   end
 
-  defp session_ref(id, %{"key" => key} = blob) do
+  defp session_ref(id, %{"key" => key} = blob, job_id) do
     %{
       "session" => %{
         "key" => key,
-        "token" => Storage.Token.sign(:get, key, outlasting_ms: preparation_margin_ms()),
+        "token" =>
+          Storage.Token.sign(:get, key, job: job_id, outlasting_ms: preparation_margin_ms()),
         "id" => id,
         "version" => blob["version"],
         # What the session had spent when the file was written, which the harness will carry into
@@ -1221,7 +1239,7 @@ defmodule Forge.Jobs do
     }
   end
 
-  defp session_ref(_id, _none), do: %{}
+  defp session_ref(_id, _none, _job_id), do: %{}
 
   @doc """
   The session a run of `job` resumes, as `{session_id, session_blob, fork?}`, or nil
@@ -1260,16 +1278,16 @@ defmodule Forge.Jobs do
 
   # Where a job's groups of files go, for a job that declares one (`Forge.Jobs.Blobs`). Uploaded
   # when the job stops, so the token lives as long as a transcript's does.
-  defp group_outputs(%Job{kind: :chat} = job),
+  defp group_outputs(%Job{kind: :chat} = job, timeout),
     do:
       Blobs.outputs(
         job,
         %Spec{job_id: job.id, branch: "", produces: []},
-        wall_clock_ms(job) + preparation_margin_ms()
+        timeout + preparation_margin_ms()
       )
 
-  defp group_outputs(%Job{} = job),
-    do: Blobs.outputs(job, spec(job), wall_clock_ms(job) + preparation_margin_ms())
+  defp group_outputs(%Job{} = job, timeout),
+    do: Blobs.outputs(job, spec(job), timeout + preparation_margin_ms())
 
   # A resume after commands is handed each command's log, by key and a `get` token, to fetch into
   # `$FORGE_JOB/commands/` before it starts (`docs/design/job-prompt.md` § Commands), and so is a
@@ -1290,7 +1308,11 @@ defmodule Forge.Jobs do
               %{
                 "file" => file,
                 "key" => key,
-                "token" => Storage.Token.sign(:get, key, outlasting_ms: preparation_margin_ms())
+                "token" =>
+                  Storage.Token.sign(:get, key,
+                    job: job.id,
+                    outlasting_ms: preparation_margin_ms()
+                  )
               }
             end)
         }
@@ -1300,20 +1322,72 @@ defmodule Forge.Jobs do
   defp command_logs(%Job{}), do: %{}
 
   @doc """
-  How long a job may run once assigned: an hour for a workflow job, a day for a conversation.
-  The worker enforces it; the platform sizes the credentials it hands out by it, because a
-  credential that lapses before the job does fails the job's last act rather than its first.
+  How long one run of `job` may take once assigned: a workflow job's `timeout` (the extension's,
+  when a person gave it one), a conversation's day, a command's own `timeout`.
+
+  **The one number the run's limit comes from.** The worker is told it (`wall_clock_ms` in the
+  assignment, the wire's old name for it), the manifest prints it, and every token and claim sized
+  to the run is sized by it, so what the manifest says and what the worker enforces cannot differ.
+  The platform sizes the credentials it hands out by it because a credential that lapses before
+  the job does fails the job's last act rather than its first.
   """
-  @spec wall_clock_ms(Job.t()) :: pos_integer()
-  def wall_clock_ms(%Job{kind: :chat}), do: config(:chat_wall_clock_ms, :timer.hours(24))
+  @spec timeout_ms(Job.t()) :: pos_integer()
+  def timeout_ms(%Job{kind: :workflow} = job) do
+    case Extensions.current(job) do
+      %Extension{timeout_ms: ms} -> ms
+      nil -> own_timeout_ms(job)
+    end
+  end
+
+  def timeout_ms(%Job{} = job), do: own_timeout_ms(job)
+
+  @doc """
+  The time limit the job was made with, an extension left aside: what the state's own run gets, and
+  what an extended run gets where its time box was left empty. A conversation's is the node's day;
+  a command's is its own `timeout`. A workflow job made before the limit was kept in its spec runs
+  on the engine's default, as one that names none does.
+  """
+  @spec own_timeout_ms(Job.t()) :: pos_integer()
+  def own_timeout_ms(%Job{kind: :chat}), do: config(:chat_wall_clock_ms, :timer.hours(24))
 
   # A command's own timeout, which the worker enforces; the credentials it is handed are sized to
-  # it the way an agent job's are sized to the hour.
-  def wall_clock_ms(%Job{kind: :command, spec: %{"command" => %{"timeout_ms" => ms}}})
+  # it the way an agent job's are sized to its limit.
+  def own_timeout_ms(%Job{kind: :command, spec: %{"command" => %{"timeout_ms" => ms}}})
       when is_integer(ms),
       do: ms
 
-  def wall_clock_ms(%Job{}), do: config(:wall_clock_ms, :timer.hours(1))
+  def own_timeout_ms(%Job{spec: %{"budget" => %{"timeout_ms" => ms}}}) when is_integer(ms),
+    do: ms
+
+  def own_timeout_ms(%Job{}), do: Workflow.default_timeout_ms()
+
+  @doc """
+  Whether the store tokens minted for the job have ended (`Forge.Storage.Token`, `docs/design/
+  storage.md` § Serving): the platform has recorded the job as finished, or there is no such job.
+
+  **A cancelled job's tokens outlive its end by the store's ordinary lifetime.** Cancelling
+  finishes the job and closes its run before the machine has stopped: the worker kills the harness,
+  uploads what it has and only then reports (`ForgeWorker.Link.finish/7`). Every other ending is
+  the worker's own report, which it sends after its uploads, so a token needs no grace after it —
+  and a job that parks or stops on a question has not ended.
+  """
+  @spec tokens_ended?(String.t()) :: boolean()
+  def tokens_ended?(job_id) when is_binary(job_id) do
+    case Repo.one(
+           from j in Job, where: j.id == ^job_id, select: {j.status, j.outcome, j.finished_at}
+         ) do
+      nil -> true
+      {:finished, :cancelled, %DateTime{} = at} -> grace_over?(at)
+      {:finished, _outcome, _finished_at} -> true
+      {_status, _outcome, _finished_at} -> false
+    end
+  end
+
+  # The store's ordinary lifetime, which is what a token with no `outlasting_ms` is good for.
+  defp grace_over?(finished_at),
+    do:
+      DateTime.diff(DateTime.utc_now(), finished_at, :second) >=
+        Storage.config(:token_max_age, 900)
 
   @doc """
   How long a job may spend being prepared — cloned, its seed fetched and unpacked — before the
@@ -1336,8 +1410,8 @@ defmodule Forge.Jobs do
       "idle_ms" => config(:chat_idle_ms, :timer.minutes(30)),
       "max_tokens" => remaining_today(),
       # What already ran on this ticket. Metadata inline because it is small; transcripts as a
-      # key and a token, because they are not (`Conversations.history/1`).
-      "history" => job.ticket_id |> ticket_of() |> Conversations.history()
+      # key and a token, because they are not (`Conversations.history/2`).
+      "history" => job.ticket_id |> ticket_of() |> Conversations.history(job.id)
     }
   end
 
@@ -1368,12 +1442,12 @@ defmodule Forge.Jobs do
   #
   # The token is minted per assignment like every other one the worker holds: a machine that
   # already has this seed never spends it, and one that does not is fetching within minutes.
-  defp seed(%{seed_id: seed_id, name: name}) when is_binary(seed_id) do
+  defp seed(%{seed_id: seed_id, name: name}, %Job{id: job_id}) when is_binary(seed_id) do
     key = Storage.Key.seed(name, seed_id)
-    %{"key" => key, "token" => Storage.Token.sign(:get, key)}
+    %{"key" => key, "token" => Storage.Token.sign(:get, key, job: job_id)}
   end
 
-  defp seed(_project), do: nil
+  defp seed(_project, _job), do: nil
 
   # Every billed invocation passes through `assign/2`, so this is where both caps are asked
   # rather than in the scheduler alone. A ticket over its own
@@ -1463,7 +1537,7 @@ defmodule Forge.Jobs do
   # A conversation's spec is synthesised at assignment and never stored — the precedent is right
   # below, where a workflow job's assignment spec is already not the row's. What it carries is
   # what a chat actually has: where its work goes, and the context it was opened with.
-  defp runtime_spec(%Job{kind: :chat} = job, ticket, files) do
+  defp runtime_spec(%Job{kind: :chat} = job, ticket, files, _timeout) do
     # Read from the log rather than stored on the row, because the log is already the
     # conversation (§ Shape) and a copy on the row would be a second one. A prompt of nil is a
     # reopen with nothing to answer, which the worker holds for the person's next message.
@@ -1497,16 +1571,22 @@ defmodule Forge.Jobs do
     spec
   end
 
-  defp runtime_spec(%Job{} = job, %Ticket{id: ticket_id} = ticket, files) do
+  defp runtime_spec(%Job{} = job, %Ticket{id: ticket_id} = ticket, files, timeout) do
     # The model and the effort are resolved here rather than frozen into the stored spec at
     # creation. The spec carries what the *state* declared, which is pinned with the workflow and
     # right to keep; the project's defaults are not pinned, and a job created a week before it ran
     # should use the project's answers now rather than the ones it had then.
+    stored = spec(job)
+
+    # **The run's limit is always set here**, from the one number the worker is told
+    # (`timeout_ms/1`), so a spec stored before the key existed still prints one and an extended
+    # run prints the extension's. The stored spec is not touched.
     spec = %{
-      spec(job)
+      stored
       | answered_keys: Artifacts.answered_keys(ticket_id),
         model: model_for(job),
-        effort: effort_for(job)
+        effort: effort_for(job),
+        budget: Map.put(stored.budget, :timeout_ms, timeout)
     }
 
     spec = spec |> put_extension(job) |> lower_budget(job, ticket)
@@ -1813,7 +1893,8 @@ defmodule Forge.Jobs do
               "tokens" => extension.tokens,
               "turns" => extension.turns,
               "note" => extension.note,
-              "exhausted" => extension.exhausted && Atom.to_string(extension.exhausted),
+              "exhausted" =>
+                extension.exhausted && extension.exhausted |> Job.to_wire() |> Atom.to_string(),
               # Told of the extension by the run it was given to only: a later run of the job keeps
               # the extension's ceiling and is told what any resume is (`ForgeCore.Prompt`).
               "later_run" => Extensions.later_run?(job, extension),
@@ -2911,7 +2992,7 @@ defmodule Forge.Jobs do
           status: :finished,
           outcome: result.outcome,
           declared_outcome: result.declared_outcome,
-          exhausted: result.exhausted,
+          exhausted: Job.from_wire(result.exhausted),
           finished_at: DateTime.utc_now(:second)
         })
     end
@@ -2922,8 +3003,8 @@ defmodule Forge.Jobs do
       "outcome" => result.outcome,
       "declared_outcome" => result.declared_outcome,
       "reason" => result.reason,
-      "exhausted" => result.exhausted,
-      "killed" => result.killed,
+      "exhausted" => Job.from_wire(result.exhausted),
+      "killed" => Job.from_wire(result.killed),
       "exit_status" => result.exit_status,
       "questions" => Enum.map(result.questions, & &1.key),
       # **Without `credential_return`**: that is a login Codex refreshed, sealed under a key derived
@@ -3050,7 +3131,7 @@ defmodule Forge.Jobs do
   worker is lost or retired.
 
   **The run's git credential goes with it.** The next assignment mints its own, and the old one
-  lives the job's whole wall clock — a day, for a conversation — so a machine that is only
+  lives the job's whole time limit — a day, for a conversation — so a machine that is only
   partitioned, not gone, could otherwise go on pushing to the branch after its job was handed to
   somebody else. The same holds wherever a run stops without the job ending — `recover/0`,
   `hibernate/3`, a failed resume, a stop on a question — and each of them revokes it too.

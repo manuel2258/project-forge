@@ -643,6 +643,34 @@ defmodule ForgeCore.Workflow do
     Resources.resolve([state, defaults && defaults.resources])
   end
 
+  # Two hours: what an agent job's run may take where neither its state nor the workflow's
+  # `defaults` says. It was one hour, a node setting no workflow could change
+  # (`docs/design/workflow-grammar-v1.md` § Timeout).
+  @default_timeout_ms :timer.hours(2)
+
+  @doc "How long one run of an agent job may take when its workflow names no `timeout`: two hours."
+  @spec default_timeout_ms() :: pos_integer()
+  def default_timeout_ms, do: @default_timeout_ms
+
+  @doc """
+  How long one run of a job in `state_name` may take: the state's `timeout`, else the workflow's
+  `defaults.timeout`, else `default_timeout_ms/0`. Always a number, unlike `resources/2`, because
+  the last link of the chain is the engine's and lives here.
+
+  A state that does not exist, or one that runs no agent, resolves as one declaring nothing; the
+  validator is what refuses `timeout` where there is no run to time.
+  """
+  @spec timeout_ms(t(), state_name()) :: pos_integer()
+  def timeout_ms(%__MODULE__{defaults: defaults} = workflow, state_name) do
+    state =
+      case state(workflow, state_name) do
+        %State{timeout_ms: ms} -> ms
+        nil -> nil
+      end
+
+    state || (defaults && defaults.timeout_ms) || @default_timeout_ms
+  end
+
   @doc """
   Outcomes a job in `state_name` may end with: engine outcomes plus declared ones. A command
   state declares the values of its `exit` map (`docs/design/workflow-grammar-v1.md` § Commands).

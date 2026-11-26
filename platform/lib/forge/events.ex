@@ -251,14 +251,34 @@ defmodule Forge.Events do
     )
   end
 
-  @doc "Where each job's creation was written in the ticket's log: `%{job_id => seq}`."
+  @doc """
+  Where each job's creation was written in the ticket's log: `%{job_id => seq}`.
+
+  Every job Steps draws has such an event, written in the transaction that made its row, but not
+  one type of it: a workflow agent job logs `job.created`, a step conversation `chat.opened`, a
+  command an agent invoked `command.invoked` (its `job_id` is the *agent's*; the command's is
+  `payload.command_job_id`) and the commands of a command state one `commands.started` that names
+  them all in `payload.jobs`, so they share a `seq`. Reading `job_id` of `command.invoked` or
+  `commands.started` would put the agent at its last command's place, which is why neither is.
+  `events.inserted_at` is whole seconds, so `seq` is what orders a job against a jump or an update
+  step's visit (`ForgeWeb.TicketLive`).
+  """
   @spec job_created_seqs(String.t()) :: %{String.t() => integer()}
   def job_created_seqs(ticket_id) do
     from(e in Event,
-      where: e.ticket_id == ^ticket_id and e.type == "job.created",
-      select: {e.job_id, e.seq}
+      where: e.ticket_id == ^ticket_id,
+      where: e.type in ["job.created", "chat.opened", "command.invoked", "commands.started"],
+      order_by: e.seq,
+      select:
+        {e.type, e.job_id, e.seq, fragment("?->>'command_job_id'", e.payload),
+         fragment("?->'jobs'", e.payload)}
     )
     |> Repo.all()
+    |> Enum.flat_map(fn
+      {"command.invoked", _parent, seq, command_job_id, _jobs} -> [{command_job_id, seq}]
+      {"commands.started", _none, seq, _id, jobs} -> Enum.map(List.wrap(jobs), &{&1, seq})
+      {_type, job_id, seq, _id, _jobs} -> [{job_id, seq}]
+    end)
     |> Map.new()
   end
 

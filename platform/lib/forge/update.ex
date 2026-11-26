@@ -375,20 +375,6 @@ defmodule Forge.Update do
     )
   end
 
-  @doc """
-  When each of the ticket's jobs was made, by job id: the `seq` of its `job.created`, which orders a
-  job against an update step's visit (`events.inserted_at` is whole seconds).
-  """
-  @spec created_seqs(String.t()) :: %{String.t() => pos_integer()}
-  def created_seqs(ticket_id) do
-    from(e in Event,
-      where: e.ticket_id == ^ticket_id and e.type == "job.created",
-      select: {e.job_id, e.seq}
-    )
-    |> Repo.all()
-    |> Map.new()
-  end
-
   @doc "The titles of the project's tickets numbered `numbers`, by number."
   @spec titles(String.t(), [integer()]) :: %{integer() => String.t()}
   def titles(_project_id, []), do: %{}

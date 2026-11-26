@@ -49,6 +49,7 @@ defmodule Forge.Look.Setups do
     "milestones" => Forge.Look.Setups.Milestones,
     "schedules" => Forge.Look.Setups.Schedules,
     "update_step" => Forge.Look.Setups.UpdateStep,
+    "steps_order" => Forge.Look.Setups.StepsOrder,
     "paged_streams" => Forge.Look.Setups.PagedStreams,
     "warm_build" => Forge.Look.Setups.WarmBuild,
     "pages" => Forge.Look.Setups.Pages

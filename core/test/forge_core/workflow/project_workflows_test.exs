@@ -450,7 +450,7 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
 
     assert refining.name == "refining"
     assert State.chat?(refining), "dev.yml: refining is not a chat step"
-    assert refining.produces == ["refinement.md"]
+    assert refining.produces == ["refinement.md", "workbench@"]
 
     assert [%Transition{approve: ["refinement.md"], when: nil}] =
              Workflow.transitions_from(workflow, "refining"),
@@ -467,7 +467,7 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
     assert refining.name == "refining"
     refute State.chat?(refining), "bug.yml: refining is a chat step"
     assert State.job?(refining)
-    assert refining.produces == ["refinement.md"]
+    assert refining.produces == ["refinement.md", "workbench@"]
 
     edges = Workflow.transitions_from(workflow, "refining")
 

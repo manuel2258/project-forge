@@ -633,8 +633,9 @@ defmodule ForgeWeb.TicketLive do
   # A visit per run of jobs in one state, **broken at a jump**: two visits to `implementing` either
   # side of one are two steps, and the jump is a row of its own between them
   # (`docs/design/ui.md` § Steps). Each job falls in the segment of jumps made before it — by the
-  # order of the events, and by the clock only for a job with no `job.created` event
-  # (`jumped_before?/3`) — and each update step's visit by the order of the events; within a segment
+  # order of the events (`Events.job_created_seqs/1`: every job has a creation event, of one type
+  # or another), and by the clock only for a job none is found for (`jumped_before?/3`) — and each
+  # update step's visit by the order of the events; within a segment
   # the jobs and visits are in the order they were made (`in_order/3`). The rows are the segments'
   # visits in turn with the jump that ends each. The ticket's own state is always the last step,
   # resting with no job when nothing has run in it since.
@@ -656,7 +657,7 @@ defmodule ForgeWeb.TicketLive do
               Map.get(job_segments, segment, []),
               Map.get(update_segments, segment, []),
               artifacts,
-              ticket
+              created
             ) ++
               Enum.map(Enum.slice(jumps, segment, 1), &jump_row(&1, me)),
           do: row
@@ -674,9 +675,9 @@ defmodule ForgeWeb.TicketLive do
     |> name_merges(ticket)
   end
 
-  defp visits(jobs, updates, artifacts, ticket) do
+  defp visits(jobs, updates, artifacts, created) do
     jobs
-    |> in_order(updates, ticket)
+    |> in_order(updates, created)
     |> chunk_visits()
     |> Enum.map(fn
       {:jobs, group} ->
@@ -694,9 +695,10 @@ defmodule ForgeWeb.TicketLive do
   end
 
   # Whether the jump was made before the job: by where each was written in the log when the job's
-  # creation is there (a workflow job's is), and else by the clock, in whole seconds — a job's row
-  # is stamped to the second and an event's to the microsecond, so a job made in the jump's own
-  # second reads as after it.
+  # creation is there (every job's is: `Events.job_created_seqs/1`), and else by the clock, in whole
+  # seconds — a job's row is stamped to the microsecond and an event's to the second, and both are
+  # cut to the second here, so a job made in the jump's own second reads as after it. The clock is
+  # a defence for a job whose event is gone, not a path the platform takes.
   defp jumped_before?(%{seq: seq}, %{id: id}, created) when is_map_key(created, id),
     do: seq < Map.fetch!(created, id)
 
@@ -721,14 +723,13 @@ defmodule ForgeWeb.TicketLive do
     }
   end
 
-  # Jobs and visits in the order they were made: a job by the seq of its `job.created`, a visit by
-  # its own. A job with no such event (none the platform makes) keeps its place after the ones that
-  # have one, in the order it came.
-  defp in_order(jobs, [], _ticket), do: Enum.map(jobs, &{:job, &1})
+  # Jobs and visits in the order they were made: a job by the seq of its creation event
+  # (`Events.job_created_seqs/1`: a command and a step chat have one too), a visit by its own. A job
+  # with no such event keeps its place after the ones that have one, in the order it came. Commands
+  # of one `commands.started` share a seq, and the sort is stable, so they keep their order.
+  defp in_order(jobs, [], _created), do: Enum.map(jobs, &{:job, &1})
 
-  defp in_order(jobs, visits, %{id: ticket_id}) do
-    created = Forge.Update.created_seqs(ticket_id)
-
+  defp in_order(jobs, visits, created) do
     jobs
     |> Enum.with_index()
     |> Enum.map(fn {job, i} -> {Map.get(created, job.id, 1_000_000_000_000 + i), {:job, job}} end)

@@ -1485,7 +1485,9 @@ looked are marked.
 
 **An update step's visit is a step of its own**, drawn on the same line-and-dot with the `↻` mark, in
 the order the events were written (`seq`, never time: `events.inserted_at` is whole seconds) among the
-jobs, and never folded into a neighbour — a visit that changed nothing is still drawn, so Steps agrees
+jobs, commands and step conversations — each placed by the creation event its own kind writes
+(`job.created`, `chat.opened`, `command.invoked`, `commands.started`; `Events.job_created_seqs/1`) —
+and never folded into a neighbour — a visit that changed nothing is still drawn, so Steps agrees
 with the ticket's history. Folded it says in one line what it did: *already up to date with `main` at
 `abc1234`*; *moved forward to `abc1234`*; *merged `main` at `abc1234`, bringing in 3 merges*; or
 *conflicted with `main` in `a.ex` and 2 more; went to `resolving`*. Opened, it lists the merges it

@@ -10,6 +10,12 @@ until it changes) or **may adopt** (new and optional). A project records the rel
 brought up to in `.forge/forge-release`; `platform.md` § Upgrading to a newer forge says how an
 upgrade goes.
 
+## 0.29.0
+
+- **may adopt** — a ticket's command jobs now record the time of every step on the machine, and a command's log lines are kept with their times. Over the API, `GET /tickets/:project/:number/jobs/:id` gains `steps`, and `GET …/jobs/:id/log` returns a command's log as text (`times=true` puts each line's milliseconds since the command started before it). Nothing in a workflow changes. (The API is described in forge's own repository, `docs/design/api-and-ui.md`, as `platform.md` does not cover it.)
+
+- **may adopt** — a ticket's kept command copies (a command that declares `keep_build`) can be looked into without a job: the ticket's page links each copy to an explorer, and a member or a project token may read `GET /tickets/:project/:number/builds` (the copies), `…/builds/:job_id/folder`, `…/file` and `…/download`, or use the MCP reads `list_builds`, `list_build_folder` and `read_build_file`. The machine holding the copy answers, a copy is held as it was for ten minutes after the last action, and a download is streamed and stored nowhere. A job's own token cannot read them. (`docs/design/worker-tier.md` § Looking into a copy, in forge's repository)
+
 ## 0.28.0
 
 - **may adopt** — a job state or `defaults` may declare `timeout`, how long one run of an agent job may take: a whole number and one unit (`90m`, `3h`) or a number of seconds, resolved state first, then `defaults`, then the engine's default. It is refused on a chat step, a command state, a human state and an update step; a command keeps its own `timeout`. A run that passes it ends `budget_exhausted`, and the job's manifest says the run's time. A library's `defaults` may set it too, as it sets `resources`. Before and after:

@@ -131,6 +131,7 @@ Platform → worker:
 | `message` | `job_id`, `message_id`, text | A chat only: write this to the harness's stdin. |
 | `interrupt` | `job_id`, `message_id` (optional, protocol 15) | A chat only: end this turn, keep the process. With a `message_id`, only if the worker still holds that message (§ Protocol 15). |
 | `close` | `job_id`, reason | A chat only: end the conversation, release the machine. |
+| `explore` | `ref`, `op` (`list`, `file`, `hash`, `download`), `ticket`, `copy`, `path_b64`, `offset`; for `download` also `stream` and `secret` (protocol 18, § Protocol 18) | Answer about the ticket's command copy kept by job `copy`: list a folder, read a file, hash it, or post it to the platform's stream door. Dropped by a worker below 18, which the platform never asks. |
 | `update` | `target`: `build`, `version`, `repository`, `digest`, `raw_sha256`, `raw_size` — or null, *stand down*; and `requested_by` (the owner's email) when *Update now* pressed it | Bring yourself to this build (protocol 13). Sent when the owner flips the switch on or presses *Update now*; **the join reply carries the same target** (§ Versions), which is how a machine learns it when it connects, refused or not. It carries no secret: the image is public, fetched by digest from the one repository the machine's own image names. |
 
 **There is no `drain`.** This table carried one — *take no new work* — meant to precede idle
@@ -156,12 +157,14 @@ Worker → platform:
 | `event` | `job_id`, normalised harness event | no |
 | `turn` | `job_id`, turn index, commit, `uncommitted` (why there is no commit, when there is none), the turn's proposals and documents, any `transition.json` it wrote (`conversations.md` § Taking a transition), and a harness summary carrying its cost | yes |
 | `delivered` | `job_id`, `message_id`: a chat's message written to its harness (protocol 15; `conversations.md` § The wire) | yes |
-| `result` | `job_id`, `ForgeCore.Job.Result` as JSON — `status` `parked` for an agent that invoked commands, with the invocations and the commit it pushed; a command's with its exit status, duration and log key; either's `blobs` (name → key and size) and `invalid_blobs` (name → why) for its groups of files; since protocol 17, `branch_moved` for a run whose push found the branch moved (§ Protocol 17) | yes |
+| `result` | `job_id`, `ForgeCore.Job.Result` as JSON — `status` `parked` for an agent that invoked commands, with the invocations and the commit it pushed; a command's with its exit status, duration and log key (and, since protocol 18, its `steps`, the key of its line `times` and `warm.folders`); either's `blobs` (name → key and size) and `invalid_blobs` (name → why) for its groups of files; since protocol 17, `branch_moved` for a run whose push found the branch moved (§ Protocol 17) | yes |
 | `hibernated` | `job_id`, commit sha, reason, the result as far as it got; a chat adds its turn count; a cancelled run whose push found the branch moved adds `kept` (§ Protocol 17) | yes |
-| `failed` | `job_id`, reason | yes |
+| `failed` | `job_id`, reason; a command's adds `steps` (protocol 18) | yes |
 | `unhealthy` | reason; the reply says `reboot` (true or false) and `why` | yes |
 | `update` | the update's state: `step` (`downloading`, `installing`, `pausing`, `restarting`, `trying`, `failed`, `fell_back`, `gave_up`, `kept`), `target_build`, `target_version`, `reason`, `failed_step`, `attempt`, `next_at` and `at` (ms, the machine's own clock when it spoke, by which the platform dates `next_at` by its own), `unable` (a code: `layout`, `not_an_image`) and for `pausing` the `jobs` and `chats` it is hibernating (ids) | no |
 | `disk` | `at` (ms), `kinds`: bytes for `nix_store`, `volumes`, `seeds`, `jobs` and `rest`; `cleanups`: per rule, `at` (ms) and `freed` | no |
+| `lines` | `job_id`, `from` (the index of the first line), `lines`: `[[ms, text], …]` — a running command's output, masked, a line at a time (protocol 18, § Protocol 18) | no |
+| `explored` | `ref`, then `ok` (a map), `error` (a word) or `progress` (`done`, `total`) — the answer to an `explore` (protocol 18, § Protocol 18) | no |
 
 **A worker refuses an assignment whose ceiling it will not make a unit with**: a `memory_max`
 below `ForgeCore.Workflow.Resources.minimum_memory/0`, or one that is not a number, ends at once
@@ -917,6 +920,66 @@ every visit); every other job is as it was. **A ticket
 chat is not gated**: its `moving` field gains `jumps`, which an older worker drops, and the
 request is made and applied by the platform, so it works unchanged. The scheduler's *Waiting for a
 newer worker image* reason and the workers page say so as they do for the other numbers.
+
+## Protocol 18 (ticket 84)
+
+Protocol 17 → 18, **not a breaking change in the sense of § What needs a bump**: everything below is
+an addition a platform or a worker may leave unsaid, and **`minimum` stays 4**. A worker below 18
+sends no steps, no lines and no times, and answers no `explore`; the platform asks a machine only
+when its `workers.protocol` is at least 18 (a fixed `@explore_protocol`, as `@commands_protocol`
+is fixed) and says *runs an older release* otherwise. `Forge.Jobs.protocol_needs/1` does not change,
+so every job still runs on a machine at 14 to 17. The number moves because a platform is told what
+a machine can answer by it, not because anything would break. The design is `worker-tier.md` §
+Looking into a copy (ticket 84); this section is the wire.
+
+**`result` and `failed` gain `steps`.** `ForgeCore.CommandSteps`: a list of
+`%{"name", "at" (wall clock, ms), "ms"}`, or `%{"name", "at", "skipped" => reason}` for a step that
+did not happen, the snapshot's with `"source"`, and `other` last, so the durations add up to the
+run's time from the start of its task to just before the terminal message. A command's `failed`
+carries them too, so a command that died at its fetch still shows where the time went. The platform
+records one `command.step` event for each in the transaction that records the result or the failure,
+and `command.steps_unrecorded` (`{"protocol": 17}`) for a result from a worker below 18, which is how
+a page tells *the machine's release predates step timings* from *ran before forge recorded steps*
+(no event at all). `result` also gains `times`, a store key, and `warm.folders`
+(`ForgeCore.WarmBuild.folders/1`).
+
+**`lines`**, unacked. `job_id`, `from` (0-based index of the first line in this batch) and
+`lines`, `[[ms, text], …]`: `ms` is milliseconds since the start of the job's task, the origin the
+steps' total uses, and `text` a masked line without its newline, valid UTF-8 and at most 4096 bytes.
+After every join the worker sends each running command's lines again, from index 0 or, once it has
+trimmed to the last 20,000, from the first it kept, and the platform drops what it holds, so a platform restart in the middle of a command loses nothing it can still
+read. The platform keeps them in memory (`Forge.Jobs.Lines`) and stores none as events.
+
+**`explore`**, platform → worker, and **`explored`**, worker → platform, unacked both ways. A
+request is `ref`, `op`, `ticket` (its id), `copy` (the job that kept it), `path_b64` (the path
+from the copy's root, base64: a name need not be UTF-8 and the channel is JSON; `""` is the root)
+and, for `list`, `offset`. The platform checks the shape of a path (`ForgeCore.Explore.path_ok?/1`)
+and the worker checks again against its disk, on a path resolved one component at a time with
+`lstat`. Replies carry the same `ref`: `ok`, `error` (`no_copy`, `path_refused`, `path_not_found`,
+`not_a_folder`, `not_a_file`, `failed`) or `progress`. **Only the connection that was asked may
+answer a ref**, and 15 seconds without any message for a ref reads as *did not answer*.
+
+| op | `ok` |
+|---|---|
+| `list` | `entries` (at most 200 from `offset`: `name_b64`, `kind` `dir`/`file`/`link`/`other`, `mtime`, `size` for a file, `entries` for a folder, `target_b64` for a link), `total`, `offset`. Folders first, then the rest, by the bytes of the name. |
+| `file` | `kind`, `size`, `mtime`, `target_b64` (a link), `entries` (a folder), `text`, `content_b64` and `truncated` (a text file's first 1 MiB; text is no NUL in that and valid UTF-8 once a sequence cut at the limit is dropped) |
+| `hash` | `sha256`, `size`; `progress` every two seconds while it reads |
+| `download` | `bytes`, once the stream ended; `progress` while it runs |
+
+**A download meets in the middle over HTTP** and nothing stores it. The request that wants it (a
+browser or the API) registers a random stream id and a secret in a Registry and sends `explore` with
+both. The worker `POST`s the archive, chunked, to `/worker-streams/<id>` on **its own** configured
+platform URL, with the secret as a bearer; the door compares it with `Plug.Crypto.secure_compare/2`,
+hands each chunk to the waiting request and waits for its ack before reading the next, so a slow
+browser slows `tar` through TCP and nothing piles up. 403 for a wrong secret, 404 for a stream that is
+unknown or used (each is used once), and the worker has 15 seconds to arrive. The headers the worker
+sends are `x-forge-kind` (`tar` or `file`) and `x-forge-name-b64`. The archive is an uncompressed
+POSIX tar from GNU tar with links as links; a single file is sent as itself.
+There is no `Range`, and a download cut off halfway starts again from the beginning.
+
+**Not verified here:** all of it against a real worker and a real platform over a network (the suite
+speaks both ends in one BEAM), a proxy that buffers a request body, and Bandit's backpressure on a
+large response (`worker-tier.md` § Looking into a copy).
 
 ## Protocol 17 (ticket 79)
 

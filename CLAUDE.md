@@ -22,7 +22,16 @@ ticket's next command: `keep_build` and `warm_start` on a command, a copy of its
 that is never shared with another ticket, an agent job or a conversation, the scheduler's two-minute
 wait for the machine holding it, **Clear** as an epoch, and the two lines a command's log gains. **It
 is built** (ticket 76), and **no saving is measured**: no machine that has the new worker has run a
-real ticket's commands (its § Open). Forge's own commands opt in to nothing yet.
+real ticket's commands (its § Open). Forge's own `check`, `static` and `test` have declared
+`keep_build` in `.forge/common.yml` since 0.27.0.
+
+`docs/design/worker-tier.md` § Looking into a copy (ticket 84) is the standard for looking into a
+ticket's command copies: every step of a command timed on the machine and kept as events, a
+command's lines live with their times (not events), a live explorer that asks the machine holding a
+copy (listing, a file's content and hash, a streamed download that nothing stores), the hold that keeps
+a copy as it was for ten minutes after the last action, and the sizes of its ignored folders saved at
+keep. **It is being built** (ticket 84); it is a migration and worker protocol 18 without a new
+minimum, and its *Not verified here* is what no real machine has yet shown.
 
 `docs/design/outside-work.md` is the standard for work done outside forge's machines: **taking a ticket
 over** (a hold with a person's or a token's name on it, which a release counts as handing back), **handing it
@@ -280,13 +289,13 @@ so that Hex is installed and the registry fetched once per ticket rather than on
 job's `HOME` is its own and goes with the job, while an ignored directory in the checkout is
 carried in the ticket's volume from one of its **agent** jobs to the next on the same machine
 (`docs/design/worker-tier.md` § The ticket volume). **A command job — which is what runs the gate
-automatically — starts cold today:** the volume holds an agent job's sources, plus a build only if
+automatically — may start cold:** the volume holds an agent job's sources, plus a build only if
 that agent ran one by hand, and `implement.md` tells it not to. A command can keep its build for the
 ticket's next command on that machine, but only when its definition in the workflow declares
-`keep_build`, and **forge's own `check`, `static` and `test` declare none yet**
-(`docs/design/worker-tier.md` § The command copy; `forge-commands-keep-their-build` is the
-proposal). Until that merges, each run of them fetches and compiles every dependency. Exported for
-the gate's own processes only; your `~/.mix` is not read and not written.
+`keep_build`, and **forge's own `check`, `static` and `test` declare it** (`.forge/common.yml`, since
+0.27.0; `docs/design/worker-tier.md` § The command copy), so a ticket's later runs of them start from
+what an earlier one built, on the same machine. Exported for the gate's own processes only; your
+`~/.mix` is not read and not written.
 
 **Export the same two before running `mix` by hand**, which is also how an agent job leaves the
 caches warm for the next one:

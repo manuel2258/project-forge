@@ -46,6 +46,11 @@ defmodule Forge.Application do
         # Which of a person's page's batches were applied already, across a reconnect, which is a
         # new LiveView process (`Forge.Pages.Batches`).
         Forge.Pages.Batches,
+        # Where a download of a command copy waits for the machine's POST (`Forge.Explore`).
+        {Registry, keys: :unique, name: Forge.Explore.Streams},
+        # The live lines of the commands that are running, held in memory and stored as nothing
+        # (`Forge.Jobs.Lines`).
+        Forge.Jobs.Lines,
         # Start to serve requests, typically the last entry
         ForgeWeb.Endpoint
       ] ++ scheduler() ++ digest()

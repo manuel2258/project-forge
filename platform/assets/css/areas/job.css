@@ -140,6 +140,48 @@
   .job-file:hover { background: var(--surface-2); }
   .job-file-name { min-width: 0; flex: 1 1 0%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+  /* -- a command's steps and output (ticket 84) ------------------------------------------- */
+
+  .job-steps { display: flex; min-width: 0; flex-direction: column; gap: 6px; padding-top: 8px; }
+  .job-step-list { display: flex; flex-direction: column; }
+  .job-step {
+    position: relative;
+    display: flex;
+    min-height: 36px;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border-soft);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .job-step-name { min-width: 0; flex: 1 1 0%; }
+  .job-step-time { flex-shrink: 0; text-align: right; }
+  /* A reason is a sentence: it wraps within the row instead of squeezing the step's name out. */
+  .job-step-time--skipped { flex-shrink: 1; min-width: 0; max-width: 60%; overflow-wrap: anywhere; }
+  /* The longest step is the one to look at: ink and weight, with a rule under it as long as its
+     share of the whole. */
+  .job-step--longest { color: var(--ink); font-weight: 600; }
+  .job-step:not(.job-step--longest) { color: var(--ink-2); }
+  .job-step-bar { position: absolute; bottom: -1px; left: 0; height: 2px; background: var(--ink-3); }
+  .job-step--longest .job-step-bar { background: var(--ink); }
+
+  /* Room under the last line for the floating step pill, which sits over the page's foot. */
+  .job-output { display: flex; min-width: 0; flex-direction: column; gap: 6px; padding-bottom: 64px; }
+  /* A line's text keeps its own spacing and breaks anywhere rather than widening the page. */
+  .job-log-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  /* A silence of ten seconds or more between two lines, marked at every width. */
+  .job-silence {
+    padding: 2px 0 2px 5.5rem;
+    color: var(--warning);
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+  @media (max-width: 767.98px) {
+    .job-silence { padding-left: 0; }
+  }
+
   /* -- where it stands ---------------------------------------------------------------------- */
 
   .job-stand-plan,

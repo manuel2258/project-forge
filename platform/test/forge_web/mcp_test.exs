@@ -20,7 +20,8 @@ defmodule ForgeWeb.McpTest do
   @tools ~w(whoami list_projects get_project list_tickets get_ticket ticket_events list_documents
             read_document get_change list_pages read_page open_ticket take_over hand_back
             write_document answer_question decide move_ticket run_again stop_run keep_job_work
-            hold release cancel restore write_page_key)
+            hold release cancel restore write_page_key get_command_steps list_builds
+            list_build_folder read_build_file download_build)
 
   setup %{conn: conn} do
     repo = seeded_repo()

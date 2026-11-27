@@ -46,6 +46,11 @@ defmodule ForgeCore.Job.Result do
     # A command's warm build, as `ForgeCore.WarmBuild` words it: where its tree came from and
     # whether its build was kept. Nil from a worker that does not report it.
     :warm,
+    # A command's steps on the machine, as `ForgeCore.CommandSteps` words them (worker protocol 18),
+    # and the store key of the blob that holds the time of each line of its log, one decimal
+    # millisecond per line. Nil from a worker that reports neither.
+    :steps,
+    :times,
     # The run's push found the ticket's branch moved by somebody else, so nothing was written to
     # it and the work was kept under `refs/forge/kept/<job id>` instead (worker protocol 17):
     # `%{"lease", "kept", "remote", "outcome"}` — the branch as the run held it, the commit kept,
@@ -88,6 +93,8 @@ defmodule ForgeCore.Job.Result do
           log: String.t() | nil,
           duration_ms: non_neg_integer() | nil,
           warm: %{String.t() => term()} | nil,
+          steps: [%{String.t() => term()}] | nil,
+          times: String.t() | nil,
           branch_moved: %{String.t() => String.t() | nil} | nil,
           invocations: [%{String.t() => term()}],
           blobs: %{String.t() => %{String.t() => term()}},
@@ -140,6 +147,8 @@ defmodule ForgeCore.Job.Result do
       "log" => result.log,
       "duration_ms" => result.duration_ms,
       "warm" => result.warm,
+      "steps" => result.steps,
+      "times" => result.times,
       "branch_moved" => result.branch_moved,
       "blobs" => result.blobs,
       "invalid_blobs" => result.invalid_blobs
@@ -178,6 +187,8 @@ defmodule ForgeCore.Job.Result do
       log: get.(:log),
       duration_ms: get.(:duration_ms),
       warm: get.(:warm),
+      steps: get.(:steps),
+      times: get.(:times),
       branch_moved: get.(:branch_moved),
       blobs: or_default(get, :blobs, %{}),
       invalid_blobs: or_default(get, :invalid_blobs, %{})

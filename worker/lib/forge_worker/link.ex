@@ -41,10 +41,12 @@ defmodule ForgeWorker.Link do
     Conversation,
     Credential,
     Dir,
+    Lines,
     Runner,
     Secrets,
     Seed,
     Session,
+    Steps,
     Workspace
   }
 
@@ -75,6 +77,11 @@ defmodule ForgeWorker.Link do
   # except in the test config, for the reason `stats_ms` is long there: a push nobody asked for
   # stalls a `Slipstream.SocketTest` link. The tests about the log turn it on.
   defp log_stream?, do: Application.get_env(:forge_worker, :log_stream, true)
+
+  # Whether a command's live lines go to the platform at all. On, except in the test config, for the
+  # reason `log_stream?/0` is off there: a push nobody asked for stalls a `Slipstream.SocketTest`
+  # link. The tests about the lines turn it on.
+  defp lines_stream?, do: Application.get_env(:forge_worker, :lines_stream, true)
 
   def start_link(opts), do: Slipstream.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -152,7 +159,8 @@ defmodule ForgeWorker.Link do
     Update.accepted()
     Disk.joined()
 
-    {:ok, socket |> tick() |> send_held() |> resend_unacked() |> report_unhealthy()}
+    {:ok,
+     socket |> tick() |> send_held() |> resend_unacked() |> report_unhealthy() |> resend_lines()}
   end
 
   # **Started once, at the first join, and never again.** These used to be started on every join,
@@ -256,6 +264,23 @@ defmodule ForgeWorker.Link do
   # `ForgeWorker.Update`'s.
   def handle_message(_topic, "update", payload, socket) when is_map(payload) do
     Update.told(payload["target"], requested_by: payload["requested_by"])
+    {:ok, socket}
+  end
+
+  # **A person looking into a ticket's command copy on this machine** (`ForgeWorker.Explore`,
+  # `docs/design/worker-channel.md` § Protocol 18): answered in a task of its own, one per request
+  # and no limit on how many, at the priority of everything else here. The answer comes back to this
+  # process as `{:explored, reply}` and leaves unacked: a platform that did not hear it counts the
+  # machine as not answering, and the person tries again.
+  def handle_message(_topic, "explore", payload, socket) when is_map(payload) do
+    link = self()
+    root = socket.assigns.root
+
+    {:ok, _task} =
+      Task.Supervisor.start_child(ForgeWorker.Explore.Tasks, fn ->
+        ForgeWorker.Explore.run(payload, root, fn reply -> send(link, {:explored, reply}) end)
+      end)
+
     {:ok, socket}
   end
 
@@ -444,6 +469,32 @@ defmodule ForgeWorker.Link do
        socket,
        "stopped because this machine is unhealthy; the platform puts it back in the queue"
      )}
+  end
+
+  # A command's tailer says it is there, to be told to send its lines again after a join
+  # (`resend_lines/1`), as a runner says it is.
+  def handle_info({:tailer, job_id, pid}, socket),
+    do: {:noreply, update_job(socket, job_id, &Map.put(&1, :tailer, pid))}
+
+  # A command's live lines, unacked: the platform holds them while the command runs and has none of
+  # them stored, so a lost batch is the next join's resend (`ForgeWorker.Job.Lines`). A link that
+  # has not joined pushes nothing, and the resend after the join says it all again.
+  def handle_info({:lines, job_id, from, lines}, socket) do
+    if lines_stream?() do
+      push(socket, socket.assigns.topic, "lines", %{
+        "job_id" => job_id,
+        "from" => from,
+        "lines" => lines
+      })
+    end
+
+    {:noreply, socket}
+  end
+
+  # What a task of `ForgeWorker.Explore.Tasks` answered, unacked.
+  def handle_info({:explored, reply}, socket) do
+    push(socket, socket.assigns.topic, "explored", reply)
+    {:noreply, socket}
   end
 
   def handle_info({:event, job_id, event}, socket) do
@@ -890,14 +941,35 @@ defmodule ForgeWorker.Link do
   # Runs one job to its end and tells the link what happened. Anything that goes wrong here is
   # a failed job, reported as one: a task that dies quietly would leave the platform holding a
   # job it believes is running until the next rejoin.
+  #
+  # **A command's steps are timed from here** (`ForgeWorker.Job.Steps`): the clock starts with the
+  # job's task and its reading is the origin of every line time. A run that ends in failure says
+  # where its time went too, and an agent job and a conversation, which time nothing, have none.
   def run(link, assignment, root) do
+    steps = start_steps(assignment)
+
+    try do
+      run(link, assignment, root, steps)
+    after
+      Steps.close(steps)
+    end
+  end
+
+  defp start_steps(%{"kind" => "command"}) do
+    {:ok, steps} = Steps.start_link()
+    steps
+  end
+
+  defp start_steps(_assignment), do: nil
+
+  defp run(link, assignment, root, steps) do
     job_id = assignment["job_id"]
     secrets = Secrets.from_assignment(assignment)
 
     # What it reports is masked as it leaves, by the link (`report/4`).
     outcome =
       with :ok <- Secrets.check(secrets) do
-        as_user(assignment, root, &prepare_and_run(link, assignment, root, &1))
+        as_user(assignment, root, &prepare_and_run(link, assignment, root, &1, steps))
       end
 
     case outcome do
@@ -912,7 +984,8 @@ defmodule ForgeWorker.Link do
 
         send(
           link,
-          {:terminal, job_id, "failed", %{"job_id" => job_id, "reason" => inspect(reason)}}
+          {:terminal, job_id, "failed",
+           with_steps(%{"job_id" => job_id, "reason" => inspect(reason)}, steps)}
         )
     end
   catch
@@ -923,8 +996,19 @@ defmodule ForgeWorker.Link do
       send(
         link,
         {:terminal, assignment["job_id"], "failed",
-         %{"job_id" => assignment["job_id"], "reason" => formatted}}
+         with_steps(%{"job_id" => assignment["job_id"], "reason" => formatted}, steps)}
       )
+  end
+
+  # A command that failed before its result carries the steps it got through, so the page shows
+  # where the time went and not a bare failure. Nothing for a job that times none.
+  defp with_steps(payload, nil), do: payload
+
+  defp with_steps(payload, steps) do
+    case Steps.finish(steps) do
+      {nil, _total} -> payload
+      {listed, _total} -> Map.put(payload, "steps", listed)
+    end
   end
 
   # The job's Unix user, made before anything of the job exists on this machine and removed after
@@ -954,47 +1038,33 @@ defmodule ForgeWorker.Link do
   # the log to the store under the key the platform minted a token for. Nothing is committed or
   # pushed — a command's write is its log — and nothing is promoted to the ticket's volume: its
   # tree is a commit. The one thing a command may leave is the ticket's **command copy**, when its
-  # definition says the script's exit status keeps its build (`settle_warm/7`,
+  # definition says the script's exit status keeps its build (`settle_warm/6`,
   # `docs/design/worker-tier.md` § The command copy).
-  defp prepare_and_run(link, %{"kind" => "command"} = assignment, root, user) do
-    job_id = assignment["job_id"]
+  defp prepare_and_run(link, %{"kind" => "command"} = assignment, root, user, steps) do
     spec = ForgeCore.Job.Spec.from_map(assignment["spec"])
 
-    with {:ok, worktree, source} <- Workspace.prepare_command(assignment, root, user),
+    with {:ok, worktree, source} <- Workspace.prepare_command(assignment, root, user, steps),
          :ok <-
            Checkout.detach(worktree, spec.command["at"],
              url: assignment["git"]["url"],
              token: assignment["git"]["token"],
-             as: Slice.as_user(user)
-           ),
-         head = WarmBuild.source_line(source.source, source.from),
-         {:ok, command} <- start_command(assignment, spec, root, worktree, head) do
-      send(link, {:runner, job_id, command})
-      {:ok, result, ending} = Command.await_ending(command)
-      log = Command.log_path(job_dir(root, job_id))
+             as: Slice.as_user(user),
+             steps: steps
+           ) do
+      head = WarmBuild.source_line(source.source, source.from)
+      tailer = start_tailer(link, assignment, root, steps)
 
-      # The script was the last thing to run in the tree, so the files come back to root and the
-      # user goes before a snapshot of it is kept (as `finish/7` does before a template).
-      # Dropping this `leave` (which also releases the archive's mount first, `Slice.leave/2`) changes
-      # nothing under `Slice.Direct`, which every test runs: only a real job user owns the tree, and
-      # only root can make one (`--include root`).
-      Slice.leave(user, job_paths(assignment, root))
-      warm = settle_warm(assignment, spec, root, worktree, source, result, ending)
-      File.write(log, WarmBuild.kept_line(warm["kept"], warm["unkept"]) <> "\n", [:append])
-      Secrets.mask_file(Secrets.from_assignment(assignment), log)
-
-      result =
-        result
-        |> upload_log(assignment, job_dir(root, job_id))
-        |> Blobs.upload(assignment, Dir.blobs_dir(job_dir(root, job_id)))
-
-      Workspace.discard(assignment, root)
-      sweep_old(root)
-      {:ok, {"result", Result.to_map(%{result | warm: warm})}}
+      # A tailer that is not finished by the end of the run is stopped, so that a command that
+      # failed to start does not leave one polling a log nobody writes.
+      try do
+        run_command(link, assignment, root, user, steps, {spec, worktree, source, head, tailer})
+      after
+        Lines.close(tailer)
+      end
     end
   end
 
-  defp prepare_and_run(link, assignment, root, user) do
+  defp prepare_and_run(link, assignment, root, user, _steps) do
     job_id = assignment["job_id"]
 
     with {:ok, worktree} <- Workspace.prepare(assignment, root, user),
@@ -1016,6 +1086,164 @@ defmodule ForgeWorker.Link do
         {:moved, _moved} = moved -> finish(assignment, root, worktree, result, moved, true, user)
         {:error, reason} -> unpushed(result, reason, changeset?)
       end
+    end
+  end
+
+  defp run_command(link, assignment, root, user, steps, {spec, worktree, source, head, tailer}) do
+    job_id = assignment["job_id"]
+
+    with {:ok, command} <- start_command(assignment, spec, root, worktree, head, steps) do
+      send(link, {:runner, job_id, command})
+      {:ok, result, ending} = Command.await_ending(command)
+      log = Command.log_path(job_dir(root, job_id))
+
+      key = CommandCopy.key(assignment)
+      unkept = unkept_reason(CommandCopy.statuses(assignment), key, ending, result.exit_status)
+
+      # Listed before the tree is handed back, as the job's user: git never runs as root in a tree
+      # a job wrote. Only for a build that will be kept; nothing else is sized by folder.
+      ignored = list_ignored(steps, worktree, user, unkept, job_id)
+
+      # The script was the last thing to run in the tree, so the files come back to root and the
+      # user goes before a snapshot of it is kept (as `finish/7` does before a template).
+      # Dropping this `leave` (which also releases the archive's mount first, `Slice.leave/2`) changes
+      # nothing under `Slice.Direct`, which every test runs: only a real job user owns the tree, and
+      # only root can make one (`--include root`).
+      Steps.time(steps, "hand_back", fn -> Slice.leave(user, job_paths(assignment, root)) end)
+
+      warm =
+        settle_warm(assignment, spec, root, worktree, {source, key, unkept, ignored}, steps)
+
+      File.write(log, WarmBuild.kept_line(warm["kept"], warm["unkept"]) <> "\n", [:append])
+
+      # The last line is in the log, so the tailer's last read has it; then the file is masked, and
+      # the times are only kept when the masked log still has a line for each (`write_times/4`).
+      lined = finish_lines(tailer)
+      Secrets.mask_file(Secrets.from_assignment(assignment), log)
+      times = write_times(assignment, job_dir(root, job_id), log, lined)
+
+      result =
+        Steps.time(steps, "upload", fn ->
+          result
+          |> upload_log(assignment, job_dir(root, job_id))
+          |> upload_times(assignment, times)
+          |> Blobs.upload(assignment, Dir.blobs_dir(job_dir(root, job_id)))
+        end)
+
+      Steps.time(steps, "discard", fn -> Workspace.discard(assignment, root) end)
+      Steps.time(steps, "sweep", fn -> sweep_old(root) end)
+      {listed, _total} = Steps.finish(steps)
+      {:ok, {"result", Result.to_map(%{result | warm: warm, steps: listed})}}
+    end
+  end
+
+  # What git ignores in a tree that is about to be kept, or nil: a build that is not kept lists
+  # nothing and says why (`ForgeCore.CommandSteps`: `not_kept`), and a listing that fails costs the
+  # copy its folder sizes and never the command its keep.
+  defp list_ignored(steps, _worktree, _user, unkept, _job_id) when is_binary(unkept) do
+    Steps.skip(steps, "ignored", "not_kept")
+    nil
+  end
+
+  defp list_ignored(steps, worktree, user, nil, job_id) do
+    case Steps.time(steps, "ignored", fn -> Checkout.ignored(worktree, Slice.as_user(user)) end) do
+      {:ok, ignored} ->
+        ignored
+
+      {:error, reason} ->
+        Log.line(
+          "copy.unsized",
+          :warning,
+          "could not list what git ignores in the kept build, so its folders are not sized: " <>
+            inspect(reason),
+          job_id: job_id
+        )
+
+        nil
+    end
+  end
+
+  defp start_tailer(link, assignment, root, steps) do
+    job_id = assignment["job_id"]
+
+    case Lines.start_link(
+           job_id: job_id,
+           path: Command.log_path(job_dir(root, job_id)),
+           link: link,
+           clock: fn -> Steps.elapsed(steps) end,
+           secrets: Secrets.from_assignment(assignment)
+         ) do
+      {:ok, tailer} -> tailer
+      _no_tailer -> nil
+    end
+  end
+
+  # The time of each line, or `:error` for a tailer that is gone: the command still ran, and a log
+  # without times is a page without them.
+  defp finish_lines(nil), do: :error
+
+  defp finish_lines(tailer) do
+    Lines.finish(tailer)
+  catch
+    :exit, _gone -> :error
+  end
+
+  # **The times are kept beside the log, one decimal millisecond per line of it** — and only when
+  # the log that is uploaded has a line for each. Masking a secret whose value spans lines joins them,
+  # and a times blob that no longer fits the log would put the wrong time on every line after it, so
+  # there is none and the machine's log says so. Nothing for a platform that sent no key for it.
+  defp write_times(assignment, job_dir, log, {:ok, times}) do
+    store = assignment["store"] || %{}
+
+    with true <- is_binary(store["times_key"]) and is_binary(store["times_token"]),
+         {:ok, contents} <- File.read(log) do
+      if Lines.count(contents) == length(times) do
+        path = Path.join(Dir.worker_dir(job_dir), "times.txt")
+        write_times_file(path, times)
+        path
+      else
+        Log.line(
+          "times.unkept",
+          :warning,
+          "the log has #{Lines.count(contents)} line(s) and #{length(times)} were timed, so " <>
+            "its line times are not kept (a secret that spans lines joins them)",
+          job_id: assignment["job_id"]
+        )
+
+        nil
+      end
+    else
+      _no_place_or_no_log -> nil
+    end
+  end
+
+  defp write_times(_assignment, _job_dir, _log, :error), do: nil
+
+  # In pieces: a log of ten million lines is not ten million lists in memory at once.
+  defp write_times_file(path, times) do
+    File.open!(path, [:write], fn file ->
+      times
+      |> Stream.chunk_every(10_000)
+      |> Enum.each(fn chunk -> IO.write(file, Enum.map(chunk, &[Integer.to_string(&1), ?\n])) end)
+    end)
+  end
+
+  defp upload_times(result, _assignment, nil), do: result
+
+  defp upload_times(result, assignment, path) do
+    store = assignment["store"]
+
+    case Config.platform_url() &&
+           Store.put(Config.platform_url(), store["times_key"], store["times_token"], path) do
+      {:ok, _info} ->
+        %{result | times: store["times_key"]}
+
+      _unavailable_or_failed ->
+        Log.line("times.unkept", :warning, "could not upload the line times of the command's log",
+          job_id: assignment["job_id"]
+        )
+
+        result
     end
   end
 
@@ -1198,13 +1426,15 @@ defmodule ForgeWorker.Link do
   # status, and only a script that ended on its own qualifies — a timeout, a cancel or a kill never
   # does, whatever its status, so a killed build cannot poison the next command. A copy that cannot
   # be kept is a warning, and the copy the ticket had stays.
-  defp settle_warm(assignment, spec, root, worktree, source, result, ending) do
-    key = CommandCopy.key(assignment)
+  defp settle_warm(assignment, spec, root, worktree, {source, key, unkept, ignored}, steps) do
+    {kept, unkept, size, folders} =
+      case unkept do
+        nil ->
+          keep_build(assignment, spec, root, worktree, key, ignored, steps)
 
-    {kept, unkept, size} =
-      case unkept_reason(CommandCopy.statuses(assignment), key, ending, result.exit_status) do
-        nil -> keep_build(assignment, spec, root, worktree, key)
-        reason -> {false, reason, nil}
+        reason ->
+          Steps.skip(steps, "keep", reason)
+          {false, reason, nil, nil}
       end
 
     with {:ok, key} <- key, false <- kept, do: CommandCopy.touch(root, key)
@@ -1214,7 +1444,8 @@ defmodule ForgeWorker.Link do
       "from" => source.from,
       "kept" => kept,
       "unkept" => unkept,
-      "size" => size
+      "size" => size,
+      "folders" => folders
     }
   end
 
@@ -1228,27 +1459,28 @@ defmodule ForgeWorker.Link do
   defp unkept_reason(statuses, _key, :own, status),
     do: if(status in statuses, do: nil, else: "status")
 
-  defp keep_build(assignment, spec, root, worktree, {:ok, key}) do
+  defp keep_build(assignment, spec, root, worktree, {:ok, key}, ignored, steps) do
     facts = %{
       "job_id" => assignment["job_id"],
       "command" => spec.command["name"],
       "commit" => spec.command["at"]
     }
 
-    case CommandCopy.keep(root, key, worktree, facts) do
-      {:ok, size} ->
-        {true, nil, size}
+    case Steps.time(steps, "keep", fn -> CommandCopy.keep(root, key, worktree, facts, ignored) end) do
+      {:ok, size, folders} ->
+        {true, nil, size, folders}
 
       {:error, reason} ->
         CommandCopy.unkept(assignment, reason)
-        {false, "failed", nil}
+        {false, "failed", nil, nil}
     end
   end
 
-  defp start_command(assignment, spec, root, worktree, head) do
+  defp start_command(assignment, spec, root, worktree, head, steps) do
     slice = assignment["slice"] || %{}
 
     Command.start_link(
+      steps: steps,
       head: head,
       spec: spec,
       root: Path.join(root, "jobs"),
@@ -1706,6 +1938,16 @@ defmodule ForgeWorker.Link do
     Enum.map(socket.assigns.jobs, fn {job_id, job} ->
       %{"job_id" => job_id, "attempt" => job.attempt}
     end)
+  end
+
+  # After a join every running command's tailer says its lines again, from the first it kept: the
+  # platform may have restarted mid-command, and drops the ones it holds.
+  defp resend_lines(socket) do
+    for {_job_id, %{tailer: tailer}} <- socket.assigns.jobs,
+        is_pid(tailer),
+        do: Lines.resend(tailer)
+
+    socket
   end
 
   defp send_terminal(socket, job_id, message, payload),

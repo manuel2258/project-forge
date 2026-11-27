@@ -17,7 +17,7 @@ defmodule ForgeWorker.Job.Workspace do
   """
 
   alias ForgeWorker.{Checkout, Log, Slice, Volume}
-  alias ForgeWorker.Job.CommandCopy
+  alias ForgeWorker.Job.{CommandCopy, Steps}
 
   # How long a run that ended while the platform was away waits to push before it gives up: long
   # enough for a deploy, short of the job credential's own lifetime.
@@ -67,8 +67,8 @@ defmodule ForgeWorker.Job.Workspace do
            :ok <- Checkout.ensure(checkout_opts(assignment, dir, user, [])),
            do: {:ok, dir}
     else
-      from_template(assignment, root, dir, user) || from_seed(assignment, root, dir, user) ||
-        clone(assignment, dir, user)
+      from_template(assignment, root, dir, user, nil) ||
+        from_seed(assignment, root, dir, user, nil) || clone(assignment, dir, user, nil)
     end
   end
 
@@ -86,30 +86,46 @@ defmodule ForgeWorker.Job.Workspace do
 
   `prepare/3`, which agents and conversations use, never looks at the command copies.
   """
-  @spec prepare_command(assignment(), String.t(), Slice.user()) ::
+  @spec prepare_command(assignment(), String.t(), Slice.user(), Steps.t()) ::
           {:ok, String.t(), %{source: String.t(), from: String.t() | nil}} | {:error, term()}
-  def prepare_command(assignment, root, user) do
+  def prepare_command(assignment, root, user, steps \\ nil) do
     dir = dir(assignment, root)
 
     if File.exists?(dir), do: Volume.impl().delete(dir)
 
-    from_copy(assignment, root, dir, user) ||
-      tagged(from_template(assignment, root, dir, user), "ticket") ||
-      tagged(from_seed(assignment, root, dir, user), "seed") ||
-      tagged(clone(assignment, dir, user), "clone")
+    result =
+      from_copy(assignment, root, dir, user, steps) ||
+        tagged(from_template(assignment, root, dir, user, steps), "ticket") ||
+        tagged(from_seed(assignment, root, dir, user, steps), "seed") ||
+        tagged(clone(assignment, dir, user, steps), "clone")
+
+    timed_source(steps, result)
+    result
   end
+
+  # **What the snapshot step says it started from**, and that a clone had none to take: a step
+  # that did not happen is skipped and never a zero (`ForgeCore.CommandSteps`).
+  defp timed_source(steps, {:ok, _dir, %{source: "clone"}}),
+    do: Steps.skip(steps, "snapshot", "no_source")
+
+  defp timed_source(steps, {:ok, _dir, %{source: source}}),
+    do: Steps.note(steps, "snapshot", "source", source)
+
+  defp timed_source(_steps, _failed), do: :ok
 
   defp tagged({:ok, dir}, source), do: {:ok, dir, %{source: source, from: nil}}
   defp tagged(other, _source), do: other
 
   # The ticket's command copy, snapshotted and made this branch's. A failure anywhere is a colder
-  # start and not a failed command (`CommandCopy.unused/2`).
-  defp from_copy(assignment, root, dir, user) do
+  # start and not a failed command (`CommandCopy.unused/2`). **Only a snapshot that was taken is
+  # timed**: a ticket with no copy is not a step that took no time.
+  defp from_copy(assignment, root, dir, user, steps) do
     with true <- CommandCopy.warm_start?(assignment),
          {:ok, key} <- CommandCopy.key(assignment),
-         {:ok, marker} <- CommandCopy.take(root, key, dir),
-         :ok <- Slice.own(user, [dir]),
-         :ok <- remote_and_ensure(assignment, dir, user) do
+         started = Steps.tick(steps),
+         {:ok, marker} <- taken(steps, started, CommandCopy.take(root, key, dir)),
+         :ok <- Steps.time(steps, "own", fn -> Slice.own(user, [dir]) end),
+         :ok <- remote_and_ensure(assignment, dir, user, steps) do
       {:ok, dir, %{source: "copy", from: marker["job_id"]}}
     else
       error when error in [false, :none] ->
@@ -122,8 +138,20 @@ defmodule ForgeWorker.Job.Workspace do
     end
   end
 
-  defp remote_and_ensure(assignment, dir, user) do
-    opts = checkout_opts(assignment, dir, user, clean: true, resume: false)
+  defp taken(steps, started, {:ok, _marker} = taken) do
+    Steps.stop(steps, "snapshot", started)
+    taken
+  end
+
+  defp taken(steps, started, {:error, _reason} = failed) do
+    Steps.stop(steps, "snapshot", started)
+    failed
+  end
+
+  defp taken(_steps, _started, :none), do: :none
+
+  defp remote_and_ensure(assignment, dir, user, steps) do
+    opts = checkout_opts(assignment, dir, user, clean: true, resume: false, steps: steps)
 
     with :ok <- Checkout.remote(dir, assignment["git"]["url"], opts[:as]),
          do: Checkout.ensure(opts)
@@ -169,7 +197,10 @@ defmodule ForgeWorker.Job.Workspace do
     |> then(fn removed ->
       # What was freed, for the disk report (`ForgeWorker.Disk`): the ticket volumes and the
       # ticket's command copies together, which the report counts as one line.
-      freed = Enum.sum(removed) + CommandCopy.sweep(root, older_than_ms)
+      freed =
+        Enum.sum(removed) + CommandCopy.sweep(root, older_than_ms) +
+          CommandCopy.release_holds(root)
+
       ForgeWorker.Disk.cleaned("volumes", freed)
       length(removed)
     end)
@@ -253,17 +284,24 @@ defmodule ForgeWorker.Job.Workspace do
   @spec dir(assignment(), String.t()) :: String.t()
   def dir(assignment, root), do: Path.join([root, "worktrees", assignment["job_id"]])
 
-  defp from_template(assignment, root, dir, user) do
+  defp from_template(assignment, root, dir, user, steps) do
     path = template(assignment, root)
 
     if is_binary(path) and File.dir?(path),
-      do: from_volume(assignment, path, dir, "ticket volume", user)
+      do: from_volume(assignment, path, dir, "ticket volume", user, steps)
   end
 
-  defp from_seed(assignment, root, dir, user) do
+  # **The seed's download is the snapshot's time**: a machine that has not got the seed fetches it
+  # here, and that is most of what a first command on it waits for.
+  defp from_seed(assignment, root, dir, user, steps) do
+    started = Steps.tick(steps)
+
     case Seed.ensure(assignment, root) do
-      seed when is_binary(seed) -> from_volume(assignment, seed, dir, "seed", user)
-      nil -> nil
+      seed when is_binary(seed) ->
+        from_volume(assignment, seed, dir, "seed", user, steps, started)
+
+      nil ->
+        nil
     end
   end
 
@@ -280,12 +318,14 @@ defmodule ForgeWorker.Job.Workspace do
   # **Handed to the job's user before git touches it.** A template's `.git` is the last job's,
   # written by a user who could put a `post-checkout` hook in it; run as root, the checkout below
   # would run that hook as root.
-  defp from_volume(assignment, source, dir, what, user) do
+  defp from_volume(assignment, source, dir, what, user, steps, started \\ nil) do
     git = assignment["git"]
-    opts = checkout_opts(assignment, dir, user, clean: false, resume: false)
+    opts = checkout_opts(assignment, dir, user, clean: false, resume: false, steps: steps)
+    started = started || Steps.tick(steps)
 
     with :ok <- Volume.impl().snapshot(source, dir),
-         :ok <- Slice.own(user, [dir]),
+         :ok <- stopped(steps, "snapshot", started),
+         :ok <- Steps.time(steps, "own", fn -> Slice.own(user, [dir]) end),
          :ok <- Checkout.remote(dir, git["url"], opts[:as]),
          :ok <- Checkout.ensure(opts) do
       {:ok, dir}
@@ -303,6 +343,11 @@ defmodule ForgeWorker.Job.Workspace do
         Volume.impl().delete(dir)
         nil
     end
+  end
+
+  defp stopped(steps, name, started) do
+    Steps.stop(steps, name, started)
+    :ok
   end
 
   # Into a sibling first, so a promotion that fails leaves the template the ticket already had
@@ -372,11 +417,11 @@ defmodule ForgeWorker.Job.Workspace do
   # cold clone again. Nothing of anyone's is in it to lose: `clone/3` is reached only when `dir`
   # did not exist. Nothing sweeps `worktrees/*` to clear it either — `Dir.sweep/2` is given
   # `jobs/` and `sweep/2` here reads `volumes/ticket/*`.
-  defp clone(assignment, dir, user) do
+  defp clone(assignment, dir, user, steps) do
     volume(dir, assignment["job_id"])
 
-    with :ok <- Checkout.ensure(checkout_opts(assignment, dir, user, [])),
-         :ok <- Slice.own(user, [dir]) do
+    with :ok <- Checkout.ensure(checkout_opts(assignment, dir, user, steps: steps)),
+         :ok <- Steps.time(steps, "own", fn -> Slice.own(user, [dir]) end) do
       {:ok, dir}
     else
       {:error, reason} ->

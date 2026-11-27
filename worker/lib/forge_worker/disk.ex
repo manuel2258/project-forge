@@ -91,6 +91,124 @@ defmodule ForgeWorker.Disk do
     end
   end
 
+  # The same bound the platform's record applies, said once, in core.
+  @max_folders ForgeCore.WarmBuild.max_folders()
+
+  @doc """
+  The size of a kept copy in one walk, and of each folder git ignores in it
+  (`docs/design/worker-tier.md` § Looking into a copy, folder sizes): `{:ok, total, folders}` with
+  `folders` as `ForgeCore.WarmBuild.folders/1` takes it, or `:error` when `du` could not be run.
+
+  `entries` is `Checkout.ignored/2`'s: paths relative to `dir`, each a folder or a loose file.
+  **One `du -x -P -B1 -s -0 --files0-from=<list>`**, the entries first and `.` last: GNU du counts
+  each inode once across its arguments, so `.` reports what the entries did not, and the figures add
+  up to the total (a test pins that, because the whole design rests on it). The list is a file in
+  the worker's temporary directory, and `dir` is `du`'s working directory, so the names in it are
+  relative.
+
+  **A path that crosses a link is dropped before `du` sees it**, and what it holds is counted in
+  `rest`: each component is `lstat`ed in the copy, every one before the last must be a real
+  directory, and a folder's last must be one too — `du` is told not to follow a link
+  (`-P`), but a trailing slash on a link would, which is why it is never given one. The folders are
+  the #{@max_folders} largest, largest first; the rest are `more`, and the loose files one total
+  (`loose`), so a project that ignores files one by one cannot make the record huge.
+  """
+  @spec sizes(String.t(), [{String.t(), :dir | :file}], (String.t(), [String.t()], keyword() ->
+                                                           {String.t(), integer()})) ::
+          {:ok, non_neg_integer(), map()} | :error
+  def sizes(dir, entries, run \\ &System.cmd/3) do
+    kept = entries |> Enum.filter(fn {path, kind} -> inside?(dir, path, kind) end) |> Enum.uniq()
+
+    list =
+      Path.join(System.tmp_dir!(), "forge-du-" <> Base.url_encode64(:crypto.strong_rand_bytes(6)))
+
+    File.write!(list, Enum.map(kept ++ [{".", :dir}], fn {path, _kind} -> [path, 0] end))
+
+    try do
+      case run.("du", ["-s", "-x", "-P", "-B1", "-0", "--files0-from=" <> list],
+             cd: dir,
+             stderr_to_stdout: false
+           ) do
+        {out, status} when status in [0, 1] ->
+          {total, folders} = measured(out, kept)
+          {:ok, total, folders}
+
+        _failed ->
+          :error
+      end
+    after
+      File.rm(list)
+    end
+  rescue
+    # Anything: a temporary directory that is full or gone raises `File.Error`, and a sizing that
+    # fails is no sizing (the keep goes on with the copy's total and no folders), never a command
+    # that failed after its copy was in place.
+    _error -> :error
+  end
+
+  # `{:ok, total, folders}` from du's records: `<bytes>\t<name>` each ended by a NUL. By name and
+  # not by position, because an argument inside an earlier one is counted there and left out.
+  defp measured(out, kept) do
+    bytes =
+      for record <- String.split(out, <<0>>, trim: true), into: %{} do
+        [size, name] = String.split(record, "\t", parts: 2)
+        {name, first_number(size)}
+      end
+
+    sized = for {path, kind} <- kept, do: {path, kind, Map.get(bytes, path, 0)}
+    {folders, loose} = Enum.split_with(sized, fn {_path, kind, _bytes} -> kind == :dir end)
+    {shown, more} = folders |> Enum.sort_by(&elem(&1, 2), :desc) |> Enum.split(@max_folders)
+
+    total = bytes |> Map.values() |> Enum.sum()
+
+    {total,
+     %{
+       "folders" => Enum.map(shown, fn {path, _kind, size} -> named(path, size) end),
+       "more" => counted(more),
+       "loose" => counted(loose),
+       "rest" => Map.get(bytes, ".", 0)
+     }}
+  end
+
+  defp counted(entries),
+    do: %{"count" => length(entries), "bytes" => entries |> Enum.map(&elem(&1, 2)) |> Enum.sum()}
+
+  defp named(path, size) do
+    if String.valid?(path),
+      do: %{"path" => path, "bytes" => size},
+      else: %{"path_base64" => Base.encode64(path), "bytes" => size}
+  end
+
+  # Every component before the last is a directory and not a link, and the last exists: the same
+  # resolution the kernel then does for `du`, and not a string check in front of it. Nothing writes
+  # into a kept copy, so nothing changes between this and the walk (`CLAUDE.md` § Rules).
+  defp inside?(dir, path, kind) do
+    parts = Path.split(path)
+
+    path != "" and Path.type(path) == :relative and ".." not in parts and "." not in parts and
+      not String.contains?(path, <<0>>) and walk(dir, parts, kind)
+  end
+
+  defp walk(_dir, [], _kind), do: true
+
+  # A folder's last component is a real directory too, and a file's is anything that is there.
+  defp walk(dir, [last], kind) do
+    case {File.lstat(Path.join(dir, last)), kind} do
+      {{:ok, %File.Stat{type: :directory}}, _kind} -> true
+      {{:ok, _stat}, :file} -> true
+      _missing_or_not_a_folder -> false
+    end
+  end
+
+  defp walk(dir, [part | rest], kind) do
+    next = Path.join(dir, part)
+
+    case File.lstat(next) do
+      {:ok, %File.Stat{type: :directory}} -> walk(next, rest, kind)
+      _link_or_missing -> false
+    end
+  end
+
   @doc "What `size/2` runs `du` with. A link is not followed, and no mount is entered."
   @spec argv(String.t()) :: [String.t()]
   def argv(path), do: ["-s", "-x", "-P", "-B1", "--", path]
@@ -116,7 +234,8 @@ defmodule ForgeWorker.Disk do
       "nix_store" => size(store, run),
       "volumes" =>
         size_each(Path.join([root, "volumes", "ticket"]), run) +
-          size_each(Path.join([root, "volumes", "command"]), run),
+          size_each(Path.join([root, "volumes", "command"]), run) +
+          size_each(Path.join([root, "volumes", "held"]), run),
       "seeds" => size_each(Path.join([root, "volumes", "seed"]), run),
       "jobs" => size(Path.join(root, "jobs"), run)
     }

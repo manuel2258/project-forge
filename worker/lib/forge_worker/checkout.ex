@@ -30,6 +30,8 @@ defmodule ForgeWorker.Checkout do
   See `docs/design/git-hosting.md`.
   """
 
+  alias ForgeWorker.Job.Steps
+
   require Logger
 
   # The filters are the ones `git lfs install` writes, on the command line so that a checkout whose
@@ -546,13 +548,49 @@ defmodule ForgeWorker.Checkout do
   """
   @spec detach(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
   def detach(dir, sha, opts) do
-    if Regex.match?(~r/\A[0-9a-f]{40}\z/, sha) do
-      with {:ok, _out} <- git(dir, ["checkout", "--quiet", "--detach", sha], opts),
-           {:ok, _out} <- git(dir, ["reset", "--quiet", "--hard", sha], opts) do
-        :ok
-      end
-    else
-      {:error, {:not_a_commit, sha}}
+    if Regex.match?(~r/\A[0-9a-f]{40}\z/, sha),
+      do: timed(opts, "reset", fn -> checkout_detached(dir, sha, opts) end),
+      else: {:error, {:not_a_commit, sha}}
+  end
+
+  defp checkout_detached(dir, sha, opts) do
+    with {:ok, _out} <- git(dir, ["checkout", "--quiet", "--detach", sha], opts),
+         {:ok, _out} <- git(dir, ["reset", "--quiet", "--hard", sha], opts) do
+      :ok
+    end
+  end
+
+  @doc """
+  What git ignores in the checkout, at the topmost level it does: `{:ok, [{path, :dir | :file}]}`,
+  each path relative to `dir` with a folder's trailing slash taken off and said as `:dir`
+  (`docs/design/worker-tier.md` § Looking into a copy, folder sizes at keep).
+
+  **`status --porcelain=v1 --ignored=matching --untracked-files=all -z`**, keeping the `!!` records:
+  it lists `target/` and `platform/_build/` as folders and a loose `src/m.o` as a file. The
+  traditional mode would name `platform/` for a folder holding one ignored directory among tracked
+  files, which is not where the gigabytes are. `as` is the job's user, because git never runs as
+  root in a tree a job wrote; call this before the tree is handed back. `--no-optional-locks` keeps
+  it from writing the index.
+  """
+  @spec ignored(String.t(), ForgeWorker.Slice.as()) ::
+          {:ok, [{String.t(), :dir | :file}]} | {:error, term()}
+  def ignored(dir, as) do
+    args = [
+      "--no-optional-locks",
+      "status",
+      "--porcelain=v1",
+      "--ignored=matching",
+      "--untracked-files=all",
+      "-z"
+    ]
+
+    with {:ok, out} <- git(dir, args, as: as) do
+      {:ok,
+       for "!! " <> path <- String.split(out, <<0>>, trim: true), path != "" do
+         if String.ends_with?(path, "/"),
+           do: {String.trim_trailing(path, "/"), :dir},
+           else: {path, :file}
+       end}
     end
   end
 
@@ -579,24 +617,30 @@ defmodule ForgeWorker.Checkout do
 
     args = ["clone", "--quiet", "--branch", branch, "--single-branch", url, dir]
 
-    with {:ok, _out} <- git(Path.dirname(dir), args, opts),
+    with {:ok, _out} <- timed(opts, "fetch", fn -> git(Path.dirname(dir), args, opts) end),
          :ok <- identity(dir, opts),
          :ok <- configure(dir, opts),
          :ok <- set_lease(dir, branch, "HEAD", opts) do
-      fetch_default(dir, opts)
+      timed(opts, "fetch", fn -> fetch_default(dir, opts) end)
     end
   end
+
+  # `opts[:steps]` (`ForgeWorker.Job.Steps`) times what a command's run spends here: the fetches
+  # under `fetch` and the checkout, reset and clean under `reset`. Nothing for a job that passes
+  # none, which is every agent and conversation.
+  defp timed(opts, name, fun), do: Steps.time(Keyword.get(opts, :steps), name, fun)
 
   defp refresh(dir, opts) do
     branch = Keyword.fetch!(opts, :branch)
 
-    with {:ok, _out} <- git(dir, ["fetch", "--quiet", "origin", branch], opts),
+    with {:ok, _out} <-
+           timed(opts, "fetch", fn -> git(dir, ["fetch", "--quiet", "origin", branch], opts) end),
          :ok <- identity(dir, opts),
          :ok <- configure(dir, opts),
-         :ok <- reset_unless_resuming(dir, branch, opts),
+         :ok <- timed(opts, "reset", fn -> reset_unless_resuming(dir, branch, opts) end),
          :ok <- lease_fetched(dir, branch, opts) do
       # Last, because it writes FETCH_HEAD too, and the reset is to the branch's.
-      fetch_default(dir, opts)
+      timed(opts, "fetch", fn -> fetch_default(dir, opts) end)
     end
   end
 

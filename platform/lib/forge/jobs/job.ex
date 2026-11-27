@@ -74,6 +74,8 @@ defmodule Forge.Jobs.Job do
     field :warm_kept, :boolean
     field :warm_unkept, :string
     field :warm_size, :integer
+    # The sizes of a kept copy's ignored folders (`ForgeCore.WarmBuild.folders/1`), or nil.
+    field :warm_folders, :map
 
     # The command that left the copy this one started from.
     belongs_to :warm_from, __MODULE__
@@ -225,7 +227,8 @@ defmodule Forge.Jobs.Job do
       :warm_from_id,
       :warm_kept,
       :warm_unkept,
-      :warm_size
+      :warm_size,
+      :warm_folders
     ])
     |> validate_required([:status])
     |> validate_number(:turns, greater_than_or_equal_to: 0)

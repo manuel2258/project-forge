@@ -31,12 +31,23 @@ defmodule Forge.WarmBuilds do
     * `:worker` - the `%Forge.Workers.Worker{}` it is on (never a destroyed one)
     * `:size` - bytes, or nil when the worker did not say
     * `:kept_at` - when the keeping command finished (`job.finished_at`)
+
+  `copies/1` and `copy/2` (the ones a person may look into) add what a page draws: `:folders` (the
+  saved sizes of its ignored folders, `ForgeCore.WarmBuild.folders/1`'s shape, or nil), `:next?`
+  (the copy the next command starts from), `:cleared?` (kept under an epoch the ticket has left
+  behind), `:command`, `:args` and `:commit` (what ran, from the job's spec).
   """
   @type copy :: %{
-          job: Job.t(),
-          worker: Worker.t(),
-          size: non_neg_integer() | nil,
-          kept_at: DateTime.t() | nil
+          required(:job) => Job.t(),
+          required(:worker) => Worker.t(),
+          required(:size) => non_neg_integer() | nil,
+          required(:kept_at) => DateTime.t() | nil,
+          optional(:folders) => map() | nil,
+          optional(:next?) => boolean(),
+          optional(:cleared?) => boolean(),
+          optional(:command) => String.t() | nil,
+          optional(:args) => [String.t()],
+          optional(:commit) => String.t() | nil
         }
 
   @doc """
@@ -83,16 +94,167 @@ defmodule Forge.WarmBuilds do
   # Any command of the ticket there touches the copy, used or not, so it is the last of them that
   # the two days run from.
   defp fresh?(ticket_id, worker_id, now) do
-    last =
-      Repo.one(
-        from j in Job,
-          where: j.ticket_id == ^ticket_id and j.kind == :command and j.worker_id == ^worker_id,
-          select: type(max(coalesce(j.finished_at, j.started_at)), :utc_datetime)
-      )
+    case last_command_at(ticket_id, worker_id) do
+      nil -> false
+      last -> DateTime.diff(now, last, :millisecond) < retention_ms()
+    end
+  end
 
-    last != nil and
-      DateTime.diff(now, last, :millisecond) <
-        Forge.Jobs.config(:warm_retention_ms, :timer.hours(48))
+  defp last_command_at(ticket_id, worker_id) do
+    Repo.one(
+      from j in Job,
+        where: j.ticket_id == ^ticket_id and j.kind == :command and j.worker_id == ^worker_id,
+        select: type(max(coalesce(j.finished_at, j.started_at)), :utc_datetime)
+    )
+  end
+
+  defp retention_ms, do: Forge.Jobs.config(:warm_retention_ms, :timer.hours(48))
+
+  @doc """
+  Every copy of the ticket still kept on a machine that a person may look into
+  (`docs/design/worker-tier.md` § Looking into a copy): for each machine that is not destroyed, the
+  ticket's latest command that kept a build there, **in any epoch** — a cleared copy is still on
+  its disk, and is what a diagnosis compares against — while the ticket's last command there is
+  within the retention. The copy `current/1` names comes first and is marked `:next?`; the rest are
+  newest first. See `t:copy/0`.
+  """
+  @spec copies(Ticket.t()) :: [copy()]
+  def copies(%Ticket{id: id} = ticket) do
+    now = DateTime.utc_now()
+    next = current(ticket)
+
+    from(j in Job,
+      where:
+        j.ticket_id == ^id and j.kind == :command and j.warm_kept == true and
+          not is_nil(j.worker_id),
+      order_by: [desc: j.finished_at, desc: j.inserted_at]
+    )
+    |> Repo.all()
+    |> Enum.uniq_by(& &1.worker_id)
+    |> Enum.flat_map(fn job ->
+      worker = Repo.get(Worker, job.worker_id)
+
+      if worker && worker.status != :destroyed && fresh?(id, job.worker_id, now),
+        do: [explorable(ticket, job, worker, next)],
+        else: []
+    end)
+    |> Enum.sort_by(&{not &1.next?, -DateTime.to_unix(&1.kept_at || ~U[1970-01-01 00:00:00Z])})
+  end
+
+  @doc """
+  One copy of this ticket by the id of the command that kept it, or `:error`: any kept command of
+  **this ticket**, so a copy a later command replaced but the machine still holds (it is held while
+  someone looks, `ForgeCore.Explore.hold_ms/0`) can be reached, and never one of another ticket or
+  project, which answers as one that does not exist. `:error` too for a machine that is destroyed.
+  """
+  @spec copy(Ticket.t(), term()) :: {:ok, copy()} | :error
+  def copy(%Ticket{id: id} = ticket, job_id) when is_binary(job_id) do
+    with {:ok, uuid} <- Ecto.UUID.cast(job_id),
+         %Job{worker_id: worker_id} = job when is_binary(worker_id) <-
+           Repo.one(
+             from j in Job,
+               where:
+                 j.id == ^uuid and j.ticket_id == ^id and j.kind == :command and
+                   j.warm_kept == true
+           ),
+         %Worker{status: status} = worker when status != :destroyed <-
+           Repo.get(Worker, worker_id) do
+      {:ok, explorable(ticket, job, worker, current(ticket))}
+    else
+      _not_a_copy_of_this_ticket -> :error
+    end
+  end
+
+  def copy(%Ticket{}, _job_id), do: :error
+
+  @doc """
+  The command of this ticket that kept a build, by id, whether or not its copy is explorable now: for
+  saying why a copy is gone. Nil for anything else — a command of another ticket included.
+  """
+  @spec kept_command(Ticket.t(), term()) :: Job.t() | nil
+  def kept_command(%Ticket{id: id}, job_id) when is_binary(job_id) do
+    case Ecto.UUID.cast(job_id) do
+      {:ok, uuid} ->
+        Repo.one(
+          from j in Job,
+            where:
+              j.id == ^uuid and j.ticket_id == ^id and j.kind == :command and j.warm_kept == true
+        )
+
+      :error ->
+        nil
+    end
+  end
+
+  def kept_command(%Ticket{}, _job_id), do: nil
+
+  defp explorable(ticket, job, worker, next) do
+    command = (job.spec || %{})["command"] || %{}
+    job_id = job.id
+
+    %{
+      job: job,
+      worker: worker,
+      size: job.warm_size,
+      folders: job.warm_folders,
+      kept_at: job.finished_at,
+      next?: match?(%{job: %Job{id: ^job_id}}, next),
+      cleared?: job.warm_epoch != ticket.warm_epoch,
+      command: command["name"],
+      args: command["args"] || [],
+      commit: command["at"]
+    }
+  end
+
+  @doc """
+  Why a copy is not on its machine, from the platform's own rows: `:replaced` when a later command of
+  the ticket kept a build there (`replaced_by` is that command, the first to), `:swept` when the
+  ticket's last command there is past the retention, `:unknown` for no more than that. `copy` is a
+  `t:copy/0` or the id of the command that kept it.
+  """
+  @spec gone(Ticket.t(), copy() | String.t(), String.t()) ::
+          %{why: :replaced | :swept | :unknown, replaced_by: Job.t() | nil}
+  def gone(%Ticket{id: id}, copy, worker_id) do
+    job_id = if is_map(copy), do: copy.job.id, else: copy
+
+    with {:ok, uuid} <- Ecto.UUID.cast(job_id),
+         %Job{finished_at: %DateTime{} = kept} <-
+           Repo.one(from j in Job, where: j.id == ^uuid and j.ticket_id == ^id) do
+      why(id, worker_id, later_command(id, worker_id, kept))
+    else
+      _unknown_job -> %{why: :unknown, replaced_by: nil}
+    end
+  end
+
+  defp later_command(ticket_id, worker_id, kept) do
+    Repo.one(
+      from j in Job,
+        where:
+          j.ticket_id == ^ticket_id and j.kind == :command and j.warm_kept == true and
+            j.worker_id == ^worker_id and j.finished_at > ^kept,
+        order_by: [asc: j.finished_at],
+        limit: 1
+    )
+  end
+
+  defp why(_ticket_id, _worker_id, %Job{} = later), do: %{why: :replaced, replaced_by: later}
+
+  defp why(ticket_id, worker_id, nil) do
+    if fresh?(ticket_id, worker_id, DateTime.utc_now()),
+      do: %{why: :unknown, replaced_by: nil},
+      else: %{why: :swept, replaced_by: nil}
+  end
+
+  @doc """
+  Until when a copy on `worker_id` can be explored once the machine is back: the retention after the
+  ticket's last command there (the worker's sweep counts from it), or nil when it ran none.
+  """
+  @spec explorable_until(Ticket.t(), String.t()) :: DateTime.t() | nil
+  def explorable_until(%Ticket{id: id}, worker_id) do
+    case last_command_at(id, worker_id) do
+      nil -> nil
+      last -> DateTime.add(last, retention_ms(), :millisecond)
+    end
   end
 
   @doc """
@@ -131,7 +293,8 @@ defmodule Forge.WarmBuilds do
           warm_from_id: same_ticket_command(job, facts["from"]),
           warm_kept: facts["kept"],
           warm_unkept: facts["unkept"],
-          warm_size: facts["size"]
+          warm_size: facts["size"],
+          warm_folders: facts["folders"]
         }
     end
   end

@@ -123,6 +123,9 @@ it was reported in (git's, the store's, the filesystem's):
 | `volume.unused` | warning | a seed or ticket volume that would not become the job's worktree, so it started colder |
 | `volume.unkept` | warning | a finished worktree it could not keep as the ticket's template, so the next job starts colder |
 | `copy.unused` | warning | a ticket's command copy that would not become a command's worktree (it would not snapshot, or its owner or its checkout would not be made right), so the command started from the next source and colder |
+| `times.unkept` | warning | a command's line times that were not kept, because masking its log joined lines a secret's value spanned and the masked log no longer had a line for each time, or because uploading the times failed; the live lines were drawn, and the page shows the finished log without times |
+| `hold.unreleased` | warning | a ticket's command copy a hold moved aside (`volumes/held/…`) that could not be deleted when its hold lapsed, so it stays until the next minute's try and the machine's disk report counts it |
+| `copy.unsized` | warning | the folders git ignores in a command's kept build could not be listed, so the keep saved its total size and no sizes of its folders |
 | `copy.unkept` | warning | a command's finished tree it could not keep as the ticket's command copy, so the ticket keeps the copy it had and its next command starts colder; its log's last line says `failed` |
 | `worktree.undeleted` | warning | a finished job's worktree it could not remove |
 | `event.dropped` | warning | an event of the job's it could not hand on — said once per run, since a sink that fails once fails for every event after it |

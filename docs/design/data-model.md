@@ -386,3 +386,13 @@ machine and in no table.
 A partial index on `jobs (ticket_id, finished_at) WHERE warm_kept` is what finds a ticket's latest
 copy. Every word is checked against `ForgeCore.WarmBuild` before it is stored, and a value a
 worker sends that is not in its lists is dropped rather than carried.
+
+A command's **folder sizes** (ticket 84, `worker-tier.md` § Looking into a copy) are one more column,
+and the migration that adds it is the one that makes this change breaking:
+
+| Column | Is |
+|---|---|
+| `jobs.warm_folders` | jsonb, null unless the command kept its build and the worker reported it: `{"folders": [{"path" or "path_base64", "bytes"}], "more": {"count", "bytes"}, "loose": {"count", "bytes"}, "rest": bytes}`, at most 50 folders, largest first (`ForgeCore.WarmBuild.folders/1`, which cleans what a worker sends). The topmost ignored folders of the kept tree, the ignored files that are in none, and everything else. `warm_size` stays the total. |
+
+A command's steps are `command.step` events and its line times a blob named in `job.finished`'s
+payload (`times`); neither has a column.

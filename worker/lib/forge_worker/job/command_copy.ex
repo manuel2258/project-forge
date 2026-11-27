@@ -22,6 +22,16 @@ defmodule ForgeWorker.Job.CommandCopy do
   renames the sibling into place and writes the marker last, so a crash at any step leaves the old
   copy or none.
 
+  **A copy someone is looking at is held** (`docs/design/worker-tier.md` § Looking into a copy,
+  ticket 84). Opening a copy (`open/3`) writes `volumes/hold/<ticket>.<job>`, whose mtime is the last
+  action anyone took on it, and the copy is held while that is under ten minutes old
+  (`ForgeCore.Explore.hold_ms/0`, `:hold_ms`). **A keep that replaces a held copy moves it aside** to
+  `volumes/held/<ticket>.<job>` — one rename, on btrfs and on a plain directory alike, and outside
+  `volumes/command/*`, which the sweep's wildcard would take for a ticket — and the person goes on
+  looking at the copy they opened, while the ticket's next command starts from the new one. **The
+  two-day sweep leaves a held copy**, and `release_holds/1` removes a moved-aside copy once its hold
+  has lapsed. Holds are files, so they survive a restart of the worker.
+
   Everything here is best effort in the caller's hands: a copy that cannot be kept or used costs
   the ticket's next command a colder start and never fails a command.
   """
@@ -114,16 +124,28 @@ defmodule ForgeWorker.Job.CommandCopy do
   end
 
   @doc """
-  Makes `worktree` the ticket's copy, replacing the one there, under the lock; `{:ok, bytes}` or
-  `{:error, why}`. The old copy and its marker are untouched when the first step fails, which is
-  the one that fails on a machine that cannot snapshot.
+  Makes `worktree` the ticket's copy, replacing the one there, under the lock; `{:ok, bytes,
+  folders}` or `{:error, why}`. The old copy and its marker are untouched when the first step fails,
+  which is the one that fails on a machine that cannot snapshot.
+
+  `ignored` is what git ignores in the tree (`Checkout.ignored/2`), listed before the tree was
+  handed back: with it the tree is sized by one walk, outside the lock, that also says how big each
+  ignored folder is (`Disk.sizes/3`), and `folders` is `ForgeCore.WarmBuild.folders/1`'s shape.
+  Without it (`nil`: the listing failed) `folders` is nil and the size is the whole tree's.
   """
-  @spec keep(String.t(), key(), String.t(), map()) :: {:ok, non_neg_integer()} | {:error, term()}
-  def keep(root, key, worktree, facts) do
-    locked(key, fn -> replace(root, key, worktree, facts) end)
+  @spec keep(String.t(), key(), String.t(), map(), [{String.t(), :dir | :file}] | nil) ::
+          {:ok, non_neg_integer(), map() | nil} | {:error, term()}
+  def keep(root, key, worktree, facts, ignored \\ nil) do
+    # **Sized before the lock is taken**, from the tree the copy is about to be snapshotted from: a
+    # walk of a large `target/` takes minutes, and every `open/3` waits for the same lock, so sizing
+    # inside it left a person looking at the old copy with an *Asking…* that never answered. The
+    # copy is the tree, byte for byte, so the figures are the same ones.
+    sizer = Application.get_env(:forge_worker, :copy_sizer, &sized/2)
+    sizes = sizer.(worktree, ignored)
+    locked(key, fn -> replace(root, key, worktree, facts, sizes) end)
   end
 
-  defp replace(root, key, worktree, facts) do
+  defp replace(root, key, worktree, facts, {size, folders}) do
     volume = Volume.impl()
     copy = path(root, key)
     marker = marker_path(root, key)
@@ -134,16 +156,59 @@ defmodule ForgeWorker.Job.CommandCopy do
          # The marker goes before the old copy so that a crash between the two leaves no copy and
          # never a marker over another tree; no test stages a crash between steps, so the order
          # is not covered. Nor is the `touch` below, which no test asserts.
+         old = marked_job(marker),
          :ok <- remove(marker),
-         :ok <- volume.delete(copy),
+         :ok <- retire(root, key, copy, old),
          :ok <- File.rename(sibling, copy),
          :ok <- write_marker(marker, Map.put(facts, "epoch", key.epoch)) do
       File.touch(copy)
-      {:ok, Disk.size(copy)}
+      {:ok, size, folders}
     else
       {:error, reason} ->
         volume.delete(sibling)
         {:error, reason}
+    end
+  end
+
+  defp sized(copy, nil), do: {Disk.size(copy), nil}
+
+  defp sized(copy, ignored) do
+    case Disk.sizes(copy, ignored) do
+      {:ok, total, folders} -> {total, folders}
+      :error -> {Disk.size(copy), nil}
+    end
+  end
+
+  # The job that kept the copy the marker describes: the name its hold and its moved-aside copy
+  # go by.
+  defp marked_job(marker) do
+    with {:ok, text} <- File.read(marker),
+         {:ok, %{"job_id" => job}} when is_binary(job) <- Jason.decode(text) do
+      job
+    else
+      _no_marker -> nil
+    end
+  end
+
+  # A copy someone is looking at is moved aside and not deleted: the keep that replaces it is not
+  # the reader's to wait for, and the reader is not to lose what they opened. Anything that stops
+  # the move is the old way, the deletion, which is a colder world for the reader and never a
+  # failed keep.
+  defp retire(root, key, copy, old) do
+    if is_binary(old) and uuid?(old) and File.dir?(copy) and held?(root, key.ticket, old) do
+      aside = held_path(root, key.ticket, old)
+      File.mkdir_p(Path.dirname(aside))
+
+      case File.rename(copy, aside) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("could not move held copy #{copy} aside: #{inspect(reason)}")
+          Volume.impl().delete(copy)
+      end
+    else
+      Volume.impl().delete(copy)
     end
   end
 
@@ -175,6 +240,154 @@ defmodule ForgeWorker.Job.CommandCopy do
     with :ok <- File.write(temporary, Jason.encode!(facts)), do: File.rename(temporary, marker)
   end
 
+  # -- a copy someone is looking at ---------------------------------------------------------------
+
+  @doc "Where a held copy that a keep replaced is moved to."
+  @spec held_path(String.t(), String.t(), String.t()) :: String.t()
+  def held_path(root, ticket, job), do: Path.join([root, "volumes", "held", ticket <> "." <> job])
+
+  @doc "The file whose mtime is the last action on a copy."
+  @spec hold_path(String.t(), String.t(), String.t()) :: String.t()
+  def hold_path(root, ticket, job), do: Path.join([root, "volumes", "hold", ticket <> "." <> job])
+
+  defp hold_ms, do: Application.get_env(:forge_worker, :hold_ms, ForgeCore.Explore.hold_ms())
+
+  @doc """
+  Whether the copy the job `job` kept for `ticket` is held: someone took an action on it less than
+  ten minutes ago (`:hold_ms`). Not a copy that was never opened.
+  """
+  @spec held?(String.t(), String.t(), String.t()) :: boolean()
+  def held?(root, ticket, job) do
+    cutoff = System.os_time(:second) - div(hold_ms(), 1000)
+
+    match?(
+      {:ok, %File.Stat{mtime: mtime}} when mtime >= cutoff,
+      File.stat(hold_path(root, ticket, job), time: :posix)
+    )
+  end
+
+  @doc """
+  The directory of the copy `job` kept for `ticket` — the ticket's current copy, or one a keep moved
+  aside — and the hold on it taken or renewed, in one step under the ticket's lock. `:error` when
+  the machine has no such copy: the marker names another job, or the directory is gone.
+
+  **Both ids are matched as UUIDs before either becomes a path**, and the copy found is the
+  ticket's by construction: `ticket` is the directory's name. A copy another epoch left (a cleared
+  one) is found too; it is looked at and never used.
+  """
+  @spec open(String.t(), String.t(), String.t()) :: {:ok, String.t()} | :error
+  def open(root, ticket, job) do
+    if uuid?(ticket) and uuid?(job),
+      do: open_held(root, String.downcase(ticket), String.downcase(job)),
+      else: :error
+  end
+
+  defp open_held(root, ticket, job) do
+    locked(%{ticket: ticket}, fn ->
+      with {:ok, dir} <- find(root, ticket, job) do
+        touch_hold(root, ticket, job)
+        {:ok, dir}
+      end
+    end)
+  end
+
+  defp find(root, ticket, job) do
+    current = path(root, %{ticket: ticket})
+    aside = held_path(root, ticket, job)
+
+    cond do
+      marked_job(current <> ".json") == job and File.dir?(current) -> {:ok, current}
+      File.dir?(aside) -> {:ok, aside}
+      true -> :error
+    end
+  end
+
+  @doc """
+  Says someone took an action on the copy now: a download still running does this every minute, so
+  a 60 GB download that outlasts ten minutes is not cut off. Does not take the ticket's lock, which
+  a keep holds while it sizes a copy.
+  """
+  @spec touch_hold(String.t(), String.t(), String.t()) :: :ok
+  def touch_hold(root, ticket, job) do
+    hold = hold_path(root, ticket, job)
+    File.mkdir_p(Path.dirname(hold))
+
+    case File.touch(hold) do
+      :ok -> :ok
+      {:error, reason} -> Logger.warning("could not hold #{hold}: #{inspect(reason)}")
+    end
+  end
+
+  @doc """
+  Removes the copies a keep moved aside whose hold has lapsed, and the holds that have, and returns
+  the bytes freed. Every minute (`ForgeWorker.Explore.Holds`) and at each end-of-job sweep.
+  """
+  @spec release_holds(String.t()) :: non_neg_integer()
+  def release_holds(root) do
+    freed =
+      [root, "volumes", "held", "*"]
+      |> Path.join()
+      |> Path.wildcard()
+      |> Enum.filter(&File.dir?/1)
+      |> Enum.map(&release(root, &1))
+      |> Enum.sum()
+
+    [root, "volumes", "hold", "*"]
+    |> Path.join()
+    |> Path.wildcard()
+    |> Enum.each(&drop_lapsed_hold/1)
+
+    freed
+  end
+
+  defp release(root, aside) do
+    with [ticket, job] <- aside |> Path.basename() |> String.split(".", parts: 2),
+         true <- uuid?(ticket) and uuid?(job) do
+      # Looked at again under the lock: an explore may have renewed the hold since the listing.
+      locked(%{ticket: ticket}, fn -> release_unless_held(root, aside, ticket, job) end)
+    else
+      _not_one_of_ours -> 0
+    end
+  end
+
+  defp release_unless_held(root, aside, ticket, job),
+    do: if(held?(root, ticket, job), do: 0, else: delete_aside(root, aside, ticket, job))
+
+  defp delete_aside(root, aside, ticket, job) do
+    size = Disk.size(aside)
+
+    case Volume.impl().delete(aside) do
+      :ok ->
+        File.rm(hold_path(root, ticket, job))
+        Logger.info("released held command copy #{Path.basename(aside)}")
+        size
+
+      {:error, reason} ->
+        Log.line(
+          "hold.unreleased",
+          :warning,
+          "could not remove the held command copy #{Path.basename(aside)}, so it stays and is tried " <>
+            "again: #{inspect(reason)}"
+        )
+
+        0
+    end
+  end
+
+  # A lapsed hold is only a file: the copy it was for has been released above, or is current and
+  # held by no one. One whose copy could not be deleted is released again by the next call, which
+  # finds no hold for it.
+  defp drop_lapsed_hold(hold) do
+    cutoff = System.os_time(:second) - div(hold_ms(), 1000)
+
+    with {:ok, %File.Stat{mtime: mtime}} <- File.stat(hold, time: :posix),
+         true <- mtime < cutoff do
+      File.rm(hold)
+    else
+      _kept -> :ok
+    end
+  end
+
   @doc """
   Says the ticket ran a command here, so the sweep counts two days from now: the copy's mtime. A
   snapshot carries the mtime of the tree it came from, which says when its root last changed and
@@ -202,18 +415,18 @@ defmodule ForgeWorker.Job.CommandCopy do
     |> Path.join()
     |> Path.wildcard()
     |> Enum.filter(&File.dir?/1)
-    |> Enum.map(&remove_if_stale(&1, cutoff))
+    |> Enum.map(&remove_if_stale(root, &1, cutoff))
     |> Enum.sum()
   end
 
-  defp remove_if_stale(path, cutoff) do
+  defp remove_if_stale(root, path, cutoff) do
     with {:ok, %File.Stat{mtime: mtime}} <- File.stat(path, time: :posix),
          true <- mtime < cutoff do
       [ticket | _rest] = path |> Path.basename() |> String.split(".")
 
       # Looked at again under the lock: a keep may have replaced the copy between the stat above
       # and the lock, and a fresh copy is not this sweep's to free.
-      free = fn -> free_if_stale(path, cutoff) end
+      free = fn -> free_if_stale(root, path, cutoff) end
 
       # The lock and the re-check in `free/0` guard a race with a keep that replaces this copy between
       # the stat above and the delete. No test holds the ticket's lock around a sweep, so neither
@@ -225,10 +438,22 @@ defmodule ForgeWorker.Job.CommandCopy do
   end
 
   defp under_lock(ticket, fun) do
-    if Regex.match?(@uuid, ticket), do: locked(%{ticket: ticket}, fun), else: fun.()
+    if uuid?(ticket), do: locked(%{ticket: ticket}, fun), else: fun.()
   end
 
-  defp free_if_stale(path, cutoff), do: if(stale?(path, cutoff), do: free(path), else: 0)
+  defp uuid?(id), do: is_binary(id) and Regex.match?(@uuid, id)
+
+  # **A held copy is not stale**, whatever its age: someone is looking at it, and the sweep that
+  # takes it is the one that would cut a download off.
+  defp free_if_stale(root, path, cutoff),
+    do: if(stale?(path, cutoff) and not held_copy?(root, path), do: free(path), else: 0)
+
+  defp held_copy?(root, path) do
+    [ticket | _rest] = path |> Path.basename() |> String.split(".")
+    job = marked_job(path <> ".json")
+
+    is_binary(job) and uuid?(ticket) and uuid?(job) and held?(root, ticket, job)
+  end
 
   defp stale?(path, cutoff) do
     match?({:ok, %File.Stat{mtime: mtime}} when mtime < cutoff, File.stat(path, time: :posix))

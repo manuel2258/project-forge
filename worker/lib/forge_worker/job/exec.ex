@@ -115,6 +115,27 @@ defmodule ForgeWorker.Job.Exec do
 
   def memory_env(_slice_opts), do: []
 
+  # Says when the script's process began, to the millisecond, in a file only that process writes:
+  # the wall clock in milliseconds. `date` is coreutils' and `%3N` is GNU's; a machine without
+  # either leaves the file empty or not a number, and the devshell and the script unseparated, which
+  # the caller reads as unmeasured and never as a number.
+  @marker ~S(m="$1"; shift; date +%s%3N >"$m" 2>/dev/null; exec "$@")
+
+  @doc """
+  `executable` started by a shell that first writes the wall clock, in milliseconds, to `marker`
+  and then `exec`s it. Put innermost — inside `nix develop`, after the secrets loader — so that the
+  time it writes is when the script itself began, which is how a command's devshell is told from
+  its script (`ForgeWorker.Job.Command`, `docs/design/worker-tier.md` § Looking into a copy). The
+  job can only write its own marker, so a script can only falsify its own split.
+  """
+  @spec mark_start(String.t(), [String.t()], String.t()) :: {String.t(), [String.t()]}
+  def mark_start(executable, args, marker),
+    do: {"/bin/sh", ["-c", @marker, "forge-mark", marker, executable | args]}
+
+  @doc "Whether `nix/4` will wrap the process: the spec names an environment and the machine has nix."
+  @spec nix?(String.t() | nil, boolean()) :: boolean()
+  def nix?(env, nix), do: nix == true and is_binary(env)
+
   @doc "The command that runs `executable` inside the project's `env`, when asked to and named."
   @spec nix(String.t(), [String.t()], String.t() | nil, boolean()) :: {String.t(), [String.t()]}
   def nix(executable, args, env, true) when is_binary(env),

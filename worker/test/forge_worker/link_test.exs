@@ -1564,6 +1564,187 @@ defmodule ForgeWorker.LinkTest do
       assert_push(@topic, "ready", %{})
     end
 
+    # `docs/design/worker-tier.md` § Looking into a copy: every step around the script, timed.
+    test "reports each step of the run in order, the remainder last, and what did not happen as skipped",
+         context do
+      %{client: client, origin: origin} = context
+      ready(context)
+
+      {first, _log} = run_command(client, origin |> command_assignment(@leaves) |> warm())
+
+      steps = first["steps"]
+      names = Enum.map(steps, & &1["name"])
+      assert names == Enum.filter(ForgeCore.CommandSteps.names(), &(&1 in names))
+      assert List.last(names) == "other"
+      assert ForgeCore.CommandSteps.sanitize(steps) == steps
+
+      by_name = Map.new(steps, &{&1["name"], &1})
+
+      # A clone has no snapshot to take, and a command run without an environment no devshell:
+      # neither is a step that took no time.
+      assert %{"skipped" => "no_source"} = by_name["snapshot"]
+      refute Map.has_key?(by_name["snapshot"], "ms")
+      assert %{"skipped" => "no_env"} = by_name["devshell"]
+
+      for name <- ~w(fetch own script ignored hand_back keep upload discard sweep other) do
+        assert is_integer(by_name[name]["ms"]), name
+      end
+
+      assert is_integer(by_name["other"]["at"])
+
+      second_job = origin |> command_assignment(@finds) |> warm()
+      {second, _log} = run_command(client, second_job)
+
+      assert %{"name" => "snapshot", "source" => "copy", "ms" => ms} =
+               Enum.find(second["steps"], &(&1["name"] == "snapshot"))
+
+      assert is_integer(ms)
+    end
+
+    test "a build that is not kept says so in its steps, and lists nothing", context do
+      %{client: client, origin: origin} = context
+      ready(context)
+
+      {result, _log} =
+        run_command(client, origin |> command_assignment(@leaves) |> warm(keep: [3]))
+
+      by_name = Map.new(result["steps"], &{&1["name"], &1})
+      assert %{"skipped" => "status"} = by_name["keep"]
+      assert %{"skipped" => "not_kept"} = by_name["ignored"]
+      assert %{"kept" => false, "unkept" => "status", "folders" => nil} = result["warm"]
+    end
+
+    test "a kept build says how big its ignored folders are, and they add up to its size",
+         context do
+      %{client: client, origin: origin} = context
+      ready(context)
+
+      {result, _log} = run_command(client, origin |> command_assignment(@leaves) |> warm())
+
+      assert %{"kept" => true, "size" => size, "folders" => folders} = result["warm"]
+      assert [%{"path" => "_build", "bytes" => bytes}] = folders["folders"]
+      assert bytes > 0
+
+      assert size ==
+               bytes + folders["more"]["bytes"] + folders["loose"]["bytes"] + folders["rest"]
+
+      assert ForgeCore.WarmBuild.folders(folders) == folders
+    end
+
+    test "the time of each line of the log is kept beside it, one for each line", context do
+      %{client: client, origin: origin} = context
+      ready(context)
+
+      job = origin |> command_assignment("#!/bin/sh\necho one\necho two\n") |> warm()
+
+      job =
+        put_in(job, ["store"], %{
+          "log_key" => "job/#{job["job_id"]}/log-1.txt",
+          "log_token" => "log-token",
+          "times_key" => "job/#{job["job_id"]}/times-1-x.txt",
+          "times_token" => "times-token"
+        })
+
+      {result, log} = run_command(client, job)
+      path = "/store/" <> job["store"]["times_key"]
+
+      assert_received {:uploaded, ^path, ["Bearer times-token"], _query, times}
+      assert result["times"] == job["store"]["times_key"]
+
+      lines = String.split(times, "\n", trim: true)
+      assert length(lines) == length(String.split(log, "\n", trim: true))
+      assert Enum.all?(lines, &match?({_ms, ""}, Integer.parse(&1)))
+      assert lines == Enum.sort_by(lines, &String.to_integer/1)
+    end
+
+    test "a secret that spans lines joins them in the log, so its times are not kept", context do
+      %{client: client, origin: origin} = context
+      ready(context)
+
+      job =
+        origin
+        |> command_assignment("#!/bin/sh\nprintf 'first\\nsecond\\nafter\\n'\n")
+        |> warm()
+
+      job =
+        job
+        |> put_in(["store", "times_key"], "job/#{job["job_id"]}/times-1-x.txt")
+        |> put_in(["store", "times_token"], "times-token")
+        |> Map.put("secrets", sealed_secrets(%{"TWO" => "first\nsecond"}, job["job_id"]).sealed)
+
+      {result, log} = run_command(client, job)
+
+      refute log =~ "first\nsecond"
+      assert log =~ "[secret TWO]"
+      assert result["times"] == nil
+      path = "/store/" <> job["store"]["times_key"]
+      refute_received {:uploaded, ^path, _auth, _query, _times}
+    end
+
+    test "a command's lines go to the platform as they are written, from the first",
+         context do
+      %{client: client, origin: origin} = context
+      Application.put_env(:forge_worker, :lines_stream, true)
+      on_exit(fn -> Application.put_env(:forge_worker, :lines_stream, false) end)
+      ready(context)
+
+      job = origin |> command_assignment("#!/bin/sh\necho one\necho two\n") |> warm()
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id}, seen} = take_push("result")
+
+      batches = for {"lines", %{"job_id" => ^job_id} = batch} <- seen, do: batch
+      assert [%{"from" => 0} | _] = batches
+
+      texts = batches |> Enum.flat_map(& &1["lines"]) |> Enum.map(fn [_ms, text] -> text end)
+      assert hd(texts) == "forge: started from a fresh clone"
+      assert Enum.slice(texts, 1, 2) == ["one", "two"]
+      assert List.last(texts) == "forge: kept this build as the ticket's warm build"
+    end
+
+    test "a command that failed before its script says where its time went", context do
+      %{client: client, origin: origin} = context
+      ready(context)
+
+      job = origin |> command_assignment("#!/bin/sh\n") |> warm()
+      job = put_in(job, ["spec", "command", "at"], String.duplicate("0", 40))
+      push(client, @topic, "assign", job)
+
+      {%{"steps" => steps}, _before} = take_push("failed")
+
+      names = Enum.map(steps, & &1["name"])
+      assert "fetch" in names
+      assert List.last(names) == "other"
+      assert ForgeCore.CommandSteps.sanitize(steps) == steps
+    end
+
+    test "an explore message is answered on the channel, as the machine that was asked",
+         context do
+      %{client: client} = context
+      ready(context)
+
+      push(client, @topic, "explore", %{
+        "ref" => "ref-1",
+        "op" => "list",
+        "ticket" => @warm_ticket,
+        "copy" => uuid(),
+        "path_b64" => ""
+      })
+
+      {reply, _before} = take_push("explored")
+      assert reply == %{"ref" => "ref-1", "error" => "no_copy"}
+    end
+
+    test "there are no times for a platform that sent no key for them", context do
+      %{client: client, origin: origin} = context
+      ready(context)
+
+      {result, _log} = run_command(client, origin |> command_assignment("#!/bin/sh\n") |> warm())
+
+      assert result["times"] == nil
+    end
+
     test "the next command finds the build, not the debris, and says where its tree came from",
          context do
       %{client: client, origin: origin, root: root} = context

@@ -13,7 +13,10 @@ defmodule ForgeCore.WorkerProtocol do
   **It moves only for a breaking change** — `worker-channel.md` § What needs a bump says which
   those are. An addition the other side may ignore is not one: a platform refuses a worker newer
   than itself, so a bump for an addition would turn away a snapshot built from a newer checkout
-  for a field its platform could simply have ignored.
+  for a field its platform could simply have ignored. **It also moves when the platform must know
+  what a machine can answer**: 18 is when a machine learned to be explored (`explore`), which the
+  platform asks only of a worker that says so; the minimum did not move, so every older machine
+  still takes every job (`worker-channel.md` § Protocol 18).
   """
 
   @path Path.join(__DIR__, "../../priv/worker_protocol")

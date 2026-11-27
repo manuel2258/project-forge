@@ -442,6 +442,19 @@ defmodule ForgeWeb.Api.FallbackController do
         "this version is a commit, not a file; its diff is GET /api/v1/tickets/:project/:number/review"
       )
 
+  # Looking into a ticket's command copy (`Forge.Explore.refusal/3`): a code of its own for each, the
+  # sentence for it, and what a client needs to act on it (`explorable_until`, `why`, `replaced_by`).
+  def call(conn, {:error, {:explore, code, extra}}) do
+    body = %{
+      reason: Atom.to_string(code),
+      detail: ForgeCore.Explore.sentence(code)
+    }
+
+    conn
+    |> put_status(explore_status(code))
+    |> json(%{error: Map.merge(body, extra)})
+  end
+
   def call(conn, {:error, {:bad_request, detail}}),
     do: error(conn, :bad_request, "bad_request", detail)
 
@@ -451,6 +464,16 @@ defmodule ForgeWeb.Api.FallbackController do
     Logger.error("api request failed: #{inspect(reason)}")
     error(conn, :internal_server_error, "internal", nil)
   end
+
+  defp explore_status(:machine_not_answering), do: :gateway_timeout
+  defp explore_status(:machine_not_connected), do: :service_unavailable
+  defp explore_status(:machine_outdated), do: :conflict
+  defp explore_status(:copy_gone), do: :not_found
+  defp explore_status(:path_refused), do: :bad_request
+  defp explore_status(:path_not_found), do: :not_found
+  defp explore_status(code) when code in [:not_a_folder, :not_a_file], do: :conflict
+  defp explore_status(:not_text), do: :unprocessable_entity
+  defp explore_status(_failed), do: :bad_gateway
 
   defp holder({:api, _id, name}), do: "the token #{name}"
   defp holder({:user, id}), do: "user #{id}"

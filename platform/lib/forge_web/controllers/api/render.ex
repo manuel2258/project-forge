@@ -120,7 +120,8 @@ defmodule ForgeWeb.Api.Render do
 
   # The ticket's warm build, as the ticket page draws it (`Forge.WarmBuilds`): null when no command
   # of its workflow keeps a build, otherwise `%{copy: null | %{...}}` — the copy the next command is
-  # sent to, which is the latest one only. Nothing of the copy itself leaves its machine.
+  # sent to, which is the latest one only. The copy itself is never stored here: its content passes
+  # through on request (`ForgeWeb.Api.BuildController`), and only to a member or a token.
   defp warm_build(%Ticket{} = t) do
     if Forge.WarmBuilds.declared?(t) do
       %{copy: t |> Forge.WarmBuilds.current() |> warm_copy()}
@@ -259,7 +260,9 @@ defmodule ForgeWeb.Api.Render do
   is what the worker reported of the ticket's warm build (`docs/design/worker-tier.md` § The
   command copy).
   """
-  def command(%Job{} = j) do
+  def command(%Job{} = j), do: command(j, Forge.Jobs.command_steps(j.id))
+
+  def command(%Job{} = j, steps) do
     command = (j.spec || %{})["command"] || %{}
 
     j
@@ -270,7 +273,23 @@ defmodule ForgeWeb.Api.Render do
       args: command["args"] || [],
       exit_status: j.exit_status
     })
+    |> Map.merge(steps(steps))
   end
+
+  @doc """
+  Commands as `command/2`, with every one's steps read in one query: a ticket with thirty commands
+  is one read of its step events and not thirty (`Forge.Jobs.Steps.read_many/1`).
+  """
+  def commands(jobs) do
+    steps = Forge.Jobs.Steps.read_many(Enum.map(jobs, & &1.id))
+    Enum.map(jobs, &command(&1, Map.fetch!(steps, &1.id)))
+  end
+
+  # A command's steps (`ForgeCore.CommandSteps`): each with its `name`, `at` (wall clock, ms) and `ms`,
+  # or `skipped` and why. Without any, `steps_unrecorded` says why: `release`, the machine's
+  # release predates step timings, or `before`, the command ran before forge recorded steps.
+  defp steps({:steps, steps}), do: %{steps: steps, steps_unrecorded: nil}
+  defp steps({:unrecorded, why}), do: %{steps: nil, steps_unrecorded: Atom.to_string(why)}
 
   # A command's warm build as it reported it (`docs/design/worker-tier.md` § The command copy), read
   # from the row with no lookups; null for a job that is not a command and for a command whose
@@ -283,7 +302,35 @@ defmodule ForgeWeb.Api.Render do
       from_job_id: j.warm_from_id,
       kept: j.warm_kept,
       unkept: j.warm_unkept,
-      size: j.warm_size
+      size: j.warm_size,
+      # The sizes of the folders git ignores in the kept copy, saved with the command
+      # (`ForgeCore.WarmBuild.folders/1`); null before a release that saved them.
+      folders: j.warm_folders
+    }
+  end
+
+  @doc """
+  A ticket's kept copies (`Forge.WarmBuilds.copies/1`), the next command's first: the command that
+  kept each with its arguments and commit, the machine, and the facts a person looks at first.
+  """
+  def copies(copies), do: Enum.map(copies, &copy/1)
+
+  def copy(copy) do
+    %{
+      job_id: copy.job.id,
+      command: copy.command,
+      args: copy.args,
+      commit: copy.commit,
+      kept_at: copy.kept_at,
+      size: copy.size,
+      folders: copy.folders,
+      next: copy.next?,
+      cleared: copy.cleared?,
+      machine: %{
+        id: copy.worker.id,
+        release: copy.worker.release,
+        protocol: copy.worker.protocol
+      }
     }
   end
 

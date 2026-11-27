@@ -635,6 +635,19 @@ which are best-effort.
 What changes for a node that is already running, where the change is in what the platform does
 with rows it already has. Newest first.
 
+- **A ticket's copies can be looked into, which is a migration and protocol 18 without a new
+  minimum** (`design/worker-tier.md` § Looking into a copy, ticket 84). `jobs.warm_folders`, one
+  jsonb column (`design/data-model.md`); the migration runs with the release and a rollback past it
+  drops the column. **The worker protocol moves to 18 and the minimum stays 4**
+  (`design/worker-channel.md` § Protocol 18): a machine on 14 to 17 still takes every job, records no
+  step events, shows no live lines and cannot be explored (the explorer says it needs updating), so
+  nothing about running a job needs the new release. **A proxy in front of the platform must not buffer
+  request bodies on `/worker-streams/` nor responses on `/tickets/*/builds/*/download` and
+  `/api/v1/tickets/*/builds/*/download`**: a download is streamed from the machine through the platform
+  to the browser and stored nowhere, and a proxy that buffers the worker's POST would store a 60 GB
+  build on its own disk (nginx: `proxy_request_buffering off; proxy_buffering off`; Traefik buffers
+  nothing by default; the platform also sends `X-Accel-Buffering: no`). Not verified here: any proxy.
+
 - **A command can keep its build for its ticket's next command, which is a migration and no bump**
   (`design/worker-tier.md` § The command copy, ticket 76). `tickets.warm_epoch` and six `warm_*`
   columns on `jobs`, with a partial index (`design/data-model.md` § A ticket's warm build). The

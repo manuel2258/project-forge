@@ -26,6 +26,13 @@ defmodule ForgeWeb.TokenRoutes do
     {:get, "/api/v1/tickets/:project/:number/events"} => :token_read,
     {:get, "/api/v1/tickets/:project/:number/review"} => :token_read,
     {:get, "/api/v1/tickets/:project/:number/jobs/:job_id"} => :token_read,
+    # A command's log, and a ticket's kept copies looked into on their machines: every one a read, so a
+    # token of either access reaches all of them (`ForgeWeb.Api.BuildController`).
+    {:get, "/api/v1/tickets/:project/:number/jobs/:job_id/log"} => :token_read,
+    {:get, "/api/v1/tickets/:project/:number/builds"} => :token_read,
+    {:get, "/api/v1/tickets/:project/:number/builds/:job_id/folder"} => :token_read,
+    {:get, "/api/v1/tickets/:project/:number/builds/:job_id/file"} => :token_read,
+    {:get, "/api/v1/tickets/:project/:number/builds/:job_id/download"} => :token_read,
     {:get, "/api/v1/tickets/:project/:number/artifacts"} => :token_read,
     {:get, "/api/v1/tickets/:project/:number/artifacts/:name"} => :token_read,
     {:get, "/api/v1/tickets/:project/:number/artifacts/:name/:version/raw"} => :token_read,

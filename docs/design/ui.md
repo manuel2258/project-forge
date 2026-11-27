@@ -1711,13 +1711,16 @@ true, and a fourth block, the warm build, only when the workflow declares one:
   the changeset while the rebase runs, so what it says holds when the rebase ends.
 - **A ticket's warm build** (`worker-tier.md` § The command copy), shown **only when the ticket's
   pinned workflow has a command that declares `keep_build`**, and nothing at all, not even a
-  heading, when it has none. It shows the copy the ticket's next command will be sent to — the
-  latest one kept, not cleared, not past its two days, on a machine that still exists: its size,
+  heading, when it has none. **It lists every kept copy, one row per machine** (ticket 84; before it listed only
+  the one the next command goes to): the machine's latest copy, in any epoch, while the ticket's last
+  command there is within two days, on a machine that still exists. The copy the next command starts
+  from comes first and says *next command starts here*; a cleared one says *cleared*. Each row shows
   its machine (named as a command's page names it), the command that kept it with its arguments as
-  `Command.argv/1` draws them, the short commit, and when, with **Clear** under it, behind a
-  confirm. With no such copy it reads, exactly, *No warm build yet: the first command that keeps
-  its build leaves one.* — which is also what it reads after a clear, and when the only copy is on a
-  machine that is gone or is past its two days. Copies on other machines are not listed. **Clear
+  `Command.argv/1` draws them, the short commit, when, its size, and **Explore** (§ The explorer),
+  with **Clear** under the list, behind a confirm. With no such copy it reads, exactly, *No warm build yet: the first command that keeps
+  its build leaves one.* — which is also what it reads when the only copies are on machines that are gone or are past
+  their two days (a cleared copy stays listed, marked *cleared*, and Clear is under the list while
+  one is still usable). **Clear
   makes every copy of the ticket unusable and deletes nothing at once**; the confirm says that the
   next command starts cold. A long machine name or a command with many arguments breaks at any
   character (`break-all`, `min-w-0`) rather than widening the block on a phone, and the arguments go
@@ -1954,6 +1957,19 @@ the person reads one that failed.
   `capacity.md` § Memory describes.
 - **Three figures on one line**: turns, usage in windows (the exact weighted tokens in its title),
   duration.
+- **A command's page** (ticket 84, `worker-tier.md` § Looking into a copy), shows under
+  its figures its **steps**, in order, each with its duration, the script among them and the uncovered
+  time as *other*, so that they add up to the command's time on the machine; the longest is
+  emphasised, and a step that did not happen says why (*no copy to start from*, *nothing kept*), never
+  as a zero. A command with no step events says why: *not recorded: build-2's release predates step
+  timings*, or *ran before forge recorded steps*. **Its log is shown live while it runs**, each line
+  with its time since the command started in a narrow column, newest at the bottom and tailed as the
+  stream is; opened mid-run it shows the output so far and then follows it, and a reconnect continues
+  where it was. **A silence of 10 seconds or more between two lines is marked** (*+42 s*); on a phone
+  the time is said once a minute, as the stream does, and the silences are still marked. After the
+  command ends the page reads the same lines from the log and the blob of times beside it (the
+  newest 1,000, with *▸ N earlier*), and the log file itself is unchanged. When the command's build
+  was kept and the copy is still on its machine the page links **Explore this build**.
 - **Stream · Manifest · Wrote**, a segmented switch, because the strip's tabs belong to the ticket.
   It is the page's one switch. The stream is the harness's events drawn as the transcript draws
   them, newest at the bottom, a bounded pane tailed while the job runs; its head says how far it got,
@@ -3804,8 +3820,43 @@ content is now:
 | Addressable artifact versions | § Addressable artifact versions |
 | The project's repository | § The project's repository |
 
+## The explorer
+
+`/tickets/:project/:number/builds/:job_id?path=…`, **a page inside the ticket's frame, like a job
+page** (ticket 84, `worker-tier.md` § Looking into a copy). The copy and the folder are in the
+address, so a reload, a reconnect or a shared link opens the same place; the name of the copy is
+the job that kept it. Every member of the project may open it, and nothing is recorded about who
+looked.
+
+- **The header** names the machine and the command that kept the copy and says how long it is held:
+  *held as it was until 14:32, 10 minutes after the last action*. At the top of a copy, the saved
+  sizes of its ignored folders, largest first, and the total of everything else; a copy kept by a
+  release that saved none says so (`ForgeCore.WarmBuild.no_folders_sentence/0`). Folder sizes are
+  **never measured while browsing**.
+- **A folder** lists its entries, folders first then files, in name order: the name, a file's size
+  or a folder's number of entries, and the time. More than 200 shows the first 200 and *show 200
+  more*. **A file** opens to its size, time and SHA-256, with its text up to the first 1 MiB (*showing
+  the first 1 MiB of 40 MiB* when longer); one that is not text shows its facts and **Download**. A
+  link shows its target as text and is never followed. **Download** is on the whole copy, on any
+  folder and on any file, and names the size before it starts where it is known (a file, the whole
+  copy, a saved ignored folder). A name with markup, 300 characters or bytes that are not valid text
+  is shown as text, never markup, and breaks at any character (`break-all`, `min-w-0`) rather than
+  widening the page on a phone.
+- **When the machine cannot answer, it says so in words, never a spinner alone**: *Asking build-2…*;
+  after 15 seconds *build-2 did not answer in 15 seconds* with **Try again**; *build-2 is not
+  connected. This copy can be explored when it reconnects, until <two days after the ticket's last
+  command there>.*; *build-2 runs an older release: update it to explore this copy.*; and *This copy is
+  no longer on build-2*, saying it was replaced (linking the command that replaced it) when a later
+  command kept a build there, swept when it is past its two days, and no more than that otherwise.
+
+**Being built** (ticket 84): what the code at a commit does is only as far as § Not built yet says.
+
 ## Not built yet
 
+- **The explorer and a command's steps and live log** (ticket 84, `worker-tier.md` § Looking into a
+  copy) are being built: § The explorer, the warm build's rows in § The details and the steps and
+  timed log on a command's page in § The job page describe what the code at this commit does only as
+  far as the ticket's commits have landed. Not verified here: a real phone, and a real machine's answers.
 - **Pages** (ticket 66, `pages.md` § Not built yet) are being built: § Pages and the rows named in
   § Docs, § The job page and § The queue describe what the code at this commit does only as far as
   that note's *Built* says.

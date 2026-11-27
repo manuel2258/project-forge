@@ -17,6 +17,11 @@ defmodule ForgeWorker.Application do
         # a job it is spoken to while it runs.
         {Registry, keys: :unique, name: ForgeWorker.Job.Registry},
         {Task.Supervisor, name: ForgeWorker.TaskSupervisor},
+        # A person looking into a ticket's command copy: one task per request, with no cap
+        # (`ForgeWorker.Explore`, criterion 8 of ticket 84), and the timer that lets go of a copy
+        # nobody is looking at any more.
+        {Task.Supervisor, name: ForgeWorker.Explore.Tasks},
+        ForgeWorker.Explore.Holds,
         # Whether this machine can still run anything: asks PID 1 once a minute, hears from a run
         # whose `systemd-run` could not, and is what the link asks before it takes work.
         ForgeWorker.Health,

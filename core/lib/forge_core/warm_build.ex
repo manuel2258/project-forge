@@ -10,8 +10,17 @@ defmodule ForgeCore.WarmBuild do
 
   A command's `warm` fact, as the worker reports it in `ForgeCore.Job.Result`:
   `%{"source" => one of sources/0, "from" => the job that left the copy, when source is "copy",
-  "kept" => boolean, "unkept" => one of reasons/0 when not kept, "size" => bytes of a kept copy}`.
+  "kept" => boolean, "unkept" => one of reasons/0 when not kept, "size" => bytes of a kept copy,
+  "folders" => the sizes of the folders git ignores in a kept copy (`folders/1`)}`.
+
+  `folders` is `%{"folders" => [%{"path" | "path_base64" => …, "bytes" => n}], "more" => %{"count",
+  "bytes"}, "loose" => %{"count", "bytes"}, "rest" => bytes}`: the topmost ignored folders, largest
+  first and at most 50 of them, then the totals that keep a project that ignores files one by one
+  from making the record huge. A copy kept by a release that saved none has no `folders`
+  (`no_folders_sentence/0`).
   """
+
+  @max_folders 50
 
   # Where a command's tree came from: this ticket's command copy, its ticket volume, the project's
   # seed, a fresh clone.
@@ -103,13 +112,65 @@ defmodule ForgeCore.WarmBuild do
       Map.merge(cleaned, %{
         "from" => from(cleaned["source"], Map.get(warm, "from")),
         "unkept" => if(kept == false, do: known(Map.get(warm, "unkept"), @reasons)),
-        "size" => if(kept == true, do: size(Map.get(warm, "size")))
+        "size" => if(kept == true, do: size(Map.get(warm, "size"))),
+        "folders" => if(kept == true, do: folders(Map.get(warm, "folders")))
       })
 
     if Enum.all?(cleaned, fn {_key, value} -> is_nil(value) end), do: nil, else: cleaned
   end
 
   def sanitize(_other), do: nil
+
+  @doc "The most ignored folders a copy's record names."
+  @spec max_folders() :: pos_integer()
+  def max_folders, do: @max_folders
+
+  @doc "What a copy's page says when the release that kept it saved no folder sizes."
+  @spec no_folders_sentence() :: String.t()
+  def no_folders_sentence, do: "kept by a release that saved no folder sizes"
+
+  @doc """
+  The sizes of the ignored folders of a kept copy, cleaned and bounded: at most #{@max_folders}
+  folders, each with a `path` (valid text) or a `path_base64` (anything else) that is not empty,
+  and whole byte counts; the totals as `%{"count", "bytes"}`. Nil for anything that is not that
+  shape, so what is stored is always what a page can draw.
+  """
+  @spec folders(term()) :: map() | nil
+  def folders(%{"folders" => list} = map) when is_list(list) do
+    %{
+      "folders" => list |> Enum.flat_map(&folder/1) |> Enum.take(@max_folders),
+      "more" => counted(Map.get(map, "more")),
+      "loose" => counted(Map.get(map, "loose")),
+      "rest" => count(Map.get(map, "rest")) || 0
+    }
+  end
+
+  def folders(_other), do: nil
+
+  defp folder(%{"bytes" => bytes} = folder) when is_integer(bytes) and bytes >= 0 do
+    cond do
+      is_binary(folder["path"]) and folder["path"] != "" and String.valid?(folder["path"]) ->
+        [%{"path" => folder["path"], "bytes" => bytes}]
+
+      is_binary(folder["path_base64"]) and
+          match?({:ok, <<_, _::binary>>}, Base.decode64(folder["path_base64"])) ->
+        [%{"path_base64" => folder["path_base64"], "bytes" => bytes}]
+
+      true ->
+        []
+    end
+  end
+
+  defp folder(_other), do: []
+
+  defp counted(%{"count" => count, "bytes" => bytes})
+       when is_integer(count) and count >= 0 and is_integer(bytes) and bytes >= 0,
+       do: %{"count" => count, "bytes" => bytes}
+
+  defp counted(_other), do: %{"count" => 0, "bytes" => 0}
+
+  defp count(value) when is_integer(value) and value >= 0, do: value
+  defp count(_value), do: nil
 
   defp known(value, allowed), do: if(value in allowed, do: value)
   defp from("copy", from) when is_binary(from), do: from

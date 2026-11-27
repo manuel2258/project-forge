@@ -111,7 +111,7 @@ defmodule ForgeWorker.Job.CommandCopyTest do
          %{root: root, worktree: worktree, key: key} do
       assert :none = CommandCopy.take(root, key, Path.join(root, "w1"))
 
-      assert {:ok, size} = CommandCopy.keep(root, key, worktree, facts())
+      assert {:ok, size, nil} = CommandCopy.keep(root, key, worktree, facts())
       assert is_integer(size)
 
       assert {:ok, %{"job_id" => "j1", "command" => "test", "commit" => "abc", "epoch" => 0}} =
@@ -122,7 +122,7 @@ defmodule ForgeWorker.Job.CommandCopyTest do
 
     test "a copy kept under another epoch is not this ticket's any more",
          %{root: root, worktree: worktree, key: key} do
-      {:ok, _size} = CommandCopy.keep(root, key, worktree, facts())
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts())
 
       assert :none = CommandCopy.take(root, %{key | epoch: 1}, Path.join(root, "w"))
       refute File.exists?(Path.join(root, "w"))
@@ -131,14 +131,14 @@ defmodule ForgeWorker.Job.CommandCopyTest do
     end
 
     test "another ticket's copy is never read", %{root: root, worktree: worktree, key: key} do
-      {:ok, _size} = CommandCopy.keep(root, key, worktree, facts())
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts())
       other = %{key | ticket: "5f0a6d1e-0000-4000-8000-000000000002"}
 
       assert :none = CommandCopy.take(root, other, Path.join(root, "w"))
     end
 
     test "a copy without its marker is no copy", %{root: root, worktree: worktree, key: key} do
-      {:ok, _size} = CommandCopy.keep(root, key, worktree, facts())
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts())
       File.rm!(CommandCopy.marker_path(root, key))
 
       assert :none = CommandCopy.take(root, key, Path.join(root, "w"))
@@ -149,7 +149,7 @@ defmodule ForgeWorker.Job.CommandCopyTest do
       worktree: worktree,
       key: key
     } do
-      {:ok, _size} = CommandCopy.keep(root, key, worktree, facts())
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts())
       File.write!(CommandCopy.marker_path(root, key), "{nope")
 
       assert :none = CommandCopy.take(root, key, Path.join(root, "w"))
@@ -157,9 +157,9 @@ defmodule ForgeWorker.Job.CommandCopyTest do
 
     test "keeping replaces the copy, and the marker names the later command",
          %{root: root, worktree: worktree, key: key} do
-      {:ok, _size} = CommandCopy.keep(root, key, worktree, facts("j1"))
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts("j1"))
       File.write!(Path.join(worktree, "built"), "second")
-      {:ok, _size} = CommandCopy.keep(root, key, worktree, facts("j2"))
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts("j2"))
 
       assert {:ok, %{"job_id" => "j2"}} = CommandCopy.take(root, key, Path.join(root, "w"))
       assert File.read!(Path.join(root, "w/built")) == "second"
@@ -168,7 +168,7 @@ defmodule ForgeWorker.Job.CommandCopyTest do
 
     test "a keep the machine cannot make leaves the copy and its marker as they were",
          %{root: root, worktree: worktree, key: key} do
-      {:ok, _size} = CommandCopy.keep(root, key, worktree, facts("j1"))
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts("j1"))
       marker = File.read!(CommandCopy.marker_path(root, key))
 
       Application.put_env(:forge_worker, :refuse_snapshot, "copy-worktree")
@@ -183,7 +183,7 @@ defmodule ForgeWorker.Job.CommandCopyTest do
     test "a keep from an earlier epoch does not replace a copy of a later one",
          %{root: root, worktree: worktree, key: key} do
       later = %{key | epoch: 1}
-      {:ok, _size} = CommandCopy.keep(root, later, worktree, facts("later"))
+      {:ok, _size, _folders} = CommandCopy.keep(root, later, worktree, facts("later"))
       File.write!(Path.join(worktree, "built"), "older")
 
       assert {:error, :superseded} = CommandCopy.keep(root, key, worktree, facts("older"))
@@ -194,7 +194,7 @@ defmodule ForgeWorker.Job.CommandCopyTest do
 
     test "a keep that fails after its snapshot leaves no sibling behind",
          %{root: root, worktree: worktree, key: key} do
-      {:ok, _size} = CommandCopy.keep(root, key, worktree, facts("j1"))
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts("j1"))
 
       Application.put_env(:forge_worker, :refuse_delete, CommandCopy.path(root, key))
       assert {:error, :refused} = CommandCopy.keep(root, key, worktree, facts("j2"))
@@ -203,7 +203,7 @@ defmodule ForgeWorker.Job.CommandCopyTest do
     end
 
     test "two commands of one ticket keep one after the other, and the last is the copy",
-         %{root: root, worktree: worktree, key: key} do
+         %{root: root, key: key} do
       # The first holds the lock while the second asks for it: the order is the first's keep, then
       # the second's, not an interleaving that could leave a marker naming another copy's tree.
       test = self()
@@ -230,7 +230,7 @@ defmodule ForgeWorker.Job.CommandCopyTest do
       refute File.exists?(CommandCopy.marker_path(root, key))
 
       send(holder, :release)
-      assert {:ok, _size} = Task.await(keeper)
+      assert {:ok, _size, _folders} = Task.await(keeper)
       assert {:ok, %{"job_id" => "late"}} = CommandCopy.take(root, key, Path.join(root, "w"))
     end
   end
@@ -239,8 +239,8 @@ defmodule ForgeWorker.Job.CommandCopyTest do
     test "removes a stale copy and its marker, keeps a fresh one, and returns the bytes freed",
          %{root: root, worktree: worktree, key: key} do
       stale = %{key | ticket: "5f0a6d1e-0000-4000-8000-000000000009"}
-      {:ok, _size} = CommandCopy.keep(root, key, worktree, facts())
-      {:ok, _size} = CommandCopy.keep(root, stale, worktree, facts())
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts())
+      {:ok, _size, _folders} = CommandCopy.keep(root, stale, worktree, facts())
       File.touch!(CommandCopy.path(root, stale), {{2020, 1, 1}, {0, 0, 0}})
 
       freed = CommandCopy.sweep(root, :timer.hours(48))
@@ -254,7 +254,7 @@ defmodule ForgeWorker.Job.CommandCopyTest do
 
     test "touch says the ticket ran a command, so a used copy is not swept",
          %{root: root, worktree: worktree, key: key} do
-      {:ok, _size} = CommandCopy.keep(root, key, worktree, facts())
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts())
       File.touch!(CommandCopy.path(root, key), {{2020, 1, 1}, {0, 0, 0}})
 
       :ok = CommandCopy.touch(root, key)
@@ -266,6 +266,273 @@ defmodule ForgeWorker.Job.CommandCopyTest do
     test "touching a ticket with no copy makes none", %{root: root, key: key} do
       assert :ok = CommandCopy.touch(root, key)
       refute File.exists?(CommandCopy.path(root, key))
+    end
+  end
+
+  # `docs/design/worker-tier.md` § Looking into a copy: a copy someone has open is held, a keep
+  # moves it aside, the sweep leaves it, and the hold lapses ten minutes after the last action.
+  describe "a copy someone is looking at" do
+    @first "5f0a6d1e-0000-4000-8000-0000000000a1"
+    @second "5f0a6d1e-0000-4000-8000-0000000000a2"
+
+    defp lapse(root, ticket, job, seconds_ago \\ 700) do
+      File.touch!(
+        CommandCopy.hold_path(root, ticket, job),
+        System.os_time(:second) - seconds_ago
+      )
+    end
+
+    test "opening finds the ticket's current copy and holds it", %{
+      root: root,
+      worktree: worktree,
+      key: key
+    } do
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts(@first))
+
+      refute CommandCopy.held?(root, @ticket, @first)
+      assert {:ok, dir} = CommandCopy.open(root, @ticket, @first)
+      assert dir == CommandCopy.path(root, key)
+      assert CommandCopy.held?(root, @ticket, @first)
+    end
+
+    test "a copy of another job, another ticket, or that is not an id is not found, and is not held",
+         %{root: root, worktree: worktree, key: key} do
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts(@first))
+
+      assert :error = CommandCopy.open(root, @ticket, @second)
+      assert :error = CommandCopy.open(root, "5f0a6d1e-0000-4000-8000-000000000002", @first)
+      assert :error = CommandCopy.open(root, "../#{@ticket}", @first)
+      assert :error = CommandCopy.open(root, @ticket, "../../etc")
+      refute CommandCopy.held?(root, @ticket, @second)
+      refute File.exists?(Path.join([root, "volumes", "hold"]))
+    end
+
+    test "a copy of another epoch, which a Clear left, can still be looked at",
+         %{root: root, worktree: worktree, key: key} do
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts(@first))
+
+      refute CommandCopy.marker(root, %{key | epoch: 1})
+      assert {:ok, _dir} = CommandCopy.open(root, @ticket, @first)
+    end
+
+    test "a keep while the copy is held moves it aside, and it is still answered",
+         %{root: root, worktree: worktree, key: key} do
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts(@first))
+      {:ok, _dir} = CommandCopy.open(root, @ticket, @first)
+      File.write!(Path.join(worktree, "built"), "second")
+
+      assert {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts(@second))
+
+      assert {:ok, %{"job_id" => @second}} = CommandCopy.take(root, key, Path.join(root, "w"))
+      assert File.read!(Path.join(root, "w/built")) == "second"
+
+      assert {:ok, aside} = CommandCopy.open(root, @ticket, @first)
+      assert aside == CommandCopy.held_path(root, @ticket, @first)
+      assert File.read!(Path.join(aside, "built")) == "first"
+      refute String.starts_with?(aside, Path.join([root, "volumes", "command"]))
+    end
+
+    test "a keep while the copy is not held deletes it", %{
+      root: root,
+      worktree: worktree,
+      key: key
+    } do
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts(@first))
+      {:ok, _dir} = CommandCopy.open(root, @ticket, @first)
+      lapse(root, @ticket, @first)
+
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts(@second))
+
+      assert :error = CommandCopy.open(root, @ticket, @first)
+      refute File.exists?(CommandCopy.held_path(root, @ticket, @first))
+    end
+
+    test "the two-day sweep leaves a held copy and takes it once the hold has lapsed",
+         %{root: root, worktree: worktree, key: key} do
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts(@first))
+      {:ok, _dir} = CommandCopy.open(root, @ticket, @first)
+      File.touch!(CommandCopy.path(root, key), {{2020, 1, 1}, {0, 0, 0}})
+
+      assert CommandCopy.sweep(root, :timer.hours(48)) == 0
+      assert File.dir?(CommandCopy.path(root, key))
+
+      lapse(root, @ticket, @first)
+      assert CommandCopy.sweep(root, :timer.hours(48)) > 0
+      refute File.exists?(CommandCopy.path(root, key))
+    end
+
+    test "release removes a moved-aside copy whose hold has lapsed, and not one that has not",
+         %{root: root, worktree: worktree, key: key} do
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts(@first))
+      {:ok, _dir} = CommandCopy.open(root, @ticket, @first)
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts(@second))
+      aside = CommandCopy.held_path(root, @ticket, @first)
+
+      assert CommandCopy.release_holds(root) == 0
+      assert File.dir?(aside)
+
+      lapse(root, @ticket, @first)
+      assert CommandCopy.release_holds(root) > 0
+      refute File.exists?(aside)
+      refute File.exists?(CommandCopy.hold_path(root, @ticket, @first))
+      assert File.dir?(CommandCopy.path(root, key))
+    end
+
+    test "an action renews the hold, so a download that outlasts ten minutes is not cut off",
+         %{root: root, worktree: worktree, key: key} do
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts(@first))
+      {:ok, _dir} = CommandCopy.open(root, @ticket, @first)
+      lapse(root, @ticket, @first, 590)
+      assert CommandCopy.held?(root, @ticket, @first)
+
+      :ok = CommandCopy.touch_hold(root, @ticket, @first)
+      lapse(root, @ticket, @first, 5)
+      assert CommandCopy.held?(root, @ticket, @first)
+
+      lapse(root, @ticket, @first, 700)
+      refute CommandCopy.held?(root, @ticket, @first)
+      assert CommandCopy.release_holds(root) == 0
+      refute File.exists?(CommandCopy.hold_path(root, @ticket, @first))
+    end
+
+    test "a live hold survives the minute's tick, and only a lapsed one is dropped",
+         %{root: root, worktree: worktree, key: key} do
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts(@first))
+      {:ok, _dir} = CommandCopy.open(root, @ticket, @first)
+      hold = CommandCopy.hold_path(root, @ticket, @first)
+
+      assert CommandCopy.release_holds(root) == 0
+      assert File.exists?(hold)
+
+      lapse(root, @ticket, @first)
+      assert CommandCopy.release_holds(root) == 0
+      refute File.exists?(hold)
+    end
+
+    # **The ids are matched as UUIDs before either becomes a path**: the marker here does name the
+    # job, and the directory is there, so only the match refuses it.
+    test "an id that is not a UUID finds nothing, though a copy is there that names it",
+         %{root: root} do
+      copy = Path.join([root, "volumes", "command", "a"])
+      File.mkdir_p!(copy)
+      File.write!(copy <> ".json", ~s({"job_id": "b", "epoch": 0}))
+
+      assert CommandCopy.open(root, "a", "b") == :error
+    end
+
+    # Sizing a large tree takes minutes and every reader waits for the ticket's lock, so it is done
+    # before the lock is taken: while the keep sizes, the copy that is there still answers.
+    test "a keep that is still sizing does not hold the lock a reader needs",
+         %{root: root, worktree: worktree, key: key} do
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts(@first))
+
+      test = self()
+
+      Application.put_env(:forge_worker, :copy_sizer, fn _tree, _ignored ->
+        send(test, {:sizing, self()})
+
+        receive do
+          :go -> {7, nil}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:forge_worker, :copy_sizer) end)
+
+      keeper = Task.async(fn -> CommandCopy.keep(root, key, worktree, facts(@second)) end)
+      assert_receive {:sizing, sizer}
+
+      reader = Task.async(fn -> CommandCopy.open(root, @ticket, @first) end)
+      assert {:ok, {:ok, _dir}} = Task.yield(reader, 2_000) || Task.shutdown(reader)
+
+      send(sizer, :go)
+      assert {:ok, 7, nil} = Task.await(keeper)
+    end
+
+    test "a keep sizes the copy's ignored folders in the same walk",
+         %{root: root, worktree: worktree, key: key} do
+      File.mkdir_p!(Path.join(worktree, "target"))
+      File.write!(Path.join(worktree, "target/obj"), :binary.copy("x", 20_000))
+
+      assert {:ok, total, %{"folders" => [%{"path" => "target", "bytes" => bytes}]} = folders} =
+               CommandCopy.keep(root, key, worktree, facts(@first), [{"target", :dir}])
+
+      assert bytes >= 20_000
+      assert total == bytes + folders["rest"]
+    end
+  end
+
+  describe "a copy someone is looking at, when the machine will not cooperate" do
+    @first "5f0a6d1e-0000-4000-8000-0000000000e1"
+    @second "5f0a6d1e-0000-4000-8000-0000000000e2"
+
+    test "a keep whose old copy cannot be moved aside deletes it and still keeps",
+         %{root: root, worktree: worktree, key: key} do
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts(@first))
+      {:ok, _dir} = CommandCopy.open(root, @ticket, @first)
+
+      # Where the old copy would go is a folder that is not empty: the rename is refused.
+      blocked = CommandCopy.held_path(root, @ticket, @first)
+      File.mkdir_p!(Path.join(blocked, "in the way"))
+
+      assert {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts(@second))
+
+      assert {:ok, %{"job_id" => @second}} = CommandCopy.take(root, key, Path.join(root, "w"))
+      assert File.dir?(Path.join(root, "w"))
+    end
+
+    test "release leaves what it did not put there, and what it cannot delete",
+         %{root: root, worktree: worktree, key: key} do
+      junk = Path.join([root, "volumes", "held", "not-a-copy"])
+      File.mkdir_p!(junk)
+
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts(@first))
+      {:ok, _dir} = CommandCopy.open(root, @ticket, @first)
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts(@second))
+      aside = CommandCopy.held_path(root, @ticket, @first)
+
+      File.touch!(CommandCopy.hold_path(root, @ticket, @first), System.os_time(:second) - 700)
+      Application.put_env(:forge_worker, :refuse_delete, aside)
+
+      assert CommandCopy.release_holds(root) == 0
+      assert File.dir?(aside)
+      assert File.dir?(junk)
+
+      Application.delete_env(:forge_worker, :refuse_delete)
+      assert CommandCopy.release_holds(root) > 0
+      refute File.exists?(aside)
+      assert File.dir?(junk)
+    end
+
+    test "a hold that cannot be written is a warning and not a failed request",
+         %{root: root, worktree: worktree, key: key} do
+      {:ok, _size, _folders} = CommandCopy.keep(root, key, worktree, facts(@first))
+      File.mkdir_p!(Path.join(root, "volumes"))
+      File.write!(Path.join([root, "volumes", "hold"]), "a file where the folder should be")
+
+      assert {:ok, _dir} = CommandCopy.open(root, @ticket, @first)
+      refute CommandCopy.held?(root, @ticket, @first)
+    end
+
+    test "the sweep takes a stale directory that is not a ticket's, which no one can hold",
+         %{root: root} do
+      junk = Path.join([root, "volumes", "command", "not-a-ticket"])
+      File.mkdir_p!(junk)
+      File.write!(Path.join(junk, "x"), "x")
+      File.touch!(junk, {{2020, 1, 1}, {0, 0, 0}})
+
+      assert CommandCopy.sweep(root, :timer.hours(48)) > 0
+      refute File.exists?(junk)
+    end
+
+    test "a copy whose marker is for a job that is not an id is never held", %{root: root} do
+      copy = Path.join([root, "volumes", "command", @ticket])
+      File.mkdir_p!(copy)
+      File.write!(Path.join(copy, "built"), String.duplicate("x", 8192))
+      File.write!(copy <> ".json", ~s({"job_id": "j1", "epoch": 0}))
+      File.touch!(copy, {{2020, 1, 1}, {0, 0, 0}})
+
+      assert CommandCopy.sweep(root, :timer.hours(48)) > 0
+      refute File.exists?(copy)
     end
   end
 end

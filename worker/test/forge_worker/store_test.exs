@@ -83,4 +83,56 @@ defmodule ForgeWorker.StoreTest do
     assert Store.fetch("http://platform.test", "job/j1/t.jsonl", "t", into) == :ok
     assert File.read!(into) =~ "result"
   end
+
+  # `docs/design/worker-channel.md` § Protocol 18: a download is posted as it is produced, with the
+  # stream's secret as a bearer, and what comes back is the status the platform ended with.
+  test "a stream is posted chunk by chunk with the secret as a bearer, and its status is returned" do
+    test = self()
+
+    Application.put_env(:forge_worker, :req_options,
+      plug: fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn, length: 1_000_000)
+
+        send(
+          test,
+          {:streamed, conn.method, conn.request_path,
+           Plug.Conn.get_req_header(conn, "authorization"),
+           Plug.Conn.get_req_header(conn, "x-forge-kind"), body}
+        )
+
+        Plug.Conn.send_resp(conn, 200, "")
+      end
+    )
+
+    body = Stream.map(["one ", "two ", "three"], & &1)
+
+    assert {:ok, 200} =
+             Store.stream_post("http://platform.test/worker-streams/abc", "secret", body, [
+               {"x-forge-kind", "tar"}
+             ])
+
+    assert_received {:streamed, "POST", "/worker-streams/abc", ["Bearer secret"], ["tar"],
+                     "one two three"}
+  end
+
+  test "a stream the platform refused is the status it refused with, and is not retried" do
+    {:ok, attempts} = Agent.start_link(fn -> 0 end)
+
+    Application.put_env(:forge_worker, :req_options,
+      plug: fn conn ->
+        Agent.update(attempts, &(&1 + 1))
+        Plug.Conn.send_resp(conn, 503, "busy")
+      end
+    )
+
+    assert {:ok, 503} = Store.stream_post("http://platform.test/worker-streams/abc", "s", ["x"])
+    assert Agent.get(attempts, & &1) == 1
+  end
+
+  test "a stream that cannot reach the platform is an error, not a status" do
+    Application.delete_env(:forge_worker, :req_options)
+
+    assert {:error, _reason} =
+             Store.stream_post("http://127.0.0.1:1/worker-streams/abc", "s", ["x"])
+  end
 end

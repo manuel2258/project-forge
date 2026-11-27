@@ -780,7 +780,7 @@ holding `epoch`, `job_id`, `command` and `commit`. The ticket's next command on 
 snapshots the copy instead of the ticket's volume, so what the earlier one compiled is there. A
 command that declares no `keep_build` keeps nothing, which is every command in every workflow
 written before this existed: nothing changes for a project until its workflow says so. Forge's own
-three commands declare none yet (`forge-commands-keep-their-build` is the proposal).
+`check`, `static` and `test` declare it, in `.forge/common.yml`, since 0.27.0.
 
 **What a command starts from, in order:** the ticket's command copy, unless the command says
 `warm_start: false` or there is none usable; then the ticket's volume; then the project's seed;
@@ -873,13 +873,143 @@ note claims no figure.
 
 **What a copy may hold.** A command given project secrets keeps its tree like any other, so what
 its script wrote into the tree, a secret included, can be on disk for the ticket's later commands
-on that machine (`docs/design/secrets.md`). Nothing of a copy is uploaded: the store, the platform
-and the API see only the facts: where a command's tree came from, and whether its build was kept.
+on that machine (`docs/design/secrets.md`). **A copy is never uploaded or stored** — the store holds only the facts of it (where a
+command's tree came from, whether its build was kept, its size and the sizes of its ignored folders)
+— **but it can be read on request**: a member or a project token browsing, reading or downloading a
+copy (§ Looking into a copy) is shown its bytes as the machine holds them, passed through the
+platform and unmasked, so a secret a script wrote into the tree is readable that way by every member
+of the project (`docs/design/secrets.md`).
 
 **Not built here:** a base shared across tickets, built once per lock file, so a ticket's first
 command starts warm; uploading a copy so a command on another machine starts warm; deleting a copy
 at a clear; a stable worktree path per ticket, which is what would stop the project's own sources
 recompiling.
+
+### Looking into a copy (ticket 84)
+
+A command that started warm and was still slow could not be diagnosed: the log had no times, the
+steps around the script were not measured and what the copy held was visible to nobody. This
+subsection is what a person, a script and an agent can look at now. **None of it reads a build
+tool's output**: it reads times, files and folders, so it is the same for Mix, Cargo or anything
+else. It makes nothing faster; what it shows is for other tickets. **It is being built**; its
+*Not verified here* is at the end.
+
+**Steps, timed on the machine.** `ForgeCore.CommandSteps` names them in the order a command takes
+them: `snapshot` (the copy, the ticket's volume or the seed, the seed's download included; skipped
+`no_source` on a clone), `fetch`, `reset` (checkout, reset, clean and the detach), `own`,
+`devshell`, `script`, `ignored` (listing what git ignores, below), `hand_back`, `keep`, `upload`,
+`discard`, `sweep` and `other`. The first ten are the criterion's list plus `ignored`; `discard`
+and `sweep` are timed because on `Volume.Copy` discarding is an `rm -rf` of the whole tree, which
+would otherwise hide in `other`. **`other` is the whole run less the others, so the steps add up
+to the command's time on the machine by construction**, measured from the start of the job's task
+to just before the terminal message. A step that did not happen carries a reason and **never a zero**
+(`no_source`, `no_env`, `unmeasured`, `not_run`, `not_kept`, or the `ForgeCore.WarmBuild` reason a
+build was not kept for). The worker reports them in the `result` and in a command's `failed`
+(`worker-channel.md` § Protocol 18), and the platform keeps one `command.step` event each, a
+lifecycle event outside `job.harness.*`, so `forge_event_swept/1` keeps it for good
+(`storage.md` § Retention).
+
+**Devshell against script.** A one-line `sh` wrapper inside `nix develop --command`, innermost,
+just before the script and after the secrets loader, writes the wall clock in milliseconds
+(`date +%s%3N`) to `$FORGE_JOB/.forge-script-started` (`Slice.Systemd.prepare/1` chowns the job
+directory, so the job's user can write there). That number is when the script started: `devshell` is
+spawn to it, `script` is it to the exit.
+A marker that is missing or out of range makes `devshell` `unmeasured` and `script` run from spawn.
+A job can only falsify its own split.
+
+**Lines, live, with times.** A tailer (`ForgeWorker.Job.Lines`) polls the log file every 250 ms
+from its offset, so the file is written by the same `>>"$log" 2>&1` as before and **the log agents
+read is unchanged** (no times, its two `forge:` lines included). Each line is masked on its own, as
+events are (`secrets.md` § Masking), and for the live text only bytes that are not UTF-8 are replaced and a
+line is cut at 4 KiB. They are sent as `lines`, unacked, and after every join the worker sends again
+the lines it still has: from the first, or, once it has more than the platform holds, from the first of
+the last 20,000. A line without a newline is held to 64 KiB.
+The platform holds up to 20,000 lines of a command in memory and drops them five minutes after it
+finishes or is cancelled, and at once when it goes back to the queue (its next run starts again from
+line 0). It takes a batch from the line it expects next, or from a later one only when it holds
+nothing (it restarted) or the worker has dropped lines while it was away: from any number up to a
+billion, and what it holds then starts there; a number past that is ignored. It trims by the batch,
+so a machine cannot make it do work proportional to a number it sent.
+A cancelled command's late result still records its steps.
+**No line is an event** (a forge `check` prints about 2,100 and ticket 80 ran 33 commands,
+against the 280,000 rows ticket 64 cut the log down at). At the end a second blob,
+`job/<id>/times-<attempt>-<nonce>.txt`, one decimal millisecond per line of the log, is uploaded beside
+the log under the key and token in the assignment (`store.times_key`, `times_token`), so the times
+outlive the lines. It is uploaded only when the masked log has as many lines as there are times:
+masking a value that spans lines joins them, and then there is no blob and a `times.unkept` line in
+the worker's log (`worker-log.md`).
+
+**Folder sizes, saved at keep.** What a person asks first of a 60 GB copy is where the gigabytes
+are. At keep the worker lists what git ignores with
+`git --no-optional-locks status --porcelain=v1 --ignored=matching --untracked-files=all -z`, keeping
+the `!!` lines (the traditional mode would list `platform/` for `platform/_build/`, which is wrong
+here), **as the job's user, before the hand-back**: git never runs as root in a tree a job wrote.
+Each path is resolved in the kept copy one component at a time with `lstat` before it is sized, and
+one that crosses a link is dropped and counted in the rest. The keep's one `du -x -P -B1 -s -0
+--files0-from` replaces the walk that measured the copy: the ignored entries first and `.` last, and
+GNU du counts an inode once across its arguments, so `.` is everything else and the figures add up
+to the total. The record, on `jobs.warm_folders`: at most 50 folders, largest first, `more` (what
+the others add up to), `loose` (ignored files in no ignored folder, a count and bytes) and `rest`.
+It outlives the machine and the copy.
+
+**The explorer asks the machine, live.** A person browses any of a ticket's copies still kept on a
+machine (the latest on each, cleared ones too), folder by folder, reads a file and sees its hash.
+The platform sends `explore` over the channel and nothing of the copy is stored there. Folder sizes
+are not measured while browsing: only the saved ones are shown. A folder lists 200 entries at a time,
+folders first, then by the bytes of the name. A **text** file is one with no NUL in its first 1 MiB and
+valid UTF-8 once a sequence cut at the limit is dropped; its first 1 MiB is shown. Fifos, sockets and
+devices are `other`. Names, paths and link targets travel base64, because a name need not be UTF-8.
+Exploring and downloading run on the machine at normal priority with no limit on how many at once
+(`ForgeWorker.Explore.Tasks`, a `Task.Supervisor` with no cap): they may slow the jobs on that
+machine, and that is chosen.
+
+**Path safety is the machine's own check** (`CLAUDE.md` § Rules: a guard uses the model of the
+operation it guards). The ticket and job ids are matched as UUIDs before they become a path, and the
+copy is looked for under the ticket's id, never the platform's word. `..`, `.`, empty components, a
+NUL and an absolute path are refused before any filesystem call. After the hand-back a copy belongs
+to root and its root is mode 700 (`Slice.Systemd.leave/2` goes through the same `chown` as `own/2`,
+which ends with `chmod 700`), and nothing writes into it while it is held: a command snapshots it
+and a keep renames it. So the path is resolved from the copy's root one component at a time with
+`lstat`: everything before the last component must be a directory and is never a link; a file is
+opened once and its handle's stat must be the same regular file (device and inode) the `lstat` named;
+a last component that is a link is answered with its target as text when its facts are asked, and is
+never followed: listing it is `not_a_folder`, hashing it `not_a_file`, and downloading it puts it into
+the archive as a link. A folder is
+handed to `tar` and `du`, and neither follows a link inside it. The BEAM has no `openat2`; the walk
+is the same resolution the kernel does, because nothing can change the tree in between.
+
+**The hold.** Opening a copy keeps it as it was until ten minutes after the last action anyone took
+on it, a person or a token. An empty file, `volumes/hold/<ticket id>.<job id>`, is the hold on that
+copy; its mtime is the last action: every `explore` touches it under the ticket's lock, and a running
+download touches it every 60 seconds, so a 60 GB download that outlasts ten minutes is not cut off.
+It is fresh for ten minutes (`:hold_ms`). **A keep while the copy is held does not delete the old copy: it
+renames it to `volumes/held/<ticket id>.<job>`** (its hold file stays where it is), one rename on btrfs and on
+`Volume.Copy` alike, outside `volumes/command/*`, which the sweep's wildcard would take for a
+ticket. The new copy takes the place as usual and is not blocked; the person goes on looking at the
+one they opened, which the explorer finds by ticket and job in either place. The two-day sweep skips a
+held copy. `ForgeWorker.Explore.Holds` deletes moved-aside copies whose hold has lapsed, every minute
+and at each end-of-job sweep. Holds are files, so they survive a worker restart.
+
+**Download.** A whole copy or one folder is one uncompressed POSIX tar made by GNU tar
+(`--format=posix --one-file-system`, no `-h`, so links go in as links), with entries named from
+the copy's root for the whole copy (`./…`) and from the folder's own name for a folder; a single file is sent as itself. It is streamed machine to platform to browser as it
+is packed (`worker-channel.md` § Protocol 18), with no size limit, no `Range` and nothing stored; one
+cut off halfway starts again from the beginning. It works only while the machine is connected.
+
+**What a person may see of it, and what is not masked.** Every member of the ticket's project, over
+the browser, the JSON API and MCP, and a project token of either access (all of it is read). A running
+job's token is refused. **A copy is not masked** (file content, hashes and downloads are the copy's
+bytes; the worker holds no secret value between uses, and masking would change hashes and break
+archives): it is added to groups of files and pages in `secrets.md`. The live lines are masked, since they are the log.
+Nothing is recorded about who looked.
+
+**Not verified here:** the hold's rename of a btrfs subvolume into `volumes/held` on a real machine;
+the marker under a real `systemd-run`; `tar` and `du` on a real 60 GB tree; Bandit's backpressure
+(whether `chunk/2` blocks enough to hold a slow browser), where the suite proves the bytes and not the
+pacing; a proxy that buffers the worker's POST, which would store the download on its own disk
+(`docs/deploy.md`); the number of live lines a real Rust build prints against the 20,000-line cap and
+the page's 1,000 rows. **No saving or slowness is measured or claimed**: the steps are what would
+measure the ownership change and the saving, and no real command has been timed.
 
 ## Git
 
@@ -1385,7 +1515,9 @@ know an age is a sweep that cannot get that wrong.
 - **Command copies.** `<root>/volumes/command/<ticket id>`, with its marker beside it, one per
   ticket this machine has run a *keeping* command for (§ The command copy). Swept with the ticket
   volumes, at two days, counted from the ticket's last command on
-  the machine. The disk report's `volumes` line counts them with the ticket volumes. **A command job
+  the machine. The disk report's `volumes` line counts them with the ticket volumes, and the copies a
+  hold moved aside, `<root>/volumes/held/<ticket id>.<job>` (§ Looking into a copy), which
+  `ForgeWorker.Explore.Holds` deletes once their hold has lapsed. **A command job
   now runs these end-of-job sweeps too**: a machine that takes only commands never ran a sweep
   before, and its copies would have grown for ever.
 - **Seeds.** A worker keeps one seed per project and fetches a new one when the project's
@@ -1925,6 +2057,10 @@ from the unit's last reading rather than from that result, which it no longer pr
 - **What a job leaves in `/dev/shm` outlives it.** Nothing at a job's end removes it, and its owner
   is a uid `useradd` may hand to the next job (`docs/measurements.md` § The worker at its ceiling,
   on the image). Found while reproducing the forgery; not otherwise looked at.
+- **What the steps now show is not yet seen.** Ticket 84 times every step of a command and keeps the
+  folder sizes of a kept copy, which is what would measure `chown -R` on a large copy and the copy's
+  saving; no real command has run on a machine that has the new worker, so no figure is claimed.
+  What a real Rust or Mix build's step times look like is the first thing a person will read.
 - **The command copy is unmeasured and has only run against a fake.** Not verified here: the saving
   on a real command pool (none is claimed); a keep and a take on a real btrfs volume, where the
   tests use a strict fake that refuses what btrfs refuses; what `chown -R` costs on a large copy,

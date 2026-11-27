@@ -312,6 +312,7 @@ defmodule Forge.Jobs.Commands do
   def complete(%Job{} = job, %Ticket{} = ticket, %Result{} = result) do
     spec = Jobs.spec(job)
     log = owned_log(job, result.log)
+    times = owned_times(job, result.times)
     outcome = result.outcome || :error
     now = DateTime.utc_now(:second)
 
@@ -346,14 +347,16 @@ defmodule Forge.Jobs.Commands do
     |> Events.log(:event, "job.finished", {:job, job.id}, %{
       ticket_id: ticket.id,
       job_id: job.id,
-      payload: finished_payload(spec, result, outcome, log)
+      payload: finished_payload(spec, result, outcome, log, times)
     })
+    |> Forge.Jobs.Steps.put(job, result.steps)
     |> put_parent_event(job, spec, result, outcome)
     |> Repo.transaction()
     |> case do
       {:ok, %{job: job}} ->
         Forge.Git.Tokens.revoke_for_job(job.id)
         Forge.Workers.release(job.worker_id)
+        Forge.Jobs.Lines.drop_later(job.id)
         follow_up(job)
         Events.notify(ticket.id)
         {:ok, job}
@@ -405,6 +408,12 @@ defmodule Forge.Jobs.Commands do
   # job's to record, whatever the worker says (`docs/design/storage.md` § Keys).
   defp owned_log(%Job{id: id}, key), do: if(Storage.Key.job?(key, id), do: key)
 
+  # The line times are a blob of the job's own too, and one that is there: a key the store does not
+  # hold would be a page's read failing, for every later look at the log.
+  defp owned_times(%Job{id: id}, key) do
+    if Storage.Key.job?(key, id) and match?({:ok, _stat}, Storage.stat(key)), do: key
+  end
+
   # A status is the script's answer only when it ran to one: a killed command's is the signal's.
   defp reported_status(:converged, %Result{exit_status: status}), do: status
   defp reported_status(_outcome, _result), do: nil
@@ -428,7 +437,7 @@ defmodule Forge.Jobs.Commands do
 
   defp put_log(multi, _ticket, _job, _spec, _key), do: multi
 
-  defp finished_payload(spec, result, outcome, log) do
+  defp finished_payload(spec, result, outcome, log, times) do
     %{
       "command" => spec.command["name"],
       "args" => spec.command["args"],
@@ -438,6 +447,7 @@ defmodule Forge.Jobs.Commands do
       "reason" => result.reason,
       "duration_ms" => result.duration_ms,
       "log" => log,
+      "times" => times,
       "invalid_blobs" => result.invalid_blobs
     }
   end

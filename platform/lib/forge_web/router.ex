@@ -100,6 +100,8 @@ defmodule ForgeWeb.Router do
       live "/tickets/new", TicketNewLive
       live "/tickets/:project/:number", TicketLive
       live "/tickets/:project/:number/jobs/:job_id", JobLive
+      # One kept command copy, looked at on the machine that holds it (`ui.md` § The explorer).
+      live "/tickets/:project/:number/builds/:job_id", ExploreLive
       live "/chats", ChatsLive
       live "/chats/new", ChatNewLive
       live "/chats/:id", ChatLive
@@ -118,6 +120,9 @@ defmodule ForgeWeb.Router do
     # Not a LiveView: this serves bytes, and every artifact name in the product links to it.
     # See docs/design/ui.md § Addressable artifact versions.
     get "/tickets/:project/:number/artifacts/:name/:version", ArtifactController, :show
+    # A download out of a kept command copy, streamed from its machine and stored nowhere
+    # (`ui.md` § The explorer).
+    get "/tickets/:project/:number/builds/:job_id/download", BuildDownloadController, :show
     # A conversation's own artifacts, by the same rule: the address names the scope.
     get "/chats/:id/artifacts/:name/:version", ArtifactController, :chat
     # The page's way of sending a file to attach: staged here, claimed by the act it rides on.
@@ -169,6 +174,14 @@ defmodule ForgeWeb.Router do
     get "/tickets/:project/:number/events", TicketController, :events
     get "/tickets/:project/:number/review", TicketController, :review
     get "/tickets/:project/:number/jobs/:job_id", TicketController, :job
+    get "/tickets/:project/:number/jobs/:job_id/log", TicketController, :log
+
+    # A ticket's kept command copies, looked into on the machine that holds them: every one a read,
+    # for a token of either access (`ForgeWeb.Api.BuildController`).
+    get "/tickets/:project/:number/builds", BuildController, :index
+    get "/tickets/:project/:number/builds/:job_id/folder", BuildController, :folder
+    get "/tickets/:project/:number/builds/:job_id/file", BuildController, :file
+    get "/tickets/:project/:number/builds/:job_id/download", BuildController, :download
     get "/tickets/:project/:number/artifacts", TicketController, :artifacts
     get "/tickets/:project/:number/artifacts/:name/:version/raw", TicketController, :raw
     get "/tickets/:project/:number/artifacts/:name", TicketController, :artifact
@@ -220,6 +233,13 @@ defmodule ForgeWeb.Router do
   scope "/store", ForgeWeb do
     get "/*key", StoreController, :show
     put "/*key", StoreController, :update
+  end
+
+  # The worker's door for a download of a command copy (`docs/design/worker-tier.md` § Looking into
+  # a copy). No session and no pipeline: the stream's own secret, a bearer, authorises exactly one
+  # stream that a person's request registered, and the body is passed on and never stored.
+  scope "/worker-streams", ForgeWeb do
+    post "/:id", WorkerStreamController, :create
   end
 
   # The worker's door to the project's archive. No session: the job's own git token authorises it,

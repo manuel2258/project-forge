@@ -198,7 +198,7 @@ defmodule ForgeWeb.Api.TicketController do
       ticket: Render.ticket(ticket, project.name, offers: true),
       jobs: Enum.map(Jobs.for_ticket(ticket.id), &Render.job/1),
       # The commands the ticket ran, with the warm build each reported (`Render.command/1`).
-      commands: Enum.map(Jobs.commands_for_ticket(ticket.id), &Render.command/1),
+      commands: Render.commands(Jobs.commands_for_ticket(ticket.id)),
       artifacts:
         Enum.map(
           Artifacts.list(ticket.id),
@@ -283,6 +283,63 @@ defmodule ForgeWeb.Api.TicketController do
           })
       end
     end
+  end
+
+  @doc """
+  A command's log as text, exactly as the command wrote it, and with `?times=true` each line behind
+  the milliseconds since the command started and a tab (empty where the line's time was not kept).
+  Live lines while the command runs, the stored log and its times after. It is text and not JSON
+  because a log need not be UTF-8 (`docs/design/worker-tier.md` § Looking into a copy).
+  """
+  def log(conn, %{"job_id" => job_id} = params) do
+    case Enum.find(Jobs.commands_for_ticket(conn.assigns.ticket.id), &(&1.id == job_id)) do
+      nil -> {:error, :not_found}
+      job -> send_log(conn, job, params["times"] == "true")
+    end
+  end
+
+  defp send_log(conn, %{status: :running} = job, timed?) do
+    lines = Jobs.command_log(job, tail: Forge.Jobs.Lines.max_lines()).lines
+    body = Enum.map(lines, fn {ms, text} -> [if(timed?, do: timed(ms)), text, ?\n] end)
+    send_text(conn, body)
+  end
+
+  defp send_log(conn, job, timed?) do
+    case Forge.Jobs.CommandLog.raw(job) do
+      {:ok, bytes, _times} when not timed? ->
+        send_text(conn, bytes)
+
+      {:ok, bytes, times} ->
+        lines = Forge.Jobs.CommandLog.lines(bytes)
+        times = List.to_tuple(times || [])
+
+        body =
+          lines
+          |> Enum.with_index()
+          |> Enum.map(fn {line, index} -> [timed(time_at(times, index)), line, ?\n] end)
+
+        send_text(conn, body)
+
+      :none ->
+        {:error, :not_found}
+
+      {:error, :too_large} ->
+        {:error,
+         {:bad_request, "the log is too large to be read here; download it as its artifact"}}
+    end
+  end
+
+  defp time_at(times, index) when index < tuple_size(times), do: elem(times, index)
+  defp time_at(_times, _index), do: nil
+
+  defp timed(nil), do: "\t"
+  defp timed(ms), do: [Integer.to_string(ms), ?\t]
+
+  # Bytes, as the log has them: no charset is claimed.
+  defp send_text(conn, body) do
+    conn
+    |> put_resp_content_type("text/plain", nil)
+    |> send_resp(200, body)
   end
 
   def artifact(conn, %{"name" => name} = params) do

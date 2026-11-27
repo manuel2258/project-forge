@@ -1,0 +1,83 @@
+/* The explorer and the warm-build rows (docs/design/ui.md § The explorer, § The details; ticket 84).
+   Every name here is somebody's: it breaks at any character and nothing widens a phone's page. */
+@layer components {
+  .explore-page { display: flex; min-width: 0; flex-direction: column; gap: 14px; }
+  .explore-head { display: flex; min-width: 0; flex-direction: column; gap: 6px; }
+
+  .explore-crumbs {
+    display: flex;
+    min-width: 0;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 6px;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .explore-crumb { display: inline-flex; min-height: 44px; min-width: 0; align-items: center; color: var(--link); }
+  .explore-crumb-sep { display: inline-flex; min-width: 0; align-items: center; gap: 6px; color: var(--ink-3); }
+
+  .explore-state { padding: 6px 0; font-family: var(--font-mono); font-size: 13px; overflow-wrap: anywhere; }
+  .explore-problem { display: flex; min-width: 0; flex-direction: column; gap: 10px; }
+  .explore-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-bottom: 6px; }
+
+  .explore-saved,
+  .explore-folder,
+  .explore-file { display: flex; min-width: 0; flex-direction: column; gap: 8px; }
+
+  /* A fact's value is one line cut with an ellipsis everywhere else (`.ui-fact-value`); the file's
+     SHA-256 has to be read and compared whole, so here it wraps at any character. */
+  #explore-file-facts .ui-fact-value { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
+  #explore-hash { font-size: 11px; }
+
+  .explore-list { display: flex; flex-direction: column; }
+  /* A phone: the name on its own line, what it is beneath. A wide screen: one line. */
+  .explore-row {
+    display: flex;
+    min-width: 0;
+    min-height: 44px;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border-soft);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .explore-name { min-width: 0; flex: 1 1 100%; color: var(--link); overflow-wrap: anywhere; }
+  .explore-meta { color: var(--ink-2); }
+  .explore-time { margin-left: auto; color: var(--ink-3); font-size: 11px; }
+  .explore-target { color: var(--ink-2); overflow-wrap: anywhere; }
+  .explore-download {
+    display: inline-flex;
+    min-height: 44px;
+    align-items: center;
+    margin-left: auto;
+    color: var(--link);
+    font-family: var(--font-sans);
+    font-size: 13px;
+  }
+  @media (min-width: 768px) {
+    .explore-name { flex-basis: 0%; }
+  }
+
+  /* The file's text, wrapped and never scrolled sideways. */
+  .explore-content {
+    max-height: 70dvh;
+    overflow: auto;
+    padding: 12px;
+    border-radius: var(--radius);
+    background: var(--surface-1);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  /* The details' warm-build rows: one per machine, the one the next command starts from first. */
+  .warm-build-copy { display: flex; min-width: 0; flex-direction: column; gap: 4px; padding: 8px 0; border-bottom: 1px solid var(--border-soft); }
+  .warm-build-copy[data-next="true"] { box-shadow: inset 2px 0 0 var(--ink); padding-left: 10px; }
+  .warm-build-copy[data-cleared="true"] { color: var(--ink-3); }
+  .warm-build-mark { font-family: var(--font-mono); font-size: 12px; }
+  .warm-build-explore { display: inline-flex; min-height: 44px; align-items: center; color: var(--link); font-size: 13px; }
+}

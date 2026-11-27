@@ -59,6 +59,110 @@ defmodule ForgeWorker.DiskTest do
     end
   end
 
+  describe "sizes/3" do
+    defp kb(path, kilobytes), do: File.write!(path, :binary.copy("x", kilobytes * 1024))
+
+    setup %{base: base} do
+      copy = Path.join(base, "copy")
+      File.mkdir_p!(Path.join(copy, "target/debug"))
+      File.mkdir_p!(Path.join(copy, "sub/target"))
+      File.mkdir_p!(Path.join(copy, "src"))
+      kb(Path.join(copy, "target/debug/big"), 400)
+      kb(Path.join(copy, "sub/target/small"), 40)
+      kb(Path.join(copy, "src/m.o"), 8)
+      kb(Path.join(copy, "src/main.rs"), 16)
+      %{copy: copy}
+    end
+
+    test "sizes each ignored folder, the loose files and the rest in one walk that adds up",
+         %{copy: copy} do
+      entries = [{"target", :dir}, {"sub/target", :dir}, {"src/m.o", :file}]
+
+      assert {:ok, total, folders} = Disk.sizes(copy, entries)
+
+      assert [%{"path" => "target", "bytes" => big}, %{"path" => "sub/target", "bytes" => small}] =
+               folders["folders"]
+
+      assert big >= 400 * 1024 and big < 420 * 1024
+      assert small >= 40 * 1024 and small < 60 * 1024
+      assert %{"count" => 1, "bytes" => loose} = folders["loose"]
+      assert loose >= 8 * 1024
+      assert folders["more"] == %{"count" => 0, "bytes" => 0}
+
+      # The whole design rests on this: du counts each inode once across its arguments, so the
+      # entries and `.` add up to the total, and the rest is not the folders counted twice.
+      assert total == big + small + loose + folders["rest"]
+      assert folders["rest"] >= 16 * 1024
+      assert folders["rest"] < big
+      assert total == Disk.size(copy)
+    end
+
+    test "keeps the fifty largest folders and totals the others", %{copy: copy} do
+      for n <- 1..52, do: File.mkdir_p!(Path.join(copy, "d#{n}"))
+      # Spaced further apart than a disk block, which du rounds to.
+      for n <- 1..52, do: kb(Path.join(copy, "d#{n}/f"), n * 8)
+
+      entries = for n <- 1..52, do: {"d#{n}", :dir}
+      assert {:ok, _total, folders} = Disk.sizes(copy, entries)
+
+      assert length(folders["folders"]) == 50
+      assert folders["more"]["count"] == 2
+
+      assert folders["folders"] == Enum.sort_by(folders["folders"], & &1["bytes"], :desc)
+      assert hd(folders["folders"])["path"] == "d52"
+    end
+
+    test "a path through a link is dropped before du sees it, and what it holds is the rest",
+         %{base: base, copy: copy} do
+      outside = Path.join(base, "outside")
+      File.mkdir_p!(Path.join(outside, "secret"))
+      kb(Path.join(outside, "secret/big"), 2_000)
+      File.ln_s!(outside, Path.join(copy, "link"))
+
+      entries = [{"link/secret", :dir}, {"link", :dir}, {"../outside", :dir}, {"/etc", :dir}]
+      assert {:ok, total, folders} = Disk.sizes(copy, entries)
+
+      assert folders["folders"] == []
+      assert total < 1_000 * 1024
+      assert total == folders["rest"]
+    end
+
+    test "a name that is not text travels as base64", %{copy: copy} do
+      name = <<"odd", 255>>
+      File.mkdir_p!(Path.join(copy, name))
+      kb(Path.join([copy, name, "f"]), 4)
+
+      assert {:ok, _total, %{"folders" => [folder]}} = Disk.sizes(copy, [{name, :dir}])
+      assert folder["path_base64"] == Base.encode64(name)
+      refute Map.has_key?(folder, "path")
+    end
+
+    test "is an error when du cannot be run", %{copy: copy} do
+      assert :error = Disk.sizes(copy, [], fn _cmd, _argv, _opts -> {"", 2} end)
+
+      assert :error =
+               Disk.sizes(copy, [], fn _cmd, _argv, _opts ->
+                 raise ErlangError, original: :enoent
+               end)
+    end
+
+    # A full or missing temporary directory raises `File.Error` from the list file's write, not an
+    # `ErlangError`, and a sizing that raised failed the keep after its copy was in place.
+    test "is an error, and not a crash, for whatever the walk raises", %{copy: copy} do
+      assert :error = Disk.sizes(copy, [], fn _cmd, _argv, _opts -> raise "du is gone" end)
+
+      assert :error =
+               Disk.sizes(copy, [], fn _cmd, _argv, _opts ->
+                 raise File.Error, reason: :enospc, action: "write to file", path: "/tmp/x"
+               end)
+    end
+
+    test "what it returns is what core keeps", %{copy: copy} do
+      assert {:ok, _total, folders} = Disk.sizes(copy, [{"target", :dir}])
+      assert ForgeCore.WarmBuild.folders(folders) == folders
+    end
+  end
+
   describe "measure/3" do
     test "names each kind, and the rest is what the four leave", %{base: base} do
       File.mkdir_p!(Path.join(base, "volumes/ticket/1"))

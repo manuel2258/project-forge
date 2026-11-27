@@ -120,7 +120,7 @@ defmodule ForgeWeb.WarmBuildPagesTest do
 
       assert has_element?(view, "#ticket-warm-build", "Warm build")
       assert view |> element("#warm-build-none") |> render() =~ @no_copy
-      refute has_element?(view, "#warm-build-copy")
+      refute has_element?(view, "#warm-build-copies")
       refute has_element?(view, "#clear-warm-build-ask")
     end
 
@@ -147,40 +147,86 @@ defmodule ForgeWeb.WarmBuildPagesTest do
       refute block =~ "<b>x</b>"
 
       # Long values wrap on a phone rather than push the page sideways.
-      assert has_element?(view, "#warm-build-machine.break-all")
-      assert has_element?(view, "#warm-build-command.break-all")
+      assert has_element?(view, "#warm-build-machine-#{done.id}.break-all")
+      assert has_element?(view, "#warm-build-command-#{done.id}.break-all")
+      assert has_element?(view, "#clear-warm-build-ask", "Clear")
+
+      # The way into the explorer, and the mark of the copy the next command starts from.
+      assert has_element?(
+               view,
+               ~s(#warm-build-explore-#{done.id}[href$="/builds/#{done.id}"]),
+               "Explore"
+             )
+
+      assert has_element?(view, "#warm-build-next-#{done.id}", "next command starts here")
+    end
+
+    test "list every kept copy, one row per machine, the one the next command starts from first",
+         %{conn: conn, user: user, worker: worker} do
+      {project, ticket} = ticket_on(@keeping, user)
+      other = FakeWorker.connect()
+      [first, second] = invoke_builds(ticket, worker, [[], ["--other"]])
+      earlier = [finished_at: DateTime.add(DateTime.utc_now(:second), -600)]
+      first = finish_with(first, worker, 0, kept(1_024) ++ earlier)
+      second = finish_with(second, other, 0, kept(2_048))
+      {:ok, view, _html} = live(conn, page(project, ticket))
+
+      html = view |> element("#warm-build-copies") |> render()
+      {at_first, _} = :binary.match(html, "warm-build-copy-#{first.id}")
+      {at_second, _} = :binary.match(html, "warm-build-copy-#{second.id}")
+
+      # The later command's copy is the one the next command is sent to, so it is listed first.
+      assert at_second < at_first
+      assert has_element?(view, "#warm-build-next-#{second.id}")
+      refute has_element?(view, "#warm-build-next-#{first.id}")
+      refute has_element?(view, "#warm-build-cleared-#{first.id}")
+
+      assert has_element?(
+               view,
+               "#warm-build-machine-#{first.id}",
+               "machine " <> String.slice(worker.id, 0, 8)
+             )
+
+      assert has_element?(
+               view,
+               "#warm-build-machine-#{second.id}",
+               "machine " <> String.slice(other.id, 0, 8)
+             )
+
+      assert has_element?(view, "#warm-build-explore-#{first.id}")
+      assert has_element?(view, "#warm-build-explore-#{second.id}")
       assert has_element?(view, "#clear-warm-build-ask", "Clear")
     end
 
-    test "Clear makes the copy unusable and the block read as having none", %{
-      conn: conn,
-      user: user,
-      worker: worker
-    } do
+    test "Clear makes the copy unusable: it stays listed, marked cleared, and is no longer next",
+         %{conn: conn, user: user, worker: worker} do
       {project, ticket} = ticket_on(@keeping, user)
-      finish_with(invoke_build(ticket, worker, []), worker, 0, kept(1_024))
+      done = finish_with(invoke_build(ticket, worker, []), worker, 0, kept(1_024))
       {:ok, view, _html} = live(conn, page(project, ticket))
-      assert has_element?(view, "#warm-build-copy")
+      assert has_element?(view, "#warm-build-copy-#{done.id}")
+      refute has_element?(view, "#warm-build-cleared-#{done.id}")
 
       view |> element("#clear-warm-build") |> render_click()
 
       assert Tickets.get!(ticket.id).warm_epoch == 1
-      assert view |> element("#warm-build-none") |> render() =~ @no_copy
-      refute has_element?(view, "#warm-build-copy")
+      assert has_element?(view, "#warm-build-cleared-#{done.id}", "cleared")
+      refute has_element?(view, "#warm-build-next-#{done.id}")
+      # Nothing left to clear.
+      refute has_element?(view, "#clear-warm-build-ask")
     end
 
-    test "a copy a clear made unusable is not drawn when the page is opened", %{
+    test "a copy a clear made unusable is drawn as cleared when the page is opened", %{
       conn: conn,
       user: user,
       worker: worker
     } do
       {project, ticket} = ticket_on(@keeping, user)
-      finish_with(invoke_build(ticket, worker, []), worker, 0, kept(1_024))
+      done = finish_with(invoke_build(ticket, worker, []), worker, 0, kept(1_024))
       {:ok, _ticket} = Forge.WarmBuilds.clear(Tickets.get!(ticket.id), {:user, user.id})
       {:ok, view, _html} = live(conn, page(project, ticket))
 
-      assert has_element?(view, "#warm-build-none")
-      refute has_element?(view, "#warm-build-copy")
+      refute has_element?(view, "#warm-build-none")
+      assert has_element?(view, "#warm-build-cleared-#{done.id}", "cleared")
     end
   end
 

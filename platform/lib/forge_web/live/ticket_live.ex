@@ -835,27 +835,15 @@ defmodule ForgeWeb.TicketLive do
   end
 
   # The details' Warm build block: nothing when no command of the pinned workflow keeps its build,
-  # otherwise `%{copy: nil | the copy the ticket's next command will be sent to}` as the block
-  # draws it (`docs/design/ui.md` § The details). The machine is named as a command's page names
-  # it, and the command as `ForgeCore.Workflow.Command.argv/1` shows its arguments.
+  # otherwise `%{copies: [row]}`, every copy still kept on a machine, the one the next command
+  # starts from first (`Forge.WarmBuilds.copies/1`, `docs/design/ui.md` § The details). The machine
+  # is named as a command's page names it, and the command as `ForgeCore.Workflow.Command.argv/1`
+  # shows its arguments.
   defp warm_build(ticket) do
     if Forge.WarmBuilds.declared?(ticket),
-      do: %{copy: ticket |> Forge.WarmBuilds.current() |> warm_copy()}
-  end
-
-  defp warm_copy(nil), do: nil
-
-  defp warm_copy(%{job: job, worker: worker, size: size, kept_at: at}) do
-    command = Jobs.spec(job).command || %{}
-
-    %{
-      size: size,
-      machine: "machine " <> String.slice(worker.id, 0, 8),
-      command: command["name"],
-      args: command["args"],
-      commit: Diff.short(command["at"]),
-      at: at
-    }
+      do: %{
+        copies: ticket |> Forge.WarmBuilds.copies() |> Enum.map(&ForgeWeb.BuildViews.copy_row/1)
+      }
   end
 
   # Why each pending job has not gone out, in the scheduler's own sentence — only a pending job

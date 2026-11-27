@@ -57,8 +57,11 @@ saved — stays there on that machine for up to two days, for the ticket's later
 including ones whose own definition does not name the secret. This changes the sentence below, "a
 job whose state does not name it does not hold it", for *files on disk* and for the ticket's own
 later commands, and only for them: the value is in no environment it was not already in, the
-copy is never uploaded, and it goes to no other ticket, no agent job and no conversation. The
-worker's masking runs on what a job *uploads*, and nothing uploads a copy. It does not widen the
+copy is never stored on the platform, and it goes to no other ticket, no agent job and no
+conversation. The worker's masking runs on what a job *uploads*, and nothing uploads a copy; but a
+member of the project may now read its files, unmasked, through the explorer, over the JSON API and
+over MCP, and download it (`worker-tier.md` § Looking into a copy), so a value a command left in
+its tree is readable by every member, as every project secret already is. It does not widen the
 boundary that matters, which is above: a command runs the agent's own code, so the agent can already
 reach whatever that command holds. A project that wants a secret-holding command not to leave its
 tree to the others declares no `keep_build` on it, and one that wants its gate never to read what
@@ -356,6 +359,16 @@ nothing that is trying.
 Rewriting a commit would change the agent's work, and the agent can push on its own with its git
 token; a group's files are uploaded as they are, and may be binary, where a substring replaced is
 a file broken. A push carrying a value is § Open.
+
+**A ticket's command copy is not masked either** (ticket 84, `worker-tier.md` § Looking into a copy).
+Its file content, hashes and downloads are the copy's bytes as they are, to every member and every
+project token: the worker holds no secret value between uses, and masking would change a hash and
+break an archive. A secret a command's script wrote into its tree is readable there, for as long
+as the copy is kept, by everyone who may read the ticket. **The live lines of a running command are
+masked**, since they are its log: each line on its own, as events are. A value that contains a newline
+is masked in the log file, which is masked whole, and **not** in the live lines, and the line times
+are then not kept (`times.unkept`, `worker-log.md`). That is the one place the live text is weaker
+than the log, and it goes with what masking misses.
 
 **A page's files and a job's writes to a page's store are not masked either** (`pages.md`). A page's
 files are uploaded as a group's are, and a value written to the store is JSON a page will read back:

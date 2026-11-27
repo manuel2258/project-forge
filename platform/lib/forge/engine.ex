@@ -1490,6 +1490,10 @@ defmodule Forge.Engine do
     end
 
     Enum.each(live, &Forge.Git.Tokens.revoke_for_job(&1.id))
+
+    # A cancelled command's live lines are not held for ever when its machine never reports: they
+    # go as a finished command's do (`Forge.Jobs.Lines.drop_later/1`).
+    for %Job{kind: :command, id: id} <- live, do: Forge.Jobs.Lines.drop_later(id)
   end
 
   # A cancelled ticket's step conversation is stopped, its branch kept, so that restoring the

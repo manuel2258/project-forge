@@ -153,6 +153,14 @@ defmodule Forge.FakeWorker do
 
     outcome = Keyword.get(opts, :outcome, if(status, do: :converged, else: :error))
 
+    # What a release from protocol 18 reports: the steps of the run, and the times of the log's lines,
+    # uploaded to the key the assignment carries (`:times` is their content, `:times_key` overrides
+    # the key the result names).
+    times_key = assignment["store"]["times_key"]
+
+    if content = Keyword.get(opts, :times),
+      do: {:ok, _info} = Storage.put(times_key, content)
+
     Jobs.complete(assignment["job_id"], %Result{
       status: :finished,
       outcome: outcome,
@@ -160,7 +168,9 @@ defmodule Forge.FakeWorker do
       duration_ms: Keyword.get(opts, :duration_ms, 1_500),
       log: Keyword.get(opts, :log_key, key),
       # What the worker reports of the warm build (`ForgeCore.WarmBuild`); nil from one that does not.
-      warm: Keyword.get(opts, :warm)
+      warm: Keyword.get(opts, :warm),
+      steps: Keyword.get(opts, :steps),
+      times: if(Keyword.has_key?(opts, :times), do: Keyword.get(opts, :times_key, times_key))
     })
   end
 

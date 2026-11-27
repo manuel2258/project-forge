@@ -32,6 +32,33 @@ defmodule ForgeWorker.Store do
     end
   end
 
+  @doc """
+  POSTs `body`, an enumerable of binaries (tar's output, a file's chunks), to the platform's door
+  for a download (`POST /worker-streams/:id`, `docs/design/worker-channel.md` § Protocol 18), chunked
+  and as it is produced: nothing is held, and the platform does not read the next chunk until the
+  browser has taken the last, so a slow browser slows the producer through TCP. The secret is a
+  bearer, as every token here. Not retried: a stream is used once, and a download that is cut off
+  starts again from the beginning. Returns the status the platform ended with.
+  """
+  @spec stream_post(String.t(), String.t(), Enumerable.t(), [{String.t(), String.t()}]) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def stream_post(url, secret, body, headers \\ []) do
+    request =
+      options(
+        headers: [{"content-type", "application/octet-stream"} | bearer(secret)] ++ headers,
+        body: body,
+        retry: false,
+        # A browser may take a day over 60 GB: the wait for the platform's answer is its whole
+        # download, and what notices a dead one is the platform's own idle check.
+        receive_timeout: :timer.hours(24)
+      )
+
+    case Req.post(url, request) do
+      {:ok, %{status: status}} -> {:ok, status}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   # **An upload waits out a platform that is restarting** (`docs/design/worker-channel.md` § A
   # platform restart): a run that ends during a deploy uploads its transcript, its session and its
   # files to a platform that is not there for a minute or two, and Req's own three retries over

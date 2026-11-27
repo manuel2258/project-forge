@@ -178,6 +178,11 @@ others do, and answers `Range` with `206` and `Accept-Ranges` through `Forge.Sto
 a range capped at 8 MiB a response — **the only door of the platform that is seekable**.
 The reserved name `forge-page.js` is served from the platform's own library and never from a blob.
 
+**A copy's download is not served from here.** A download of a ticket's command copy passes
+through the platform from the machine that holds it to the browser or the API client, as it is packed,
+and **nothing of it is stored**: not in the store, not on the platform's disk (`worker-channel.md` §
+Protocol 18). It is the one thing the platform serves that `Forge.Storage` never sees.
+
 ## The local implementation
 
 `Forge.Storage.Local`, writing under `<root>/<key>`, where the root (`Forge.Storage.Local.root/0`)
@@ -253,6 +258,13 @@ six, each still read once its job is over:
 | `job.harness.finished` | the end of a run, as the harness reported it |
 | `job.harness.rate_limit` | each credential's windows (`capacity.md` § Engine support) |
 | `job.harness.memory` | the memory warning on the job page |
+
+**Step events are lifecycle events.** A command's `command.step` and `command.steps_unrecorded`
+(ticket 84, `worker-tier.md` § Looking into a copy) are outside `job.harness.*`, so
+`forge_event_swept/1` keeps them for good and its list does not change. **A line of a command's
+output is not an event at all**: the page reads it live from memory, and after the command ends from
+a second blob beside the log, `job/<id>/times-<attempt>-<nonce>.txt`, one decimal millisecond per line
+(§ Serving: it is uploaded under its own key and token, and recorded as `times` on `job.finished`).
 
 **Swept:** every other `job.harness.*` type — `tool_use`, `tool_result`, `notice`, `retry`,
 `starting`, `correction`, `control`, `usage`, `unknown`, `malformed` today, and **any harness type added later**, unless

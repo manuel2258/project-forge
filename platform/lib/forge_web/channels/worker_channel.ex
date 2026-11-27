@@ -12,6 +12,7 @@ defmodule ForgeWeb.WorkerChannel do
   use Phoenix.Channel
 
   alias Forge.{Conversations, Jobs, Workers}
+  alias Forge.Jobs.Lines
   alias Forge.Workers.{Log, Updates}
   alias ForgeCore.Job.{Event, Result}
   alias ForgeCore.WorkerProtocol
@@ -139,6 +140,24 @@ defmodule ForgeWeb.WorkerChannel do
     {:noreply, socket}
   end
 
+  # A person or a token looking into a ticket's command copy (`Forge.Explore`): the request is
+  # pushed to the machine with a `ref`, and the answer is sent back to whoever asked, by this
+  # connection and no other — `handle_in("explored", …)` only answers a ref it holds. The asker is
+  # monitored so a page that closed does not leave its ref held.
+  def handle_info({:explore, ref, pid, payload}, socket) when is_binary(ref) and is_pid(pid) do
+    monitor = Process.monitor(pid)
+    push(socket, "explore", Map.put(payload, "ref", ref))
+    {:noreply, assign(socket, :explores, Map.put(held_explores(socket), ref, {pid, monitor}))}
+  end
+
+  # The asker gave up waiting: a late answer has nobody to go to.
+  def handle_info({:explore_cancel, ref}, socket), do: {:noreply, forget_explore(socket, ref)}
+
+  def handle_info({:DOWN, monitor, :process, _pid, _reason}, socket) do
+    explores = for {ref, {_pid, ^monitor}} <- held_explores(socket), do: ref
+    {:noreply, Enum.reduce(explores, socket, &forget_explore(&2, &1))}
+  end
+
   def handle_info({:cancel, job_id, reason}, socket) do
     push(socket, "cancel", %{"job_id" => job_id, "reason" => to_string(reason)})
     {:noreply, socket}
@@ -203,6 +222,34 @@ defmodule ForgeWeb.WorkerChannel do
     {:noreply, socket}
   end
 
+  # A running command's output, each line with its time (`Forge.Jobs.Lines`). Unacked: the worker
+  # sends the lines it still has again after it joins, so a lost batch is made good, and
+  # `Lines.put/3` drops what it holds. **Only the worker running the command, and only while it
+  # runs**: anything else is dropped, so a machine cannot write into another's command page or
+  # fill memory for a job that has ended.
+  def handle_in("lines", %{"job_id" => job_id, "from" => from, "lines" => lines}, socket)
+      when is_binary(job_id) do
+    with :ok <- owns(socket, job_id),
+         %{kind: :command, status: :running} <- Jobs.get(job_id) do
+      Lines.put(job_id, from, lines)
+    end
+
+    {:noreply, socket}
+  end
+
+  # What a machine answers to an `explore`, unacked. Only to a ref this connection holds: the
+  # machine that was asked is the only one that may answer (`Forge.Explore`).
+  def handle_in("explored", %{"ref" => ref} = payload, socket) when is_binary(ref) do
+    case Map.get(held_explores(socket), ref) do
+      {pid, _monitor} ->
+        send(pid, {:explored, ref, Map.take(payload, ["ok", "error", "progress"])})
+        {:noreply, if(payload["progress"], do: socket, else: forget_explore(socket, ref))}
+
+      nil ->
+        {:noreply, socket}
+    end
+  end
+
   # Best-effort, and unacked: a lost event costs a line in the timeline, never a decision. Nor
   # is a lost one detectable — the worker sends no sequence, so a gap and a quiet job look the
   # same (`docs/design/worker-channel.md` § Delivery).
@@ -255,7 +302,7 @@ defmodule ForgeWeb.WorkerChannel do
       with(
         :ok <- owns(socket, job_id),
         :ok <- still_its(socket, job_id, "failed"),
-        do: Jobs.fail(job_id, {:worker, payload["reason"]})
+        do: Jobs.fail(job_id, {:worker, payload["reason"]}, steps: payload["steps"])
       ),
       socket
     )
@@ -287,6 +334,19 @@ defmodule ForgeWeb.WorkerChannel do
     if socket.assigns[:joined] do
       {level, why} = parting(reason)
       Log.record(socket.assigns.worker_id, "disconnected", level, why)
+    end
+  end
+
+  defp held_explores(socket), do: Map.get(socket.assigns, :explores, %{})
+
+  defp forget_explore(socket, ref) do
+    case Map.pop(held_explores(socket), ref) do
+      {{_pid, monitor}, rest} ->
+        Process.demonitor(monitor, [:flush])
+        assign(socket, :explores, rest)
+
+      {nil, _same} ->
+        socket
     end
   end
 

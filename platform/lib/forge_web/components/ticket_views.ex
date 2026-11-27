@@ -1555,7 +1555,13 @@ defmodule ForgeWeb.TicketViews do
         </p>
       </div>
 
-      <.warm_build :if={@warm_build} warm_build={@warm_build} ticket={@ticket} now={@now} />
+      <.warm_build
+        :if={@warm_build}
+        warm_build={@warm_build}
+        ticket={@ticket}
+        project={@project}
+        now={@now}
+      />
 
       <div class="flex flex-col gap-2">
         <.link
@@ -1587,41 +1593,67 @@ defmodule ForgeWeb.TicketViews do
 
   attr :warm_build, :map, required: true
   attr :ticket, :map, required: true
+  attr :project, :map, required: true
   attr :now, :any, required: true
 
-  # The warm build of a ticket whose workflow has a command that keeps one: the copy its next
-  # command will be sent to, or the sentence that there is none, and Clear
-  # (`docs/design/ui.md` § The details). Every value that is not ours is text, cut with an ellipsis at the fact's width
-  # (`.ui-fact-value` does not wrap, so the `break-all` below only holds where it is not that): a machine
-  # and a command's arguments are as long as somebody made them.
+  # The warm build of a ticket whose workflow has a command that keeps one: **every kept copy, one
+  # row per machine**, the one the next command starts from first, and the sentence that there is
+  # none when no machine has one, and Clear (`docs/design/ui.md` § The details). Each row opens the
+  # explorer. Every value that is not ours is text, cut with an ellipsis at the fact's width
+  # (`.ui-fact-value` does not wrap, so the `break-all` below only holds where it is not that): a
+  # machine and a command's arguments are as long as somebody made them.
   defp warm_build(assigns) do
     ~H"""
     <div id="ticket-warm-build" class="min-w-0">
       <.eyebrow>Warm build</.eyebrow>
       <p
-        :if={@warm_build.copy == nil}
+        :if={@warm_build.copies == []}
         id="warm-build-none"
         class="mt-2 text-[12.5px] break-words text-ink-3"
       >
         {ForgeCore.WarmBuild.no_copy_sentence()}
       </p>
-      <div :if={@warm_build.copy} id="warm-build-copy" class="min-w-0">
-        <.fact_list id="warm-build-facts" dense>
-          <:fact label="size">{ForgeWeb.Blob.size_label(@warm_build.copy.size || 0)}</:fact>
-          <:fact label="machine">
-            <span id="warm-build-machine" class="min-w-0 break-all">{@warm_build.copy.machine}</span>
-          </:fact>
-          <:fact label="command">
-            <span id="warm-build-command" class="min-w-0 break-all">
-              {@warm_build.copy.command} {ForgeCore.Workflow.Command.argv(@warm_build.copy.args)}
+      <div :if={@warm_build.copies != []} id="warm-build-copies" class="min-w-0">
+        <div
+          :for={copy <- @warm_build.copies}
+          id={"warm-build-copy-#{copy.id}"}
+          class="warm-build-copy"
+          data-next={copy.next && "true"}
+          data-cleared={copy.cleared && "true"}
+        >
+          <p :if={copy.next || copy.cleared} class="warm-build-mark">
+            <span :if={copy.next} id={"warm-build-next-#{copy.id}"}>▸ next command starts here</span>
+            <span :if={copy.cleared} id={"warm-build-cleared-#{copy.id}"} class="text-ink-3">
+              cleared
             </span>
-          </:fact>
-          <:fact label="commit">
-            <span class="break-all">{@warm_build.copy.commit}</span>
-          </:fact>
-          <:fact label="kept">{Format.ago_phrase(@warm_build.copy.at, @now)}</:fact>
-        </.fact_list>
+          </p>
+          <.fact_list dense>
+            <:fact label="size">{ForgeWeb.Blob.size_label(copy.size || 0)}</:fact>
+            <:fact label="machine">
+              <span id={"warm-build-machine-#{copy.id}"} class="min-w-0 break-all">
+                {copy.machine}
+              </span>
+            </:fact>
+            <:fact label="command">
+              <span id={"warm-build-command-#{copy.id}"} class="min-w-0 break-all">
+                {copy.command} {ForgeCore.Workflow.Command.argv(copy.args)}
+              </span>
+            </:fact>
+            <:fact label="commit">
+              <span class="break-all">{copy.commit}</span>
+            </:fact>
+            <:fact label="kept">{Format.ago_phrase(copy.at, @now)}</:fact>
+          </.fact_list>
+          <.link
+            id={"warm-build-explore-#{copy.id}"}
+            navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/builds/#{copy.id}"}
+            class="warm-build-explore"
+          >
+            Explore ›
+          </.link>
+        </div>
         <.confirm
+          :if={Enum.any?(@warm_build.copies, &(not &1.cleared))}
           id="clear-warm-build"
           label="Clear"
           act="Clear it"

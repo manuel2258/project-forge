@@ -799,6 +799,9 @@ defmodule Forge.Jobs do
   @spec command_assignment(Job.t(), Ticket.t(), Forge.Projects.Project.t(), String.t()) :: map()
   def command_assignment(%Job{kind: :command} = job, %Ticket{} = ticket, project, git_token) do
     log = Storage.Key.job(job.id, "log-#{job.attempt}-#{Storage.Key.nonce()}.txt")
+
+    # The time of each line of the log, beside it (`docs/design/worker-tier.md` § Looking into a copy).
+    times = Storage.Key.job(job.id, "times-#{job.attempt}-#{Storage.Key.nonce()}.txt")
     timeout = timeout_ms(job)
 
     %{
@@ -815,6 +818,12 @@ defmodule Forge.Jobs do
         "log_key" => log,
         "log_token" =>
           Storage.Token.sign(:put, log,
+            job: job.id,
+            outlasting_ms: timeout + preparation_margin_ms()
+          ),
+        "times_key" => times,
+        "times_token" =>
+          Storage.Token.sign(:put, times,
             job: job.id,
             outlasting_ms: timeout + preparation_margin_ms()
           )
@@ -2402,7 +2411,7 @@ defmodule Forge.Jobs do
       # hear the same one twice. Keyed by the job: a job is recorded once. Not "is it running":
       # a worker that rejoins before its result is acked has the job re-queued under it
       # (`WorkerChannel.reconcile/2`), and the result that follows is still the run's answer.
-      recorded?(job) -> settled(job, result.harness)
+      recorded?(job) -> settle_recorded(job, result)
       # A command's result is its exit status and its log (`docs/design/commands.md`).
       job.kind == :command -> Commands.complete(job, ticket, result)
       # An agent that asked for commands: the run is over and the job is not.
@@ -2649,6 +2658,26 @@ defmodule Forge.Jobs do
   defp put_immediate_resume(multi, false, job, batch),
     do: Commands.put_resumed_event(multi, job, batch)
 
+  # A result for a job already finished. `settled/2` settles what the run spent; for a command a
+  # person's cancel ended, the result is also the only word of how its run went, so its steps are
+  # kept (once: a result is re-sent until it is acked) and its live lines, which nothing else will
+  # ever drop, go in five minutes like a finished command's (`Forge.Jobs.Lines`).
+  defp settle_recorded(job, result) do
+    outcome = settled(job, result.harness)
+    if job.kind == :command and job.outcome == :cancelled, do: settle_command(job, result)
+    outcome
+  end
+
+  defp settle_command(job, result) do
+    Forge.Jobs.Lines.drop_later(job.id)
+
+    if Forge.Jobs.Steps.read(job.id) == {:unrecorded, :before} do
+      Multi.new() |> Forge.Jobs.Steps.put(job, result.steps) |> Repo.transaction()
+    end
+
+    :ok
+  end
+
   defp record_and_follow_up(job, ticket, result) do
     result = Blobs.require_pages(spec(job), result)
 
@@ -2863,18 +2892,30 @@ defmodule Forge.Jobs do
     end
   end
 
+  @doc """
+  A command's steps as its page and the API draw them (`Forge.Jobs.Steps`): `{:steps, [step]}`,
+  `{:unrecorded, :release}` for a machine whose release predates them, `{:unrecorded, :before}` for
+  a command that ran before forge recorded steps.
+  """
+  @spec command_steps(String.t()) :: {:steps, [map()]} | {:unrecorded, :release | :before}
+  defdelegate command_steps(job_id), to: Forge.Jobs.Steps, as: :read
+
+  @doc "A command's log with each line's time: live while it runs, stored after (`Forge.Jobs.CommandLog`)."
+  @spec command_log(Job.t(), keyword()) :: Forge.Jobs.CommandLog.t()
+  defdelegate command_log(job, opts \\ []), to: Forge.Jobs.CommandLog, as: :read
+
   @doc "Marks a job whose runner died as finished with an error, then lets the engine decide."
-  @spec fail(String.t(), term()) :: {:ok, Job.t()} | {:error, term()}
-  def fail(job_id, reason) do
+  @spec fail(String.t(), term(), keyword()) :: {:ok, Job.t()} | {:error, term()}
+  def fail(job_id, reason, opts \\ []) do
     case get!(job_id) do
       # A failure reported twice, or after the result: finished is finished, and a second
       # follow-up would run the engine — or wake a command's parent — over a job already done.
       %Job{status: :finished} -> {:error, :already_recorded}
-      job -> fail_job(job, reason)
+      job -> fail_job(job, reason, opts[:steps])
     end
   end
 
-  defp fail_job(job, reason) do
+  defp fail_job(job, reason, steps) do
     ticket = job.ticket_id && Tickets.get!(job.ticket_id)
     attrs = fail_attrs(job)
 
@@ -2886,11 +2927,14 @@ defmodule Forge.Jobs do
       job_id: job.id,
       payload: %{"outcome" => attrs[:outcome], "reason" => inspect(reason)}
     })
+    # A command that died at its fetch still shows where the time went (`Forge.Jobs.Steps`).
+    |> Forge.Jobs.Steps.put(job, steps)
     |> Repo.transaction()
     |> case do
       {:ok, %{job: job}} ->
         Tokens.revoke_for_job(job.id)
         Workers.release(job.worker_id)
+        if job.kind == :command, do: Forge.Jobs.Lines.drop_later(job.id)
         # A conversation has no engine to continue: it failed, and a person decides what next.
         # On the kind, not on "does it have a ticket" — a *ticket* chat has one, so that guard
         # sent every failed ticket chat into `Engine.after_job`, which has no workflow job to move on from
@@ -3316,6 +3360,9 @@ defmodule Forge.Jobs do
     |> case do
       {:ok, %{job: job}} ->
         Tokens.revoke_for_job(job.id)
+        # A command that runs again keeps its id, so its new run's lines from the first would be
+        # dropped as ones already held, and the page would show the lost run's output.
+        if job.kind == :command, do: Forge.Jobs.Lines.drop(job.id)
         Events.notify_changed(job)
         lost_reply(job)
         {:ok, job}

@@ -493,6 +493,16 @@ it keeps, its timeout, a cancel, a kill, or keeping failed on the machine. A com
 `ticket/<n>` branch, a conversation's, neither starts from a copy nor keeps one. Its last line says it is not a ticket's command when
 its definition lists `keep_build`, and that the command keeps nothing when it does not.
 
+**A command's steps are events too, and its lines are not** (ticket 84, `worker-tier.md` § Looking into a
+copy). When a command's result or failure is recorded the platform writes one `command.step` event
+for each step the worker timed, in order — name, start, duration or the reason it did not happen —
+and, for a result from a worker below protocol 18, one `command.steps_unrecorded`. They are
+lifecycle events (`storage.md` § Retention), kept for good. The lines the script prints reach the
+command's page live, each with its time since the command started, from memory
+(`Forge.Jobs.Lines`) and never as events; after the command ends their times are read from a blob
+beside the log, one millisecond per line, recorded as `times` on the `job.finished` event. The log
+itself is unchanged and carries no times.
+
 The argv is on the event because with freeform arguments it is no longer derivable from the
 workflow file. That is the cost of dropping the parameter schema, and it is cheap: one field, and
 "what actually ran" stays answerable for ever.
@@ -509,10 +519,9 @@ the gate a quarter of an hour, and a job the clock stops is recorded as out of b
 spend lost. `agents/implement.md`, `implement-bug.md`, `rebase.md` and `deps.md` therefore forbid
 running the gate or a suite in the checkout and send the agent to these three, in one batch where
 it can. `bin/look` is still run in the checkout, because its steps arrive on standard input and a
-command takes only arguments. **They keep nothing yet.** None of the three declares `keep_build`, so a project's own commands
-run as they did; opting them in, with every exit status kept, is a later change of its own
-(proposal `forge-commands-keep-their-build`), and until it merges the cold build each `static` and
-`test` pays is still there. **Not verified here:** the two scripts have been linted and not run
+command takes only arguments. **They keep their build.** `.forge/common.yml` has declared `keep_build` on `check`, `static` and `test`
+since 0.27.0, so a ticket's later commands start from what an earlier one built (`worker-tier.md` §
+The command copy). **Not verified here:** the two scripts have been linted and not run
 on a command machine, and `static`/`test` change what a ticket's agents do only once this merges,
 since a script is read at the ticket's pinned base (`workflow-grammar.md` § Commands).
 

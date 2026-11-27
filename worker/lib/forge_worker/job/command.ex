@@ -17,12 +17,23 @@ defmodule ForgeWorker.Job.Command do
   before the script's output, which the script's output is then appended to. Its log and the files of its
   groups staged for upload are in the worker's own directory (`ForgeWorker.Job.Dir.worker_dir/1`),
   which the script cannot reach.
+
+  `:steps` (`ForgeWorker.Job.Steps`) is where it says how long its devshell and its script took:
+  in `nix develop`, a one-line shell written innermost writes the time into `@marker` just before the script
+  (`Exec.mark_start/3`), and the time between the spawn and that is the devshell and the rest the
+  script. A missing or out-of-range marker, which only the job can cause, makes the devshell
+  `unmeasured` and the script run from the spawn to the exit.
   """
+
+  # The file the wrapper writes, in the job directory the job's user owns.
+  @marker ".forge-script-started"
+  # What a marker may hold: a millisecond clock reading is 13 digits.
+  @marker_max 64
 
   use GenServer, restart: :temporary
 
   alias ForgeCore.Job.{Result, Spec}
-  alias ForgeWorker.Job.{Dir, Exec}
+  alias ForgeWorker.Job.{Dir, Exec, Steps}
   alias ForgeWorker.Log
 
   @default_grace_ms :timer.seconds(10)
@@ -78,6 +89,9 @@ defmodule ForgeWorker.Job.Command do
       grace_ms: Keyword.get(opts, :grace_ms, @default_grace_ms),
       health: Keyword.get_lazy(opts, :health, &ForgeWorker.Health.server/0),
       started: System.monotonic_time(:millisecond),
+      steps: Keyword.get(opts, :steps),
+      spawned: nil,
+      marked?: false,
       port: nil,
       slice: nil,
       slice_context: nil,
@@ -102,7 +116,16 @@ defmodule ForgeWorker.Job.Command do
           do: {name, value}
 
     secrets_file = Exec.write_secrets(state.job_dir, secrets)
-    {executable, args} = Exec.load_secrets(script, spec.command["args"] || [], secrets_file)
+    nix? = Exec.nix?(spec.env, Keyword.get(opts, :nix_env, false))
+    marked? = nix? and state.steps != nil
+    {executable, args} = {script, spec.command["args"] || []}
+
+    {executable, args} =
+      if marked?,
+        do: Exec.mark_start(executable, args, marker_path(state.job_dir)),
+        else: {executable, args}
+
+    {executable, args} = Exec.load_secrets(executable, args, secrets_file)
 
     {executable, args} =
       Exec.nix(executable, args, spec.env, Keyword.get(opts, :nix_env, false))
@@ -139,7 +162,15 @@ defmodule ForgeWorker.Job.Command do
         {executable, args} = slice.wrap(executable, args, context)
         state = %{state | slice: slice, slice_context: context}
         Process.send_after(self(), :timeout, spec.command["timeout_ms"])
-        {:noreply, %{state | port: spawn_port(state, executable, args, env)}}
+        spawned = System.os_time(:millisecond)
+
+        {:noreply,
+         %{
+           state
+           | port: spawn_port(state, executable, args, env),
+             spawned: spawned,
+             marked?: marked?
+         }}
 
       {:error, reason} ->
         # A command that cannot be confined is not run unconfined: it ends with no status.
@@ -247,6 +278,70 @@ defmodule ForgeWorker.Job.Command do
     end
   end
 
+  # Says where the time went: from the spawn to the marker is the devshell, from the marker to the
+  # exit the script. A script that never ran has neither.
+  defp time_steps(%{steps: nil}, _status, _ended), do: :ok
+
+  defp time_steps(%{spawned: nil, steps: steps}, _status, _ended) do
+    Steps.skip(steps, "devshell", "not_run")
+    Steps.skip(steps, "script", "not_run")
+  end
+
+  defp time_steps(%{steps: steps, spawned: spawned} = state, _status, ended) do
+    case marked_at(state, spawned, ended) do
+      nil ->
+        Steps.skip(steps, "devshell", if(state.marked?, do: "unmeasured", else: "no_env"))
+        Steps.record(steps, "script", spawned, ended - spawned)
+
+      marked ->
+        Steps.record(steps, "devshell", spawned, marked - spawned)
+        Steps.record(steps, "script", marked, ended - marked)
+    end
+  end
+
+  # The marker's time, when the wrapper wrote one that lies between the spawn and the exit: a
+  # script that wrote its own file, or an empty one, is unmeasured and not believed.
+  defp marked_at(%{marked?: false}, _spawned, _ended), do: nil
+
+  defp marked_at(state, spawned, ended) do
+    with {:ok, text} <- read_marker(marker_path(state.job_dir)),
+         {marked, ""} <- Integer.parse(String.trim(text)),
+         true <- marked >= spawned and marked <= ended do
+      marked
+    else
+      _unmeasured -> nil
+    end
+  end
+
+  # **The job's user owns the marker, and the worker reads it as root**: a link to `/dev/zero` would
+  # be read for ever and a FIFO would block for ever, with the slice's processes already killed. So
+  # it is read as `Job.Dir` reads what a job owns: only a regular file, only a few bytes of it, and
+  # `lstat` first, which does not follow a link. Nothing can swap it between the `lstat` and the
+  # `open`: the job's processes are gone by now when it ran in a slice (`conclude/2` cleans the slice up first).
+  defp read_marker(path) do
+    with {:ok, %File.Stat{type: :regular, size: size}} when size <= @marker_max <-
+           File.lstat(path),
+         {:ok, fd} <- :file.open(path, [:read, :raw, :binary]) do
+      read_and_close(fd)
+    else
+      _not_a_small_regular_file -> :error
+    end
+  end
+
+  # Reading at most `@marker_max` bytes is an equivalent mutant of the size check in `read_marker/1`
+  # (a file that passed it is no longer than that), kept so that the read stays bounded on its own
+  # if the check above it is ever changed.
+  defp read_and_close(fd) do
+    case :file.read(fd, @marker_max) do
+      {:ok, text} -> {:ok, text}
+      _eof_or_error -> :error
+    end
+  after
+    :file.close(fd)
+  end
+
+  defp marker_path(job_dir), do: Path.join(job_dir, @marker)
+
   defp ended(status, nil), do: {:converged, status, nil, :own}
   defp ended(status, reason), do: {:converged, status, reason, :memory}
 
@@ -256,9 +351,11 @@ defmodule ForgeWorker.Job.Command do
   # exits, 127 from `env`, and that is a status like any other. A killed command's status is the
   # signal's, and reporting it would read as the script's own answer.
   defp conclude(state, status) do
+    ended = System.os_time(:millisecond)
     Exec.remove_secrets(state.job_dir)
     if state.slice, do: state.slice.cleanup(state.slice_context)
     ending = ending(state, status)
+    time_steps(state, status, ended)
 
     {outcome, exit_status, reason, how} =
       case {state.killed, status} do

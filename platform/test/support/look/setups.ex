@@ -54,7 +54,8 @@ defmodule Forge.Look.Setups do
     "warm_build" => Forge.Look.Setups.WarmBuild,
     "pages" => Forge.Look.Setups.Pages,
     "ticket_text" => Forge.Look.Setups.TicketText,
-    "takeover" => Forge.Look.Setups.Takeover
+    "takeover" => Forge.Look.Setups.Takeover,
+    "explore" => Forge.Look.Setups.Explore
   }
 
   @doc "The registered setups, by name."

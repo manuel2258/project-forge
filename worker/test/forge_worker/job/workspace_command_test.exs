@@ -73,7 +73,7 @@ defmodule ForgeWorker.Job.WorkspaceCommandTest do
 
     {:ok, key} = CommandCopy.key(first)
 
-    {:ok, _size} =
+    {:ok, _size, _folders} =
       CommandCopy.keep(root, key, dir, %{"job_id" => first["job_id"], "commit" => "c"})
 
     :ok = Workspace.discard(first, root)

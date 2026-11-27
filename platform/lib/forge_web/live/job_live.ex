@@ -30,7 +30,18 @@ defmodule ForgeWeb.JobLive do
   alias Forge.{Archive, Artifacts, Events, Jobs, Tickets}
   alias Forge.Events.Stream
   alias Forge.Jobs.{Memory, Runs}
-  alias ForgeWeb.{Actions, Diff, FileType, Format, JobStream, Markdown, TicketViews, WorkScreen}
+
+  alias ForgeWeb.{
+    Actions,
+    BuildViews,
+    Diff,
+    FileType,
+    Format,
+    JobStream,
+    Markdown,
+    TicketViews,
+    WorkScreen
+  }
 
   @panes ~w(stream manifest wrote)
   @shows ~w(transcript raw)
@@ -53,6 +64,7 @@ defmodule ForgeWeb.JobLive do
     if connected?(socket) do
       Events.subscribe()
       Events.subscribe_job(job.id)
+      if job.kind == :command, do: Jobs.Lines.subscribe(job.id)
     end
 
     {:ok,
@@ -62,7 +74,8 @@ defmodule ForgeWeb.JobLive do
        ticket: ticket,
        job_id: job.id,
        pane: "stream",
-       show: "transcript"
+       show: "transcript",
+       log_earlier: 0
      )
      |> ForgeWeb.Capacity.project(project)
      |> load()
@@ -81,7 +94,8 @@ defmodule ForgeWeb.JobLive do
         ForgeWeb.PageViews.member?(page_names, artifact.name)
       end)
 
-    assign(socket,
+    socket
+    |> assign(
       page_title: "#{project.name}##{ticket.number} · #{job.state} ##{job.attempt}",
       job: job,
       spec: Jobs.spec(job),
@@ -105,11 +119,35 @@ defmodule ForgeWeb.JobLive do
       # started from, when it did (`docs/design/ui.md` § The job page).
       wait: wait(job),
       warm_from: warm_from(job),
+      # A command's steps, its output with the time of each line and the explorer's way in
+      # (`docs/design/ui.md` § The job page, ticket 84): nothing of them for any other job.
+      steps: command_steps(job),
+      build_copy: build_copy(ticket, job),
       failures: Stream.failures(job.id),
       transcripts: WorkScreen.transcript_links(job, project, ticket),
       now: DateTime.utc_now()
     )
+    |> load_log()
   end
+
+  defp command_steps(%{kind: :command, status: :finished, id: id}), do: Jobs.command_steps(id)
+  # Reported with the result, so a command that has not ended has none to show yet.
+  defp command_steps(%{kind: :command}), do: :running
+  defp command_steps(_job), do: nil
+
+  # The command's copy when it is still on its machine and a person may look into it: the
+  # latest kept on that machine, which `Forge.WarmBuilds.copies/1` lists. Nil for anything else.
+  defp build_copy(ticket, %{kind: :command, id: id, warm_kept: true}),
+    do: Enum.find(Forge.WarmBuilds.copies(ticket), &(&1.job.id == id))
+
+  defp build_copy(_ticket, _job), do: nil
+
+  # The output as the page draws it: the newest lines, with their times — live while the command
+  # runs, from the log and the times beside it after it ends (`Forge.Jobs.command_log/2`).
+  defp load_log(%{assigns: %{job: %{kind: :command} = job, log_earlier: earlier}} = socket),
+    do: assign(socket, command_log: Jobs.command_log(job, tail: 1_000, earlier: earlier))
+
+  defp load_log(socket), do: assign(socket, command_log: nil)
 
   # The reason a pending job is waiting, in the sentence it is drawn with: the warm build's is
   # `ForgeCore.WarmBuild.wait_sentence/0`, every other the scheduler's own words
@@ -275,6 +313,13 @@ defmodule ForgeWeb.JobLive do
 
   def handle_info({:ticket_changed, _}, socket), do: {:noreply, socket}
 
+  # What the worker streams of a running command's output (`Forge.Jobs.Lines`): the page's log is
+  # read again from what is held, which is the whole of the live answer.
+  def handle_info({:command_lines, id, _from, _lines}, %{assigns: %{job_id: id}} = socket),
+    do: {:noreply, load_log(socket)}
+
+  def handle_info({:command_lines, _id, _from, _lines}, socket), do: {:noreply, socket}
+
   # What a streamed event changes beyond the stream: the plan, the memory warning and the failure
   # link are queries of their own (`load/1`), read again only for the event that can move them.
   defp touch(socket, %{type: "job.harness.memory"}),
@@ -305,6 +350,10 @@ defmodule ForgeWeb.JobLive do
 
   def handle_event("more", _params, socket),
     do: {:noreply, assign(socket, stream: JobStream.older(socket.assigns.stream))}
+
+  # A thousand more lines above the thousand shown, of a command's output.
+  def handle_event("log-earlier", _params, %{assigns: %{log_earlier: n}} = socket),
+    do: {:noreply, socket |> assign(log_earlier: n + 1_000) |> load_log()}
 
   def handle_event("notices", _params, %{assigns: %{stream: stream}} = socket) do
     drawn = stream |> JobStream.held() |> WorkScreen.entries(stream.notices) |> length()
@@ -1069,6 +1118,7 @@ defmodule ForgeWeb.JobLive do
         </p>
         <p :if={@wait} id="job-wait" class="job-caption">{@wait}</p>
         <p class="job-caption">The script's exit status, or the engine's reason it has none.</p>
+        <BuildViews.steps :if={@steps} steps={@steps} worker_id={@job.worker_id} />
       </header>
 
       <section id="job-stand" class="job-stand" aria-label="As it ran">
@@ -1099,6 +1149,17 @@ defmodule ForgeWeb.JobLive do
           </.link>
 
           <.eyebrow>Log</.eyebrow>
+          <%!-- The copy this command kept, while it is still on its machine: the explorer's way
+                in (`docs/design/ui.md` § The explorer). --%>
+          <.link
+            :if={@build_copy}
+            id="job-explore"
+            navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/builds/#{@job.id}"}
+            class="job-file"
+          >
+            <span class="job-file-name">Explore this build</span>
+            <span class="job-dim" aria-hidden="true">›</span>
+          </.link>
           <.link
             :if={@log}
             href={
@@ -1116,6 +1177,7 @@ defmodule ForgeWeb.JobLive do
       </section>
 
       <section id="job-work" class="job-work">
+        <BuildViews.command_log log={@command_log} job={@job} />
         <.eyebrow>Script</.eyebrow>
         <pre id="command-script" class="job-prompt">{@command["script"]}</pre>
       </section>

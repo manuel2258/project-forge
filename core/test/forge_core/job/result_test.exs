@@ -239,6 +239,26 @@ defmodule ForgeCore.Job.ResultTest do
              command |> Result.to_map() |> Jason.encode!() |> Jason.decode!() |> Result.from_map()
   end
 
+  test "carries a command's steps and the key of its line times through the wire" do
+    steps = [
+      %{"name" => "snapshot", "at" => 1_700_000_000_000, "ms" => 40, "source" => "copy"},
+      %{"name" => "devshell", "skipped" => "no_env"}
+    ]
+
+    result = %Result{
+      status: :finished,
+      outcome: :converged,
+      steps: steps,
+      times: "job/abc/times-1-x.txt"
+    }
+
+    assert ^result =
+             result |> Result.to_map() |> Jason.encode!() |> Jason.decode!() |> Result.from_map()
+
+    assert %Result{steps: nil, times: nil} =
+             Result.from_map(%{"status" => "finished", "outcome" => "error"})
+  end
+
   test "carries a command's warm build through the wire, and a worker that sends none leaves nil" do
     warm = %{"source" => "copy", "from" => "job-1", "kept" => true, "unkept" => nil, "size" => 12}
     result = %Result{status: :finished, outcome: :converged, warm: warm}

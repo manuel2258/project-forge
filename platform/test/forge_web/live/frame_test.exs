@@ -140,7 +140,11 @@ defmodule ForgeWeb.FrameTest do
         "/projects/:name/releases/:id" => release.id
       }
 
-      %{conn: log_in_user(conn, user), params: params, ids: ids}
+      # A build the ticket kept, which the explorer's address names (`/builds/:job_id`) where the
+      # other pages name the job above.
+      kept = Forge.WarmFixtures.kept!(ticket, worker)
+
+      %{conn: log_in_user(conn, user), params: params, ids: ids, kept_id: kept.id}
     end
 
     # Enumerated from the router, so a page added to a signed-in session is in here without
@@ -149,7 +153,8 @@ defmodule ForgeWeb.FrameTest do
     test "draws the frame: the top bar, the header and both usage lines", %{
       conn: conn,
       params: params,
-      ids: ids
+      ids: ids,
+      kept_id: kept_id
     } do
       paths =
         for %{path: path, metadata: %{phoenix_live_view: {_, _, _, %{name: session}}}} <-
@@ -161,9 +166,17 @@ defmodule ForgeWeb.FrameTest do
           path
           |> String.split("/")
           |> Enum.map_join("/", fn
-            ":id" -> id
-            ":" <> param -> Map.fetch!(params, param)
-            segment -> segment
+            ":id" ->
+              id
+
+            ":job_id" ->
+              if String.contains?(path, "/builds/"), do: kept_id, else: params["job_id"]
+
+            ":" <> param ->
+              Map.fetch!(params, param)
+
+            segment ->
+              segment
           end)
         end
 

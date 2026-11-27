@@ -55,6 +55,10 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/tickets/new" => :member,
     "/tickets/:project/:number" => :member,
     "/tickets/:project/:number/jobs/:job_id" => :member,
+    # A kept build of the ticket, looked into on the machine that holds it: every member, and
+    # the copy is reached only through the ticket named in the address (`Forge.WarmBuilds.copy/2`).
+    "/tickets/:project/:number/builds/:job_id" => :member,
+    "/tickets/:project/:number/builds/:job_id/download" => :member,
     "/tickets/:project/:number/artifacts/:name/:version" => :member,
     "/chats" => :member,
     "/chats/new" => :member,
@@ -111,6 +115,14 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/api/v1/tickets/:project/:number/review" => :member,
     "/api/v1/tickets/:project/:number/clear-warm-build" => :member,
     "/api/v1/tickets/:project/:number/jobs/:job_id" => :member,
+    # A command's log with its times, and the ticket's kept copies explored and downloaded: reads, for
+    # every member and a project token of either access; a copy is reached only through its ticket
+    # (`ForgeWeb.Api.Builds`).
+    "/api/v1/tickets/:project/:number/jobs/:job_id/log" => :member,
+    "/api/v1/tickets/:project/:number/builds" => :member,
+    "/api/v1/tickets/:project/:number/builds/:job_id/folder" => :member,
+    "/api/v1/tickets/:project/:number/builds/:job_id/file" => :member,
+    "/api/v1/tickets/:project/:number/builds/:job_id/download" => :member,
     "/api/v1/tickets/:project/:number/artifacts" => :member,
     "/api/v1/tickets/:project/:number/artifacts/:name" => :member,
     "/api/v1/tickets/:project/:number/artifacts/:name/:version/raw" => :member,
@@ -166,6 +178,9 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
 
     # No session at all: a credential that names one key and one verb, or one ref of one repo.
     "/store/*key" => :token,
+    # A download of a command copy, passed through from the machine that packs it: the stream's own
+    # secret, one stream, compared in constant time, never stored (`ForgeWeb.WorkerStreamController`).
+    "/worker-streams/:id" => :token,
     "/archive" => :token,
     "/archive/tickets/:number" => :token,
     "/archive/tickets/:number/:ref" => :token,
@@ -240,6 +255,9 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"chats_live.ex", "start:change"} => :local,
     {"job_live.ex", "more"} => :local,
     {"job_live.ex", "notices"} => :local,
+    {"job_live.ex", "log-earlier"} => :local,
+    {"explore_live.ex", "more"} => :local,
+    {"explore_live.ex", "retry"} => :local,
     {"job_live.ex", "first-failure"} => :local,
     {"job_live.ex", "pane"} => :local,
     {"job_live.ex", "show"} => :local,
@@ -496,6 +514,10 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # worker id and never by one in the payload (`docs/design/worker-channel.md` § An unhealthy
     # machine).
     "unhealthy" => :socket_worker,
+    # Held for the machine that was asked: an `explored` answers a ref this connection holds, and
+    # nothing in the payload names a job.
+    "explored" => :socket_worker,
+    "lines" => :owns_job,
     "event" => :owns_job,
     "result" => :owns_job,
     "turn" => :owns_job,

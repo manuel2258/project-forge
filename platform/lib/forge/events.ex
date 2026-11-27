@@ -74,7 +74,10 @@ defmodule Forge.Events do
   # latest events, a project's feed, a chat. `docs/design/archive.md` § What is recorded says the
   # operator sees the count and nothing else (the job page's, and no list), so the lists leave them
   # out and `archive_reads/1` is the one way to read them.
-  @unlisted ["job.archive_read"]
+  #
+  # **A command's steps are left out for the same reason** (`Forge.Jobs.Steps`): one event a step,
+  # drawn as a table on the command's page and read by `command_step_events/1`.
+  @unlisted ["job.archive_read", "command.step", "command.steps_unrecorded"]
 
   @doc "The events of one job that record which archive versions it opened, oldest first."
   @spec archive_reads(String.t()) :: [Event.t()]
@@ -82,6 +85,20 @@ defmodule Forge.Events do
     Repo.all(
       from e in Event,
         where: e.job_id == ^job_id and e.type == "job.archive_read",
+        order_by: e.seq
+    )
+  end
+
+  @doc "The step events of one command, oldest first (`Forge.Jobs.Steps`)."
+  @spec command_step_events(String.t()) :: [Event.t()]
+  def command_step_events(job_id), do: command_step_events_many([job_id])
+
+  @doc "The step events of several commands, oldest first."
+  @spec command_step_events_many([String.t()]) :: [Event.t()]
+  def command_step_events_many(job_ids) do
+    Repo.all(
+      from e in Event,
+        where: e.job_id in ^job_ids and e.type in ["command.step", "command.steps_unrecorded"],
         order_by: e.seq
     )
   end

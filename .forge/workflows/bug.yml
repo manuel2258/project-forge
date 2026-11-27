@@ -24,7 +24,7 @@ states:
     # The page is for when a person should fill in or work through something over time (a form, a
     # checklist, a mock-up to react to); most refinements write none, so it is excused.
     optional: [workbench]
-    budget: { turns: 200, tokens: 1.6M }
+    budget: { turns: 300, tokens: 5M }
 
   # `implementation.md` is here because `implementing` sends the ticket back on
   # `diagnosis_invalid`, and a re-diagnosis that cannot read why it was sent back re-derives the
@@ -42,7 +42,7 @@ states:
     effort: xhigh
     inputs: [ticket, refinement.md, implementation.md]
     produces: [diagnosis.md]
-    budget: { turns: 240, tokens: 1.5M }
+    budget: { turns: 400, tokens: 8M }
 
   implementing:
     prompt: agents/implement-bug.md
@@ -53,9 +53,9 @@ states:
     model: sonnet
     effort: high
     may_invoke:
-      static: { max: 10 }
-      test: { max: 30 }
-      check: { max: 10 }
+      static: { max: 50 }
+      test: { max: 150 }
+      check: { max: 30 }
     inputs: [ticket, refinement.md, diagnosis.md, report.md, feedback.md]
     produces: [implementation.md, changeset, screenshots/*]
     outcomes: [done, diagnosis_invalid]
@@ -70,7 +70,7 @@ states:
     # (the note's 25 % margin would be 1280; four jobs on 4400 MiB is why it is not). Measured on 2026-11-08 with `/proc/<pid>/smaps_rollup` every 200 ms; the default
     # is above that figure, so nothing is declared. A page much heavier than the shipped setup's
     # would move it, and the figure to correct this with is a look killed at 137.
-    budget: { turns: 800, tokens: 12M }
+    budget: { turns: 2000, tokens: 40M }
 
   checking:
     extends: checking
@@ -159,7 +159,7 @@ transitions:
   - { from: implementing, to: checking }
   - { from: implementing, to: diagnosing,   when: diagnosis_invalid, max: 2 }
   - { from: checking,     to: reviewing }
-  - { from: checking,     to: implementing, when: checks_failed,     max: 3 }
+  - { from: checking,     to: implementing, when: checks_failed,     max: 5 }
   - { from: reviewing,    to: presenting }
   - { from: reviewing,    to: implementing, when: issues_found,      max: 5 }
   - { from: presenting,   to: review_ready }
@@ -169,16 +169,16 @@ transitions:
   - { from: rebasing,     to: checking,     when: needs_review }
 
   - { from: checking,     to: checking,     when: gate_unavailable,  max: 2 }
-  - { from: refining,     to: refining,     when: did_not_converge,  max: 1 }
-  - { from: diagnosing,   to: diagnosing,   when: did_not_converge,  max: 1 }
-  - { from: implementing, to: implementing, when: did_not_converge,  max: 1 }
-  - { from: reviewing,    to: reviewing,    when: did_not_converge,  max: 1 }
-  - { from: presenting,   to: presenting,   when: did_not_converge,  max: 1 }
+  - { from: refining,     to: refining,     when: did_not_converge,  max: 2 }
+  - { from: diagnosing,   to: diagnosing,   when: did_not_converge,  max: 2 }
+  - { from: implementing, to: implementing, when: did_not_converge,  max: 2 }
+  - { from: reviewing,    to: reviewing,    when: did_not_converge,  max: 2 }
+  - { from: presenting,   to: presenting,   when: did_not_converge,  max: 2 }
 
 limits:
-  # 152.5M and not 24M because `reviewing` costs 12M and its loop runs five times, and because the
-  # refinement and the rebases after the approval spend under the same cap. It is 4.4M under
-  # `dev.yml`'s 156.9M because this refinement is a job priced at its 1.6M budget and not a
-  # conversation allowed 6M; `.forge/common.yml` derives the rest beside the review budget.
-  # `project_workflows_test.exs` computes it from this file rather than trusting the comment.
-  ticket_tokens: 152.5M
+  # **Cost is not what this cap is for** (decided by the operator on 2026-11-27, after a scan of
+  # tickets 48–84 found agent budgets and wall clocks stopping jobs on nearly every ticket and the
+  # cap reaching at most 37 %). It is a backstop for a runaway loop, set well above the journey
+  # `project_workflows_test.exs` prices out of this file (about 420M at the budgets of that date),
+  # so a budget raised later only needs this raised when the test says so.
+  ticket_tokens: 500M

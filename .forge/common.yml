@@ -7,14 +7,19 @@ defaults:
   # `MemoryMax` is hard, so a look killed at 137 is the figure to raise this with. Commands
   # declare their own.
   resources: { memory: 1100MiB, cpu: 1 }
+  # **6h per run, not the platform's two-hour default** (2026-11-27): reviews were stopped at 60–210
+  # minutes on tickets 53–82, most of them a minute or two from done (an extension finished them in
+  # one or two turns), and long implementing runs the same. It is a backstop, not a pace.
+  timeout: 6h
 
 commands:
   check:
     run: .forge/commands/check.sh
     env: default
     produces: check.log
-    # 30m: the gate's p90 is 15.6 min and 12 of 397 runs hit the old 20 (ledger, 2026-11-22).
-    timeout: 30m
+    # 60m: the gate's p90 was 15.6 min and 12 of 397 runs hit the old 20 (ledger, 2026-11-22); at 30m,
+    # passing gates on tickets 60–66 ran at 80–98 % of it and bursts of runs were killed (2026-11-27).
+    timeout: 60m
     # **Two cores and not four: that is what the machines here have.** `cpu` is a reservation and
     # never a quota — the slice gets `CPUWeight` and nothing sets `CPUQuota` — so the gate is the
     # only thing the number talks to, and `mix check` on an idle machine still uses all of it.
@@ -45,7 +50,7 @@ commands:
     run: .forge/commands/static.sh
     env: default
     produces: static.log
-    timeout: 20m
+    timeout: 30m
     resources: { memory: 4GiB, cpu: 2 }
     # 0 and 1: every tool here, and `mix` for compile, format and Credo, fails with 1. 2 is the missing machine.
     keep_build: [0, 1]
@@ -54,7 +59,7 @@ commands:
     run: .forge/commands/test.sh
     env: default
     produces: test.log
-    timeout: 30m
+    timeout: 60m
     resources: { memory: 4GiB, cpu: 2 }
     # 0 passed; `mix test` exits 2 when a test fails, 1 on a compile error, and both leave the build
     # worth keeping. The script's own 2 (a missing tool, bad usage) keeps an unbuilt tree, which costs nothing.
@@ -85,6 +90,15 @@ states:
   # spent its 3M almost exactly, while the two that did report cost 1.9M and 3.9M — one of
   # them over the cap and allowed through only because nothing looked until the turn ended. 7M was
   # above the one measured converging run that exceeded 3M, with room for the mutation lens.
+  #
+  # **Raised again on 2026-11-27, on the operator's word that cost is not the constraint**: every
+  # agent budget, the command caps, the command timeouts, the `checks_failed` and `did_not_converge`
+  # bounds and each workflow's `limits.ticket_tokens` (now 500M, a backstop rather than a price). A
+  # scan of tickets 48–84 found a budget or a wall clock stopping a job on nearly every ticket:
+  # planning and diagnosing at 1.8–4M, big implementing runs at 13–20M, reviews on the clock at
+  # 60–210 minutes, each one a person's click to extend; the invocation caps peaked at 8 of 10 and
+  # the cap at 37 %. The figures and the arithmetic below are the history of how the old ones were
+  # chosen, not a derivation of the new ones.
   #
   # **Raised on 2026-11-17 from the archive's `jobs.tsv` for tickets 43–54: `reviewing` 8M → 12M and
   # 120 → 150 turns, `implementing` 4M → 8M and 300 → 400 turns, `planning` and `diagnosing` 800k →
@@ -196,11 +210,11 @@ states:
     # result stays on the larger one: cutting the writer and the reader in the same edit is not a
     # cost cut, it is a quality cut with a cost cut's arithmetic. The round count out of this
     # state is also the meter for that change — rounds of `issues_found` staying at zero or one
-    # says the cheaper `implementing` held, and rounds climbing says it did not, at 12M each.
+    # says the cheaper `implementing` held, and rounds climbing says it did not.
     effort: high
     produces: [report.md]
     outcomes: [done, issues_found]
-    budget: { turns: 300, tokens: 12M }
+    budget: { turns: 600, tokens: 25M }
 
   # A presentation (`produces: [presentation.md!]`): prose for the person deciding, drawn above
   # the diff on the review page with the source it quotes inline, read by no later state and
@@ -240,7 +254,7 @@ states:
     # cost ceiling is the one that should bind. Ticket 7's `planning` died at turn 51 of 50 with
     # $1.11 of its $4.00 unspent, and one of its four refinements — a job then, a conversation now
     # — used 36 of 40.
-    budget: { turns: 120, tokens: 600k }
+    budget: { turns: 200, tokens: 2M }
 
   # Every edge into it queues (`queue: true` in each workflow's transitions), so an approval puts
   # the ticket in the project's line and the merge queue's runner merges the line one ticket at a
@@ -276,8 +290,8 @@ states:
     model: opus
     effort: high
     may_invoke:
-      static: { max: 3 }
-      check: { max: 3 }
+      static: { max: 10 }
+      check: { max: 10 }
     produces: [rebase.md, changeset]
     outcomes: [done, needs_review]
-    budget: { turns: 200, tokens: 1.6M }
+    budget: { turns: 300, tokens: 5M }

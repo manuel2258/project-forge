@@ -30,7 +30,7 @@ states:
     inputs: [ticket, plan-review.md]
     produces: [plan.md, advisory.md]
     outcomes: [done, nothing_to_do]
-    budget: { turns: 240, tokens: 1.5M }
+    budget: { turns: 400, tokens: 8M }
 
   plan_reviewing:
     prompt: agents/weekly-plan-review.md
@@ -40,7 +40,7 @@ states:
     inputs: [plan.md, advisory.md]
     produces: [plan-review.md]
     outcomes: [done, issues_found]
-    budget: { turns: 240, tokens: 1.5M }
+    budget: { turns: 400, tokens: 8M }
 
   implementing:
     prompt: agents/weekly.md
@@ -48,13 +48,13 @@ states:
     model: sonnet
     effort: high
     may_invoke:
-      static: { max: 10 }
-      test: { max: 30 }
-      check: { max: 10 }
+      static: { max: 50 }
+      test: { max: 150 }
+      check: { max: 30 }
     inputs: [ticket, plan.md, plan-review.md, report.md]
     produces: [implementation.md, changeset]
     outcomes: [done, plan_invalid]
-    budget: { turns: 800, tokens: 12M }
+    budget: { turns: 2000, tokens: 40M }
 
   skipped: {}
 
@@ -84,7 +84,7 @@ transitions:
   - { from: implementing,   to: checking }
   - { from: implementing,   to: planning,       when: plan_invalid,      max: 1 }
   - { from: checking,       to: reviewing }
-  - { from: checking,       to: implementing,   when: checks_failed,     max: 3 }
+  - { from: checking,       to: implementing,   when: checks_failed,     max: 5 }
   - { from: reviewing,      to: presenting }
   - { from: reviewing,      to: implementing,   when: issues_found,      max: 3 }
   - { from: presenting,     to: merged,         queue: true }
@@ -92,11 +92,12 @@ transitions:
   - { from: rebasing,       to: checking,       when: needs_review }
 
   - { from: checking,       to: checking,       when: gate_unavailable,  max: 2 }
-  - { from: planning,       to: planning,       when: did_not_converge,  max: 1 }
-  - { from: plan_reviewing, to: plan_reviewing, when: did_not_converge,  max: 1 }
-  - { from: implementing,   to: implementing,   when: did_not_converge,  max: 1 }
-  - { from: reviewing,      to: reviewing,      when: did_not_converge,  max: 1 }
-  - { from: presenting,     to: presenting,     when: did_not_converge,  max: 1 }
+  - { from: planning,       to: planning,       when: did_not_converge,  max: 2 }
+  - { from: plan_reviewing, to: plan_reviewing, when: did_not_converge,  max: 2 }
+  - { from: implementing,   to: implementing,   when: did_not_converge,  max: 2 }
+  - { from: reviewing,      to: reviewing,      when: did_not_converge,  max: 2 }
+  - { from: presenting,     to: presenting,     when: did_not_converge,  max: 2 }
 
 limits:
-  ticket_tokens: 156.9M
+  # As `dev.yml`'s: a backstop for a runaway loop, not a price (2026-11-27).
+  ticket_tokens: 500M

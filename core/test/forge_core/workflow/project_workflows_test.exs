@@ -146,10 +146,11 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
     end
   end
 
-  test "reviewing still retries itself once when it did not converge" do
+  # Two and not one since 2026-11-27 (`.forge/common.yml`, the raise of that date).
+  test "reviewing still retries itself twice when it did not converge" do
     for {name, workflow} <- reviewing_workflows() do
-      assert edges(workflow, "reviewing", "did_not_converge") == [{"reviewing", 1}],
-             "#{name}: did_not_converge keeps its one fresh retry"
+      assert edges(workflow, "reviewing", "did_not_converge") == [{"reviewing", 2}],
+             "#{name}: did_not_converge keeps its two fresh retries"
     end
   end
 
@@ -157,13 +158,13 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
   # estimate and not a measurement (it was $35, from the production runs), and a floor of "above
   # the $19.53 that did report" would let a regression to $20 through while that comment still
   # said 7M. Changing it means changing both, and the
-  # ticket cap below.
+  # ticket cap below. 25M and 600 turns since 2026-11-27, when cost stopped being the constraint.
   test "reviewing's cost budget is the figure common.yml derives" do
     for {name, workflow} <- reviewing_workflows() do
       budget = Workflow.state(workflow, "reviewing").budget
 
-      assert budget.tokens == 12_000_000, "#{name}: reviewing has #{budget.tokens}"
-      assert budget.turns == 300, "#{name}: reviewing has #{budget.turns} turns"
+      assert budget.tokens == 25_000_000, "#{name}: reviewing has #{budget.tokens}"
+      assert budget.turns == 600, "#{name}: reviewing has #{budget.turns} turns"
     end
   end
 
@@ -482,7 +483,7 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
              &match?(%Transition{to: "refresh", approve: ["refinement.md"], when: nil}, &1)
            )
 
-    assert Enum.sort(for %Transition{when: w, to: "refining", max: 1} <- edges, do: w) ==
+    assert Enum.sort(for %Transition{when: w, to: "refining", max: 2} <- edges, do: w) ==
              ["did_not_converge"]
   end
 

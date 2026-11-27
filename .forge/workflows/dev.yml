@@ -48,7 +48,7 @@ states:
     effort: xhigh
     inputs: [ticket, refinement.md, implementation.md]
     produces: [plan.md]
-    budget: { turns: 240, tokens: 1.5M }
+    budget: { turns: 400, tokens: 8M }
 
   implementing:
     prompt: agents/implement.md
@@ -76,9 +76,9 @@ states:
     model: sonnet
     effort: high
     may_invoke:
-      static: { max: 10 }
-      test: { max: 30 }
-      check: { max: 10 }
+      static: { max: 50 }
+      test: { max: 150 }
+      check: { max: 30 }
     inputs: [ticket, refinement.md, plan.md, report.md, feedback.md]
     produces: [implementation.md, changeset, screenshots/*]
     outcomes: [done, plan_invalid]
@@ -93,7 +93,7 @@ states:
     # (the note's 25 % margin would be 1280; four jobs on 4400 MiB is why it is not). Measured on 2026-11-08 with `/proc/<pid>/smaps_rollup` every 200 ms; the default
     # is above that figure, so nothing is declared. A page much heavier than the shipped setup's
     # would move it, and the figure to correct this with is a look killed at 137.
-    budget: { turns: 800, tokens: 12M }
+    budget: { turns: 2000, tokens: 40M }
 
   checking:
     extends: checking
@@ -153,7 +153,7 @@ transitions:
   - { from: implementing, to: checking }
   - { from: implementing, to: planning,     when: plan_invalid,      max: 2 }
   - { from: checking,     to: reviewing }
-  - { from: checking,     to: implementing, when: checks_failed,     max: 3 }
+  - { from: checking,     to: implementing, when: checks_failed,     max: 5 }
   - { from: reviewing,    to: presenting }
   - { from: reviewing,    to: implementing, when: issues_found,      max: 5 }
   - { from: presenting,   to: review_ready }
@@ -163,14 +163,15 @@ transitions:
   - { from: rebasing,     to: checking,     when: needs_review }
 
   - { from: checking,     to: checking,     when: gate_unavailable,  max: 2 }
-  - { from: planning,     to: planning,     when: did_not_converge,  max: 1 }
-  - { from: implementing, to: implementing, when: did_not_converge,  max: 1 }
-  - { from: reviewing,    to: reviewing,    when: did_not_converge,  max: 1 }
-  - { from: presenting,   to: presenting,   when: did_not_converge,  max: 1 }
+  - { from: planning,     to: planning,     when: did_not_converge,  max: 2 }
+  - { from: implementing, to: implementing, when: did_not_converge,  max: 2 }
+  - { from: reviewing,    to: reviewing,    when: did_not_converge,  max: 2 }
+  - { from: presenting,   to: presenting,   when: did_not_converge,  max: 2 }
 
 limits:
-  # 156.9M and not 24M because `reviewing` costs 12M and its loop runs five times, and because the
-  # refinement conversation and the rebases after the approval spend under the same cap:
-  # `.forge/common.yml` derives the figure beside the review budget and the bounds it follows from.
-  # `project_workflows_test.exs` computes it from this file rather than trusting the comment.
-  ticket_tokens: 156.9M
+  # **Cost is not what this cap is for** (decided by the operator on 2026-11-27, after a scan of
+  # tickets 48–84 found agent budgets and wall clocks stopping jobs on nearly every ticket and the
+  # cap reaching at most 37 %). It is a backstop for a runaway loop, set well above the journey
+  # `project_workflows_test.exs` prices out of this file (about 421M at the budgets of that date),
+  # so a budget raised later only needs this raised when the test says so.
+  ticket_tokens: 500M
